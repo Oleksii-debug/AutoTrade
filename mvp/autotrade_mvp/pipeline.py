@@ -962,9 +962,10 @@ def _repair_interrupted_replay(
             "projection_checkpoints": 0,
             "global_projection_checkpoints": 0,
         }
+        initial_store_cut = store.whole_store_state_cut()
         if (
-            store.whole_store_state_counts() != expected_existing_counts
-            or store.current_journal_sequence() != existing_event_count
+            initial_store_cut.get("counts") != expected_existing_counts
+            or initial_store_cut.get("journal_sequence") != existing_event_count
         ):
             raise ValueError(
                 "Unexpected durable journal state before replay repair"
@@ -1032,6 +1033,10 @@ def _repair_interrupted_replay(
                 topic="autotrade.simulation.events",
             )
             journal_ids.add(evidence_id)
+        if store.whole_store_state_cut() != initial_store_cut:
+            raise ValueError(
+                "Durable journal state changed during replay preflight"
+            )
     if journal_ids - expected_ids:
         raise ValueError("Simulation journal contains unknown replay evidence")
     missing_journal = expected_ids - journal_ids
@@ -1405,7 +1410,6 @@ def verify_replay(state_dir: str | Path) -> bool:
         _reconcile(checkpoint_provider, checkpoint_ledger)
 
         store = JournalStore(journal_path)
-        counts = store.whole_store_state_counts()
         expected_counts = {
             "events": len(ids),
             "outbox": len(ids),
@@ -1413,9 +1417,11 @@ def verify_replay(state_dir: str | Path) -> bool:
             "projection_checkpoints": 0,
             "global_projection_checkpoints": 0,
         }
-        if counts != expected_counts:
-            return False
-        if store.current_journal_sequence() != len(ids):
+        initial_store_cut = store.whole_store_state_cut()
+        if (
+            initial_store_cut.get("counts") != expected_counts
+            or initial_store_cut.get("journal_sequence") != len(ids)
+        ):
             return False
         events = store.load_events("simulation_portfolio", symbol)
         if not events:
@@ -1539,6 +1545,8 @@ def verify_replay(state_dir: str | Path) -> bool:
             replay_ledger.cash != checkpoint_ledger.cash
             or replay_ledger.position != checkpoint_ledger.position
         ):
+            return False
+        if store.whole_store_state_cut() != initial_store_cut:
             return False
         return True
     except (OSError, ValueError, KeyError, TypeError, RuntimeError):

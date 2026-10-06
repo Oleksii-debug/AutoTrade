@@ -175,6 +175,10 @@ def _submission_projection(
         raise TypeError(
             "observation must be durable ProviderSubmissionObservation"
         )
+    if type(prepared_request) is not KrakenFuturesPreparedRequest:
+        raise TypeError(
+            "prepared_request must be exact KrakenFuturesPreparedRequest"
+        )
     projected = _projection(observation)
     cid = _client_order_id(prepared_request.body.get("cliOrdId"))
     expected = (
@@ -210,8 +214,23 @@ def _response_evidence(
 ) -> dict[str, str]:
     """Bind one authenticated provider response to the guarded Futures request."""
 
+    provider_environment = _text(
+        prepared_request.provider_environment,
+        name="provider_environment",
+    ).upper()
+    runtime_environment = _text(
+        prepared_request.environment,
+        name="environment",
+    ).upper()
+    expected_runtime_environment = _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT.get(
+        provider_environment
+    )
+    if expected_runtime_environment != runtime_environment:
+        raise ProviderCoreError(
+            "Kraken Futures provider environment does not match runtime environment"
+        )
     source = (
-        futures_base_url(prepared_request.provider_environment)
+        futures_base_url(provider_environment)
         + prepared_request.endpoint
     )
     return {
@@ -440,8 +459,10 @@ def parse_submission_response(
     """Map one durable exact Futures sendorder response into SubmissionResult."""
 
     aid = _uuid_text(attempt_id, name="attempt_id")
-    if not isinstance(prepared_request, KrakenFuturesPreparedRequest):
-        raise TypeError("prepared_request must be KrakenFuturesPreparedRequest")
+    if type(prepared_request) is not KrakenFuturesPreparedRequest:
+        raise TypeError(
+            "prepared_request must be exact KrakenFuturesPreparedRequest"
+        )
     cid = _client_order_id(prepared_request.body.get("cliOrdId"))
     if type(transport_ambiguous) is not bool:
         raise ProviderCoreError("transport_ambiguous must be boolean")

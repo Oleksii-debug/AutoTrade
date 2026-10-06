@@ -126,6 +126,28 @@ def _amount_map(values: dict[str, object], *, allow_zero: bool) -> dict[str, str
     return dict(sorted(result.items()))
 
 
+def _require_inert_json(value: object, *, name: str) -> None:
+    """Reject executable JSON-like subclasses before financial replay hashing."""
+
+    if value is None or type(value) in {str, int, float, bool}:
+        return
+    if type(value) is list:
+        for index, item in enumerate(value):
+            _require_inert_json(item, name=f"{name}[{index}]")
+        return
+    if type(value) is dict:
+        for key, item in dict.items(value):
+            if type(key) is not str:
+                raise ReservationConflict(
+                    f"{name} object keys must be exact text"
+                )
+            _require_inert_json(item, name=f"{name}.{key}")
+        return
+    raise ReservationConflict(
+        f"{name} must contain only exact inert JSON values"
+    )
+
+
 def _snapshot_payload(snapshot: ReservationSnapshot) -> dict[str, object]:
     return {
         "reservation_id": snapshot.reservation_id,
@@ -615,6 +637,11 @@ class DurableReservationBook:
         expected_version = 1
 
         for event in events:
+            _require_inert_json(event, name="reservation journal event")
+            if type(event) is not dict:
+                raise ReservationConflict(
+                    "reservation journal event must be an exact object"
+                )
             if event["aggregate_version"] != expected_version:
                 raise ReservationConflict(
                     "reservation journal aggregate versions are not contiguous"
@@ -624,13 +651,15 @@ class DurableReservationBook:
                 raise ReservationConflict(
                     "reservation journal contains an unsupported event type"
                 )
-            if payload_digest(event["payload"]) != event["payload_hash"]:
+            payload = event.get("payload")
+            if type(payload) is not dict:
+                raise ReservationConflict(
+                    "reservation event payload must be an exact object"
+                )
+            if payload_digest(payload) != event["payload_hash"]:
                 raise ReservationConflict(
                     "reservation journal payload hash does not match stored payload"
                 )
-            payload = event["payload"]
-            if not isinstance(payload, dict):
-                raise ReservationConflict("reservation event payload must be an object")
             if payload.get("environment") != self.environment:
                 raise ReservationConflict(
                     "reservation journal event environment does not match book scope"
@@ -644,10 +673,14 @@ class DurableReservationBook:
             expected_snapshot = payload.get("snapshot")
             idem = payload.get("idempotency_key")
             request_hash = payload.get("request_hash")
-            if not isinstance(request, dict):
-                raise ReservationConflict("reservation event request must be an object")
-            if not isinstance(expected_snapshot, dict):
-                raise ReservationConflict("reservation event snapshot must be an object")
+            if type(request) is not dict:
+                raise ReservationConflict(
+                    "reservation event request must be an exact object"
+                )
+            if type(expected_snapshot) is not dict:
+                raise ReservationConflict(
+                    "reservation event snapshot must be an exact object"
+                )
             idem = _text(idem, name="idempotency_key")
             request_hash = _text(request_hash, name="request_hash")
             if request_hash != payload_digest(request):

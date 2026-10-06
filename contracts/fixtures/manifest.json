@@ -20,6 +20,12 @@
       "expected": "valid"
     },
     {
+      "path": "market-event.valid.json",
+      "schema": "market.schema.json",
+      "definition": "MarketEvent",
+      "expected": "valid"
+    },
+    {
       "path": "model-request.valid.json",
       "schema": "model.schema.json",
       "definition": "ModelRequest",

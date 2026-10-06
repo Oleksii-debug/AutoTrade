@@ -152,6 +152,33 @@ class ContractSchemaTests(unittest.TestCase):
     def test_model_request_fixture(self):
         self.validate("model.schema.json", "ModelRequest", json.loads((FIXTURES / "model-request.valid.json").read_text()))
 
+    def test_market_event_adapter_version_is_required_and_canonical(self):
+        fixture = json.loads((FIXTURES / "market-event.valid.json").read_text())
+        schema = self.schemas["market.schema.json"]
+        validator = Draft202012Validator(
+            {"$ref": f"{schema['$id']}#/$defs/MarketEvent"},
+            registry=self.registry,
+            format_checker=FormatChecker(),
+        )
+        self.assertTrue(validator.is_valid(fixture))
+
+        missing = dict(fixture)
+        missing.pop("adapter_version")
+        self.assertFalse(validator.is_valid(missing))
+
+        for invalid in (
+            "",
+            " leading",
+            "trailing ",
+            "contains space",
+            "x" * 129,
+            "valid-token@1\n",
+        ):
+            candidate = dict(fixture)
+            candidate["adapter_version"] = invalid
+            with self.subTest(adapter_version=repr(invalid)):
+                self.assertFalse(validator.is_valid(candidate))
+
     def test_order_intent_fixture(self):
         self.validate("execution.schema.json", "OrderIntent", json.loads((FIXTURES / "order-intent.valid.json").read_text()))
 

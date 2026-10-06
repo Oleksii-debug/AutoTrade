@@ -1018,11 +1018,6 @@ def _prepare_provider_fill_correction_binding(
     if type(replacement) is not JournalTransaction:
         raise TypeError("replacement must be an exact JournalTransaction")
     _require_durable_provider_economic_book_authority(economic_book)
-    for evidence in (original_provider_fill, corrected_provider_fill):
-        if evidence.provider_environment != economic_book.provider_environment:
-            raise AccountingConflict(
-                "provider fill correction provider_environment does not match economic book"
-            )
     _require_same_financial_journal_generation(
         economic_book,
         reservation_book,
@@ -1059,6 +1054,14 @@ def _prepare_provider_fill_correction_binding(
         raise AccountingConflict("correction provider execution identity changed")
     if corrected_projected_fill.provider_execution_id != execution_id:
         raise AccountingConflict("corrected projection execution identity changed")
+    for label, evidence in (
+        ("original", original_provider_fill),
+        ("corrected", corrected_provider_fill),
+    ):
+        if evidence.provider_environment != economic_book.provider_environment:
+            raise AccountingConflict(
+                f"{label} provider fill provider_environment does not match economic book"
+            )
 
     initial_aggregate_id = _provider_fill_binding_aggregate_id(
         provider_id=economic_book.provider_id,
@@ -1100,8 +1103,10 @@ def _prepare_provider_fill_correction_binding(
         initial_request.get("provider_id") != economic_book.provider_id
         or initial_request.get("account_id") != economic_book.account_id
         or initial_request.get("environment") != economic_book.environment
-        or initial_request.get("provider_environment", economic_book.environment)
-        != economic_book.provider_environment
+        or initial_request.get(
+            "provider_environment",
+            economic_book.environment,
+        ) != economic_book.provider_environment
         or initial_request.get("provider_execution_id") != execution_id
         or initial_request.get("reservation_id") != rid
         or initial_request.get("intent_id") != corrected_projected_fill.intent_id
@@ -1204,8 +1209,14 @@ def _prepare_provider_fill_correction_binding(
     expected_order_key = (
         f"provider:{economic_book.provider_id}:execution:{execution_id}"
     )
+    provider_domain = (
+        ""
+        if economic_book.provider_environment == economic_book.environment
+        else f"provider-environment:{economic_book.provider_environment}:"
+    )
     expected_cause_event_id = (
         f"provider:{economic_book.provider_id}:environment:{economic_book.environment}:"
+        f"{provider_domain}"
         f"account:{economic_book.account_id}:execution:{execution_id}"
     )
     if (
@@ -1263,8 +1274,10 @@ def _prepare_provider_fill_correction_binding(
             payload.get("provider_id") != economic_book.provider_id
             or payload.get("account_id") != economic_book.account_id
             or payload.get("environment") != economic_book.environment
-            or payload.get("provider_environment", economic_book.environment)
-            != economic_book.provider_environment
+            or payload.get(
+                "provider_environment",
+                economic_book.environment,
+            ) != economic_book.provider_environment
             or payload.get("provider_execution_id") != execution_id
         ):
             raise AccountingConflict(
@@ -1613,10 +1626,6 @@ def _prepare_provider_fill_correction_binding(
         if amount > conservative_usage.get(resource, Decimal("0"))
     }
     reservation_cut = reservation_snapshot_digest(snapshot)
-    provider_scope_payload = _provider_environment_payload(
-        provider_environment=economic_book.provider_environment,
-        environment=economic_book.environment,
-    )
     request = {
         "schema_version": "1.0.0",
         "provider_id": economic_book.provider_id,
@@ -1636,6 +1645,10 @@ def _prepare_provider_fill_correction_binding(
         "resulting_conservative_usage": _usage_payload(resulting_usage),
         "additional_usage": _usage_payload(additional_usage),
     }
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=economic_book.provider_environment,
+        environment=economic_book.environment,
+    )
     if provider_scope_payload is not None:
         request["provider_environment"] = provider_scope_payload
     request_digest = payload_digest(request)
@@ -2940,6 +2953,8 @@ def commit_economic_batch_with_reservation_consumption(
             binding_request.get("provider_id") != economic_book.provider_id
             or binding_request.get("account_id") != economic_book.account_id
             or binding_request.get("environment") != economic_book.environment
+            or binding_request.get("provider_environment", economic_book.environment)
+            != economic_book.provider_environment
             or binding_request.get("reservation_id") != _text(
                 reservation_id, name="reservation_id"
             )
@@ -3559,6 +3574,8 @@ def commit_economic_correction_with_settlement_replacement(
             binding_request.get("provider_id") != economic_book.provider_id
             or binding_request.get("account_id") != economic_book.account_id
             or binding_request.get("environment") != economic_book.environment
+            or binding_request.get("provider_environment", economic_book.environment)
+            != economic_book.provider_environment
             or binding_request.get("reservation_id") != rid
         ):
             raise AccountingConflict(

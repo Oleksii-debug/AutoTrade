@@ -48,6 +48,7 @@ from mvp.autotrade_mvp._provider_activity_accounting_impl import (
     _provider_fill_binding_payload,
     _provider_fill_correction_binding_aggregate_id,
     _provider_fill_from_binding_payload,
+    _prepare_provider_fill_binding,
     _usage_payload,
 )
 from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence
@@ -694,112 +695,6 @@ class ExactFillFinancialArithmeticTests(unittest.TestCase):
 
         self.assertEqual(len(observed), 1)
 
-    def test_bybit_provider_domain_is_durable_fill_binding_identity(self):
-        common = {
-            "provider_id": "BYBIT",
-            "account_id": "bybit-account",
-            "environment": "PAPER",
-            "provider_execution_id": "shared-execution",
-            "client_order_id": "shared-client",
-            "instrument": "BTCUSDT@v1",
-            "quantity": "0.01",
-            "price": "65000",
-            "fee_amount": "0",
-            "fee_currency": "USDT",
-            "trade_time": "2026-09-25T08:00:00Z",
-            "side": "BUY",
-            "evidence_refs": ("provider-read:sha256:" + "1" * 64,),
-        }
-        testnet = ProviderFillEvidence.create(
-            **common,
-            provider_environment="TESTNET",
-        )
-        demo = ProviderFillEvidence.create(
-            **common,
-            provider_environment="DEMO",
-        )
-
-        testnet_id = _provider_fill_binding_aggregate_id(
-            provider_id="BYBIT",
-            account_id="bybit-account",
-            environment="PAPER",
-            provider_environment="TESTNET",
-            provider_execution_id="shared-execution",
-        )
-        demo_id = _provider_fill_binding_aggregate_id(
-            provider_id="BYBIT",
-            account_id="bybit-account",
-            environment="PAPER",
-            provider_environment="DEMO",
-            provider_execution_id="shared-execution",
-        )
-        self.assertNotEqual(testnet_id, demo_id)
-        self.assertNotEqual(
-            _provider_fill_correction_binding_aggregate_id(
-                provider_id="BYBIT",
-                account_id="bybit-account",
-                environment="PAPER",
-                provider_environment="TESTNET",
-                provider_execution_id="shared-execution",
-            ),
-            _provider_fill_correction_binding_aggregate_id(
-                provider_id="BYBIT",
-                account_id="bybit-account",
-                environment="PAPER",
-                provider_environment="DEMO",
-                provider_execution_id="shared-execution",
-            ),
-        )
-
-        for evidence, provider_environment in (
-            (testnet, "TESTNET"),
-            (demo, "DEMO"),
-        ):
-            with self.subTest(provider_environment=provider_environment):
-                payload = _provider_fill_binding_payload(evidence)
-                self.assertEqual(
-                    payload["provider_environment"],
-                    provider_environment,
-                )
-                restored = _provider_fill_from_binding_payload(
-                    payload,
-                    name="test provider fill",
-                )
-                self.assertEqual(
-                    restored.provider_environment,
-                    provider_environment,
-                )
-                ambiguous = dict(payload)
-                ambiguous.pop("provider_environment")
-                with self.assertRaisesRegex(
-                    AccountingConflict,
-                    "invalid",
-                ):
-                    _provider_fill_from_binding_payload(
-                        ambiguous,
-                        name="ambiguous BYBIT provider fill",
-                    )
-
-        ordinary = ProviderFillEvidence.create(
-            provider_id=PROVIDER,
-            account_id=ACCOUNT,
-            environment=ENVIRONMENT,
-            provider_execution_id="ordinary-execution",
-            client_order_id="ordinary-client",
-            instrument="ABC",
-            quantity="1",
-            price="1",
-            fee_amount="0",
-            fee_currency="USD",
-            trade_time="2026-09-25T08:00:00Z",
-            side="BUY",
-            evidence_refs=("provider-fill:ordinary",),
-        )
-        self.assertNotIn(
-            "provider_environment",
-            _provider_fill_binding_payload(ordinary),
-        )
-
     def test_cash_usage_high_water_and_settlement_aggregation_ignore_ambient_context(self):
         transaction = book_equity_fill(
             transaction_id="exact-context-fill",
@@ -851,69 +746,6 @@ class ExactFillFinancialArithmeticTests(unittest.TestCase):
 
 
 class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
-    def test_bybit_fill_domain_must_match_durable_economic_book(self):
-        with TemporaryDirectory() as directory:
-            store = JournalStore(Path(directory) / "journal.sqlite3")
-            reservations = DurableReservationBook(
-                store,
-                environment="PAPER",
-                account_id="bybit-account",
-            )
-            reservations.reserve(
-                command_id="reserve-bybit-domain",
-                idempotency_key="reserve-bybit-domain",
-                reservation_id="reservation-1",
-                intent_id="intent-1",
-                requirements={"CASH:USD": "1000"},
-                available={"CASH:USD": "2000"},
-            )
-            economics = DurableProviderEconomicBook(
-                store,
-                provider_id="BYBIT",
-                account_id="bybit-account",
-                environment="PAPER",
-                provider_environment="TESTNET",
-            )
-            projected = ProjectedFillEvidence.create(
-                fill_id="fill-bybit-domain",
-                provider_execution_id="execution-bybit-domain",
-                intent_id="intent-1",
-                client_order_id="client-bybit-domain",
-                side="BUY",
-                quantity="0.01",
-                price="65000",
-            )
-            demo_fill = ProviderFillEvidence.create(
-                provider_id="BYBIT",
-                account_id="bybit-account",
-                environment="PAPER",
-                provider_environment="DEMO",
-                provider_execution_id="execution-bybit-domain",
-                client_order_id="client-bybit-domain",
-                instrument="BTCUSDT@v1",
-                quantity="0.01",
-                price="65000",
-                fee_amount="0",
-                fee_currency="USDT",
-                trade_time="2026-09-25T09:00:00Z",
-                side="BUY",
-                evidence_refs=("provider-read:sha256:" + "2" * 64,),
-            )
-            with self.assertRaisesRegex(
-                AccountingConflict,
-                "provider_environment.*durable economic book",
-            ):
-                build_provider_fill_financial_plan(
-                    book=economics,
-                    provider_id="BYBIT",
-                    projected_fill=projected,
-                    provider_fill=demo_fill,
-                    expected_instrument="BTCUSDT@v1",
-                    settlement_currency="USD",
-                    reservation_snapshot=reservations.get("reservation-1"),
-                    observed_at="2026-09-25T09:00:01Z",
-                )
-
     def projected_fill(
         self,
         *,
@@ -995,6 +827,129 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             observed_at="2026-09-25T09:00:01Z",
             committed_at="2026-09-25T09:00:02Z",
         )
+
+    def test_bybit_fill_binding_is_scoped_to_provider_environment(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="bybit-account",
+            )
+            reservations.reserve(
+                command_id="reserve-bybit-scope",
+                idempotency_key="reserve-bybit-scope",
+                reservation_id="reservation-1",
+                intent_id="intent-1",
+                requirements={"CASH:USD": "120"},
+                available={"CASH:USD": "1000"},
+            )
+            snapshot = reservations.get("reservation-1")
+            projected = self.projected_fill()
+            prepared = {}
+
+            for provider_environment in ("TESTNET", "DEMO"):
+                economics = DurableProviderEconomicBook(
+                    store,
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment=provider_environment,
+                )
+                provider = ProviderFillEvidence.create(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment=provider_environment,
+                    provider_execution_id="provider-execution-1",
+                    client_order_id="client-order-1",
+                    instrument="ABC",
+                    quantity="1",
+                    price="100",
+                    fee_amount="0",
+                    fee_currency="USD",
+                    trade_time="2026-09-25T09:00:00Z",
+                    side="BUY",
+                    evidence_refs=("provider-fill:bybit-scope",),
+                )
+                plan = build_provider_fill_financial_plan(
+                    book=economics,
+                    provider_id="BYBIT",
+                    projected_fill=projected,
+                    provider_fill=provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    reservation_snapshot=snapshot,
+                    observed_at="2026-09-25T09:00:01Z",
+                )
+                binding = _prepare_provider_fill_binding(
+                    economics,
+                    plan=plan,
+                    projected_fill=projected,
+                    provider_fill=provider,
+                    committed_at="2026-09-25T09:00:02Z",
+                )
+                self.assertEqual(
+                    binding.aggregate_id,
+                    _provider_fill_binding_aggregate_id(
+                        provider_id="BYBIT",
+                        account_id="bybit-account",
+                        environment="PAPER",
+                        provider_environment=provider_environment,
+                        provider_execution_id="provider-execution-1",
+                    ),
+                )
+                self.assertEqual(
+                    binding.request["provider_environment"],
+                    provider_environment,
+                )
+                self.assertEqual(
+                    binding.request["provider_fill"]["provider_environment"],
+                    provider_environment,
+                )
+                restored = _provider_fill_from_binding_payload(
+                    binding.request["provider_fill"],
+                    name="test provider fill",
+                )
+                self.assertEqual(
+                    restored.provider_environment,
+                    provider_environment,
+                )
+                self.assertEqual(
+                    binding.envelope["payload"]["provider_environment"],
+                    provider_environment,
+                )
+                prepared[provider_environment] = (plan, binding)
+
+            self.assertNotEqual(
+                prepared["TESTNET"][0].plan_digest,
+                prepared["DEMO"][0].plan_digest,
+            )
+            self.assertNotEqual(
+                prepared["TESTNET"][1].aggregate_id,
+                prepared["DEMO"][1].aggregate_id,
+            )
+            self.assertNotEqual(
+                prepared["TESTNET"][1].request["provider_fill_digest"],
+                prepared["DEMO"][1].request["provider_fill_digest"],
+            )
+
+    def test_bybit_correction_binding_identity_is_provider_environment_scoped(self):
+        testnet = _provider_fill_correction_binding_aggregate_id(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            provider_execution_id="provider-execution-1",
+        )
+        demo = _provider_fill_correction_binding_aggregate_id(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+            provider_environment="DEMO",
+            provider_execution_id="provider-execution-1",
+        )
+        self.assertNotEqual(testnet, demo)
 
     def test_financial_plan_usage_and_digest_ignore_ambient_decimal_context(self):
         with TemporaryDirectory() as directory:

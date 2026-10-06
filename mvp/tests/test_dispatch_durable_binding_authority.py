@@ -762,7 +762,11 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
         response = b"{}"
         kwargs = {
             "attempt_id": "attempt-constructor",
-            "aggregate_id": "aggregate-constructor",
+            "aggregate_id": submission_attempt_aggregate_id(
+                environment="SIMULATION",
+                account_id="acct-constructor",
+                attempt_id="attempt-constructor",
+            ),
             "provider": "BYBIT",
             "request_hash": "sha256:" + "1" * 64,
             "client_order_id": "client-constructor",
@@ -796,6 +800,49 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                     SubmissionResponseBinding(**forged)
                 self.assertEqual(TrapText.callbacks, 0)
 
+    def test_response_binding_constructor_cross_binds_identity_and_chronology(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        scope = {}
+        response = b"{}"
+        kwargs = {
+            "attempt_id": "attempt-constructor",
+            "aggregate_id": submission_attempt_aggregate_id(
+                environment="SIMULATION",
+                account_id="acct-constructor",
+                attempt_id="attempt-constructor",
+            ),
+            "provider": "BYBIT",
+            "request_hash": "sha256:" + "1" * 64,
+            "client_order_id": "client-constructor",
+            "environment": "SIMULATION",
+            "account_id": "acct-constructor",
+            "prepared_at": "2026-10-06T14:00:00Z",
+            "sent_at": "2026-10-06T14:00:01Z",
+            "submission_scope": scope,
+            "submission_scope_hash": "sha256:"
+            + sha256(canonical_json(scope).encode("utf-8")).hexdigest(),
+            "response_bytes": response,
+            "response_sha256": "sha256:" + sha256(response).hexdigest(),
+            "_factory_token": dispatch_module._SUBMISSION_RESPONSE_BINDING_TOKEN,
+        }
+
+        forged_identity = dict(kwargs)
+        forged_identity["aggregate_id"] = "submission-attempt:" + "0" * 64
+        with self.assertRaisesRegex(
+            ValueError,
+            "aggregate_id mismatches durable submission identity",
+        ):
+            SubmissionResponseBinding(**forged_identity)
+
+        reversed_chronology = dict(kwargs)
+        reversed_chronology["sent_at"] = "2026-10-06T13:59:59Z"
+        with self.assertRaisesRegex(
+            ValueError,
+            "sent_at must not precede prepared_at",
+        ):
+            SubmissionResponseBinding(**reversed_chronology)
+
     def test_response_binding_constructor_rejects_mapping_subclass_before_callbacks(self):
         from mvp.autotrade_mvp import dispatch as dispatch_module
 
@@ -815,7 +862,11 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "submission_scope must be an exact dict"):
             SubmissionResponseBinding(
                 attempt_id="attempt-constructor",
-                aggregate_id="aggregate-constructor",
+                aggregate_id=submission_attempt_aggregate_id(
+                    environment="SIMULATION",
+                    account_id="acct-constructor",
+                    attempt_id="attempt-constructor",
+                ),
                 provider="BYBIT",
                 request_hash="sha256:" + "1" * 64,
                 client_order_id="client-constructor",

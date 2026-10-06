@@ -1008,6 +1008,72 @@ class BybitV5AdapterTests(unittest.TestCase):
         )
         self.assertEqual(fills[0].fee_currency, "USDT")
 
+    def test_typed_fee_currency_authority_scope_must_match_account_environment_and_instrument(self):
+        response = {"retCode": 0, "result": {"category": "spot", "list": [{
+            "execId": "typed-fee-scope", "orderLinkId": "", "symbol": "BTCUSDT", "side": "Buy",
+            "execQty": "0.01", "execPrice": "65000", "execFee": "0.5",
+            "feeCurrency": "", "extraFees": "",
+            "execTime": "1790280000000",
+        }]}}
+        evidence = bound_execution_response(
+            response,
+            instrument_version="11111111-1111-4111-8111-111111111111@1",
+        )
+        cases = (
+            (
+                fee_currency_authority(account_id="other-account"),
+                "account does not match",
+            ),
+            (
+                fee_currency_authority(provider_environment="MAINNET"),
+                "environment does not match",
+            ),
+            (
+                fee_currency_authority(
+                    instrument_version="22222222-2222-4222-8222-222222222222@1"
+                ),
+                "instrument does not match",
+            ),
+            (
+                fee_currency_authority(product_category="linear"),
+                "product category does not match",
+            ),
+        )
+        for authority, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                ProviderCoreError, message
+            ):
+                parse_executions(
+                    evidence,
+                    instrument_versions={
+                        "BTCUSDT": "11111111-1111-4111-8111-111111111111@1"
+                    },
+                    qualified_fee_currency=authority,
+                )
+
+    def test_typed_fee_currency_authority_is_rejected_when_mutated_after_issuance(self):
+        authority = fee_currency_authority()
+        object.__setattr__(authority, "fee_currency", "BTC")
+        with self.assertRaisesRegex(ProviderCoreError, "changed after canonical issuance"):
+            parse_executions(
+                bound_execution_response(
+                    {
+                        "retCode": 0,
+                        "result": {"category": "spot", "list": [{
+                            "execId": "typed-fee-mutated", "orderLinkId": "", "symbol": "BTCUSDT",
+                            "side": "Buy", "execQty": "0.01", "execPrice": "65000",
+                            "execFee": "0.5", "feeCurrency": "", "extraFees": "",
+                            "execTime": "1790280000000",
+                        }]},
+                    },
+                    instrument_version="11111111-1111-4111-8111-111111111111@1",
+                ),
+                instrument_versions={
+                    "BTCUSDT": "11111111-1111-4111-8111-111111111111@1"
+                },
+                qualified_fee_currency=authority,
+            )
+
     def test_provider_fee_currency_must_agree_with_typed_authority(self):
         response = {"retCode": 0, "result": {"category": "spot", "list": [{
             "execId": "typed-fee-2", "orderLinkId": "", "symbol": "BTCUSDT", "side": "Buy",

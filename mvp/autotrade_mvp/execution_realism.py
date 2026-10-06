@@ -446,6 +446,7 @@ class ExecutionModel:
                     name="price_grid_instrument_version",
                 )
             ),
+            price_grid=price_grid,
         )
 
     @property

@@ -401,6 +401,139 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
             resolve(source)
         self.assertEqual(HostileText.calls, 0)
 
+    def test_late_resolver_authority_globals_do_not_rewrite_resolution(self):
+        source = sealed_dividend()
+        baseline = resolve(source)
+        calls = []
+        originals = {
+            "text": corporate_action_evidence_module._text,
+            "environments": corporate_action_evidence_module._ENVIRONMENTS,
+            "utc_text": corporate_action_evidence_module._utc_text,
+            "payload_digest": corporate_action_evidence_module.payload_digest,
+            "parser_id": corporate_action_evidence_module._CORPORATE_ACTION_PARSER_ID,
+            "parser_version": corporate_action_evidence_module._CORPORATE_ACTION_PARSER_VERSION,
+            "parser_digest": corporate_action_evidence_module._CORPORATE_ACTION_PARSER_CONTRACT_DIGEST,
+            "source_type": corporate_action_evidence_module.ProviderResponseObservation,
+            "surface": corporate_action_evidence_module.Surface,
+        }
+
+        def decoy(name):
+            def fail(*_args, **_kwargs):
+                calls.append(name)
+                raise AssertionError(f"late {name} decoy must not execute")
+            return fail
+
+        class DecoySource:
+            pass
+
+        class DecoySurface:
+            ACTIVITIES = object()
+
+        corporate_action_evidence_module._text = decoy("text")
+        corporate_action_evidence_module._ENVIRONMENTS = frozenset({"BROKEN"})
+        corporate_action_evidence_module._utc_text = decoy("utc_text")
+        corporate_action_evidence_module.payload_digest = decoy("payload_digest")
+        corporate_action_evidence_module._CORPORATE_ACTION_PARSER_ID = "forged-parser"
+        corporate_action_evidence_module._CORPORATE_ACTION_PARSER_VERSION = "999.0.0"
+        corporate_action_evidence_module._CORPORATE_ACTION_PARSER_CONTRACT_DIGEST = (
+            "sha256:" + "f" * 64
+        )
+        corporate_action_evidence_module.ProviderResponseObservation = DecoySource
+        corporate_action_evidence_module.Surface = DecoySurface
+        try:
+            accepted = resolve(source)
+        finally:
+            corporate_action_evidence_module._text = originals["text"]
+            corporate_action_evidence_module._ENVIRONMENTS = originals["environments"]
+            corporate_action_evidence_module._utc_text = originals["utc_text"]
+            corporate_action_evidence_module.payload_digest = originals["payload_digest"]
+            corporate_action_evidence_module._CORPORATE_ACTION_PARSER_ID = originals[
+                "parser_id"
+            ]
+            corporate_action_evidence_module._CORPORATE_ACTION_PARSER_VERSION = originals[
+                "parser_version"
+            ]
+            corporate_action_evidence_module._CORPORATE_ACTION_PARSER_CONTRACT_DIGEST = (
+                originals["parser_digest"]
+            )
+            corporate_action_evidence_module.ProviderResponseObservation = originals[
+                "source_type"
+            ]
+            corporate_action_evidence_module.Surface = originals["surface"]
+
+        self.assertEqual(calls, [])
+        self.assertEqual(accepted, baseline)
+        self.assertEqual(accepted.provenance_digest, baseline.provenance_digest)
+        self.assertEqual(accepted.event.source_revision, baseline.event.source_revision)
+
+    def test_late_parser_helper_globals_do_not_rewrite_provider_fact(self):
+        source = sealed_dividend()
+        baseline = resolve(source)
+        calls = []
+        originals = {
+            "datetime": corporate_action_evidence_module.datetime,
+            "timezone": corporate_action_evidence_module.timezone,
+            "mapping": corporate_action_evidence_module.Mapping,
+            "decimal": corporate_action_evidence_module.Decimal,
+            "mapping_proxy": corporate_action_evidence_module.MappingProxyType,
+            "reserved": corporate_action_evidence_module._CORPORATE_ACTION_RESERVED_FIELDS,
+            "kinds": corporate_action_evidence_module._KINDS,
+            "digest": corporate_action_evidence_module._DIGEST,
+        }
+
+        class DecoyDateTime:
+            @classmethod
+            def fromisoformat(cls, _value):
+                calls.append("datetime")
+                raise AssertionError("late datetime decoy must not execute")
+
+        class DecoyTimezone:
+            utc = object()
+
+        class DecoyDecimal:
+            pass
+
+        class DecoyDigest:
+            def fullmatch(self, _value):
+                calls.append("digest")
+                raise AssertionError("late digest decoy must not execute")
+
+        def decoy_mapping_proxy(_value):
+            calls.append("mapping_proxy")
+            raise AssertionError("late MappingProxyType decoy must not execute")
+
+        corporate_action_evidence_module.datetime = DecoyDateTime
+        corporate_action_evidence_module.timezone = DecoyTimezone
+        corporate_action_evidence_module.Mapping = object()
+        corporate_action_evidence_module.Decimal = DecoyDecimal
+        corporate_action_evidence_module.MappingProxyType = decoy_mapping_proxy
+        corporate_action_evidence_module._CORPORATE_ACTION_RESERVED_FIELDS = frozenset()
+        corporate_action_evidence_module._KINDS = frozenset()
+        corporate_action_evidence_module._DIGEST = DecoyDigest()
+        try:
+            accepted = resolve(source)
+        finally:
+            corporate_action_evidence_module.datetime = originals["datetime"]
+            corporate_action_evidence_module.timezone = originals["timezone"]
+            corporate_action_evidence_module.Mapping = originals["mapping"]
+            corporate_action_evidence_module.Decimal = originals["decimal"]
+            corporate_action_evidence_module.MappingProxyType = originals[
+                "mapping_proxy"
+            ]
+            corporate_action_evidence_module._CORPORATE_ACTION_RESERVED_FIELDS = originals[
+                "reserved"
+            ]
+            corporate_action_evidence_module._KINDS = originals["kinds"]
+            corporate_action_evidence_module._DIGEST = originals["digest"]
+
+        self.assertEqual(calls, [])
+        self.assertEqual(accepted, baseline)
+        self.assertEqual(accepted.event.payload["per_share"], "1.25")
+        self.assertEqual(
+            accepted.event.effective_at,
+            READ_NOW + timedelta(seconds=1),
+        )
+
     def test_late_module_global_provider_projection_decoys_do_not_run(self):
         source = sealed_dividend()
         calls = []

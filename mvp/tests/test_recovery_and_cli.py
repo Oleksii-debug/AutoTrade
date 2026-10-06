@@ -53,6 +53,31 @@ class CliTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             self.assertEqual(get_status(directory), {"status": "not_started"})
 
+    def test_legacy_checkpoint_with_valid_evidence_reports_migration_required(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_vertical_slice([100, 101, 102, 103], root)
+            checkpoint_path = root / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint["schema_version"] = 1
+            checkpoint_path.write_text(
+                json.dumps(checkpoint, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            status = get_status(directory)
+            self.assertEqual(status["status"], "needs_recovery")
+            self.assertEqual(status["resume_compatibility"], "migration_required")
+            self.assertTrue(status["replay_verified"])
+
+    def test_current_checkpoint_reports_current_resume_compatibility(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            status = get_status(directory)
+            self.assertEqual(status["status"], "running")
+            self.assertEqual(status["resume_compatibility"], "current")
+            self.assertTrue(status["replay_verified"])
+
     def test_multi_episode_cli_and_status(self):
         with TemporaryDirectory() as directory:
             argv = [

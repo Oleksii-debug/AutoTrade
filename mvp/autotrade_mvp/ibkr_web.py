@@ -978,7 +978,7 @@ def parse_web_api_trades(
             or instrument_value != instrument_value.strip()
         ):
             raise IbkrWebAdapterError(
-                "instrument_versions_by_conid values must be canonical exact text"
+                "instrument_versions_by_conid values must be exact text"
             )
     for execution_key, currency_value in fee_currency_by_execution_id.items():
         if (
@@ -987,7 +987,7 @@ def parse_web_api_trades(
             or execution_key != execution_key.strip()
         ):
             raise IbkrWebAdapterError(
-                "fee_currency_by_execution_id keys must be canonical exact text"
+                "fee_currency_by_execution_id keys must be exact text"
             )
         if (
             type(currency_value) is not str
@@ -995,7 +995,7 @@ def parse_web_api_trades(
             or currency_value != currency_value.strip()
         ):
             raise IbkrWebAdapterError(
-                "fee_currency_by_execution_id values must be canonical exact text"
+                "fee_currency_by_execution_id values must be exact text"
             )
     account = observation.account_id
     environment = observation.environment

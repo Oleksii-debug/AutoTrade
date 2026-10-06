@@ -13,18 +13,30 @@ from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_
 
 
 class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
-    def _tamper_prepared_field(self, path: str, field: str, value: object) -> None:
+    def _tamper_event_field(
+        self,
+        path: str,
+        event_type: str,
+        field: str,
+        value: object,
+        *,
+        envelope_field: bool = False,
+    ) -> None:
         connection = sqlite3.connect(path)
         try:
             row = connection.execute(
                 "SELECT event_id, payload_json, envelope_json "
-                "FROM events WHERE event_type = 'SubmissionPrepared'"
+                "FROM events WHERE event_type = ?",
+                (event_type,),
             ).fetchone()
             self.assertIsNotNone(row)
             event_id, payload_json, envelope_json = row
             payload = json.loads(payload_json)
             envelope = json.loads(envelope_json)
-            payload[field] = value
+            if envelope_field:
+                envelope[field] = value
+            else:
+                payload[field] = value
             new_payload_json = canonical_json(payload)
             new_payload_hash = payload_digest(payload)
             envelope["payload"] = payload
@@ -83,7 +95,12 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             with self.subTest(field=field), TemporaryDirectory() as directory:
                 path = f"{directory}/journal.sqlite3"
                 self._make_exact_response_attempt(path)
-                self._tamper_prepared_field(path, field, bad_value)
+                self._tamper_event_field(
+                    path,
+                    "SubmissionPrepared",
+                    field,
+                    bad_value,
+                )
 
                 reopened = JournalStore(path)
                 with self.assertRaisesRegex(
@@ -96,6 +113,91 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                         account_id="acct",
                         attempt_id="binding-type-a1",
                     )
+
+
+    def test_restart_rejects_exact_text_identity_retargeting(self):
+        for field, bad_value in (
+            ("attempt_id", "other-attempt"),
+            ("environment", "PAPER"),
+            ("account_id", "other-account"),
+        ):
+            with self.subTest(field=field), TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                self._make_exact_response_attempt(path)
+                self._tamper_event_field(
+                    path,
+                    "SubmissionPrepared",
+                    field,
+                    bad_value,
+                )
+
+                reopened = JournalStore(path)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"durable SubmissionPrepared {field} mismatches selected submission identity",
+                ):
+                    load_submission_response_binding(
+                        reopened,
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id="binding-type-a1",
+                    )
+
+    def test_restart_rejects_cross_event_client_order_identity_retargeting(self):
+        for event_type in ("SubmissionSending", "SubmissionSent"):
+            with self.subTest(event_type=event_type), TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                self._make_exact_response_attempt(path)
+                self._tamper_event_field(
+                    path,
+                    event_type,
+                    "client_order_id",
+                    "forged-client-order-id",
+                )
+
+                reopened = JournalStore(path)
+                expected_event = (
+                    "SubmissionSending" if event_type == "SubmissionSending" else "terminal"
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"durable {expected_event} client_order_id mismatches SubmissionPrepared",
+                ):
+                    load_submission_response_binding(
+                        reopened,
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id="binding-type-a1",
+                    )
+
+    def test_restart_rejects_cross_event_environment_retargeting(self):
+        for event_type in ("SubmissionSending", "SubmissionSent"):
+            with self.subTest(event_type=event_type), TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                self._make_exact_response_attempt(path)
+                self._tamper_event_field(
+                    path,
+                    event_type,
+                    "environment",
+                    "PAPER",
+                    envelope_field=True,
+                )
+
+                reopened = JournalStore(path)
+                expected_event = (
+                    "SubmissionSending" if event_type == "SubmissionSending" else "terminal"
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"durable {expected_event} environment mismatches selected submission identity",
+                ):
+                    load_submission_response_binding(
+                        reopened,
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id="binding-type-a1",
+                    )
+
 
 
 if __name__ == "__main__":

@@ -514,6 +514,18 @@ def commit_authoritative_corporate_action(
     ):
         raise ValueError("corporate-action durable authorities have different scope")
 
+    # Cross the resolver-issuance boundary before any financial interpretation.
+    # The evidence store returns a detached canonical copy reconstructed from its
+    # closure-owned issuance snapshot, so later caller mutation cannot alter the
+    # economic inputs selected for this operation.
+    initial_evidence_plan = (
+        DurableCorporateActionEvidenceStore.prepare_record_mutation(
+            evidence_store,
+            accepted,
+        )
+    )
+    accepted = initial_evidence_plan.accepted
+
     observed_at = datetime.fromisoformat(
         accepted.observed_at.replace("Z", "+00:00")
     ).astimezone(timezone.utc)

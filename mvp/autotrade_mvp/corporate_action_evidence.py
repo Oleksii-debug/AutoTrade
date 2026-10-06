@@ -376,7 +376,190 @@ class AuthoritativeCorporateAction:
 EvidenceResolver = Callable[[str], ProviderResponseObservation]
 
 
-def resolve_authoritative_corporate_action(
+def _authoritative_corporate_action_operations():
+    """Retain resolver issuance authority outside caller-writable dataclass state."""
+
+    states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+    state_lock = threading.RLock()
+
+    def event_snapshot(event: CorporateEvent) -> tuple[object, ...]:
+        if type(event) is not CorporateEvent:
+            raise CorporateActionEvidenceError(
+                "authoritative corporate action requires exact CorporateEvent"
+            )
+        for name in ("event_id", "instrument_id", "kind", "source_revision"):
+            if type(getattr(event, name)) is not str:
+                raise CorporateActionEvidenceError(
+                    f"authoritative corporate-action event {name} must remain exact text"
+                )
+        if type(event.instrument_version) is not int:
+            raise CorporateActionEvidenceError(
+                "authoritative corporate-action instrument_version must remain exact int"
+            )
+        if event.source_sequence is not None and type(event.source_sequence) is not int:
+            raise CorporateActionEvidenceError(
+                "authoritative corporate-action source_sequence must remain exact int"
+            )
+        if event.effective_at is not None and type(event.effective_at) is not datetime:
+            raise CorporateActionEvidenceError(
+                "authoritative corporate-action effective_at must remain exact datetime"
+            )
+        if type(event.payload) is not dict:
+            raise CorporateActionEvidenceError(
+                "authoritative corporate-action payload must remain canonical"
+            )
+        if any(
+            type(key) is not str or type(item) is not str
+            for key, item in event.payload.items()
+        ):
+            raise CorporateActionEvidenceError(
+                "authoritative corporate-action payload scalars must remain exact text"
+            )
+        return (
+            event.event_id,
+            event.instrument_id,
+            event.instrument_version,
+            event.kind,
+            event.effective_date,
+            event.source_revision,
+            tuple(sorted(event.payload.items())),
+            event.source_sequence,
+            event.effective_at,
+        )
+
+    def snapshot(value: AuthoritativeCorporateAction) -> tuple[object, ...]:
+        for name in (
+            "evidence_ref",
+            "provider_id",
+            "account_id",
+            "environment",
+            "external_event_id",
+            "provider_revision",
+            "raw_evidence_digest",
+            "query_digest",
+            "capability_snapshot_id",
+            "provider_instrument_version",
+            "observed_at",
+            "provenance_digest",
+        ):
+            if type(getattr(value, name)) is not str:
+                raise CorporateActionEvidenceError(
+                    f"authoritative corporate-action {name} must remain exact text"
+                )
+        if (
+            value.corrects_external_event_id is not None
+            and type(value.corrects_external_event_id) is not str
+        ):
+            raise CorporateActionEvidenceError(
+                "authoritative corporate-action correction identity must remain exact text"
+            )
+        return (
+            event_snapshot(value.event),
+            value.evidence_ref,
+            value.provider_id,
+            value.account_id,
+            value.environment,
+            value.external_event_id,
+            value.provider_revision,
+            value.raw_evidence_digest,
+            value.query_digest,
+            value.capability_snapshot_id,
+            value.provider_instrument_version,
+            value.observed_at,
+            value.provenance_digest,
+            value.corrects_external_event_id,
+        )
+
+    def detached(
+        state: tuple[object, ...],
+    ) -> AuthoritativeCorporateAction:
+        event_state = state[0]
+        event = CorporateEvent.create(
+            event_id=event_state[0],
+            instrument_id=event_state[1],
+            instrument_version=event_state[2],
+            kind=event_state[3],
+            effective_date=event_state[4],
+            source_revision=event_state[5],
+            payload=dict(event_state[6]),
+            source_sequence=event_state[7],
+            effective_at=event_state[8],
+        )
+        return AuthoritativeCorporateAction(
+            event=event,
+            evidence_ref=state[1],
+            provider_id=state[2],
+            account_id=state[3],
+            environment=state[4],
+            external_event_id=state[5],
+            provider_revision=state[6],
+            raw_evidence_digest=state[7],
+            query_digest=state[8],
+            capability_snapshot_id=state[9],
+            provider_instrument_version=state[10],
+            observed_at=state[11],
+            provenance_digest=state[12],
+            corrects_external_event_id=state[13],
+        )
+
+    def prune_dead() -> None:
+        dead = [
+            object_id
+            for object_id, (value_ref, _state) in states.items()
+            if value_ref() is None
+        ]
+        for object_id in dead:
+            states.pop(object_id, None)
+
+    def register(value: AuthoritativeCorporateAction) -> None:
+        if type(value) is not AuthoritativeCorporateAction:
+            raise TypeError(
+                "issued corporate action must be exact AuthoritativeCorporateAction"
+            )
+        current = snapshot(value)
+        with state_lock:
+            prune_dead()
+            object_id = id(value)
+            previous = states.get(object_id)
+            if previous is not None and previous[0]() is not None:
+                raise CorporateActionEvidenceError(
+                    "authoritative corporate-action issuance identity collision"
+                )
+            states[object_id] = (weakref.ref(value), current)
+
+    def require(
+        value: AuthoritativeCorporateAction,
+    ) -> AuthoritativeCorporateAction:
+        if type(value) is not AuthoritativeCorporateAction:
+            raise TypeError(
+                "accepted must be canonical AuthoritativeCorporateAction"
+            )
+        with state_lock:
+            prune_dead()
+            state = states.get(id(value))
+        if state is None or state[0]() is not value:
+            raise CorporateActionEvidenceError(
+                "corporate action lacks canonical resolver issuance authority"
+            )
+        if snapshot(value) != state[1]:
+            raise CorporateActionEvidenceError(
+                "canonical corporate action changed after resolver issuance"
+            )
+        trusted = detached(state[1])
+        register(trusted)
+        return trusted
+
+    return register, require
+
+
+(
+    _register_authoritative_corporate_action,
+    _require_authoritative_corporate_action,
+) = _authoritative_corporate_action_operations()
+del _authoritative_corporate_action_operations
+
+
+def _resolve_authoritative_corporate_action_impl(
     evidence_ref: str,
     *,
     evidence_resolver: EvidenceResolver,
@@ -388,6 +571,7 @@ def resolve_authoritative_corporate_action(
     permission_scope: str,
     normalizer: object | None = None,
     instrument_resolver: object | None = None,
+    _register_authority,
 ) -> AuthoritativeCorporateAction:
     """Resolve one accepted event exclusively from sealed provider evidence.
 
@@ -411,8 +595,10 @@ def resolve_authoritative_corporate_action(
     reference = _text(evidence_ref, "evidence_ref")
     if not callable(evidence_resolver):
         raise TypeError("evidence_resolver must be callable")
-    if not isinstance(instrument_registry, InstrumentRegistry):
-        raise TypeError("instrument_registry must be InstrumentRegistry")
+    if type(instrument_registry) is not InstrumentRegistry:
+        raise TypeError("instrument_registry must be exact InstrumentRegistry")
+    if any(name in vars(instrument_registry) for name in ("exact", "at")):
+        raise TypeError("instrument_registry lookup methods must not be shadowed")
     if normalizer is not None:
         raise TypeError(
             "caller-supplied corporate-action normalizer is not financial authority"
@@ -425,8 +611,8 @@ def resolve_authoritative_corporate_action(
         _text(expected_provider_id, "expected_provider_id")
     )
     expected_account = _text(expected_account_id, "expected_account_id")
-    if not isinstance(allowed_endpoints, frozenset) or not allowed_endpoints:
-        raise TypeError("allowed_endpoints must be a non-empty frozenset")
+    if type(allowed_endpoints) is not frozenset or not allowed_endpoints:
+        raise TypeError("allowed_endpoints must be an exact non-empty frozenset")
     endpoints = frozenset(
         _text(value, "allowed endpoint") for value in allowed_endpoints
     )
@@ -445,9 +631,9 @@ def resolve_authoritative_corporate_action(
         raise CorporateActionEvidenceError(
             "corporate-action evidence could not be resolved"
         ) from error
-    if not isinstance(source, ProviderResponseObservation):
+    if type(source) is not ProviderResponseObservation:
         raise CorporateActionEvidenceError(
-            "corporate-action evidence must be a sealed ProviderResponseObservation"
+            "corporate-action evidence must be an exact sealed ProviderResponseObservation"
         )
     if source.evidence_ref != reference:
         raise CorporateActionEvidenceError(
@@ -487,8 +673,9 @@ def resolve_authoritative_corporate_action(
         f"{observation.instrument_id}@{observation.instrument_version}"
     )
     try:
-        instrument = instrument_registry.exact(version_ref)
-        effective_instrument = instrument_registry.at(
+        instrument = InstrumentRegistry.exact(instrument_registry, version_ref)
+        effective_instrument = InstrumentRegistry.at(
+            instrument_registry,
             observation.instrument_id,
             observation.effective_at,
         )
@@ -573,7 +760,7 @@ def resolve_authoritative_corporate_action(
         source_sequence=observation.source_sequence,
         payload=dict(observation.payload),
     )
-    return AuthoritativeCorporateAction(
+    accepted = AuthoritativeCorporateAction(
         event=event,
         evidence_ref=source.evidence_ref,
         provider_id=observation.provider_id,
@@ -589,7 +776,52 @@ def resolve_authoritative_corporate_action(
         provenance_digest=provenance_digest,
         corrects_external_event_id=observation.corrects_external_event_id,
     )
+    _register_authority(accepted)
+    return accepted
 
+
+
+def _bind_authoritative_corporate_action_resolver(
+    resolve_impl,
+    register_authority,
+):
+    def resolve_authoritative_corporate_action(
+        evidence_ref: str,
+        *,
+        evidence_resolver: EvidenceResolver,
+        instrument_registry: InstrumentRegistry,
+        expected_provider_id: str,
+        expected_account_id: str,
+        expected_environment: str,
+        allowed_endpoints: frozenset[str],
+        permission_scope: str,
+        normalizer: object | None = None,
+        instrument_resolver: object | None = None,
+    ) -> AuthoritativeCorporateAction:
+        return resolve_impl(
+            evidence_ref,
+            evidence_resolver=evidence_resolver,
+            instrument_registry=instrument_registry,
+            expected_provider_id=expected_provider_id,
+            expected_account_id=expected_account_id,
+            expected_environment=expected_environment,
+            allowed_endpoints=allowed_endpoints,
+            permission_scope=permission_scope,
+            normalizer=normalizer,
+            instrument_resolver=instrument_resolver,
+            _register_authority=register_authority,
+        )
+
+    return resolve_authoritative_corporate_action
+
+
+resolve_authoritative_corporate_action = _bind_authoritative_corporate_action_resolver(
+    _resolve_authoritative_corporate_action_impl,
+    _register_authoritative_corporate_action,
+)
+del _bind_authoritative_corporate_action_resolver
+del _resolve_authoritative_corporate_action_impl
+del _register_authoritative_corporate_action
 
 
 class CorporateActionEvidenceConflict(CorporateActionEvidenceError):
@@ -918,8 +1150,6 @@ class DurableCorporateActionEvidenceStore:
     ) -> PreparedCorporateActionEvidenceMutation:
         """Prepare source evidence for a shared JournalStore transaction."""
 
-        if type(accepted) is not AuthoritativeCorporateAction:
-            raise TypeError("accepted must be canonical AuthoritativeCorporateAction")
         _, _, provider_id, account_id, environment, aggregate_id = (
             DurableCorporateActionEvidenceStore._composition(self)
         )
@@ -1148,4 +1378,28 @@ class DurableCorporateActionEvidenceStore:
             provenance_digest=accepted.provenance_digest,
             corrects_external_event_id=accepted.corrects_external_event_id,
         )
+
+def _bind_durable_corporate_action_verifier(
+    prepare_record_mutation,
+    require_authority,
+):
+    def verified_prepare_record_mutation(
+        self,
+        accepted: AuthoritativeCorporateAction,
+    ) -> PreparedCorporateActionEvidenceMutation:
+        trusted = require_authority(accepted)
+        return prepare_record_mutation(self, trusted)
+
+    return verified_prepare_record_mutation
+
+
+DurableCorporateActionEvidenceStore.prepare_record_mutation = (
+    _bind_durable_corporate_action_verifier(
+        DurableCorporateActionEvidenceStore.prepare_record_mutation,
+        _require_authoritative_corporate_action,
+    )
+)
+del _bind_durable_corporate_action_verifier
+del _require_authoritative_corporate_action
+
 

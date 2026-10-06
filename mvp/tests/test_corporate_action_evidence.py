@@ -5,7 +5,9 @@ from tempfile import TemporaryDirectory
 import unittest
 import weakref
 
+import mvp.autotrade_mvp.corporate_action_evidence as corporate_action_evidence_module
 from mvp.autotrade_mvp.corporate_action_evidence import (
+    AuthoritativeCorporateAction,
     CorporateActionEvidenceConflict,
     CorporateActionEvidenceError,
     CorporateActionObservation,
@@ -21,6 +23,7 @@ from mvp.autotrade_mvp.corporate_actions import CorporateEvent
 from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
+    ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
@@ -249,6 +252,81 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         second = resolve(source)
         self.assertEqual(first, second)
         self.assertEqual(first.event, second.event)
+
+    def test_provider_observation_subclass_is_rejected_before_attribute_access(self):
+        class ForgedObservation(ProviderResponseObservation):
+            @property
+            def evidence_ref(self):
+                raise AssertionError("subclass evidence_ref must not execute")
+
+            def require_scope(self, **_kwargs):
+                raise AssertionError("subclass require_scope must not execute")
+
+        forged = object.__new__(ForgedObservation)
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "exact sealed ProviderResponseObservation",
+        ):
+            resolve_authoritative_corporate_action(
+                "evidence:forged",
+                evidence_resolver=lambda _reference: forged,
+                instrument_registry=canonical_registry(),
+                expected_provider_id="BINANCE",
+                expected_account_id="acct-1",
+                expected_environment="SIMULATION",
+                allowed_endpoints=frozenset({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
+
+    def test_instrument_registry_subclass_is_rejected_before_registry_dispatch(self):
+        class ForgedRegistry(InstrumentRegistry):
+            def exact(self, _version_ref):
+                raise AssertionError("subclass exact must not execute")
+
+            def at(self, _instrument_id, _at):
+                raise AssertionError("subclass at must not execute")
+
+        source = sealed_dividend()
+        forged = ForgedRegistry(versions=(canonical_instrument(),))
+        with self.assertRaisesRegex(TypeError, "exact InstrumentRegistry"):
+            resolve(
+                source,
+                instrument_registry=forged,
+            )
+
+    def test_instrument_registry_instance_shadow_is_rejected_before_dispatch(self):
+        source = sealed_dividend()
+        registry = canonical_registry()
+        registry.exact = lambda _version_ref: (_ for _ in ()).throw(
+            AssertionError("shadowed exact must not execute")
+        )
+        registry.at = lambda _instrument_id, _at: (_ for _ in ()).throw(
+            AssertionError("shadowed at must not execute")
+        )
+
+        with self.assertRaisesRegex(TypeError, "must not be shadowed"):
+            resolve(
+                source,
+                instrument_registry=registry,
+            )
+
+    def test_allowed_endpoints_subclass_is_rejected_before_iteration(self):
+        class ForgedEndpoints(frozenset):
+            def __iter__(self):
+                raise AssertionError("subclass iteration must not execute")
+
+        source = sealed_dividend()
+        with self.assertRaisesRegex(TypeError, "exact non-empty frozenset"):
+            resolve_authoritative_corporate_action(
+                source.evidence_ref,
+                evidence_resolver={source.evidence_ref: source}.__getitem__,
+                instrument_registry=canonical_registry(),
+                expected_provider_id="BINANCE",
+                expected_account_id="acct-1",
+                expected_environment="SIMULATION",
+                allowed_endpoints=ForgedEndpoints({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
 
     def test_locally_constructed_event_is_not_provider_evidence(self):
         local = CorporateEvent.create(
@@ -596,6 +674,143 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
             environment="SIMULATION",
         )
         return journal, durable
+
+    def test_prepared_mutation_uses_detached_issued_action_snapshot(self):
+        accepted = self._accepted()
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            _journal, durable = self._store(path)
+            plan = durable.prepare_record_mutation(accepted)
+
+        self.assertIsNot(plan.accepted, accepted)
+        self.assertIsNot(plan.accepted.event, accepted.event)
+        self.assertEqual(plan.accepted, accepted)
+
+        accepted.event.payload["per_share"] = "999"
+        object.__setattr__(accepted, "provider_revision", "forged-revision")
+        self.assertEqual(plan.accepted.provider_revision, "1")
+        self.assertEqual(plan.accepted.event.payload["per_share"], "1.25")
+
+    def test_module_global_decoys_cannot_mint_or_verify_corporate_action_authority(self):
+        decoy_calls = []
+        corporate_action_evidence_module._register_authoritative_corporate_action = (
+            lambda _value: decoy_calls.append("register")
+        )
+        corporate_action_evidence_module._require_authoritative_corporate_action = (
+            lambda _value: decoy_calls.append("require")
+        )
+        corporate_action_evidence_module._resolve_authoritative_corporate_action_impl = (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("decoy resolver implementation must not execute")
+            )
+        )
+        try:
+            issued = self._accepted()
+            self.assertEqual(decoy_calls, [])
+            forged = AuthoritativeCorporateAction(**issued.__dict__)
+            with TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                journal, durable = self._store(path)
+                with self.assertRaisesRegex(
+                    CorporateActionEvidenceError,
+                    "lacks canonical resolver issuance authority",
+                ):
+                    durable.record(forged)
+                self.assertEqual(decoy_calls, [])
+                self.assertEqual(
+                    journal.load_events(
+                        "corporate_action_evidence",
+                        durable.aggregate_id,
+                    ),
+                    [],
+                )
+        finally:
+            del corporate_action_evidence_module._register_authoritative_corporate_action
+            del corporate_action_evidence_module._require_authoritative_corporate_action
+            del corporate_action_evidence_module._resolve_authoritative_corporate_action_impl
+
+    def test_manually_constructed_authoritative_action_cannot_reach_durable_store(self):
+        issued = self._accepted()
+        forged = AuthoritativeCorporateAction(**issued.__dict__)
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceError,
+                "lacks canonical resolver issuance authority",
+            ):
+                durable.record(forged)
+            self.assertEqual(
+                journal.load_events(
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
+
+    def test_post_issuance_event_payload_mutation_is_rejected_before_journal_mutation(self):
+        accepted = self._accepted()
+        accepted.event.payload["per_share"] = "999"
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceError,
+                "changed after resolver issuance",
+            ):
+                durable.record(accepted)
+            self.assertEqual(
+                journal.load_events(
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
+
+    def test_equal_polymorphic_scalar_cannot_replace_issued_exact_text(self):
+        class EqualText(str):
+            pass
+
+        accepted = self._accepted()
+        object.__setattr__(
+            accepted,
+            "provider_revision",
+            EqualText(accepted.provider_revision),
+        )
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceError,
+                "provider_revision must remain exact text",
+            ):
+                durable.record(accepted)
+            self.assertEqual(
+                journal.load_events(
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
+
+    def test_post_issuance_action_mutation_is_rejected_before_journal_mutation(self):
+        accepted = self._accepted()
+        object.__setattr__(accepted, "provider_revision", "forged-revision")
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceError,
+                "changed after resolver issuance",
+            ):
+                durable.record(accepted)
+            self.assertEqual(
+                journal.load_events(
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
 
     def test_evidence_is_exactly_once_across_restart(self):
         accepted = self._accepted()

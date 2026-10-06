@@ -11,6 +11,7 @@ from mvp.autotrade_mvp.corporate_action_accounting import (
     commit_authoritative_corporate_action,
 )
 from mvp.autotrade_mvp.corporate_action_evidence import (
+    CorporateActionEvidenceError,
     CorporateActionObservation,
     DurableCorporateActionEvidenceStore,
     resolve_authoritative_corporate_action,
@@ -162,6 +163,35 @@ def evidence_store(store):
 
 
 class AtomicCorporateActionFinancialTests(unittest.TestCase):
+    def test_exact_forged_action_cannot_enter_atomic_financial_composition(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            durable_evidence = evidence_store(store)
+            economics = economic_book(store)
+            issued = resolve_action(sealed_action())
+            forged = type(issued)(**issued.__dict__)
+
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceError,
+                "lacks canonical resolver issuance authority",
+            ):
+                commit_authoritative_corporate_action(
+                    store=store,
+                    evidence_store=durable_evidence,
+                    economic_book=economics,
+                    corporate_book=pure_book(),
+                    accepted=forged,
+                )
+
+            self.assertEqual(
+                store.load_events(
+                    "corporate_action_evidence",
+                    durable_evidence.aggregate_id,
+                ),
+                [],
+            )
+            self.assertEqual(len(economics.transactions), 1)
+
     def test_financial_collaborator_subclasses_are_rejected_before_dispatch(self):
         calls = []
 

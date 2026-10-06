@@ -562,9 +562,12 @@ def load_submission_response_binding(
         raise ValueError(
             "durable exact response requires aggregate versions 1 -> 2 -> 3"
         )
+    canonical_environment = environment.strip().upper()
+    canonical_account_id = account_id.strip()
     if any(
         event.get("aggregate_type") != "submission_attempt"
         or event.get("aggregate_id") != aggregate_id
+        or event.get("environment") != canonical_environment
         for event in events
     ):
         raise ValueError("durable submission aggregate identity mismatch")
@@ -583,8 +586,18 @@ def load_submission_response_binding(
     durable_attempt_id = prepared_payload.get("attempt_id")
     durable_environment = prepared_payload.get("environment")
     durable_account_id = prepared_payload.get("account_id")
+    provider = prepared_payload.get("provider")
+    request_hash = prepared_payload.get("request_hash")
     if durable_attempt_id != attempt_id:
         raise ValueError("durable submission attempt identity mismatch")
+    if (
+        durable_environment != canonical_environment
+        or durable_account_id != canonical_account_id
+        or type(provider) is not str
+        or not provider.strip()
+        or type(request_hash) is not str
+    ):
+        raise ValueError("durable prepared submission identity is invalid")
     try:
         prepared_aggregate_id = submission_attempt_aggregate_id(
             environment=durable_environment,
@@ -681,11 +694,11 @@ def load_submission_response_binding(
     return SubmissionResponseBinding(
         attempt_id=attempt_id,
         aggregate_id=aggregate_id,
-        provider=str(prepared_payload.get("provider", "")),
-        request_hash=str(prepared_payload.get("request_hash", "")),
+        provider=provider,
+        request_hash=request_hash,
         client_order_id=client_order_id,
-        environment=str(durable_environment or ""),
-        account_id=str(durable_account_id or ""),
+        environment=durable_environment,
+        account_id=durable_account_id,
         prepared_at=prepared_at,
         sent_at=sent_at,
         submission_scope=scope,

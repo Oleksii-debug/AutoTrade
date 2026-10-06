@@ -1246,5 +1246,76 @@ class DurableOrderProjectionTests(unittest.TestCase):
             self.assertEqual(outbound, 1)
 
 
+    def test_exact_wp18_ambiguous_sync_revalidates_binding_and_stays_unknown(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            book = durable(store, environment="PAPER")
+            intent_id = "intent-exact-wp18-ambiguous-sync"
+            attempt_id = "exact-wp18-ambiguous-sync-a1"
+            client_order_id = stable_client_order_id(
+                "PROVIDER-A",
+                intent_id,
+                environment="PAPER",
+                account_id="acct-1",
+            )
+            book.create_order(
+                event_key="create-exact-wp18-ambiguous-sync",
+                client_order_id=client_order_id,
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="acct-1",
+                owner_token="sender-a",
+            )
+            outbound = 0
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return ExactJsonTransportResponse(
+                    b"<opaque-provider-gateway-response>",
+                    http_status=502,
+                    requires_reconciliation=True,
+                    ambiguity_reason="opaque_gateway_response_after_send",
+                )
+
+            unknown = dispatcher.dispatch(
+                attempt_id=attempt_id,
+                intent_id=intent_id,
+                intent_hash="sha256:" + "9" * 64,
+                provider="PROVIDER-A",
+                request={"side": "BUY", "quantity": "1"},
+                now=T1,
+                authority_check=lambda *_args: (True, "allowed"),
+                transport_send=transport,
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(unknown.status, "UNKNOWN")
+            self.assertEqual(outbound, 1)
+
+            synced = book.sync_submission_attempt(attempt_id=attempt_id)
+            self.assertEqual(len(synced), 2)
+            self.assertTrue(all(item.inserted for item in synced))
+            projected = book.order(client_order_id)
+            self.assertEqual(projected.state, "UNKNOWN")
+            self.assertEqual(projected.filled_quantity, Decimal("0"))
+            self.assertIsNone(projected.provider_order_id)
+            self.assertEqual(projected.submission_attempt_id, attempt_id)
+
+            replayed = book.sync_submission_attempt(attempt_id=attempt_id)
+            self.assertEqual(len(replayed), 2)
+            self.assertTrue(all(not item.inserted for item in replayed))
+            self.assertEqual(book.order(client_order_id).state, "UNKNOWN")
+            self.assertEqual(outbound, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

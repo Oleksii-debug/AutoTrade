@@ -387,9 +387,16 @@ def _authoritative_corporate_action_operations():
             raise CorporateActionEvidenceError(
                 "authoritative corporate action requires exact CorporateEvent"
             )
-        if type(event.payload) is not MappingProxyType:
+        if type(event.payload) is not dict:
             raise CorporateActionEvidenceError(
-                "authoritative corporate-action payload must remain immutable"
+                "authoritative corporate-action payload must remain canonical"
+            )
+        if any(
+            type(key) is not str or type(item) is not str
+            for key, item in event.payload.items()
+        ):
+            raise CorporateActionEvidenceError(
+                "authoritative corporate-action payload scalars must remain exact text"
             )
         return (
             event.event_id,

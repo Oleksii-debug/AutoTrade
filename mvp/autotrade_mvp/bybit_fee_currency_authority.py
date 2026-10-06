@@ -266,7 +266,71 @@ def _qualification_semantics(
         raise BybitFeeCurrencyAuthorityError(
             "provider qualification financial scope is non-canonical"
         )
+
+    for field_name in (
+        "provider_id",
+        "runtime_environment",
+        "provider_environment",
+        "entity_policy_id",
+    ):
+        if type(object.__getattribute__(provider_scope, field_name)) is not str:
+            raise BybitFeeCurrencyAuthorityError(
+                "provider qualification financial scope fields are non-canonical"
+            )
+
+    for field_name in (
+        "product_family",
+        "adapter_source_git_sha",
+        "packaged_artifact_digest",
+        "campaign_id",
+        "protocol_id",
+        "protocol_version",
+        "required_case_policy_digest",
+        "result_set_digest",
+        "route_semantics_digest",
+        "documentation_revision_digest",
+        "evidence_set_digest",
+        "chronology_digest",
+        "lineage_digest",
+        "acceptance_metadata_digest",
+        "attestation_digest",
+        "trust_policy_digest",
+        "issuer_identity_digest",
+        "verifier_identity_digest",
+        "content_digest",
+    ):
+        # content_digest is a computed property; all source fields it consumes
+        # must be exact scalar types before it can be read safely.
+        if field_name == "content_digest":
+            continue
+        if type(getattr(identity, field_name)) is not str:
+            raise BybitFeeCurrencyAuthorityError(
+                "provider qualification identity fields are non-canonical"
+            )
+
+    for field_name in ("campaign_id", "protocol_id", "protocol_version", "product_family"):
+        if type(getattr(scope, field_name)) is not str:
+            raise BybitFeeCurrencyAuthorityError(
+                "provider qualification scope fields are non-canonical"
+            )
+    if type(getattr(scope, "campaign_version", None)) is not int:
+        raise BybitFeeCurrencyAuthorityError(
+            "provider qualification scope fields are non-canonical"
+        )
+    if type(getattr(scope, "packaged_artifact_digest", None)) is not str:
+        raise BybitFeeCurrencyAuthorityError(
+            "provider qualification scope fields are non-canonical"
+        )
+    if type(getattr(scope, "adapter_source_git_sha", None)) is not str:
+        raise BybitFeeCurrencyAuthorityError(
+            "provider qualification scope fields are non-canonical"
+        )
+
     qualification_id = object.__getattribute__(qualification, "qualification_id")
+    if type(qualification_id) is not str:
+        raise BybitFeeCurrencyAuthorityError(
+            "provider qualification id is non-canonical"
+        )
     semantics_digest = "sha256:" + sha256(raw.encode("utf-8")).hexdigest()
     if (
         getattr(identity, "route_semantics_digest", None) != semantics_digest
@@ -391,6 +455,21 @@ def _qualification_semantics(
         qualification,
         "supersedes_qualification_id",
     )
+    for field_name, value in (
+        ("required_cases", required_cases),
+        ("unsupported_features", unsupported_features),
+        ("documentation_revisions", documentation_revisions),
+    ):
+        if type(value) is not tuple or any(type(item) is not str for item in value):
+            raise BybitFeeCurrencyAuthorityError(
+                f"provider qualification {field_name} are non-canonical"
+            )
+    if supersedes_qualification_id is not None and type(
+        supersedes_qualification_id
+    ) is not str:
+        raise BybitFeeCurrencyAuthorityError(
+            "provider qualification lineage is non-canonical"
+        )
     if (
         getattr(identity, "required_case_policy_digest", None)
         != _canonical_digest(list(required_cases))

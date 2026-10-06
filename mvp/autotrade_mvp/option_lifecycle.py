@@ -810,14 +810,51 @@ class DurableOptionLifecycleAuthority:
         require_scope_code = getattr(require_scope, "__code__", None)
         observation_parser = _canonical_observation_from_sealed_response
         observation_parser_code = getattr(observation_parser, "__code__", None)
+
+        # Snapshot every caller-reachable lifecycle owner/config value locally.
+        # Instance-level "_expected_*" fields are not sufficient across an
+        # arbitrary callback because the callback could rewrite both the live
+        # value and its instance-stored expectation.
+        expected_store = self.store
+        expected_registry = self.registry
+        expected_economic_book = self.economic_book
+        expected_economic_scope = (
+            expected_economic_book.provider_id,
+            expected_economic_book.account_id,
+            expected_economic_book.environment,
+            expected_economic_book.book_id,
+        )
+        expected_endpoints = self.lifecycle_endpoints
+        expected_permission_scope = self.permission_scope
+        expected_resolver = self.evidence_resolver
         try:
-            source = self.evidence_resolver(reference)
+            source = expected_resolver(reference)
         except Exception as error:
             raise OptionLifecycleError(
                 "provider lifecycle evidence could not be resolved"
             ) from error
-        # Validate captured financial scope immediately after the callback,
-        # before the source is interpreted using any caller-retargeted owner.
+        # Validate captured lifecycle/financial scope immediately after the
+        # callback, before the source is interpreted using caller-retargeted
+        # owners or configuration.
+        current_economic_scope = (
+            self.economic_book.provider_id,
+            self.economic_book.account_id,
+            self.economic_book.environment,
+            self.economic_book.book_id,
+        )
+        if (
+            self.store is not expected_store
+            or self.registry is not expected_registry
+            or self.economic_book is not expected_economic_book
+            or current_economic_scope != expected_economic_scope
+            or self.lifecycle_endpoints != expected_endpoints
+            or self.permission_scope != expected_permission_scope
+            or self.evidence_resolver is not expected_resolver
+            or "_require_canonical_authorities" in vars(self)
+        ):
+            raise OptionLifecycleError(
+                "option lifecycle authority changed during evidence resolution"
+            )
         self._require_canonical_authorities()
         if (
             ProviderResponseObservation.require_scope is not require_scope

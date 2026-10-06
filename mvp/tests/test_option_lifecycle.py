@@ -36,6 +36,7 @@ from mvp.autotrade_mvp.provider_core import (
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
 )
+from mvp.autotrade_mvp.provider_route_reads import QualifiedProviderResponseObservation
 
 
 OPTION_ID = "11111111-1111-1111-1111-111111111111"
@@ -633,6 +634,35 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                     ),
                     before_lifecycle,
                 )
+
+    def test_qualified_provider_read_wrapper_is_not_lifecycle_authority(self):
+        reference = "qualified-provider-read-wrapper"
+        forged = object.__new__(QualifiedProviderResponseObservation)
+        self._evidence[reference] = forged
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events(
+                "option_lifecycle",
+                self.authority.aggregate_id,
+            )
+        )
+
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "exact sealed ProviderResponseObservation",
+        ):
+            self.authority.apply(reference)
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(
+                self.store.load_events(
+                    "option_lifecycle",
+                    self.authority.aggregate_id,
+                )
+            ),
+            before_lifecycle,
+        )
 
     def test_simulation_resolver_cannot_rebind_lifecycle_observation_parser(self):
         reference = self.evidence(

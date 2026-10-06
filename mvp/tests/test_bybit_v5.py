@@ -1908,6 +1908,68 @@ class BybitV5AdapterTests(unittest.TestCase):
                         qualified_fee_currencies={"BTCUSDT@v1": "USDT"},
                     )
 
+    def test_execution_metadata_inputs_require_exact_inert_snapshots(self):
+        row = {
+            "execId": "exec-metadata-snapshot",
+            "orderLinkId": "",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.01",
+            "execPrice": "65000",
+            "execFee": "0.5",
+            "feeCurrency": "",
+            "execTime": "1790280000000",
+        }
+        observation = bound_execution_response(
+            {"retCode": 0, "result": {"list": [row]}}
+        )
+        callbacks = []
+
+        class HostileDict(dict):
+            def __getitem__(self, key):
+                callbacks.append(("getitem", key))
+                raise AssertionError("mapping callback executed")
+
+            def __iter__(self):
+                callbacks.append(("iter", None))
+                raise AssertionError("mapping callback executed")
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "instrument_versions must be an exact inert mapping",
+        ):
+            parse_executions(
+                observation,
+                instrument_versions=HostileDict(
+                    {"BTCUSDT": "BTCUSDT@v1"}
+                ),
+                qualified_fee_currencies={"BTCUSDT@v1": "USDT"},
+            )
+        self.assertEqual(callbacks, [])
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "qualified_fee_currencies must be an exact inert mapping",
+        ):
+            parse_executions(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                qualified_fee_currencies=HostileDict(
+                    {"BTCUSDT@v1": "USDT"}
+                ),
+            )
+        self.assertEqual(callbacks, [])
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "instrument version must be canonical exact text",
+        ):
+            parse_executions(
+                observation,
+                instrument_versions={"BTCUSDT": " BTCUSDT@v1 "},
+                qualified_fee_currencies={"BTCUSDT@v1": "USDT"},
+            )
+
     def test_execution_rejects_noncanonical_provider_identity_text(self):
         base = {
             "execId": "exec-identity-canonical",

@@ -1438,12 +1438,19 @@ def parse_executions(
     rows = result.get("list")
     if not isinstance(rows, (list, tuple)):
         raise ProviderCoreError("result.list must be an array")
-    if not isinstance(instrument_versions, Mapping):
-        raise ProviderCoreError("instrument_versions must be a mapping")
-    if qualified_fee_currencies is not None and not isinstance(
-        qualified_fee_currencies, Mapping
-    ):
-        raise ProviderCoreError("qualified_fee_currencies must be a mapping")
+    if type(instrument_versions) not in {dict, MappingProxyType}:
+        raise ProviderCoreError(
+            "instrument_versions must be an exact inert mapping"
+        )
+    instrument_versions = MappingProxyType(dict(instrument_versions))
+    if qualified_fee_currencies is not None:
+        if type(qualified_fee_currencies) not in {dict, MappingProxyType}:
+            raise ProviderCoreError(
+                "qualified_fee_currencies must be an exact inert mapping"
+            )
+        qualified_fee_currencies = MappingProxyType(
+            dict(qualified_fee_currencies)
+        )
 
     by_execution: dict[str, ProviderFillEvidence] = {}
     for index, value in enumerate(rows):
@@ -1475,7 +1482,14 @@ def parse_executions(
             raise ProviderCoreError(
                 f"unmapped Bybit instrument symbol: {symbol}"
             ) from error
-        instrument = _text(instrument, name="instrument_version")
+        if (
+            type(instrument) is not str
+            or not instrument
+            or instrument != instrument.strip()
+        ):
+            raise ProviderCoreError(
+                "Bybit instrument version must be canonical exact text"
+            )
 
         link = row.get("orderLinkId")
         client_id = None

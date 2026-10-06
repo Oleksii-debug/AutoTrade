@@ -172,6 +172,10 @@ class BybitOptionDeliveryReadPolicyTests(unittest.TestCase):
                 "startTime must be canonical integer text",
             ),
             (
+                {"category": "option", "startTime": "9" * 4301},
+                "startTime must be canonical integer text",
+            ),
+            (
                 {
                     "category": "option",
                     "startTime": str(start),

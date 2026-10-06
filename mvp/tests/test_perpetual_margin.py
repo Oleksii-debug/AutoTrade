@@ -11,6 +11,7 @@ from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
@@ -24,7 +25,7 @@ from mvp.autotrade_mvp.perpetual_margin import (
     PerpetualStress,
     evaluate_perpetual_margin,
 )
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 
 def tier(
@@ -839,9 +840,99 @@ class PerpetualMarginTests(unittest.TestCase):
             evidence(provider_id=HostileText("TEST_PROVIDER"))
         self.assertFalse(HostileText.strip_called)
 
+    def test_margin_artifacts_use_one_authenticated_snapshot_per_artifact(self):
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+            original = ArtifactStore.read_authenticated_snapshot
+            calls = []
+
+            def read_snapshot(instance, artifact_id):
+                calls.append(artifact_id)
+                return original(instance, artifact_id)
+
+            with patch.object(
+                ArtifactStore,
+                "read_authenticated_snapshot",
+                autospec=True,
+                side_effect=read_snapshot,
+            ):
+                result = evaluate(evidence=trusted, artifact_store=store)
+
+            self.assertEqual(result.verdict, "ALLOW_NEW_RISK")
+            self.assertEqual(calls, [TIER_TABLE_ID, EVIDENCE_BUNDLE_ID])
+
+    def test_instance_poisoning_cannot_split_margin_artifact_snapshot(self):
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+
+            def poisoned(*_args, **_kwargs):
+                raise AssertionError("instance artifact reader must not execute")
+
+            store.load_manifest = poisoned
+            store.read_bytes = poisoned
+            store.read_authenticated_snapshot = poisoned
+
+            result = evaluate(evidence=trusted, artifact_store=store)
+            self.assertEqual(result.verdict, "ALLOW_NEW_RISK")
+
+    def test_margin_artifact_snapshot_requires_exact_builtin_bytes(self):
+        class HostileBytes(bytes):
+            pass
+
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+            original = ArtifactStore.read_authenticated_snapshot
+
+            def hostile_snapshot(instance, artifact_id):
+                manifest, payload = original(instance, artifact_id)
+                return manifest, HostileBytes(payload)
+
+            with patch.object(
+                ArtifactStore,
+                "read_authenticated_snapshot",
+                autospec=True,
+                side_effect=hostile_snapshot,
+            ):
+                with self.assertRaisesRegex(
+                    PerpetualMarginError,
+                    "unsupported representation",
+                ):
+                    evaluate(evidence=trusted, artifact_store=store)
+
+    def test_margin_artifact_snapshot_failures_are_bounded_and_fail_closed(self):
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+            for error in (
+                ArtifactIntegrityError("integrity"),
+                OSError("io"),
+                TypeError("type"),
+                ValueError("value"),
+            ):
+                with self.subTest(error=type(error).__name__):
+                    with patch.object(
+                        ArtifactStore,
+                        "read_authenticated_snapshot",
+                        autospec=True,
+                        side_effect=error,
+                    ):
+                        with self.assertRaisesRegex(
+                            PerpetualMarginError,
+                            "artifact is missing or corrupt",
+                        ):
+                            evaluate(evidence=trusted, artifact_store=store)
+
     def test_artifact_store_subclass_is_rejected_before_virtual_dispatch(self):
         class ForgedArtifactStore(ArtifactStore):
             load_called = False
+            snapshot_called = False
 
             def load_manifest(self, artifact_id):
                 type(self).load_called = True
@@ -849,6 +940,10 @@ class PerpetualMarginTests(unittest.TestCase):
 
             def read_bytes(self, artifact_id):
                 raise AssertionError("subclass method must not run")
+
+            def read_authenticated_snapshot(self, artifact_id):
+                type(self).snapshot_called = True
+                raise AssertionError("subclass snapshot reader must not run")
 
         trusted = evidence()
         with TemporaryDirectory() as directory:
@@ -861,6 +956,7 @@ class PerpetualMarginTests(unittest.TestCase):
             ):
                 evaluate(evidence=trusted, artifact_store=forged)
             self.assertFalse(ForgedArtifactStore.load_called)
+            self.assertFalse(ForgedArtifactStore.snapshot_called)
 
 if __name__ == "__main__":
     unittest.main()

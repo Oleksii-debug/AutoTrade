@@ -735,6 +735,7 @@ def _detached_instrument_version(version: InstrumentVersion) -> InstrumentVersio
         "price_band_low",
         "price_band_high",
         "strike",
+        "exercise_cash_per_contract",
     )
     datetime_fields = (
         "effective_from",
@@ -771,6 +772,13 @@ def _detached_instrument_version(version: InstrumentVersion) -> InstrumentVersio
 
     if version.funding_schedule is not None and type(version.funding_schedule) is not MappingProxyType:
         raise TypeError("version.funding_schedule must be canonical immutable mapping")
+    if (
+        version.settlement_convention is not None
+        and type(version.settlement_convention) is not SettlementConvention
+    ):
+        raise TypeError(
+            "version.settlement_convention must be exact SettlementConvention"
+        )
     if type(version.metadata_evidence) is not tuple:
         raise TypeError("version.metadata_evidence must be exact tuple")
     for evidence in version.metadata_evidence:

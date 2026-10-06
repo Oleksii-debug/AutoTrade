@@ -2373,36 +2373,6 @@ class GuardedDispatcher:
                 expected_prepared=expected_prepared,
             )
 
-        try:
-            authority_result = authority_check(intent_hash, now)
-        except Exception as error:
-            require_dispatch_call_authority()
-            reason = f"authority_check_failed_before_send:{type(error).__name__}"
-            self._append(
-                attempt_id=attempt_id,
-                event_type="SubmissionBlocked",
-                version=2,
-                payload={"client_order_id": client_order_id, "reason": reason},
-                now=now,
-            )
-            return DispatchOutcome(
-                "BLOCKED",
-                client_order_id,
-                None,
-                "authority_check_failed_before_send",
-            )
-        require_dispatch_call_authority()
-        allowed, reason = _validated_authority_result(authority_result)
-        if not allowed:
-            self._append(
-                attempt_id=attempt_id,
-                event_type="SubmissionBlocked",
-                version=2,
-                payload={"client_order_id": client_order_id, "reason": reason},
-                now=now,
-            )
-            return DispatchOutcome("BLOCKED", client_order_id, None, reason)
-
         guard_called = False
         barrier_passed = False
         barrier_now = now
@@ -2434,13 +2404,18 @@ class GuardedDispatcher:
             if final_barrier_clock is not None:
                 try:
                     barrier_now = final_barrier_clock()
+                    require_transport_module_authority()
+                    require_dispatch_call_authority()
                     parsed_barrier_now = _instant(barrier_now)
-                except Exception as error:
+                except snapshot_dispatch_authority_changed:
+                    raise
+                except snapshot_exception as error:
+                    require_transport_module_authority()
                     require_dispatch_call_authority()
                     barrier_now = now
                     reason = (
                         "final_barrier_clock_failed:"
-                        + type(error).__name__
+                        + snapshot_type(error).__name__
                     )
                     self._append(
                         attempt_id=attempt_id,
@@ -2453,6 +2428,7 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked(reason) from error
+                require_transport_module_authority()
                 require_dispatch_call_authority()
                 if parsed_barrier_now < _instant(now):
                     barrier_now = now
@@ -2485,12 +2461,17 @@ class GuardedDispatcher:
             if sender_check is not None:
                 try:
                     sender_check(self.owner_token, self.owner_epoch)
+                    require_transport_module_authority()
                     require_dispatch_call_authority()
-                except _DispatchAuthorityChanged:
+                except snapshot_dispatch_authority_changed:
                     raise
-                except Exception as error:
+                except snapshot_exception as error:
+                    require_transport_module_authority()
                     require_dispatch_call_authority()
-                    barrier_reason = f"sender_fence_rejected:{type(error).__name__}"
+                    barrier_reason = (
+                        "sender_fence_rejected:"
+                        + snapshot_type(error).__name__
+                    )
                     self._append(
                         attempt_id=attempt_id,
                         event_type="SubmissionBlocked",
@@ -2506,13 +2487,16 @@ class GuardedDispatcher:
                     raise DispatchBlocked(barrier_reason) from error
             try:
                 authority_result = authority_check(intent_hash, barrier_now)
-            except _DispatchAuthorityChanged:
+                require_transport_module_authority()
+                require_dispatch_call_authority()
+            except snapshot_dispatch_authority_changed:
                 raise
-            except Exception as error:
+            except snapshot_exception as error:
+                require_transport_module_authority()
                 require_dispatch_call_authority()
                 barrier_reason = (
                     "authority_check_failed_at_final_barrier:"
-                    + type(error).__name__
+                    + snapshot_type(error).__name__
                 )
                 self._append(
                     attempt_id=attempt_id,
@@ -2522,6 +2506,7 @@ class GuardedDispatcher:
                     now=barrier_now,
                 )
                 raise DispatchBlocked(barrier_reason) from error
+            require_transport_module_authority()
             require_dispatch_call_authority()
             allowed_now, barrier_reason = _validated_authority_result(authority_result)
             if not allowed_now:
@@ -3657,11 +3642,57 @@ class GuardedDispatcher:
         def require_transport_module_authority() -> None:
             builtin_namespace_changed = restore_postsend_builtin_namespace()
             helper_changed = restore_postsend_helper_authority()
+            exact_response_changed = restore_exact_response_authority()
             restore_postsend_builtin_globals()
-            if builtin_namespace_changed or helper_changed:
+            if (
+                builtin_namespace_changed
+                or helper_changed
+                or exact_response_changed
+            ):
                 raise snapshot_dispatch_authority_changed(
                     "dispatcher module authority changed before final send barrier"
                 )
+
+        # The first caller-controlled authority callback runs only after the
+        # complete builtin/helper/decoder authority cut above has been captured.
+        # Any callback mutation is restored and rejected before its result or
+        # any mutated helper can influence durable send eligibility.
+        try:
+            authority_result = authority_check(intent_hash, now)
+            require_transport_module_authority()
+            require_dispatch_call_authority()
+        except snapshot_dispatch_authority_changed:
+            raise
+        except snapshot_exception as error:
+            require_transport_module_authority()
+            require_dispatch_call_authority()
+            reason = (
+                "authority_check_failed_before_send:"
+                + snapshot_type(error).__name__
+            )
+            self._append(
+                attempt_id=attempt_id,
+                event_type="SubmissionBlocked",
+                version=2,
+                payload={"client_order_id": client_order_id, "reason": reason},
+                now=now,
+            )
+            return DispatchOutcome(
+                "BLOCKED",
+                client_order_id,
+                None,
+                "authority_check_failed_before_send",
+            )
+        allowed, reason = _validated_authority_result(authority_result)
+        if not allowed:
+            self._append(
+                attempt_id=attempt_id,
+                event_type="SubmissionBlocked",
+                version=2,
+                payload={"client_order_id": client_order_id, "reason": reason},
+                now=now,
+            )
+            return DispatchOutcome("BLOCKED", client_order_id, None, reason)
 
         postsend_builtin_authority_changed = False
         postsend_helper_authority_changed = False

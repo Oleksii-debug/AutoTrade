@@ -219,10 +219,14 @@ _RESTORE_GLOBAL_AUTHORITY_PROPERTIES = (
 
 
 def _restore_authority_property_names(tree: ET.ElementTree) -> tuple[str, ...]:
+    present = {
+        _xml_local_name(node.tag).casefold()
+        for node in tree.iter()
+    }
     return tuple(
         name
         for name in _RESTORE_AUTHORITY_PROPERTIES
-        if _xml_elements(tree, name)
+        if name.casefold() in present
     )
 
 
@@ -231,14 +235,14 @@ def _restore_local_override_names(tree: ET.ElementTree) -> tuple[str, ...]:
     if not isinstance(raw, str) or not raw.strip():
         return ()
     declared = {
-        token.strip()
+        token.strip().casefold()
         for token in raw.split(';')
         if token.strip()
     }
     return tuple(
         name
         for name in _RESTORE_GLOBAL_AUTHORITY_PROPERTIES
-        if name in declared
+        if name.casefold() in declared
     )
 
 

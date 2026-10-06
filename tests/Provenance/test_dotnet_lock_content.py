@@ -960,6 +960,28 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             ):
                 dotnet_locked_dependency_graph(root, [project])
 
+    def test_restore_authority_property_names_are_case_insensitive(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'App' / 'App.csproj'
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                '<Project TreatAsLocalProperty="restorelockedmode">'
+                '<PropertyGroup>'
+                '<restoreforceevaluate>true</restoreforceevaluate>'
+                '</PropertyGroup></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [
+                    'DOTNET_RESTORE_AUTHORITY_PROPERTY_UNSUPPORTED:'
+                    'src/App/App.csproj:RestoreForceEvaluate',
+                    'DOTNET_RESTORE_AUTHORITY_LOCAL_OVERRIDE_UNSUPPORTED:'
+                    'src/App/App.csproj:RestoreLockedMode',
+                ],
+            )
+
     def test_project_cannot_localize_restore_locked_mode(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

@@ -11,8 +11,47 @@ import sqlite3
 from typing import Any, Mapping
 
 
+_MAX_JSON_NESTING = 128
+
+
+def _detach_json_value(value: Any, *, _depth: int = 0) -> Any:
+    """Freeze caller JSON into an inert exact-builtin graph before authority use.
+
+    Persistence hashes and bytes must be derived from one callback-free value graph.
+    Exact tuples retain the historical json.dumps array compatibility by becoming
+    exact lists.  Dict keys are JSON object member names and therefore exact text.
+    """
+
+    if _depth > _MAX_JSON_NESTING:
+        raise ValueError("JSON value exceeds maximum supported nesting")
+    if value is None or type(value) in (str, int, float, bool):
+        return value
+    if type(value) in (list, tuple):
+        return [
+            _detach_json_value(item, _depth=_depth + 1)
+            for item in value
+        ]
+    if type(value) is dict:
+        detached: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError("JSON object keys must be exact strings")
+            detached[key] = _detach_json_value(item, _depth=_depth + 1)
+        return detached
+    raise TypeError(
+        "persistent JSON values must use exact built-in JSON containers and scalars"
+    )
+
+
 def canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    detached = _detach_json_value(value)
+    return json.dumps(
+        detached,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
 
 
 def payload_digest(value: Any) -> str:
@@ -1137,6 +1176,9 @@ class JournalStore:
         expected_journal_sequence: int | None = None,
         expected_whole_store_counts: Mapping[str, int] | None = None,
     ) -> AppendResult:
+        if type(envelope) is not dict:
+            raise TypeError("event envelope must be an exact dict")
+        envelope = _detach_json_value(envelope)
         event_id = self._require_text(envelope.get("event_id"), "event_id")
         event_type = self._require_text(envelope.get("event_type"), "event_type")
         aggregate_type = self._require_text(envelope.get("aggregate_type"), "aggregate_type")
@@ -1473,6 +1515,7 @@ class JournalStore:
             or aggregate_version < 0
         ):
             raise ValueError("aggregate_version must be a non-negative integer")
+        state = _detach_json_value(state)
         state_json = canonical_json(state)
         state_hash = (
             _projection_checkpoint_digest(
@@ -1669,6 +1712,7 @@ class JournalStore:
         projection_name = self._require_text(projection_name, "projection_name")
         if type(journal_sequence) is not int or journal_sequence < 0:
             raise ValueError("journal_sequence must be a non-negative integer")
+        state = _detach_json_value(state)
         state_json = canonical_json(state)
         state_hash = payload_digest(
             {
@@ -2347,6 +2391,8 @@ class JournalStore:
             or state_version < 0
         ):
             raise ValueError("state_version must be a non-negative integer")
+        request = _detach_json_value(request)
+        result = _detach_json_value(result)
         request_hash = payload_digest(request)
         result_json = canonical_json(result)
         result_hash = (
@@ -2432,6 +2478,8 @@ class JournalStore:
             expected_whole_store_counts
         )
 
+        request = _detach_json_value(request)
+        result = _detach_json_value(result)
         request_hash = payload_digest(request)
         result_json = canonical_json(result)
         result_hash = (
@@ -2441,8 +2489,9 @@ class JournalStore:
         seen_event_ids: set[str] = set()
 
         for envelope, outbox_topic in events:
-            if not isinstance(envelope, dict):
-                raise ValueError("Each event envelope must be an object")
+            if type(envelope) is not dict:
+                raise TypeError("Each event envelope must be an exact dict")
+            envelope = _detach_json_value(envelope)
             event_id = self._require_text(envelope.get("event_id"), "event_id")
             if event_id in seen_event_ids:
                 raise ValueError("event_id is duplicated within the transaction")
@@ -2464,11 +2513,15 @@ class JournalStore:
             payload = envelope.get("payload")
             payload_json = canonical_json(payload)
             supplied_hash = envelope.get("payload_hash")
-            if supplied_hash != payload_digest(payload):
+            expected_payload_hash = (
+                "sha256:" + sha256(payload_json.encode("utf-8")).hexdigest()
+            )
+            if supplied_hash != expected_payload_hash:
                 raise ValueError("payload_hash does not match payload")
             committed_at = self._require_text(envelope.get("committed_at"), "committed_at")
             if outbox_topic is not None:
                 self._require_text(outbox_topic, "outbox_topic")
+            envelope_json = canonical_json(envelope)
             prepared.append(
                 {
                     "event_id": event_id,
@@ -2480,9 +2533,9 @@ class JournalStore:
                     "payload_hash": supplied_hash,
                     "committed_at": committed_at,
                     "outbox_topic": outbox_topic,
-                    "envelope_json": canonical_json(envelope),
-                    "envelope_hash": _event_envelope_digest(canonical_json(envelope)),
-                    "outbox_payload": canonical_json(envelope),
+                    "envelope_json": envelope_json,
+                    "envelope_hash": _event_envelope_digest(envelope_json),
+                    "outbox_payload": envelope_json,
                 }
             )
 

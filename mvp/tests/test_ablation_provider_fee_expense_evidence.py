@@ -236,7 +236,11 @@ class AblationProviderFeeExpenseEvidenceTests(unittest.TestCase):
             owner = self._owner(Path(directory))
             owner.append(self._fill("fill-1", fee="2"))
             cut = owner.resolve_historical_cut(1)
-            owner.read_historical_cut = lambda *args, **kwargs: None
+            object.__setattr__(
+                owner,
+                "read_historical_cut",
+                lambda *args, **kwargs: None,
+            )
 
             with self.assertRaisesRegex(
                 AccountingConflict,

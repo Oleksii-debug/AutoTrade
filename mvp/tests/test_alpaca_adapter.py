@@ -781,6 +781,43 @@ class AlpacaAdapterTests(unittest.TestCase):
             )
         self.assertEqual(callbacks, [])
 
+    def test_prepared_projection_uses_captured_primitives_on_invalid_instrument_scope(self):
+        intent_id = "alpaca-prepared-primitive-fence"
+        client_id = stable_client_order_id(
+            "ALPACA",
+            intent_id,
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        _attempt, prepared, _observation = self._durable_submission_observation(
+            payload={
+                "id": str(uuid4()),
+                "client_order_id": client_id,
+            },
+            intent_id=intent_id,
+        )
+        object.__setattr__(prepared, "instrument_versions", (object(),))
+
+        with patch(
+            "builtins.any",
+            side_effect=AssertionError("mutable builtin any must not execute"),
+        ) as rebound_any, patch(
+            "mvp.autotrade_mvp.alpaca.AlpacaAdapterError",
+            side_effect=AssertionError("mutable module error class must not execute"),
+        ) as rebound_error:
+            with self.assertRaisesRegex(
+                AlpacaAdapterError,
+                "prepared request authority changed",
+            ):
+                parse_submission_response(
+                    attempt_id=str(uuid4()),
+                    prepared_request=prepared,
+                    observation=None,
+                    transport_ambiguous=True,
+                )
+        rebound_any.assert_not_called()
+        rebound_error.assert_not_called()
+
     def test_submission_consumer_rejects_subclass_before_virtual_callback(self):
         intent_id = "alpaca-hostile-observation"
         client_id = stable_client_order_id(

@@ -567,12 +567,12 @@ def _prepared_submission_projection(
         )
         or _canonical_type(instrument_versions) is not _canonical_tuple
         or not instrument_versions
-        or any(
+        or _canonical_any(
             _canonical_type(value) is not _canonical_str
             for value in instrument_versions
         )
     ):
-        raise AlpacaAdapterError(
+        raise _error_type(
             "Alpaca prepared request authority changed"
         )
     return _mapping_proxy_type(

@@ -1174,6 +1174,66 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                     ["SubmissionPrepared"],
                 )
 
+    def test_final_guard_uses_per_call_state_even_if_instance_snapshot_is_rewritten(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+                prepared_lease_seconds=60,
+            )
+            original_state = dispatcher._dispatch_authority_state
+            wire_calls = 0
+
+            def transport(_client_order_id, _request, guard):
+                nonlocal wire_calls
+                dispatcher.prepared_lease_seconds = 3600
+                dispatcher._dispatch_authority_state = (
+                    dispatcher.environment,
+                    dispatcher.account_id,
+                    dispatcher.scope_key,
+                    dispatcher.owner_token,
+                    dispatcher.owner_epoch,
+                    dispatcher.prepared_lease_seconds,
+                )
+                guard()
+                wire_calls += 1
+                return ExactJsonTransportResponse(b'{"accepted":true}')
+
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "dispatcher authority changed during dispatch",
+                ):
+                    dispatcher.dispatch(
+                        attempt_id="per-call-state-a1",
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=lambda *_args: (True, "allowed"),
+                        transport_send=transport,
+                        submission_scope={"endpoint": "/orders"},
+                    )
+            finally:
+                dispatcher.prepared_lease_seconds = 60
+                dispatcher._dispatch_authority_state = original_state
+
+            self.assertEqual(wire_calls, 0)
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("per-call-state-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared"],
+            )
+
     def test_final_authority_callback_cannot_retarget_sender_state(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

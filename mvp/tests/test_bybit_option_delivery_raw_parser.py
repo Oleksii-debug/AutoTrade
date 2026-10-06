@@ -254,7 +254,7 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
             ),
             (
                 {"query": {"category": "option"}},
-                "requires an exact symbol filter",
+                None,
             ),
             (
                 {
@@ -268,10 +268,19 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
         )
         for kwargs, message in cases:
             with self.subTest(kwargs=kwargs):
-                with self.assertRaisesRegex(ProviderCoreError, message):
-                    parse_option_delivery_page(
+                if message is None:
+                    parsed = parse_option_delivery_page(
                         observation(response(), **kwargs)
                     )
+                    self.assertEqual(
+                        parsed.instrument_version,
+                        "BTC-29DEC22-16000-P@v1",
+                    )
+                else:
+                    with self.assertRaisesRegex(ProviderCoreError, message):
+                        parse_option_delivery_page(
+                            observation(response(), **kwargs)
+                        )
 
     def test_parser_rejects_delivery_row_schema_drift(self):
         payload = response()
@@ -295,7 +304,7 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
         payload["result"]["list"][0]["symbol"] = "ETH-29DEC22-1600-P"
         with self.assertRaisesRegex(
             ProviderCoreError,
-            "violates requested symbol filter",
+            "violates bound instrument symbol",
         ):
             parse_option_delivery_page(
                 observation(

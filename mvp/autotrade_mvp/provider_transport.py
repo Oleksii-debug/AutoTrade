@@ -531,8 +531,130 @@ BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS: Mapping[
             data_entitlement="ACTIVITIES",
             success_statuses=frozenset({200}),
         ),
+        "/v5/asset/delivery-record": AuthenticatedReadEndpointRule(
+            surface=Surface.ACTIVITIES,
+            permission_scope="ACCOUNT.READ",
+            data_entitlement="ACTIVITIES",
+            success_statuses=frozenset({200}),
+        ),
     }
 )
+
+
+_BYBIT_OPTION_DELIVERY_ENDPOINT = "/v5/asset/delivery-record"
+_BYBIT_OPTION_DELIVERY_QUERY_FIELDS = frozenset(
+    {"category", "symbol", "startTime", "endTime", "expDate", "limit", "cursor"}
+)
+_BYBIT_OPTION_DELIVERY_MONTHS = frozenset(
+    {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"}
+)
+_BYBIT_OPTION_DELIVERY_MAX_RANGE_MS = 30 * 24 * 60 * 60 * 1000
+
+
+def _bybit_delivery_query_integer(
+    value: object,
+    *,
+    name: str,
+    minimum: int = 0,
+    maximum: int | None = None,
+) -> int:
+    if type(value) is not str or not value or not value.isascii() or not value.isdigit():
+        raise ProviderTransportScopeError(
+            f"Bybit option delivery {name} must be canonical integer text"
+        )
+    parsed = int(value, 10)
+    if str(parsed) != value or parsed < minimum:
+        raise ProviderTransportScopeError(
+            f"Bybit option delivery {name} must be canonical integer text"
+        )
+    if maximum is not None and parsed > maximum:
+        raise ProviderTransportScopeError(
+            f"Bybit option delivery {name} is outside the documented range"
+        )
+    return parsed
+
+
+def _validate_bybit_option_delivery_query(
+    binding: AuthenticatedReadQueryBinding,
+) -> None:
+    if binding.endpoint != _BYBIT_OPTION_DELIVERY_ENDPOINT:
+        return
+    query = binding.query
+    unsupported = set(query) - _BYBIT_OPTION_DELIVERY_QUERY_FIELDS
+    if unsupported:
+        raise ProviderTransportScopeError(
+            "Bybit option delivery query contains unsupported fields: "
+            + ",".join(sorted(unsupported))
+        )
+    if query.get("category") != "option":
+        raise ProviderTransportScopeError(
+            "Bybit option delivery query requires category=option"
+        )
+
+    symbol = query.get("symbol")
+    if symbol is not None:
+        if (
+            type(symbol) is not str
+            or re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", symbol) is None
+        ):
+            raise ProviderTransportScopeError(
+                "Bybit option delivery symbol must be uppercase canonical provider text"
+            )
+
+    start_ms = None
+    end_ms = None
+    if "startTime" in query:
+        start_ms = _bybit_delivery_query_integer(
+            query["startTime"],
+            name="startTime",
+        )
+    if "endTime" in query:
+        end_ms = _bybit_delivery_query_integer(
+            query["endTime"],
+            name="endTime",
+        )
+    if start_ms is not None and end_ms is not None:
+        if end_ms < start_ms:
+            raise ProviderTransportScopeError(
+                "Bybit option delivery endTime cannot precede startTime"
+            )
+        if end_ms - start_ms > _BYBIT_OPTION_DELIVERY_MAX_RANGE_MS:
+            raise ProviderTransportScopeError(
+                "Bybit option delivery time range exceeds 30 days"
+            )
+
+    exp_date = query.get("expDate")
+    if exp_date is not None:
+        if type(exp_date) is not str or re.fullmatch(r"[0-3][0-9][A-Z]{3}[0-9]{2}", exp_date) is None:
+            raise ProviderTransportScopeError(
+                "Bybit option delivery expDate must use DDMMMYY"
+            )
+        day = int(exp_date[:2], 10)
+        month = exp_date[2:5]
+        if day < 1 or day > 31 or month not in _BYBIT_OPTION_DELIVERY_MONTHS:
+            raise ProviderTransportScopeError(
+                "Bybit option delivery expDate must use DDMMMYY"
+            )
+
+    if "limit" in query:
+        _bybit_delivery_query_integer(
+            query["limit"],
+            name="limit",
+            minimum=1,
+            maximum=50,
+        )
+
+    cursor = query.get("cursor")
+    if cursor is not None:
+        if (
+            type(cursor) is not str
+            or not cursor
+            or cursor != cursor.strip()
+            or any(character.isspace() for character in cursor)
+        ):
+            raise ProviderTransportScopeError(
+                "Bybit option delivery cursor must be canonical opaque text"
+            )
 
 
 def _bybit_authenticated_read_rule(
@@ -551,6 +673,7 @@ def _bybit_authenticated_read_rule(
         raise ProviderTransportScopeError(
             "authenticated-read permission scope does not match Bybit endpoint policy"
         )
+    _validate_bybit_option_delivery_query(binding)
     return rule
 
 

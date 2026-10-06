@@ -289,6 +289,57 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             self.assertEqual(result.reason, "durable_submission_history_invalid")
             self.assertEqual(reads, [])
 
+    def test_final_send_barrier_rejects_prepared_authority_retargeting(self):
+        for field, bad_value, envelope_field in (
+            ("provider", "retargeted-provider", False),
+            ("submission_scope", {"endpoint": "/retargeted"}, False),
+            ("owner_token", "retargeted-owner", False),
+            ("owner_epoch", 77, False),
+            ("prepared_at", "2026-10-06T13:59:59Z", False),
+            ("environment", "PAPER", True),
+        ):
+            with self.subTest(field=field), TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                store = JournalStore(path)
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+                wire_calls = 0
+
+                def transport(_client_order_id, _request, guard):
+                    nonlocal wire_calls
+                    self._tamper_event_field(
+                        path,
+                        "SubmissionPrepared",
+                        field,
+                        bad_value,
+                        envelope_field=envelope_field,
+                    )
+                    guard()
+                    wire_calls += 1
+                    return ExactJsonTransportResponse(b'{"accepted":true}')
+
+                result = dispatcher.dispatch(
+                    attempt_id="final-barrier-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T14:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    submission_scope={"endpoint": "/orders"},
+                )
+                self.assertEqual(result.status, "BLOCKED")
+                self.assertEqual(
+                    result.reason,
+                    "submission_changed_during_final_send_validation",
+                )
+                self.assertEqual(wire_calls, 0)
+
     def test_runtime_redispatch_rejects_submission_scope_retargeting(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

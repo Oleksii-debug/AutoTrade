@@ -2282,10 +2282,13 @@ class JournalStore:
         the pending publication intent.
         """
 
-        outbox_id = self._require_text(outbox_id, "outbox_id")
-        expected_envelope_hash = self._require_text(
+        outbox_id = _require_canonical_durable_text(
+            outbox_id,
+            name="outbox_id",
+        )
+        expected_envelope_hash = _require_canonical_durable_text(
             expected_envelope_hash,
-            "expected_envelope_hash",
+            name="expected_envelope_hash",
         )
         if (
             expected_journal_sequence is not None

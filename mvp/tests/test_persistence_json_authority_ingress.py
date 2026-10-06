@@ -362,6 +362,45 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
                     topic=_HostileText("fills"),
                 )
 
+    def test_outbox_delivery_ack_rejects_noncanonical_requested_identity(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            store.append_event(
+                _event("evt-exact-delivery-ack"),
+                outbox_topic="fills",
+            )
+            pending = store.pending_outbox()
+            self.assertEqual(len(pending), 1)
+            outbox_id = pending[0]["outbox_id"]
+            envelope_hash = pending[0]["envelope_hash"]
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox_id must be canonical non-empty text",
+            ):
+                store.mark_outbox_delivered(
+                    f" {outbox_id} ",
+                    expected_envelope_hash=envelope_hash,
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "expected_envelope_hash must be canonical non-empty text",
+            ):
+                store.mark_outbox_delivered(
+                    outbox_id,
+                    expected_envelope_hash=f" {envelope_hash} ",
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox_id must be canonical non-empty text",
+            ):
+                store.mark_outbox_delivered(
+                    _HostileText(outbox_id),
+                    expected_envelope_hash=envelope_hash,
+                )
+
+            self.assertEqual(len(store.pending_outbox()), 1)
+
     def test_outbox_reads_and_ack_reject_blob_payload_authority(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

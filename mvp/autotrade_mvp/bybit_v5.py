@@ -709,6 +709,24 @@ def _install_bybit_prepared_submission_authority(
     canonical_position_idx_code = _position_idx_from_capability.__code__
     canonical_capability_admits = capability_type.admits
     canonical_capability_admits_code = capability_type.admits.__code__
+    bool_type = bool
+    int_type = int
+    str_type = str
+    canonical_dict = dict
+    canonical_dict_get = canonical_dict.get
+    canonical_len = len
+    category_by_family = _CATEGORY_BY_FAMILY
+    time_in_force_map = _TIME_IN_FORCE
+    rest_base_by_environment = _REST_BASE_BY_ENVIRONMENT
+    runtime_environment_by_provider_environment = (
+        _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT
+    )
+    derivative_scope_by_family = _DERIVATIVE_ORDER_SCOPE_BY_FAMILY
+    capability_environment_by_provider_environment = (
+        _CAPABILITY_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT
+    )
+    documented_endpoints = BYBIT_DOCUMENTED_ENDPOINTS
+    prepared_token = _BYBIT_PREPARED_SUBMISSION_TOKEN
     error_type = ProviderCoreError
     canonical_type = type
     canonical_id = id
@@ -733,6 +751,11 @@ def _install_bybit_prepared_submission_authority(
             or tuple is not canonical_tuple
             or getattr is not canonical_getattr
             or isinstance is not canonical_isinstance
+            or bool is not bool_type
+            or int is not int_type
+            or str is not str_type
+            or dict is not canonical_dict
+            or len is not canonical_len
             or object is not canonical_object
             or AttributeError is not attribute_error_type
             or MappingProxyType is not mapping_proxy_type
@@ -766,6 +789,81 @@ def _install_bybit_prepared_submission_authority(
             or _position_idx_from_capability is not canonical_position_idx
             or canonical_getattr(canonical_position_idx, "__code__", None)
             is not canonical_position_idx_code
+            or _CATEGORY_BY_FAMILY is not category_by_family
+            or _TIME_IN_FORCE is not time_in_force_map
+            or _REST_BASE_BY_ENVIRONMENT is not rest_base_by_environment
+            or _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT
+            is not runtime_environment_by_provider_environment
+            or _DERIVATIVE_ORDER_SCOPE_BY_FAMILY is not derivative_scope_by_family
+            or _CAPABILITY_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT
+            is not capability_environment_by_provider_environment
+            or BYBIT_DOCUMENTED_ENDPOINTS is not documented_endpoints
+            or _BYBIT_PREPARED_SUBMISSION_TOKEN is not prepared_token
+            or canonical_type(category_by_family) is not canonical_dict
+            or canonical_len(category_by_family) != 5
+            or canonical_dict_get(category_by_family, "SPOT") != "spot"
+            or canonical_dict_get(category_by_family, "MARGIN") != "spot"
+            or canonical_dict_get(category_by_family, "LINEAR_DERIVATIVES") != "linear"
+            or canonical_dict_get(category_by_family, "INVERSE_DERIVATIVES")
+            != "inverse"
+            or canonical_dict_get(category_by_family, "OPTIONS") != "option"
+            or canonical_type(time_in_force_map) is not canonical_dict
+            or canonical_len(time_in_force_map) != 4
+            or canonical_dict_get(time_in_force_map, "GTC") != "GTC"
+            or canonical_dict_get(time_in_force_map, "IOC") != "IOC"
+            or canonical_dict_get(time_in_force_map, "FOK") != "FOK"
+            or canonical_dict_get(time_in_force_map, "POST_ONLY") != "PostOnly"
+            or canonical_type(rest_base_by_environment) is not canonical_dict
+            or canonical_len(rest_base_by_environment) != 3
+            or canonical_dict_get(rest_base_by_environment, "MAINNET")
+            != "https://api.bybit.com"
+            or canonical_dict_get(rest_base_by_environment, "TESTNET")
+            != "https://api-testnet.bybit.com"
+            or canonical_dict_get(rest_base_by_environment, "DEMO")
+            != "https://api-demo.bybit.com"
+            or canonical_type(runtime_environment_by_provider_environment)
+            is not canonical_dict
+            or canonical_len(runtime_environment_by_provider_environment) != 3
+            or canonical_dict_get(
+                runtime_environment_by_provider_environment, "MAINNET"
+            )
+            != "LIVE"
+            or canonical_dict_get(
+                runtime_environment_by_provider_environment, "TESTNET"
+            )
+            != "PAPER"
+            or canonical_dict_get(
+                runtime_environment_by_provider_environment, "DEMO"
+            )
+            != "PAPER"
+            or canonical_type(derivative_scope_by_family) is not canonical_dict
+            or canonical_len(derivative_scope_by_family) != 2
+            or canonical_dict_get(
+                derivative_scope_by_family, "LINEAR_DERIVATIVES"
+            )
+            != "BYBIT.LINEAR.ORDER.WRITE"
+            or canonical_dict_get(
+                derivative_scope_by_family, "INVERSE_DERIVATIVES"
+            )
+            != "BYBIT.INVERSE.ORDER.WRITE"
+            or canonical_type(capability_environment_by_provider_environment)
+            is not canonical_dict
+            or canonical_len(capability_environment_by_provider_environment) != 3
+            or canonical_dict_get(
+                capability_environment_by_provider_environment, "MAINNET"
+            )
+            != "LIVE"
+            or canonical_dict_get(
+                capability_environment_by_provider_environment, "TESTNET"
+            )
+            != "PAPER"
+            or canonical_dict_get(
+                capability_environment_by_provider_environment, "DEMO"
+            )
+            != "PAPER"
+            or canonical_type(documented_endpoints) is not canonical_dict
+            or canonical_dict_get(documented_endpoints, "PLACE_ORDER")
+            != "/v5/order/create"
             or capability_type.admits is not canonical_capability_admits
             or canonical_getattr(canonical_capability_admits, "__code__", None)
             is not canonical_capability_admits_code

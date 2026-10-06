@@ -969,6 +969,11 @@ class BybitV5AdapterTests(unittest.TestCase):
             "tuple",
             "getattr",
             "isinstance",
+            "bool",
+            "int",
+            "str",
+            "dict",
+            "len",
             "object",
             "AttributeError",
             "MappingProxyType",
@@ -977,6 +982,14 @@ class BybitV5AdapterTests(unittest.TestCase):
             "timezone",
             "CapabilitySnapshot",
             "BybitPreparedSubmission",
+            "_CATEGORY_BY_FAMILY",
+            "_TIME_IN_FORCE",
+            "_REST_BASE_BY_ENVIRONMENT",
+            "_RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT",
+            "_DERIVATIVE_ORDER_SCOPE_BY_FAMILY",
+            "_CAPABILITY_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT",
+            "BYBIT_DOCUMENTED_ENDPOINTS",
+            "_BYBIT_PREPARED_SUBMISSION_TOKEN",
         ):
             with self.subTest(name=name):
                 with patch.object(
@@ -1002,6 +1015,61 @@ class BybitV5AdapterTests(unittest.TestCase):
                             time_in_force="IOC",
                         )
                 self.assertEqual(callbacks, [])
+
+    def test_prepared_issuer_rejects_in_place_routing_authority_mutation(self):
+        capability = submission_write_capability()
+        cases = (
+            (bybit_v5_module._CATEGORY_BY_FAMILY, "SPOT", "linear"),
+            (bybit_v5_module._TIME_IN_FORCE, "IOC", "GTC"),
+            (
+                bybit_v5_module._REST_BASE_BY_ENVIRONMENT,
+                "MAINNET",
+                "https://attacker.invalid",
+            ),
+            (
+                bybit_v5_module._RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT,
+                "MAINNET",
+                "PAPER",
+            ),
+            (
+                bybit_v5_module._DERIVATIVE_ORDER_SCOPE_BY_FAMILY,
+                "LINEAR_DERIVATIVES",
+                "ORDER_WRITE",
+            ),
+            (
+                bybit_v5_module._CAPABILITY_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT,
+                "MAINNET",
+                "PAPER",
+            ),
+            (
+                bybit_v5_module.BYBIT_DOCUMENTED_ENDPOINTS,
+                "PLACE_ORDER",
+                "/v5/order/cancel",
+            ),
+        )
+        for authority, key, forged_value in cases:
+            with self.subTest(key=key, forged_value=forged_value):
+                original = authority[key]
+                authority[key] = forged_value
+                try:
+                    with self.assertRaisesRegex(
+                        ProviderCoreError,
+                        "prepared submission authority changed",
+                    ):
+                        bybit_v5_module.prepare_order_submission(
+                            capability=capability,
+                            at=READ_AT,
+                            provider_environment="MAINNET",
+                            product_family="SPOT",
+                            symbol="BTCUSDT",
+                            side="BUY",
+                            order_type="MARKET",
+                            quantity="0.01",
+                            client_order_id="in-place-authority-mutation",
+                            time_in_force="IOC",
+                        )
+                finally:
+                    authority[key] = original
 
     def test_guarded_projection_rejects_runtime_shadowing_before_callback(self):
         prepared = prepare_order_submission(

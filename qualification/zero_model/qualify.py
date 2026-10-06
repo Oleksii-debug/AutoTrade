@@ -9,14 +9,17 @@ and economically reportable.  It does not claim economic edge or live authority.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
 from pathlib import Path
 import platform
+import socket
 import subprocess
 import tempfile
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.economics import build_economic_report
 from mvp.autotrade_mvp.model_gateway import (
@@ -43,6 +46,35 @@ class UnavailableModelInventory:
     def __iter__(self):
         self.touched = True
         raise RuntimeError("ZERO mode must not inspect unavailable model inventory")
+
+
+@contextmanager
+def _deny_network_access():
+    """Fail before Python socket/DNS I/O can escape the zero-model qualifier."""
+
+    attempts: list[str] = []
+
+    def blocked(*args, **kwargs):
+        del kwargs
+        operation = "socket"
+        if args:
+            operation = getattr(args[0], "__name__", operation)
+        attempts.append(operation)
+        raise RuntimeError(
+            "zero-model qualification attempted network access"
+        )
+
+    targets = (
+        patch.object(socket.socket, "connect", blocked),
+        patch.object(socket.socket, "connect_ex", blocked),
+        patch.object(socket, "create_connection", blocked),
+        patch.object(socket, "getaddrinfo", blocked),
+        patch.object(socket, "gethostbyname", blocked),
+        patch.object(socket, "gethostbyname_ex", blocked),
+        patch.object(socket, "gethostbyaddr", blocked),
+    )
+    with targets[0], targets[1], targets[2], targets[3], targets[4], targets[5], targets[6]:
+        yield attempts
 
 
 def _require_source_sha(value: str) -> str:
@@ -156,6 +188,24 @@ def qualify(source_sha: str) -> dict[str, object]:
     source_sha = _require_exact_checkout(source_sha)
     qualifier_sha256 = _qualifier_sha256()
 
+    with _deny_network_access() as network_attempts:
+        evidence = _qualify_offline(source_sha, qualifier_sha256)
+    if network_attempts:
+        raise RuntimeError(
+            "zero-model qualification observed a blocked network attempt"
+        )
+    evidence["network_guard"] = {
+        "python_socket_io_blocked": True,
+        "network_attempt_count": 0,
+    }
+    evidence["claims"]["network_or_model_call_performed"] = False
+    return evidence
+
+
+def _qualify_offline(
+    source_sha: str,
+    qualifier_sha256: str,
+) -> dict[str, object]:
     request = ModelRequest(
         request_id="zero-model-qualification",
         allowed_model_ids=("unavailable-local", "unavailable-remote"),

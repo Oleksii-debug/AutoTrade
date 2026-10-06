@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from threading import RLock
 from typing import Mapping
 from uuid import UUID, NAMESPACE_URL, uuid5
 import weakref
@@ -54,9 +55,14 @@ _RESOLUTION_SCHEMA_VERSION = 2
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    # Durable reservation identities are authority-bearing.  Do not invoke
+    # caller-controlled str subclass methods while deriving journal scope.
+    if type(value) is not str:
         raise ValueError(f"{name} is required")
-    return value.strip()
+    normalized = str.strip(value)
+    if not normalized:
+        raise ValueError(f"{name} is required")
+    return normalized
 
 
 
@@ -102,11 +108,14 @@ def _decimal_text(value: Decimal) -> str:
         ) from error
 
 
-def _amount_map(values: Mapping[str, object], *, allow_zero: bool) -> dict[str, str]:
-    if not isinstance(values, Mapping) or not values:
+def _amount_map(values: dict[str, object], *, allow_zero: bool) -> dict[str, str]:
+    if type(values) is not dict:
+        raise TypeError("resource amounts must use an exact dict")
+    items = tuple(dict.items(values))
+    if not items:
         raise ValueError("resource amounts are required")
     result: dict[str, str] = {}
-    for resource, raw in values.items():
+    for resource, raw in items:
         key = _text(resource, name="resource")
         if key in result:
             raise ValueError("resource names must be unique after normalization")
@@ -141,9 +150,57 @@ def _snapshot_payload(snapshot: ReservationSnapshot) -> dict[str, object]:
 def reservation_snapshot_digest(snapshot: ReservationSnapshot) -> str:
     """Return the reservation authority's canonical identity for one state cut."""
 
-    if not isinstance(snapshot, ReservationSnapshot):
-        raise TypeError("snapshot must be ReservationSnapshot")
+    if type(snapshot) is not ReservationSnapshot:
+        raise TypeError("snapshot must be exact ReservationSnapshot")
     return payload_digest(_snapshot_payload(snapshot))
+
+
+def _canonical_sha256(value: object, *, name: str) -> str:
+    digest = _text(value, name=name)
+    if (
+        not digest.startswith("sha256:")
+        or len(digest) != 71
+        or any(ch not in "0123456789abcdef" for ch in digest[7:])
+    ):
+        raise ReservationConflict(f"{name} must be canonical SHA-256")
+    return digest
+
+
+def _filled_resolution_evidence(request: Mapping[str, object]) -> str:
+    """Bind reservation FILLED authority to one exact durable OMS fill cut."""
+
+    event_id = _text(request.get("order_fill_event_id"), name="order_fill_event_id")
+    try:
+        canonical_event_id = str(UUID(event_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ReservationConflict("order_fill_event_id must be a canonical UUID") from error
+    if canonical_event_id != event_id:
+        raise ReservationConflict("order_fill_event_id must be a canonical UUID")
+    payload_hash = _canonical_sha256(
+        request.get("order_fill_payload_hash"),
+        name="order_fill_payload_hash",
+    )
+    snapshot_digest = _canonical_sha256(
+        request.get("order_fill_snapshot_digest"),
+        name="order_fill_snapshot_digest",
+    )
+    mutation_hash = _canonical_sha256(
+        request.get("order_fill_mutation_hash"),
+        name="order_fill_mutation_hash",
+    )
+    _text(request.get("order_fill_provider_id"), name="order_fill_provider_id")
+    _text(request.get("order_fill_client_order_id"), name="order_fill_client_order_id")
+    _text(request.get("order_fill_fill_id"), name="order_fill_fill_id")
+    _text(
+        request.get("order_fill_provider_execution_id"),
+        name="order_fill_provider_execution_id",
+    )
+    return (
+        f"journal:order-fill:{canonical_event_id}"
+        f"@payload:{payload_hash}"
+        f"@snapshot:{snapshot_digest}"
+        f"@mutation:{mutation_hash}"
+    )
 
 
 def _now() -> str:
@@ -151,7 +208,9 @@ def _now() -> str:
 
 
 def _environment(value: str) -> str:
-    normalized = value.strip().upper() if isinstance(value, str) else ""
+    if type(value) is not str:
+        raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
+    normalized = str.upper(str.strip(value))
     if normalized not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
         raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
     return normalized
@@ -190,13 +249,13 @@ class PreparedReservationMutation:
 
 @dataclass(frozen=True)
 class _DurableReservationStoreBinding:
-    store: JournalStore
+    store_ref: weakref.ReferenceType
     store_identity: object
     environment: str
     account_id: str
     scope_id: str
-    resolution_artifact_store: ArtifactStore | None
-    resolution_artifact_reader: object | None
+    resolution_artifact_store_ref: weakref.ReferenceType | None
+    resolution_artifact_reader_ref: weakref.ReferenceType | None
 
 
 def _build_reservation_store_binding_accessors():
@@ -206,39 +265,45 @@ def _build_reservation_store_binding_accessors():
     carries a caller-discoverable removal callback; manually invoking that
     callback can erase a live trust binding and make reinitialization appear to
     be first composition. Callback-free weakrefs plus identity checks preserve
-    fail-closed binding semantics while still allowing dead ids to be pruned.
+    fail-closed binding semantics. The registry weak-references selected
+    authority resources too, so a dead owner cannot retain JournalStore,
+    ArtifactStore, or retained-reader capabilities until a future access.
     """
 
     bindings: dict[
         int,
         tuple[weakref.ReferenceType, _DurableReservationStoreBinding],
     ] = {}
+    lock = RLock()
 
     def prune_dead() -> None:
-        dead = [
-            object_id
-            for object_id, (value_ref, _binding) in bindings.items()
-            if value_ref() is None
-        ]
-        for object_id in dead:
-            bindings.pop(object_id, None)
+        with lock:
+            dead = [
+                object_id
+                for object_id, (value_ref, _binding) in bindings.items()
+                if value_ref() is None
+            ]
+            for object_id in dead:
+                bindings.pop(object_id, None)
 
     def registered_binding(
         value: object,
     ) -> _DurableReservationStoreBinding | None:
-        entry = bindings.get(id(value))
-        if entry is None:
-            return None
-        value_ref, binding = entry
-        current = value_ref()
-        if current is value:
-            return binding
-        if current is None:
-            bindings.pop(id(value), None)
-            return None
-        raise ReservationConflict(
-            "durable reservation binding identity collision"
-        )
+        object_id = id(value)
+        with lock:
+            entry = bindings.get(object_id)
+            if entry is None:
+                return None
+            value_ref, binding = entry
+            current = value_ref()
+            if current is value:
+                return binding
+            if current is None:
+                bindings.pop(object_id, None)
+                return None
+            raise ReservationConflict(
+                "durable reservation binding identity collision"
+            )
 
     def is_registered(value: object) -> bool:
         try:
@@ -303,39 +368,67 @@ def _build_reservation_store_binding_accessors():
             "reservation-book",
         )
 
-        object.__setattr__(value, "store", store)
-        object.__setattr__(value, "environment", normalized_environment)
-        object.__setattr__(value, "account_id", normalized_account)
-        object.__setattr__(
-            value,
-            "resolution_artifact_store",
-            resolution_artifact_store,
-        )
-        object.__setattr__(value, "_resolution_artifact_reader", reader)
-        object.__setattr__(value, "scope_id", scope_id)
-        object.__setattr__(value, "_book", ReservationBook())
-        object.__setattr__(value, "_idempotency", {})
-
         object_id = id(value)
-        bindings[object_id] = (
-            weakref.ref(value),
-            _DurableReservationStoreBinding(
-                store=store,
-                store_identity=identity,
-                environment=normalized_environment,
-                account_id=normalized_account,
-                scope_id=scope_id,
-                resolution_artifact_store=resolution_artifact_store,
-                resolution_artifact_reader=reader,
+        binding = _DurableReservationStoreBinding(
+            store_ref=weakref.ref(store),
+            store_identity=identity,
+            environment=normalized_environment,
+            account_id=normalized_account,
+            scope_id=scope_id,
+            resolution_artifact_store_ref=(
+                None
+                if resolution_artifact_store is None
+                else weakref.ref(resolution_artifact_store)
+            ),
+            resolution_artifact_reader_ref=(
+                None if reader is None else weakref.ref(reader)
             ),
         )
-        try:
-            DurableReservationBook._reload(value)
-        except Exception:
+        # The initial precheck is only a fast-fail optimization. A concurrent
+        # explicit __init__ can pass it on the same live object, so the
+        # authority selection and visible state must be published under one
+        # lock with a second exact-identity check. Never let a later initializer
+        # overwrite the first closure-owned financial authority.
+        with lock:
             entry = bindings.get(object_id)
-            if entry is not None and entry[0]() is value:
+            if entry is not None:
+                current = entry[0]()
+                if current is value:
+                    raise ReservationConflict(
+                        "reservation store authority is already established"
+                    )
+                if current is not None:
+                    raise ReservationConflict(
+                        "durable reservation binding identity collision"
+                    )
                 bindings.pop(object_id, None)
-            raise
+
+            object.__setattr__(value, "store", store)
+            object.__setattr__(value, "environment", normalized_environment)
+            object.__setattr__(value, "account_id", normalized_account)
+            object.__setattr__(
+                value,
+                "resolution_artifact_store",
+                resolution_artifact_store,
+            )
+            object.__setattr__(value, "_resolution_artifact_reader", reader)
+            object.__setattr__(value, "scope_id", scope_id)
+            object.__setattr__(value, "_book", ReservationBook())
+            object.__setattr__(value, "_idempotency", {})
+            bindings[object_id] = (weakref.ref(value), binding)
+            # Keep construction atomic to every other thread. The binding is
+            # now present for this thread's re-entrant _reload() calls, but the
+            # same registry lock prevents another thread from observing the
+            # authority before durable replay has reconstructed _book and
+            # _idempotency. On replay failure the binding disappears before
+            # any other thread can acquire it.
+            try:
+                DurableReservationBook._reload(value)
+            except BaseException:
+                entry = bindings.get(object_id)
+                if entry is not None and entry[0]() is value:
+                    bindings.pop(object_id, None)
+                raise
 
     def require(value: object) -> tuple[JournalStore, object, str]:
         if type(value) is not DurableReservationBook:
@@ -359,7 +452,32 @@ def _build_reservation_store_binding_accessors():
             raise ReservationConflict(
                 "durable reservation instance state is shadowed"
             )
-        if state.get("store") is not binding.store:
+        store = binding.store_ref()
+        artifact_store = (
+            None
+            if binding.resolution_artifact_store_ref is None
+            else binding.resolution_artifact_store_ref()
+        )
+        artifact_reader = (
+            None
+            if binding.resolution_artifact_reader_ref is None
+            else binding.resolution_artifact_reader_ref()
+        )
+        if store is None:
+            raise ReservationConflict(
+                "durable reservation JournalStore was released while book is live"
+            )
+        if (
+            binding.resolution_artifact_store_ref is not None
+            and artifact_store is None
+        ) or (
+            binding.resolution_artifact_reader_ref is not None
+            and artifact_reader is None
+        ):
+            raise ReservationConflict(
+                "durable reservation evidence authority was released while book is live"
+            )
+        if state.get("store") is not store:
             raise ReservationConflict(
                 "durable reservation JournalStore changed after construction"
             )
@@ -372,17 +490,15 @@ def _build_reservation_store_binding_accessors():
                 "durable reservation scope changed after construction"
             )
         if (
-            state.get("resolution_artifact_store")
-            is not binding.resolution_artifact_store
-            or state.get("_resolution_artifact_reader")
-            is not binding.resolution_artifact_reader
+            state.get("resolution_artifact_store") is not artifact_store
+            or state.get("_resolution_artifact_reader") is not artifact_reader
         ):
             raise ReservationConflict(
                 "durable reservation evidence authority changed after construction"
             )
         try:
             current = require_exact_journal_store_authority(
-                binding.store,
+                store,
                 subject="durable reservation JournalStore",
             )
         except (TypeError, RuntimeError) as error:
@@ -393,7 +509,7 @@ def _build_reservation_store_binding_accessors():
             raise ReservationConflict(
                 "durable reservation JournalStore generation changed"
             )
-        return binding.store, binding.store_identity, binding.scope_id
+        return store, binding.store_identity, binding.scope_id
 
     return is_registered, initialize, require
 
@@ -515,6 +631,14 @@ class DurableReservationBook:
             payload = event["payload"]
             if not isinstance(payload, dict):
                 raise ReservationConflict("reservation event payload must be an object")
+            if payload.get("environment") != self.environment:
+                raise ReservationConflict(
+                    "reservation journal event environment does not match book scope"
+                )
+            if payload.get("account_id") != self.account_id:
+                raise ReservationConflict(
+                    "reservation journal event account does not match book scope"
+                )
             operation = payload.get("operation")
             request = payload.get("request")
             expected_snapshot = payload.get("snapshot")
@@ -561,6 +685,8 @@ class DurableReservationBook:
                         client_order_id=request.get("client_order_id"),
                         resolution_evidence=request.get("resolution_evidence"),
                     )
+                elif operation == "CONSUME_AND_MARK_FILLED":
+                    self._verify_durable_order_fill_terminal_evidence(request)
                 snapshot = self._apply(book, operation, request)
             except Exception as error:
                 raise ReservationConflict(
@@ -594,6 +720,17 @@ class DurableReservationBook:
                 request["reservation_id"],
                 request["usage"],
             )
+        if operation == "CONSUME_AND_MARK_FILLED":
+            return book.consume_and_mark_filled(
+                request["reservation_id"],
+                request["usage"],
+                resolution_evidence=_filled_resolution_evidence(request),
+            )
+        if operation == "RESTORE_CONSUMPTION":
+            return book.restore_consumption(
+                request["reservation_id"],
+                request["usage"],
+            )
         if operation == "MARK_UNKNOWN":
             return book.mark_unknown(request["reservation_id"])
         if operation in {"MARK_TERMINAL", "MARK_ZERO_WIRE_TERMINAL"}:
@@ -603,6 +740,111 @@ class DurableReservationBook:
                 resolution_evidence=request["resolution_evidence"],
             )
         raise ReservationConflict(f"unsupported reservation operation: {operation}")
+
+    def _verify_durable_order_fill_terminal_evidence(
+        self,
+        request: Mapping[str, object],
+    ) -> str:
+        """Verify the exact referenced OMS RECORD_FILL is durable and terminal."""
+
+        expected_evidence = _filled_resolution_evidence(request)
+        event_id = _text(
+            request.get("order_fill_event_id"),
+            name="order_fill_event_id",
+        )
+        order_event = _reservation_store_get_event(self, event_id)
+        if order_event is None:
+            raise ReservationConflict(
+                "FILLED reservation requires the referenced durable OMS fill event"
+            )
+        if (
+            order_event.get("event_id") != event_id
+            or order_event.get("event_type") != "OrderProjectionMutationCommitted"
+            or order_event.get("aggregate_type") != "order_projection_book"
+        ):
+            raise ReservationConflict(
+                "referenced OMS fill event has invalid durable identity"
+            )
+        payload = order_event.get("payload")
+        if type(payload) is not dict:
+            raise ReservationConflict(
+                "referenced OMS fill event payload is invalid"
+            )
+        actual_payload_hash = payload_digest(payload)
+        if (
+            actual_payload_hash != order_event.get("payload_hash")
+            or actual_payload_hash != request.get("order_fill_payload_hash")
+        ):
+            raise ReservationConflict(
+                "referenced OMS fill event payload hash is invalid"
+            )
+        scope = payload.get("scope")
+        order_request = payload.get("request")
+        order_snapshot = payload.get("snapshot")
+        evidence_refs = order_event.get("evidence_refs")
+        if (
+            type(scope) is not dict
+            or scope.get("provider_id") != request.get("order_fill_provider_id")
+            or scope.get("account_id") != self.account_id
+            or scope.get("environment") != self.environment
+            or payload.get("operation") != "RECORD_FILL"
+            or type(order_request) is not dict
+            or type(order_snapshot) is not dict
+            or order_snapshot.get("state") != "FILLED"
+            or type(evidence_refs) is not list
+        ):
+            raise ReservationConflict(
+                "referenced OMS fill event is not an exact terminal fill for this scope"
+            )
+        try:
+            open_quantity = _decimal(
+                order_snapshot.get("open_quantity"),
+                name="OMS fill open_quantity",
+            )
+        except (TypeError, ValueError) as error:
+            raise ReservationConflict(
+                "referenced OMS fill open quantity is invalid"
+            ) from error
+        if open_quantity != 0:
+            raise ReservationConflict(
+                "referenced OMS FILLED snapshot must have zero open quantity"
+            )
+        if (
+            order_request.get("client_order_id")
+            != request.get("order_fill_client_order_id")
+            or order_request.get("fill_id") != request.get("order_fill_fill_id")
+            or order_request.get("provider_execution_id")
+            != request.get("order_fill_provider_execution_id")
+            or order_snapshot.get("client_order_id")
+            != request.get("order_fill_client_order_id")
+        ):
+            raise ReservationConflict(
+                "referenced OMS fill identity differs from reservation authority"
+            )
+        request_hash = _text(
+            payload.get("request_hash"),
+            name="OMS fill request_hash",
+        )
+        if request_hash != payload_digest(order_request):
+            raise ReservationConflict(
+                "referenced OMS fill request hash is invalid"
+            )
+        actual_snapshot_digest = payload_digest(order_snapshot)
+        if actual_snapshot_digest != request.get("order_fill_snapshot_digest"):
+            raise ReservationConflict(
+                "referenced OMS fill snapshot differs from reservation authority"
+            )
+        actual_mutation_hash = payload_digest(
+            {
+                "request_hash": request_hash,
+                "evidence_refs": evidence_refs,
+            }
+        )
+        if actual_mutation_hash != request.get("order_fill_mutation_hash"):
+            raise ReservationConflict(
+                "referenced OMS fill mutation differs from reservation authority"
+            )
+        return expected_evidence
 
     def _reload(self) -> None:
         self._book, self._idempotency = self._replay(self._events())
@@ -631,8 +873,8 @@ class DurableReservationBook:
         idempotency_key: str,
         reservation_id: str,
         intent_id: str,
-        requirements: Mapping[str, object],
-        available: Mapping[str, object],
+        requirements: dict[str, object],
+        available: dict[str, object],
         committed_at: str,
     ) -> PreparedReservationMutation:
         """Prepare, but do not commit, a worst-case reservation.
@@ -708,7 +950,7 @@ class DurableReservationBook:
         event_key: str,
         idempotency_key: str,
         reservation_id: str,
-        usage: Mapping[str, object],
+        usage: dict[str, object],
         committed_at: str,
         expected_snapshot_digest: str | None = None,
     ) -> PreparedReservationMutation:
@@ -740,9 +982,26 @@ class DurableReservationBook:
                 raise ReservationConflict(
                     "idempotency_key was already used for a different reservation request"
                 )
-            snapshot = candidate.get(request["reservation_id"])
+            matching_indexes = tuple(
+                index
+                for index, event in enumerate(events)
+                if isinstance(event.get("payload"), dict)
+                and event["payload"].get("idempotency_key") == key
+                and event["payload"].get("operation") == "CONSUME"
+            )
+            if len(matching_indexes) != 1:
+                raise ReservationConflict(
+                    "committed reservation consumption identity is ambiguous"
+                )
+            matching_index = matching_indexes[0]
+            matching_event = events[matching_index]
+            historical_book, _ = self._replay(events[: matching_index + 1])
+            snapshot = historical_book.get(request["reservation_id"])
             snapshot_value = _snapshot_payload(snapshot)
-            if snapshot_value != existing[1]:
+            if (
+                snapshot_value != existing[1]
+                or snapshot_value != matching_event["payload"].get("snapshot")
+            ):
                 raise ReservationConflict(
                     "committed reservation consumption snapshot does not match replayed state"
                 )
@@ -752,11 +1011,7 @@ class DurableReservationBook:
                 envelope=None,
                 idempotency_key=key,
                 request=request,
-                aggregate_version=(
-                    0
-                    if not events
-                    else int(events[-1]["aggregate_version"])
-                ),
+                aggregate_version=int(matching_event["aggregate_version"]),
                 already_committed=True,
             )
 
@@ -786,6 +1041,307 @@ class DurableReservationBook:
                 self.environment,
                 self.account_id,
                 "financial-fill-reservation-event",
+                _text(event_key, name="event_key"),
+            ),
+            "event_type": _EVENT_TYPE,
+            "aggregate_type": _AGGREGATE_TYPE,
+            "aggregate_id": self.scope_id,
+            "aggregate_version": str(next_version),
+            "payload": payload,
+            "payload_hash": payload_digest(payload),
+            "committed_at": _text(committed_at, name="committed_at"),
+        }
+        return PreparedReservationMutation(
+            snapshot=snapshot,
+            snapshot_payload=snapshot_value,
+            envelope=envelope,
+            idempotency_key=key,
+            request=request,
+            aggregate_version=next_version,
+        )
+
+    def prepare_consume_and_mark_filled_mutation(
+        self,
+        *,
+        event_key: str,
+        idempotency_key: str,
+        reservation_id: str,
+        usage: dict[str, object],
+        order_fill_event_id: str,
+        order_fill_payload_hash: str,
+        order_fill_snapshot_digest: str,
+        order_fill_mutation_hash: str,
+        order_fill_provider_id: str,
+        order_fill_client_order_id: str,
+        order_fill_fill_id: str,
+        order_fill_provider_execution_id: str,
+        committed_at: str,
+        expected_snapshot_digest: str | None = None,
+    ) -> PreparedReservationMutation:
+        """Prepare one journal-native consume + FILLED transition.
+
+        FILLED authority is derived from the exact prepared durable OMS
+        RECORD_FILL event, its post-fill snapshot digest and mutation hash.  A
+        historical command that already committed only CONSUME is replayed as
+        that historical cut; this method never rewrites legacy reservation
+        history merely because the current OMS projection is terminal.
+        """
+
+        key = _text(idempotency_key, name="idempotency_key")
+        legacy_request = {
+            "reservation_id": _text(reservation_id, name="reservation_id"),
+            "usage": _amount_map(usage, allow_zero=False),
+        }
+        request = {
+            **legacy_request,
+            "order_fill_event_id": _text(
+                order_fill_event_id,
+                name="order_fill_event_id",
+            ),
+            "order_fill_payload_hash": _canonical_sha256(
+                order_fill_payload_hash,
+                name="order_fill_payload_hash",
+            ),
+            "order_fill_snapshot_digest": _canonical_sha256(
+                order_fill_snapshot_digest,
+                name="order_fill_snapshot_digest",
+            ),
+            "order_fill_mutation_hash": _canonical_sha256(
+                order_fill_mutation_hash,
+                name="order_fill_mutation_hash",
+            ),
+            "order_fill_provider_id": _text(
+                order_fill_provider_id,
+                name="order_fill_provider_id",
+            ),
+            "order_fill_client_order_id": _text(
+                order_fill_client_order_id,
+                name="order_fill_client_order_id",
+            ),
+            "order_fill_fill_id": _text(
+                order_fill_fill_id,
+                name="order_fill_fill_id",
+            ),
+            "order_fill_provider_execution_id": _text(
+                order_fill_provider_execution_id,
+                name="order_fill_provider_execution_id",
+            ),
+        }
+        # Validate the composed evidence string before any candidate mutation.
+        _filled_resolution_evidence(request)
+        expected_cut = (
+            None
+            if expected_snapshot_digest is None
+            else _text(expected_snapshot_digest, name="expected_snapshot_digest")
+        )
+        events = self._events()
+        candidate, idempotency = self._replay(events)
+        existing = idempotency.get(key)
+        if existing is not None:
+            matching_indexes = tuple(
+                index
+                for index, event in enumerate(events)
+                if isinstance(event.get("payload"), dict)
+                and event["payload"].get("idempotency_key") == key
+            )
+            if len(matching_indexes) != 1:
+                raise ReservationConflict(
+                    "committed reservation fill mutation identity is ambiguous"
+                )
+            matching_index = matching_indexes[0]
+            matching_event = events[matching_index]
+            stored_payload = matching_event["payload"]
+            stored_operation = stored_payload.get("operation")
+            if (
+                stored_operation == "CONSUME"
+                and existing[0] == payload_digest(legacy_request)
+            ):
+                legacy_plan = self.prepare_consume_mutation(
+                    event_key=event_key,
+                    idempotency_key=key,
+                    reservation_id=legacy_request["reservation_id"],
+                    usage=legacy_request["usage"],
+                    committed_at=committed_at,
+                    expected_snapshot_digest=None,
+                )
+                if not legacy_plan.already_committed:
+                    raise ReservationConflict(
+                        "historical reservation CONSUME did not resolve as committed"
+                    )
+                return legacy_plan
+            if (
+                stored_operation == "CONSUME_AND_MARK_FILLED"
+                and existing[0] == payload_digest(request)
+            ):
+                replay_request = request
+            else:
+                raise ReservationConflict(
+                    "idempotency_key was already used for a different reservation request"
+                )
+
+            # Return the exact historical post-mutation cut. A later bust or
+            # refill may legitimately move the current projection forward and
+            # must not invalidate idempotent recovery of this command.
+            historical_book, _ = self._replay(events[: matching_index + 1])
+            snapshot = historical_book.get(legacy_request["reservation_id"])
+            snapshot_value = _snapshot_payload(snapshot)
+            stored_snapshot = stored_payload.get("snapshot")
+            if snapshot_value != existing[1] or snapshot_value != stored_snapshot:
+                raise ReservationConflict(
+                    "committed reservation fill snapshot does not match replayed state"
+                )
+            return PreparedReservationMutation(
+                snapshot=snapshot,
+                snapshot_payload=snapshot_value,
+                envelope=None,
+                idempotency_key=key,
+                request=replay_request,
+                aggregate_version=int(matching_event["aggregate_version"]),
+                already_committed=True,
+            )
+
+        if expected_cut is not None:
+            current_snapshot = candidate.get(legacy_request["reservation_id"])
+            if reservation_snapshot_digest(current_snapshot) != expected_cut:
+                raise ReservationConflict(
+                    "reservation snapshot changed after provider fill plan derivation"
+                )
+
+        snapshot = self._apply(candidate, "CONSUME_AND_MARK_FILLED", request)
+        snapshot_value = _snapshot_payload(snapshot)
+        next_version = 1 if not events else int(events[-1]["aggregate_version"]) + 1
+        payload = {
+            "environment": self.environment,
+            "account_id": self.account_id,
+            "operation": "CONSUME_AND_MARK_FILLED",
+            "request": request,
+            "idempotency_key": key,
+            "request_hash": payload_digest(request),
+            "snapshot": snapshot_value,
+        }
+        envelope = {
+            "event_id": _journal_identity(
+                self.environment,
+                self.account_id,
+                "financial-fill-terminal-reservation-event",
+                _text(event_key, name="event_key"),
+            ),
+            "event_type": _EVENT_TYPE,
+            "aggregate_type": _AGGREGATE_TYPE,
+            "aggregate_id": self.scope_id,
+            "aggregate_version": str(next_version),
+            "payload": payload,
+            "payload_hash": payload_digest(payload),
+            "committed_at": _text(committed_at, name="committed_at"),
+        }
+        return PreparedReservationMutation(
+            snapshot=snapshot,
+            snapshot_payload=snapshot_value,
+            envelope=envelope,
+            idempotency_key=key,
+            request=request,
+            aggregate_version=next_version,
+        )
+
+    def prepare_restore_consumption_mutation(
+        self,
+        *,
+        event_key: str,
+        idempotency_key: str,
+        reservation_id: str,
+        usage: dict[str, object],
+        committed_at: str,
+        expected_snapshot_digest: str | None = None,
+    ) -> PreparedReservationMutation:
+        """Prepare a conservative fill-bust restoration for a shared commit.
+
+        The mutation moves previously consumed amounts back to the active
+        reservation's remaining balance. It therefore restores held capacity;
+        it does not release capacity to availability. No state is mutated until
+        the caller commits this envelope in the canonical JournalStore batch.
+        """
+
+        key = _text(idempotency_key, name="idempotency_key")
+        request = {
+            "reservation_id": _text(reservation_id, name="reservation_id"),
+            "usage": _amount_map(usage, allow_zero=False),
+        }
+        expected_cut = (
+            None
+            if expected_snapshot_digest is None
+            else _text(expected_snapshot_digest, name="expected_snapshot_digest")
+        )
+        events = self._events()
+        candidate, idempotency = self._replay(events)
+        existing = idempotency.get(key)
+        if existing is not None:
+            if existing[0] != payload_digest(request):
+                raise ReservationConflict(
+                    "idempotency_key was already used for a different reservation request"
+                )
+            matching_event_indexes = tuple(
+                index
+                for index, event in enumerate(events)
+                if isinstance(event.get("payload"), Mapping)
+                and event["payload"].get("idempotency_key") == key
+                and event["payload"].get("operation") == "RESTORE_CONSUMPTION"
+            )
+            if len(matching_event_indexes) != 1:
+                raise ReservationConflict(
+                    "committed reservation restoration identity is ambiguous"
+                )
+            committed_event_index = matching_event_indexes[0]
+            committed_event = events[committed_event_index]
+            committed_snapshot = committed_event["payload"].get("snapshot")
+            if committed_snapshot != existing[1]:
+                raise ReservationConflict(
+                    "committed reservation restoration snapshot authority changed"
+                )
+            # Exact retry binds to the historical post-restoration cut, not the
+            # reservation's current state. Later fills may legitimately consume
+            # the same reservation; replaying this command must neither reject
+            # that progress nor apply the restoration a second time.
+            historical_book, _ = self._replay(events[: committed_event_index + 1])
+            snapshot = historical_book.get(request["reservation_id"])
+            snapshot_value = _snapshot_payload(snapshot)
+            if snapshot_value != committed_snapshot:
+                raise ReservationConflict(
+                    "committed reservation restoration historical cut changed"
+                )
+            return PreparedReservationMutation(
+                snapshot=snapshot,
+                snapshot_payload=snapshot_value,
+                envelope=None,
+                idempotency_key=key,
+                request=request,
+                aggregate_version=int(committed_event["aggregate_version"]),
+                already_committed=True,
+            )
+
+        if expected_cut is not None:
+            current_snapshot = candidate.get(request["reservation_id"])
+            if reservation_snapshot_digest(current_snapshot) != expected_cut:
+                raise ReservationConflict(
+                    "reservation snapshot changed after fill-bust restoration derivation"
+                )
+
+        snapshot = self._apply(candidate, "RESTORE_CONSUMPTION", request)
+        snapshot_value = _snapshot_payload(snapshot)
+        next_version = 1 if not events else int(events[-1]["aggregate_version"]) + 1
+        payload = {
+            "environment": self.environment,
+            "account_id": self.account_id,
+            "operation": "RESTORE_CONSUMPTION",
+            "request": request,
+            "idempotency_key": key,
+            "request_hash": payload_digest(request),
+            "snapshot": snapshot_value,
+        }
+        envelope = {
+            "event_id": _journal_identity(
+                self.environment,
+                self.account_id,
+                "financial-fill-bust-reservation-event",
                 _text(event_key, name="event_key"),
             ),
             "event_type": _EVENT_TYPE,
@@ -969,8 +1525,8 @@ class DurableReservationBook:
         idempotency_key: str,
         reservation_id: str,
         intent_id: str,
-        requirements: Mapping[str, object],
-        available: Mapping[str, object],
+        requirements: dict[str, object],
+        available: dict[str, object],
     ) -> ReservationSnapshot:
         request = {
             "reservation_id": _text(reservation_id, name="reservation_id"),
@@ -991,7 +1547,7 @@ class DurableReservationBook:
         command_id: str,
         idempotency_key: str,
         reservation_id: str,
-        usage: Mapping[str, object],
+        usage: dict[str, object],
     ) -> ReservationSnapshot:
         request = {
             "reservation_id": _text(reservation_id, name="reservation_id"),

@@ -82,7 +82,10 @@ _ALLOWED_EXTERNAL_ORIGINS = frozenset({"MANUAL", "EXTERNAL"})
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    # Trust-sensitive financial identities must be exact built-in text before
+    # normalization. A str subclass can override strip() and execute caller
+    # code while this bridge is establishing durable financial authority.
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
@@ -139,31 +142,154 @@ def _scoped_identity(kind: str, *parts: str) -> str:
     return f"{normalized_kind}:{digest}"
 
 
+def _provider_environment(
+    *,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    provider = _text(provider_id, name="provider_id").upper()
+    runtime = _environment(environment)
+    if provider == "BYBIT" and provider_environment is None:
+        raise AccountingConflict(
+            "BYBIT durable economic authority requires explicit provider_environment"
+        )
+    normalized = (
+        runtime
+        if provider_environment is None
+        else _text(provider_environment, name="provider_environment").upper()
+    )
+    if provider == "BYBIT" and normalized not in {"MAINNET", "TESTNET", "DEMO"}:
+        raise AccountingConflict(
+            "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+        )
+    if provider == "BYBIT":
+        expected_runtime = "LIVE" if normalized == "MAINNET" else "PAPER"
+        if runtime != expected_runtime:
+            raise AccountingConflict(
+                "BYBIT provider_environment does not match runtime environment"
+            )
+    return normalized
+
+
+def _provider_environment_payload(
+    *,
+    provider_environment: str,
+    environment: str,
+) -> str | None:
+    return (
+        provider_environment
+        if provider_environment != environment
+        else None
+    )
+
+
+def _financial_scope_identity(
+    kind: str,
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    provider_environment: str | None,
+    tail: str,
+) -> str:
+    """Bind a durable component identity to one exact provider financial domain."""
+
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    runtime = _environment(environment)
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=runtime,
+        provider_environment=provider_environment,
+    )
+    parts = [provider, account, runtime]
+    if provider_scope != runtime:
+        parts.append(provider_scope)
+    parts.append(_text(tail, name="identity_tail"))
+    return _scoped_identity(kind, *parts)
+
+
 def _activity_identity(
     *,
     provider_id: str,
     account_id: str,
     environment: str,
     activity_id: str,
+    provider_environment: str | None = None,
 ) -> str:
     provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")
     scope = _environment(environment)
-    activity = _text(activity_id, name="activity_id")
-    return _scoped_identity(
-        "provider-activity",
-        provider,
-        account,
-        scope,
-        activity,
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
     )
+    parts = [provider, account, scope]
+    if provider_scope != scope:
+        parts.append(provider_scope)
+    parts.append(_text(activity_id, name="activity_id"))
+    return _scoped_identity("provider-activity", *parts)
 
 
-def _book_id(*, provider_id: str, account_id: str, environment: str) -> str:
+def _book_id(
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    provider_environment: str | None = None,
+) -> str:
     provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")
     scope = _environment(environment)
-    return _scoped_identity("economic-book", provider, account, scope)
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
+    )
+    parts = [provider, account, scope]
+    if provider_scope != scope:
+        parts.append(provider_scope)
+    return _scoped_identity("economic-book", *parts)
+
+
+def _require_unambiguous_provider_economic_history(
+    store: JournalStore,
+    store_identity: object,
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    scoped_book_id: str,
+) -> None:
+    """Fence legacy runtime-only BYBIT economics before scoped authority is used."""
+
+    provider = _text(provider_id, name="provider_id").upper()
+    if provider != "BYBIT":
+        return
+    account = _text(account_id, name="account_id")
+    runtime = _environment(environment)
+    legacy_book_id = _scoped_identity(
+        "economic-book",
+        provider,
+        account,
+        runtime,
+    )
+    if legacy_book_id == scoped_book_id:
+        return
+    with journal_store_authority_scope(store, store_identity):
+        legacy_events = JournalStore.load_events(
+            store,
+            "economic_book",
+            legacy_book_id,
+        )
+    if legacy_events:
+        raise AccountingConflict(
+            "BYBIT durable economic-book legacy runtime scope contains "
+            "ambiguous financial history; explicit provider-environment "
+            "migration/reconciliation is required"
+        )
 
 
 def _transaction_payload(transaction: JournalTransaction) -> dict[str, Any]:
@@ -248,15 +374,30 @@ def _economic_batch_digest(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
     transactions: Iterable[JournalTransaction],
 ) -> str:
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    scope = _environment(environment)
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
+    )
     material = {
         "schema_version": "1.0.0",
-        "provider_id": _text(provider_id, name="provider_id").upper(),
-        "account_id": _text(account_id, name="account_id"),
-        "environment": _environment(environment),
+        "provider_id": provider,
+        "account_id": account,
+        "environment": scope,
         "transactions": [_transaction_payload(item) for item in transactions],
     }
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=provider_scope,
+        environment=scope,
+    )
+    if provider_scope_payload is not None:
+        material["provider_environment"] = provider_scope_payload
     return payload_digest(material)
 
 
@@ -368,13 +509,23 @@ def _provider_fill_binding_aggregate_id(
     account_id: str,
     environment: str,
     provider_execution_id: str,
+    provider_environment: str | None = None,
 ) -> str:
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    runtime = _environment(environment)
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=runtime,
+        provider_environment=provider_environment,
+    )
+    parts = [provider, account, runtime]
+    if provider_scope != runtime:
+        parts.append(provider_scope)
+    parts.append(_text(provider_execution_id, name="provider_execution_id"))
     return _scoped_identity(
         "provider-fill-financial-binding",
-        _text(provider_id, name="provider_id").upper(),
-        _text(account_id, name="account_id"),
-        _environment(environment),
-        _text(provider_execution_id, name="provider_execution_id"),
+        *parts,
     )
 
 
@@ -399,7 +550,7 @@ def _projected_fill_binding_payload(
 def _provider_fill_binding_payload(
     provider_fill: ProviderFillEvidence,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "provider_id": provider_fill.provider_id,
         "account_id": provider_fill.account_id,
         "environment": provider_fill.environment,
@@ -416,6 +567,13 @@ def _provider_fill_binding_payload(
         "position_effect": getattr(provider_fill, "position_effect", None),
         "evidence_refs": list(provider_fill.evidence_refs),
     }
+    provider_scope = _provider_environment_payload(
+        provider_environment=provider_fill.provider_environment,
+        environment=provider_fill.environment,
+    )
+    if provider_scope is not None:
+        payload["provider_environment"] = provider_scope
+    return payload
 
 
 def _require_plain_financial_json(
@@ -515,7 +673,14 @@ def _provider_fill_from_binding_payload(
     *,
     name: str,
 ) -> ProviderFillEvidence:
-    if type(payload) is not dict or set(payload) != _PROVIDER_FILL_BINDING_FIELDS:
+    if (
+        type(payload) is not dict
+        or set(payload)
+        not in {
+            _PROVIDER_FILL_BINDING_FIELDS,
+            _PROVIDER_FILL_BINDING_FIELDS_WITH_PROVIDER_ENVIRONMENT,
+        }
+    ):
         raise AccountingConflict(f"{name} shape is invalid")
     raw = dict(payload)
     refs = raw["evidence_refs"]
@@ -526,6 +691,7 @@ def _provider_fill_from_binding_payload(
             provider_id=raw["provider_id"],
             account_id=raw["account_id"],
             environment=raw["environment"],
+            provider_environment=raw.get("provider_environment"),
             provider_execution_id=raw["provider_execution_id"],
             client_order_id=raw["client_order_id"],
             instrument=raw["instrument"],
@@ -557,11 +723,11 @@ def _prepare_provider_fill_binding(
     if type(economic_book) is not DurableProviderEconomicBook:
         raise TypeError("economic_book must be exact DurableProviderEconomicBook")
     _require_durable_provider_economic_book_authority(economic_book)
-    if not isinstance(plan, ProviderFillFinancialPlan):
-        raise TypeError("plan must be ProviderFillFinancialPlan")
-    if not isinstance(projected_fill, ProjectedFillEvidence):
+    if type(plan) is not ProviderFillFinancialPlan:
+        raise TypeError("plan must be exact ProviderFillFinancialPlan")
+    if type(projected_fill) is not ProjectedFillEvidence:
         raise TypeError("projected_fill must be ProjectedFillEvidence")
-    if not isinstance(provider_fill, ProviderFillEvidence):
+    if type(provider_fill) is not ProviderFillEvidence:
         raise TypeError("provider_fill must be ProviderFillEvidence")
     if projected_fill.correction_of is not None:
         raise AccountingConflict(
@@ -573,11 +739,16 @@ def _prepare_provider_fill_binding(
         )
     if plan.intent_id != projected_fill.intent_id:
         raise AccountingConflict("provider fill binding intent identity changed")
+    if provider_fill.provider_environment != economic_book.provider_environment:
+        raise AccountingConflict(
+            "provider fill binding provider_environment does not match economic book"
+        )
 
     aggregate_id = _provider_fill_binding_aggregate_id(
         provider_id=economic_book.provider_id,
         account_id=economic_book.account_id,
         environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
         provider_execution_id=provider_fill.provider_execution_id,
     )
     usage = {
@@ -608,6 +779,12 @@ def _prepare_provider_fill_binding(
         ),
         "derived_usage": usage,
     }
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=economic_book.provider_environment,
+        environment=economic_book.environment,
+    )
+    if provider_scope_payload is not None:
+        request["provider_environment"] = provider_scope_payload
     events = _economic_store_load_events(economic_book,
         _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
         aggregate_id,
@@ -626,6 +803,10 @@ def _prepare_provider_fill_binding(
             payload.get("provider_id") != economic_book.provider_id
             or payload.get("account_id") != economic_book.account_id
             or payload.get("environment") != economic_book.environment
+            or payload.get(
+                "provider_environment",
+                economic_book.environment,
+            ) != economic_book.provider_environment
             or payload.get("provider_execution_id") != plan.provider_execution_id
         ):
             raise AccountingConflict(
@@ -677,20 +858,21 @@ def _prepare_provider_fill_binding(
                 "provider fill financial binding reservation cut is invalid"
             )
         stored_plan_digest = stored_request.get("plan_digest")
-        expected_plan_digest = payload_digest(
-            {
-                "schema_version": "1.1.0",
-                "provider_id": economic_book.provider_id,
-                "account_id": economic_book.account_id,
-                "environment": economic_book.environment,
-                "reservation_id": plan.reservation_id,
-                "intent_id": plan.intent_id,
-                "provider_execution_id": plan.provider_execution_id,
-                "reservation_cut_digest": stored_cut,
-                "transaction": canonical_transaction(plan.transaction),
-                "derived_usage": usage,
-            }
-        )
+        expected_plan_material = {
+            "schema_version": "1.1.0",
+            "provider_id": economic_book.provider_id,
+            "account_id": economic_book.account_id,
+            "environment": economic_book.environment,
+            "reservation_id": plan.reservation_id,
+            "intent_id": plan.intent_id,
+            "provider_execution_id": plan.provider_execution_id,
+            "reservation_cut_digest": stored_cut,
+            "transaction": canonical_transaction(plan.transaction),
+            "derived_usage": usage,
+        }
+        if provider_scope_payload is not None:
+            expected_plan_material["provider_environment"] = provider_scope_payload
+        expected_plan_digest = payload_digest(expected_plan_material)
         if stored_plan_digest != expected_plan_digest:
             raise AccountingConflict(
                 "provider fill financial binding plan digest is invalid"
@@ -724,6 +906,8 @@ def _prepare_provider_fill_binding(
         "request_digest": request_digest,
         "request": request,
     }
+    if provider_scope_payload is not None:
+        payload["provider_environment"] = provider_scope_payload
     envelope = {
         "event_id": event_id,
         "event_type": _PROVIDER_FILL_BINDING_EVENT_TYPE,
@@ -847,13 +1031,23 @@ def _provider_fill_correction_binding_aggregate_id(
     account_id: str,
     environment: str,
     provider_execution_id: str,
+    provider_environment: str | None = None,
 ) -> str:
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    runtime = _environment(environment)
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=runtime,
+        provider_environment=provider_environment,
+    )
+    parts = [provider, account, runtime]
+    if provider_scope != runtime:
+        parts.append(provider_scope)
+    parts.append(_text(provider_execution_id, name="provider_execution_id"))
     return _scoped_identity(
         "provider-fill-reservation-correction-binding",
-        _text(provider_id, name="provider_id").upper(),
-        _text(account_id, name="account_id"),
-        _environment(environment),
-        _text(provider_execution_id, name="provider_execution_id"),
+        *parts,
     )
 
 
@@ -874,6 +1068,16 @@ def _prepare_provider_fill_correction_binding(
 
     if type(economic_book) is not DurableProviderEconomicBook:
         raise TypeError("economic_book must be exact DurableProviderEconomicBook")
+    if type(original_projected_fill) is not ProjectedFillEvidence:
+        raise TypeError("original_projected_fill must be exact ProjectedFillEvidence")
+    if type(original_provider_fill) is not ProviderFillEvidence:
+        raise TypeError("original_provider_fill must be exact ProviderFillEvidence")
+    if type(corrected_projected_fill) is not ProjectedFillEvidence:
+        raise TypeError("corrected_projected_fill must be exact ProjectedFillEvidence")
+    if type(corrected_provider_fill) is not ProviderFillEvidence:
+        raise TypeError("corrected_provider_fill must be exact ProviderFillEvidence")
+    if type(replacement) is not JournalTransaction:
+        raise TypeError("replacement must be an exact JournalTransaction")
     _require_durable_provider_economic_book_authority(economic_book)
     _require_same_financial_journal_generation(
         economic_book,
@@ -911,11 +1115,20 @@ def _prepare_provider_fill_correction_binding(
         raise AccountingConflict("correction provider execution identity changed")
     if corrected_projected_fill.provider_execution_id != execution_id:
         raise AccountingConflict("corrected projection execution identity changed")
+    for label, evidence in (
+        ("original", original_provider_fill),
+        ("corrected", corrected_provider_fill),
+    ):
+        if evidence.provider_environment != economic_book.provider_environment:
+            raise AccountingConflict(
+                f"{label} provider fill provider_environment does not match economic book"
+            )
 
     initial_aggregate_id = _provider_fill_binding_aggregate_id(
         provider_id=economic_book.provider_id,
         account_id=economic_book.account_id,
         environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
         provider_execution_id=execution_id,
     )
     initial_events = _economic_store_load_events(economic_book,
@@ -951,6 +1164,10 @@ def _prepare_provider_fill_correction_binding(
         initial_request.get("provider_id") != economic_book.provider_id
         or initial_request.get("account_id") != economic_book.account_id
         or initial_request.get("environment") != economic_book.environment
+        or initial_request.get(
+            "provider_environment",
+            economic_book.environment,
+        ) != economic_book.provider_environment
         or initial_request.get("provider_execution_id") != execution_id
         or initial_request.get("reservation_id") != rid
         or initial_request.get("intent_id") != corrected_projected_fill.intent_id
@@ -976,6 +1193,8 @@ def _prepare_provider_fill_correction_binding(
         or initial_provider_evidence.provider_id != economic_book.provider_id
         or initial_provider_evidence.account_id != economic_book.account_id
         or initial_provider_evidence.environment != economic_book.environment
+        or initial_provider_evidence.provider_environment
+        != economic_book.provider_environment
         or initial_provider_evidence.provider_execution_id != execution_id
         or initial_provider_evidence.client_order_id
         != initial_projected_evidence.client_order_id
@@ -1051,8 +1270,14 @@ def _prepare_provider_fill_correction_binding(
     expected_order_key = (
         f"provider:{economic_book.provider_id}:execution:{execution_id}"
     )
+    provider_domain = (
+        ""
+        if economic_book.provider_environment == economic_book.environment
+        else f"provider-environment:{economic_book.provider_environment}:"
+    )
     expected_cause_event_id = (
         f"provider:{economic_book.provider_id}:environment:{economic_book.environment}:"
+        f"{provider_domain}"
         f"account:{economic_book.account_id}:execution:{execution_id}"
     )
     if (
@@ -1071,6 +1296,7 @@ def _prepare_provider_fill_correction_binding(
         provider_id=economic_book.provider_id,
         account_id=economic_book.account_id,
         environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
         provider_execution_id=execution_id,
     )
     events = _economic_store_load_events(economic_book,
@@ -1109,6 +1335,10 @@ def _prepare_provider_fill_correction_binding(
             payload.get("provider_id") != economic_book.provider_id
             or payload.get("account_id") != economic_book.account_id
             or payload.get("environment") != economic_book.environment
+            or payload.get(
+                "provider_environment",
+                economic_book.environment,
+            ) != economic_book.provider_environment
             or payload.get("provider_execution_id") != execution_id
         ):
             raise AccountingConflict(
@@ -1259,6 +1489,8 @@ def _prepare_provider_fill_correction_binding(
             or historical_provider.provider_id != economic_book.provider_id
             or historical_provider.account_id != economic_book.account_id
             or historical_provider.environment != economic_book.environment
+            or historical_provider.provider_environment
+            != economic_book.provider_environment
             or historical_provider.provider_execution_id != execution_id
             or historical_provider.client_order_id
             != historical_projected.client_order_id
@@ -1472,6 +1704,12 @@ def _prepare_provider_fill_correction_binding(
         "resulting_conservative_usage": _usage_payload(resulting_usage),
         "additional_usage": _usage_payload(additional_usage),
     }
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=economic_book.provider_environment,
+        environment=economic_book.environment,
+    )
+    if provider_scope_payload is not None:
+        request["provider_environment"] = provider_scope_payload
     request_digest = payload_digest(request)
     next_version = len(events) + 1
     event_id = str(
@@ -1492,6 +1730,8 @@ def _prepare_provider_fill_correction_binding(
         "request_digest": request_digest,
         "request": request,
     }
+    if provider_scope_payload is not None:
+        payload["provider_environment"] = provider_scope_payload
     envelope = {
         "event_id": event_id,
         "event_type": _PROVIDER_FILL_CORRECTION_BINDING_EVENT_TYPE,
@@ -1532,6 +1772,7 @@ class ProviderEconomicCut:
     provider_id: str
     account_id: str
     environment: str
+    provider_environment: str
     book_id: str
     aggregate_version: int
     journal_sequence: int
@@ -1556,6 +1797,7 @@ class ProviderEconomicCut:
             "provider_id",
             "account_id",
             "environment",
+            "provider_environment",
             "book_id",
             "event_id",
             "payload_hash",
@@ -1608,6 +1850,7 @@ def _provider_economic_cut_seal_digest(value: ProviderEconomicCut) -> str:
             "provider_id": value.provider_id,
             "account_id": value.account_id,
             "environment": value.environment,
+            "provider_environment": value.provider_environment,
             "book_id": value.book_id,
             "aggregate_version": value.aggregate_version,
             "journal_sequence": value.journal_sequence,
@@ -1701,6 +1944,7 @@ def reverify_provider_economic_cut(
         cut.provider_id != book.provider_id
         or cut.account_id != book.account_id
         or cut.environment != book.environment
+        or cut.provider_environment != book.provider_environment
         or cut.book_id != book.book_id
     ):
         raise AccountingConflict(
@@ -1736,6 +1980,7 @@ class _DurableProviderEconomicBookAuthority:
     provider_id: str
     account_id: str
     environment: str
+    provider_environment: str
     book_id: str
     projection_digest: str
 
@@ -1823,6 +2068,7 @@ def _install_durable_provider_economic_book_authority():
             state.get("provider_id") != authority.provider_id
             or state.get("account_id") != authority.account_id
             or state.get("environment") != authority.environment
+            or state.get("provider_environment") != authority.provider_environment
             or state.get("book_id") != authority.book_id
         ):
             raise AccountingConflict(
@@ -1855,6 +2101,7 @@ def _install_durable_provider_economic_book_authority():
             provider_id=authority.provider_id,
             account_id=authority.account_id,
             environment=authority.environment,
+            provider_environment=authority.provider_environment,
             book_id=authority.book_id,
             projection_digest=authority.projection_digest,
         )
@@ -1882,6 +2129,7 @@ def _install_durable_provider_economic_book_authority():
         provider_id: str,
         account_id: str,
         environment: str,
+        provider_environment: str | None = None,
     ) -> None:
         if type(value) is not DurableProviderEconomicBook:
             raise TypeError("economic_book must be exact DurableProviderEconomicBook")
@@ -1903,11 +2151,17 @@ def _install_durable_provider_economic_book_authority():
             "provider_id",
             _text(provider_id, name="provider_id").upper(),
         )
-        ScopedEconomicBook.__init__(
-            value,
-            environment=environment,
-            account_id=account_id,
+        normalized_environment = _environment(environment)
+        normalized_account_id = _text(account_id, name="account_id")
+        object.__setattr__(value, "environment", normalized_environment)
+        object.__setattr__(value, "account_id", normalized_account_id)
+        object.__setattr__(value, "_book", EconomicBook())
+        provider_environment_value = _provider_environment(
+            provider_id=object.__getattribute__(value, "provider_id"),
+            environment=object.__getattribute__(value, "environment"),
+            provider_environment=provider_environment,
         )
+        object.__setattr__(value, "provider_environment", provider_environment_value)
         object.__setattr__(
             value,
             "book_id",
@@ -1915,7 +2169,16 @@ def _install_durable_provider_economic_book_authority():
                 provider_id=object.__getattribute__(value, "provider_id"),
                 account_id=object.__getattribute__(value, "account_id"),
                 environment=object.__getattribute__(value, "environment"),
+                provider_environment=provider_environment_value,
             ),
+        )
+        _require_unambiguous_provider_economic_history(
+            store,
+            identity,
+            provider_id=object.__getattribute__(value, "provider_id"),
+            account_id=object.__getattribute__(value, "account_id"),
+            environment=object.__getattribute__(value, "environment"),
+            scoped_book_id=object.__getattribute__(value, "book_id"),
         )
         state = object.__getattribute__(value, "__dict__")
         object_id = id(value)
@@ -1927,6 +2190,7 @@ def _install_durable_provider_economic_book_authority():
                 provider_id=state["provider_id"],
                 account_id=state["account_id"],
                 environment=state["environment"],
+                provider_environment=state["provider_environment"],
                 book_id=state["book_id"],
                 projection_digest=_economic_projection_digest(state["_book"]),
             ),
@@ -2034,7 +2298,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
     _SINGLE_EVENT = "EconomicTransactionBooked"
     _ACTOR = "provider-economic-accounting"
     _AUTHORITY_STATE_NAMES = frozenset(
-        {"store", "provider_id", "account_id", "environment", "book_id", "_book"}
+        {"store", "provider_id", "account_id", "environment", "provider_environment", "book_id", "_book"}
     )
 
     def __getattribute__(self, name: str):
@@ -2081,6 +2345,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         provider_id: str,
         account_id: str,
         environment: str,
+        provider_environment: str | None = None,
     ):
         _initialize_durable_provider_economic_book(
             self,
@@ -2088,6 +2353,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=provider_id,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         )
 
     def _events(self) -> list[dict[str, Any]]:
@@ -2129,6 +2395,8 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 payload.get("provider_id") != authority.provider_id
                 or payload.get("account_id") != authority.account_id
                 or payload.get("environment") != authority.environment
+                or payload.get("provider_environment", authority.environment)
+                != authority.provider_environment
             ):
                 raise AccountingConflict(
                     "economic durable event scope does not match provider book"
@@ -2152,6 +2420,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 provider_id=authority.provider_id,
                 account_id=authority.account_id,
                 environment=authority.environment,
+                provider_environment=authority.provider_environment,
                 transactions=transactions,
             )
             if payload.get("batch_digest") != batch_digest:
@@ -2221,10 +2490,9 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         previously frozen historical cut must supply that cut's recorded
         visibility_journal_sequence explicitly.
 
-        Current main does not yet retain exact provider_environment in this
-        durable book.  BYBIT PAPER/LIVE therefore remains too ambiguous for
-        terminal provider-cost evidence and is rejected here until the shared
-        provider-domain migration lands.
+        The durable book identity retains exact provider_environment. BYBIT
+        historical cuts therefore remain separated across TESTNET, DEMO and
+        MAINNET and legacy ambiguous scope cannot silently alias a new book.
         """
 
         if type(aggregate_version) is not int or aggregate_version <= 0:
@@ -2268,16 +2536,14 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=self.provider_id,
             account_id=self.account_id,
             environment=self.environment,
+            provider_environment=self.provider_environment,
         )
         if self.book_id != expected_book_id:
             raise AccountingConflict(
                 "historical economic cut book identity does not match owner scope"
             )
-        if self.provider_id == "BYBIT" and self.environment in {"PAPER", "LIVE"}:
-            raise AccountingConflict(
-                "BYBIT historical economic cut requires exact provider_environment "
-                "before terminal provider-cost evidence"
-            )
+        # Provider environment is part of the durable book identity, so
+        # historical cuts are unambiguous across BYBIT TESTNET/DEMO/MAINNET.
         if type(self.store) is not JournalStore:
             raise AccountingConflict(
                 "historical economic cut requires exact canonical JournalStore"
@@ -2381,6 +2647,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             "provider_id": self.provider_id,
             "account_id": self.account_id,
             "environment": self.environment,
+            "provider_environment": self.provider_environment,
             "book_id": self.book_id,
             "aggregate_version": aggregate_version,
             "journal_sequence": journal_sequence,
@@ -2396,6 +2663,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=self.provider_id,
             account_id=self.account_id,
             environment=self.environment,
+            provider_environment=self.provider_environment,
             book_id=self.book_id,
             aggregate_version=aggregate_version,
             journal_sequence=journal_sequence,
@@ -2447,6 +2715,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=authority.provider_id,
             account_id=authority.account_id,
             environment=authority.environment,
+            provider_environment=authority.provider_environment,
             transactions=batch,
         )
         request = {
@@ -2454,6 +2723,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             "provider_id": authority.provider_id,
             "account_id": authority.account_id,
             "environment": authority.environment,
+            "provider_environment": authority.provider_environment,
             "batch_digest": batch_digest,
             "transactions": transaction_payloads,
         }
@@ -2483,10 +2753,16 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 raise AccountingConflict(
                     "economic transactions already exist without one canonical durable batch"
                 )
+            matching_event_index = next(
+                index for index, event in enumerate(events) if event is matches[0]
+            )
+            historical = DurableProviderEconomicBook._replay(
+                self, events[: matching_event_index + 1]
+            )
             result = {
                 "batch_digest": batch_digest,
                 "transaction_ids": [item.transaction_id for item in batch],
-                "resulting_book_digest": current.audit_digest(),
+                "resulting_book_digest": historical.audit_digest(),
             }
             return PreparedEconomicBatch(
                 transactions=batch,
@@ -2525,6 +2801,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             "provider_id": authority.provider_id,
             "account_id": authority.account_id,
             "environment": authority.environment,
+            "provider_environment": authority.provider_environment,
             "batch_digest": batch_digest,
             "previous_book_digest": previous_digest,
             "resulting_book_digest": resulting_digest,
@@ -2637,6 +2914,103 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
 ) = _install_durable_provider_economic_book_authority()
 del _install_durable_provider_economic_book_authority
 
+
+def _make_durable_provider_economic_init(initialize):
+    """Retain the canonical constructor issuer selected at module import."""
+
+    def __init__(
+        self,
+        store: JournalStore,
+        *,
+        provider_id: str,
+        account_id: str,
+        environment: str,
+        provider_environment: str | None = None,
+    ):
+        initialize(
+            self,
+            store,
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            provider_environment=provider_environment,
+        )
+
+    return __init__
+
+
+DurableProviderEconomicBook.__init__ = _make_durable_provider_economic_init(
+    _initialize_durable_provider_economic_book
+)
+del _make_durable_provider_economic_init
+
+
+def _make_durable_provider_economic_read_facade(
+    require_authority,
+    *,
+    _getattribute=object.__getattribute__,
+    _digest_payload=payload_digest,
+):
+    """Bind durable read authority and digest primitives selected at import."""
+
+    def projection(self):
+        authority = require_authority(self)
+        return authority, _getattribute(self, "_book")
+
+    def transactions(self):
+        _authority, book = projection(self)
+        return book.transactions
+
+    def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
+        _authority, book = projection(self)
+        return book.balance(ledger_account, asset_or_currency)
+
+    def cash(self, currency: str) -> Decimal:
+        _authority, book = projection(self)
+        return book.cash(currency)
+
+    def position(self, instrument: str) -> Decimal:
+        _authority, book = projection(self)
+        return book.position(instrument)
+
+    def fee_expense(self, currency: str) -> Decimal:
+        _authority, book = projection(self)
+        return book.fee_expense(currency)
+
+    def audit_digest(self) -> str:
+        authority, book = projection(self)
+        return _digest_payload(
+            {
+                "schema_version": "1.0.0",
+                "environment": authority.environment,
+                "account_id": authority.account_id,
+                "economic_book_digest": book.audit_digest(),
+            }
+        )
+
+    return (
+        property(transactions),
+        balance,
+        cash,
+        position,
+        fee_expense,
+        audit_digest,
+    )
+
+
+(
+    DurableProviderEconomicBook.transactions,
+    DurableProviderEconomicBook.balance,
+    DurableProviderEconomicBook.cash,
+    DurableProviderEconomicBook.position,
+    DurableProviderEconomicBook.fee_expense,
+    DurableProviderEconomicBook.audit_digest,
+) = _make_durable_provider_economic_read_facade(
+    _require_durable_provider_economic_book_authority
+)
+del _make_durable_provider_economic_read_facade
+
+
 def commit_economic_batch_with_reservation_consumption(
     economic_book: DurableProviderEconomicBook,
     reservation_book: DurableReservationBook,
@@ -2732,15 +3106,19 @@ def commit_economic_batch_with_reservation_consumption(
                 )
 
     if provider_fill_binding is not None:
-        if not isinstance(provider_fill_binding, PreparedProviderFillBinding):
+        if type(provider_fill_binding) is not PreparedProviderFillBinding:
             raise TypeError(
-                "provider_fill_binding must be PreparedProviderFillBinding or None"
+                "provider_fill_binding must be exact PreparedProviderFillBinding or None"
             )
         binding_request = provider_fill_binding.request
         if (
             binding_request.get("provider_id") != economic_book.provider_id
             or binding_request.get("account_id") != economic_book.account_id
             or binding_request.get("environment") != economic_book.environment
+            or binding_request.get(
+                "provider_environment",
+                economic_book.environment,
+            ) != economic_book.provider_environment
             or binding_request.get("reservation_id") != _text(
                 reservation_id, name="reservation_id"
             )
@@ -2765,6 +3143,8 @@ def commit_economic_batch_with_reservation_consumption(
             settlement_book.scope.provider_id != economic_book.provider_id
             or settlement_book.scope.account_id != economic_book.account_id
             or settlement_book.scope.environment != economic_book.environment
+            or settlement_book.scope.provider_environment
+            != economic_book.provider_environment
         ):
             raise ValueError(
                 "settlement book must share provider/account/environment scope"
@@ -2782,27 +3162,75 @@ def commit_economic_batch_with_reservation_consumption(
         if committed_at is None
         else _instant_text(committed_at, name="committed_at")
     )
-    reservation_component_key = _scoped_identity(
+    reservation_component_key = _financial_scope_identity(
         "atomic-fill-reservation",
-        economic_book.provider_id,
-        economic_book.account_id,
-        economic_book.environment,
-        idem,
+        provider_id=economic_book.provider_id,
+        account_id=economic_book.account_id,
+        environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
+        tail=idem,
     )
-    reservation_plan = reservation_book.prepare_consume_mutation(
-        event_key=_scoped_identity(
-            "atomic-fill-reservation-event",
-            economic_book.provider_id,
-            economic_book.account_id,
-            economic_book.environment,
-            cid,
-        ),
-        idempotency_key=reservation_component_key,
-        reservation_id=rid,
-        usage=usage,
-        committed_at=when,
-        expected_snapshot_digest=reservation_expected_snapshot_digest,
+    reservation_event_key = _financial_scope_identity(
+        "atomic-fill-reservation-event",
+        provider_id=economic_book.provider_id,
+        account_id=economic_book.account_id,
+        environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
+        tail=cid,
     )
+    if _order_fill_plan is not None and _order_fill_plan.snapshot.state == "FILLED":
+        if _order_fill_plan.snapshot.open_quantity != 0:
+            raise AccountingConflict(
+                "FILLED OMS snapshot must have zero open quantity before reservation release"
+            )
+        order_fill_envelope = _order_fill_plan.envelope
+        if type(order_fill_envelope) is not dict:
+            raise AccountingConflict(
+                "FILLED OMS reservation release requires exact durable fill envelope"
+            )
+        order_fill_request = _order_fill_plan.request
+        order_fill_client_order_id = _text(
+            order_fill_request.get("client_order_id"),
+            name="client_order_id",
+        )
+        order_fill_fill_id = _text(
+            order_fill_request.get("fill_id"),
+            name="fill_id",
+        )
+        order_fill_provider_execution_id = _text(
+            order_fill_request.get("provider_execution_id"),
+            name="provider_execution_id",
+        )
+        reservation_plan = reservation_book.prepare_consume_and_mark_filled_mutation(
+            event_key=reservation_event_key,
+            idempotency_key=reservation_component_key,
+            reservation_id=rid,
+            usage=usage,
+            order_fill_event_id=_order_fill_plan.event_id,
+            order_fill_payload_hash=_text(
+                order_fill_envelope.get("payload_hash"),
+                name="order_fill_payload_hash",
+            ),
+            order_fill_snapshot_digest=payload_digest(
+                _order_fill_plan.snapshot_payload
+            ),
+            order_fill_mutation_hash=_order_fill_plan.mutation_hash,
+            order_fill_provider_id=economic_book.provider_id,
+            order_fill_client_order_id=order_fill_client_order_id,
+            order_fill_fill_id=order_fill_fill_id,
+            order_fill_provider_execution_id=order_fill_provider_execution_id,
+            committed_at=when,
+            expected_snapshot_digest=reservation_expected_snapshot_digest,
+        )
+    else:
+        reservation_plan = reservation_book.prepare_consume_mutation(
+            event_key=reservation_event_key,
+            idempotency_key=reservation_component_key,
+            reservation_id=rid,
+            usage=usage,
+            committed_at=when,
+            expected_snapshot_digest=reservation_expected_snapshot_digest,
+        )
     economic_plan = economic_book.prepare_batch_mutation(
         transactions,
         committed_at=when,
@@ -2817,9 +3245,15 @@ def commit_economic_batch_with_reservation_consumption(
             )
         expected_cause_event_id = provider_execution_id
         if provider_fill_binding is not None:
+            provider_domain = (
+                ""
+                if economic_book.provider_environment == economic_book.environment
+                else f"provider-environment:{economic_book.provider_environment}:"
+            )
             expected_cause_event_id = (
                 f"provider:{economic_book.provider_id}:"
                 f"environment:{economic_book.environment}:"
+                f"{provider_domain}"
                 f"account:{economic_book.account_id}:"
                 f"execution:{provider_execution_id}"
             )
@@ -2981,21 +3415,23 @@ def commit_economic_batch_with_reservation_consumption(
         uuid5(
             NAMESPACE_URL,
             "https://commands.autotrade.local/atomic-fill/"
-            + _scoped_identity(
+            + _financial_scope_identity(
                 "atomic-fill-command",
-                economic_book.provider_id,
-                economic_book.account_id,
-                economic_book.environment,
-                cid,
+                provider_id=economic_book.provider_id,
+                account_id=economic_book.account_id,
+                environment=economic_book.environment,
+                provider_environment=economic_book.provider_environment,
+                tail=cid,
             ),
         )
     )
-    journal_idempotency_key = "atomic-fill:" + _scoped_identity(
+    journal_idempotency_key = "atomic-fill:" + _financial_scope_identity(
         "atomic-fill-idempotency",
-        economic_book.provider_id,
-        economic_book.account_id,
-        economic_book.environment,
-        idem,
+        provider_id=economic_book.provider_id,
+        account_id=economic_book.account_id,
+        environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
+        tail=idem,
     )
 
     if all_financial_committed:
@@ -3276,6 +3712,8 @@ def commit_economic_correction_with_settlement_replacement(
         settlement_book.scope.provider_id != economic_book.provider_id
         or settlement_book.scope.account_id != economic_book.account_id
         or settlement_book.scope.environment != economic_book.environment
+        or settlement_book.scope.provider_environment
+        != economic_book.provider_environment
     ):
         raise ValueError(
             "settlement book must share provider/account/environment scope"
@@ -3303,12 +3741,10 @@ def commit_economic_correction_with_settlement_replacement(
             raise ValueError(
                 "reservation-aware correction requires correction binding evidence"
             )
-        if not isinstance(
-            provider_fill_correction_binding,
-            PreparedProviderFillCorrectionBinding,
-        ):
+        if type(provider_fill_correction_binding) is not PreparedProviderFillCorrectionBinding:
             raise TypeError(
-                "provider_fill_correction_binding has invalid type"
+                "provider_fill_correction_binding must be exact "
+                "PreparedProviderFillCorrectionBinding"
             )
         rid = _text(reservation_id, name="reservation_id")
         binding_request = provider_fill_correction_binding.request
@@ -3316,16 +3752,20 @@ def commit_economic_correction_with_settlement_replacement(
             binding_request.get("provider_id") != economic_book.provider_id
             or binding_request.get("account_id") != economic_book.account_id
             or binding_request.get("environment") != economic_book.environment
+            or binding_request.get(
+                "provider_environment",
+                economic_book.environment,
+            ) != economic_book.provider_environment
             or binding_request.get("reservation_id") != rid
         ):
             raise AccountingConflict(
                 "provider fill correction binding scope does not match correction"
             )
 
-    if not isinstance(reversal, JournalTransaction):
-        raise TypeError("reversal must be a JournalTransaction")
-    if not isinstance(replacement, JournalTransaction):
-        raise TypeError("replacement must be a JournalTransaction")
+    if type(reversal) is not JournalTransaction:
+        raise TypeError("reversal must be an exact JournalTransaction")
+    if type(replacement) is not JournalTransaction:
+        raise TypeError("replacement must be an exact JournalTransaction")
     if reversal.reverses_transaction_id is None:
         raise AccountingConflict(
             "settlement-aware correction requires an explicit reversal"
@@ -3415,19 +3855,21 @@ def commit_economic_correction_with_settlement_replacement(
         additional_usage = provider_fill_correction_binding.additional_usage
         if additional_usage:
             reservation_plan = reservation_book.prepare_consume_mutation(
-                event_key=_scoped_identity(
+                event_key=_financial_scope_identity(
                     "atomic-correction-reservation-event",
-                    economic_book.provider_id,
-                    economic_book.account_id,
-                    economic_book.environment,
-                    cid,
+                    provider_id=economic_book.provider_id,
+                    account_id=economic_book.account_id,
+                    environment=economic_book.environment,
+                    provider_environment=economic_book.provider_environment,
+                    tail=cid,
                 ),
-                idempotency_key=_scoped_identity(
+                idempotency_key=_financial_scope_identity(
                     "atomic-correction-reservation",
-                    economic_book.provider_id,
-                    economic_book.account_id,
-                    economic_book.environment,
-                    idem,
+                    provider_id=economic_book.provider_id,
+                    account_id=economic_book.account_id,
+                    environment=economic_book.environment,
+                    provider_environment=economic_book.provider_environment,
+                    tail=idem,
                 ),
                 reservation_id=_text(reservation_id, name="reservation_id"),
                 usage=additional_usage,
@@ -3520,23 +3962,25 @@ def commit_economic_correction_with_settlement_replacement(
         uuid5(
             NAMESPACE_URL,
             "https://commands.autotrade.local/atomic-settlement-correction/"
-            + _scoped_identity(
+            + _financial_scope_identity(
                 "atomic-settlement-correction-command",
-                economic_book.provider_id,
-                economic_book.account_id,
-                economic_book.environment,
-                cid,
+                provider_id=economic_book.provider_id,
+                account_id=economic_book.account_id,
+                environment=economic_book.environment,
+                provider_environment=economic_book.provider_environment,
+                tail=cid,
             ),
         )
     )
     journal_idempotency_key = (
         "atomic-settlement-correction:"
-        + _scoped_identity(
+        + _financial_scope_identity(
             "atomic-settlement-correction-idempotency",
-            economic_book.provider_id,
-            economic_book.account_id,
-            economic_book.environment,
-            idem,
+            provider_id=economic_book.provider_id,
+            account_id=economic_book.account_id,
+            environment=economic_book.environment,
+            provider_environment=economic_book.provider_environment,
+            tail=idem,
         )
     )
     events: list[tuple[dict[str, Any], str | None]] = [
@@ -3610,6 +4054,27 @@ def commit_provider_fill_correction_with_settlement_replacement(
 
     if type(economic_book) is not DurableProviderEconomicBook:
         raise TypeError("economic_book must be exact DurableProviderEconomicBook")
+    if type(original_projected_fill) is not ProjectedFillEvidence:
+        raise TypeError("original_projected_fill must be exact ProjectedFillEvidence")
+    if type(original_provider_fill) is not ProviderFillEvidence:
+        raise TypeError("original_provider_fill must be exact ProviderFillEvidence")
+    if type(corrected_projected_fill) is not ProjectedFillEvidence:
+        raise TypeError("corrected_projected_fill must be exact ProjectedFillEvidence")
+    if type(corrected_provider_fill) is not ProviderFillEvidence:
+        raise TypeError("corrected_provider_fill must be exact ProviderFillEvidence")
+    normalized_instrument = _text(
+        expected_instrument,
+        name="expected_instrument",
+    )
+    normalized_settlement = _text(
+        settlement_currency,
+        name="settlement_currency",
+    ).upper()
+    normalized_family = _text(asset_family, name="asset_family").upper()
+    normalized_correction_observed_at = _instant_text(
+        correction_observed_at,
+        name="correction_observed_at",
+    )
     _require_durable_provider_economic_book_authority(economic_book)
     _require_same_financial_journal_generation(
         economic_book,
@@ -3636,9 +4101,9 @@ def commit_provider_fill_correction_with_settlement_replacement(
         original_provider_fill=original_provider_fill,
         corrected_projected_fill=corrected_projected_fill,
         corrected_provider_fill=corrected_provider_fill,
-        expected_instrument=expected_instrument,
-        settlement_currency=settlement_currency,
-        correction_observed_at=correction_observed_at,
+        expected_instrument=normalized_instrument,
+        settlement_currency=normalized_settlement,
+        correction_observed_at=normalized_correction_observed_at,
     )
     binding = _prepare_provider_fill_correction_binding(
         economic_book,
@@ -3649,7 +4114,7 @@ def commit_provider_fill_correction_with_settlement_replacement(
         corrected_projected_fill=corrected_projected_fill,
         corrected_provider_fill=corrected_provider_fill,
         replacement=replacement,
-        asset_family=asset_family,
+        asset_family=normalized_family,
         committed_at=when,
     )
     return commit_economic_correction_with_settlement_replacement(
@@ -3771,29 +4236,48 @@ def commit_provider_fill_bust_with_economic_reversal(
     bust_provider_revision: str,
     bust_observed_at: str,
     order_event_key: str,
+    reservation_book: DurableReservationBook | None = None,
+    reservation_id: str | None = None,
     correction_fill_id: str | None = None,
     committed_at: str | None = None,
     order_evidence_refs: Sequence[Mapping[str, object]] | None = None,
 ) -> bool:
     """Atomically compose provider BUST_FILL with its exact economic reversal.
 
-    A bust never releases reservation capacity. Unsettled settlement obligations
-    remain immutable historical evidence and become inactive with their reversed
-    economic source. A source that already has settlement-completion evidence is
-    blocked until a distinct provider settlement-compensation authority exists.
-    Fresh OMS + reversal commit in one EVENT_BATCH. An exact OMS-only legacy
-    split may recover the missing reversal under a global journal-sequence CAS.
-    Finance-without-OMS and unproven fully split state fail closed.
+    A bust never releases reservation capacity. When the caller supplies the
+    canonical reservation authority, the exact provider-fill binding is loaded
+    from durable history and its original derived usage is moved from consumed
+    back to remaining in the same JournalStore transaction as the OMS bust and
+    economic reversal. That restores held capacity; it does not free it.
+
+    Unsettled settlement obligations remain immutable historical evidence and
+    become inactive with their reversed economic source. A source that already
+    has settlement-completion evidence is blocked until a distinct provider
+    settlement-compensation authority exists. An exact OMS-only legacy split
+    may recover the missing financial effects under a global journal-sequence
+    CAS. Finance-without-OMS and unproven split state fail closed.
     """
 
     if type(economic_book) is not DurableProviderEconomicBook:
         raise TypeError("economic_book must be exact DurableProviderEconomicBook")
     if type(order_book) is not DurableOrderBookProjection:
         raise TypeError("order_book must be exact DurableOrderBookProjection")
-    if not isinstance(projected_fill, ProjectedFillEvidence):
+    if type(projected_fill) is not ProjectedFillEvidence:
         raise TypeError("projected_fill must be ProjectedFillEvidence")
-    if not isinstance(provider_fill, ProviderFillEvidence):
+    if type(provider_fill) is not ProviderFillEvidence:
         raise TypeError("provider_fill must be ProviderFillEvidence")
+    normalized_instrument = _text(
+        expected_instrument,
+        name="expected_instrument",
+    )
+    normalized_settlement = _text(
+        settlement_currency,
+        name="settlement_currency",
+    ).upper()
+    normalized_bust_observed_at = _instant_text(
+        bust_observed_at,
+        name="bust_observed_at",
+    )
     _require_durable_provider_economic_book_authority(economic_book)
     _require_same_financial_journal_generation(
         economic_book,
@@ -3839,6 +4323,205 @@ def commit_provider_fill_bust_with_economic_reversal(
     cid = _text(command_id, name="command_id")
     idem = _text(idempotency_key, name="idempotency_key")
 
+    reservation_plan = None
+    reservation_usage: Mapping[str, Decimal] | None = None
+    reservation_cut_digest: str | None = None
+    initial_fill_binding_event_id: str | None = None
+    initial_fill_binding_request_digest: str | None = None
+    initial_source_transaction_id: str | None = None
+    rid: str | None = None
+
+    binding_aggregate_id = _provider_fill_binding_aggregate_id(
+        provider_id=economic_book.provider_id,
+        account_id=economic_book.account_id,
+        environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
+        provider_execution_id=projected_fill.provider_execution_id,
+    )
+    binding_events = _economic_store_load_events(
+        economic_book,
+        _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
+        binding_aggregate_id,
+    )
+
+    if reservation_book is None:
+        if reservation_id is not None:
+            raise ValueError("reservation_id requires reservation_book")
+        if binding_events:
+            raise AccountingConflict(
+                "reservation-bound fill bust requires reservation authority"
+            )
+    else:
+        if type(reservation_book) is not DurableReservationBook:
+            raise TypeError(
+                "reservation_book must be exact DurableReservationBook"
+            )
+        if reservation_id is None:
+            raise ValueError("reservation_id is required with reservation_book")
+        _require_same_financial_journal_generation(
+            economic_book,
+            reservation_book,
+            expected_type=DurableReservationBook,
+            subject="reservation book",
+        )
+        if (
+            reservation_book.account_id != economic_book.account_id
+            or reservation_book.environment != economic_book.environment
+        ):
+            raise ValueError(
+                "reservation book must share account/environment scope"
+            )
+        if projected_fill.correction_of is not None:
+            raise AccountingConflict(
+                "reservation-aware fill bust is not qualified for corrected fill evidence"
+            )
+
+        rid = _text(reservation_id, name="reservation_id")
+        if len(binding_events) != 1:
+            raise AccountingConflict(
+                "reservation-aware fill bust requires exactly one initial financial binding"
+            )
+        binding_event = binding_events[0]
+        if (
+            binding_event.get("event_type") != _PROVIDER_FILL_BINDING_EVENT_TYPE
+            or int(binding_event.get("aggregate_version", 0)) != 1
+        ):
+            raise AccountingConflict(
+                "initial provider fill financial binding is invalid"
+            )
+        binding_payload = binding_event.get("payload")
+        if type(binding_payload) is not dict:
+            raise AccountingConflict(
+                "initial provider fill financial binding payload is invalid"
+            )
+        _require_plain_financial_json(
+            binding_payload,
+            name="initial provider fill financial binding payload",
+        )
+        if payload_digest(binding_payload) != binding_event.get("payload_hash"):
+            raise AccountingConflict(
+                "initial provider fill financial binding payload hash is invalid"
+            )
+        binding_request = binding_payload.get("request")
+        if type(binding_request) is not dict:
+            raise AccountingConflict(
+                "initial provider fill financial binding request is invalid"
+            )
+        binding_request = dict(binding_request)
+        binding_request_digest = payload_digest(binding_request)
+        if binding_payload.get("request_digest") != binding_request_digest:
+            raise AccountingConflict(
+                "initial provider fill financial binding request digest is invalid"
+            )
+
+        expected_projected_payload = _projected_fill_binding_payload(
+            projected_fill
+        )
+        expected_provider_payload = _provider_fill_binding_payload(
+            provider_fill
+        )
+        if (
+            binding_request.get("provider_id") != economic_book.provider_id
+            or binding_request.get("account_id") != economic_book.account_id
+            or binding_request.get("environment") != economic_book.environment
+            or binding_request.get(
+                "provider_environment",
+                economic_book.environment,
+            ) != economic_book.provider_environment
+            or binding_request.get("provider_execution_id")
+            != projected_fill.provider_execution_id
+            or binding_request.get("reservation_id") != rid
+            or binding_request.get("intent_id") != projected_fill.intent_id
+            or binding_request.get("fill_id") != projected_fill.fill_id
+            or binding_request.get("provider_revision")
+            != projected_fill.provider_revision
+            or binding_request.get("projected_fill")
+            != expected_projected_payload
+            or binding_request.get("provider_fill")
+            != expected_provider_payload
+            or binding_request.get("projected_fill_digest")
+            != payload_digest(expected_projected_payload)
+            or binding_request.get("provider_fill_digest")
+            != payload_digest(expected_provider_payload)
+        ):
+            raise AccountingConflict(
+                "fill bust evidence does not match the initial financial binding"
+            )
+
+        reservation_usage = _positive_usage_map(
+            binding_request.get("derived_usage"),
+            name="initial provider fill usage",
+        )
+        snapshot = reservation_book.get(rid)
+        if snapshot.intent_id != projected_fill.intent_id:
+            raise AccountingConflict(
+                "fill bust intent does not match admitted reservation"
+            )
+        for resource, amount in reservation_usage.items():
+            if resource not in snapshot.original or amount > snapshot.original[resource]:
+                raise AccountingConflict(
+                    "fill bust usage exceeds the admitted reservation envelope"
+                )
+
+        source_transaction_id = _text(
+            binding_request.get("transaction_id"),
+            name="initial transaction_id",
+        )
+        initial_source_transaction_id = source_transaction_id
+        source_transactions = tuple(
+            transaction
+            for transaction in economic_book.transactions
+            if transaction.transaction_id == source_transaction_id
+        )
+        if len(source_transactions) != 1:
+            raise AccountingConflict(
+                "initial provider fill binding does not identify one economic transaction"
+            )
+        source_transaction = source_transactions[0]
+        if binding_request.get("transaction_digest") != payload_digest(
+            canonical_transaction(source_transaction)
+        ):
+            raise AccountingConflict(
+                "initial provider fill transaction digest is invalid"
+            )
+        stored_cut = _text(
+            binding_request.get("reservation_cut_digest"),
+            name="initial reservation_cut_digest",
+        )
+        if (
+            not stored_cut.startswith("sha256:")
+            or len(stored_cut) != 71
+            or any(ch not in "0123456789abcdef" for ch in stored_cut[7:])
+        ):
+            raise AccountingConflict(
+                "initial provider fill reservation cut is invalid"
+            )
+        usage_payload = _usage_payload(reservation_usage)
+        expected_plan_digest = payload_digest(
+            {
+                "schema_version": "1.1.0",
+                "provider_id": economic_book.provider_id,
+                "account_id": economic_book.account_id,
+                "environment": economic_book.environment,
+                "reservation_id": rid,
+                "intent_id": projected_fill.intent_id,
+                "provider_execution_id": projected_fill.provider_execution_id,
+                "reservation_cut_digest": stored_cut,
+                "transaction": canonical_transaction(source_transaction),
+                "derived_usage": usage_payload,
+            }
+        )
+        if binding_request.get("plan_digest") != expected_plan_digest:
+            raise AccountingConflict(
+                "initial provider fill financial plan digest is invalid"
+            )
+        reservation_cut_digest = reservation_snapshot_digest(snapshot)
+        initial_fill_binding_event_id = _text(
+            binding_event.get("event_id"),
+            name="initial fill binding event_id",
+        )
+        initial_fill_binding_request_digest = binding_request_digest
+
     order = order_book.order(projected_fill.client_order_id)
     if order.side != projected_fill.side:
         raise AccountingConflict("fill bust OMS side differs from provider evidence")
@@ -3864,14 +4547,21 @@ def commit_provider_fill_bust_with_economic_reversal(
         provider_id=economic_book.provider_id,
         projected_fill=projected_fill,
         provider_fill=provider_fill,
-        expected_instrument=expected_instrument,
-        settlement_currency=settlement_currency,
+        expected_instrument=normalized_instrument,
+        settlement_currency=normalized_settlement,
         bust_provider_revision=revision,
-        bust_observed_at=bust_observed_at,
+        bust_observed_at=normalized_bust_observed_at,
     )
     if reversal.reverses_transaction_id is None:
         raise AccountingConflict(
             "fill bust compensation is not bound to one reversed economic source"
+        )
+    if (
+        initial_source_transaction_id is not None
+        and reversal.reverses_transaction_id != initial_source_transaction_id
+    ):
+        raise AccountingConflict(
+            "fill bust reversal does not target the reservation-bound source transaction"
         )
     settled_source_obligations = _settled_obligation_ids_for_economic_source(
         economic_book,
@@ -3895,6 +4585,32 @@ def commit_provider_fill_bust_with_economic_reversal(
         committed_at=when,
         evidence_refs=order_evidence_refs,
     )
+    if reservation_book is not None:
+        assert rid is not None
+        assert reservation_usage is not None
+        assert reservation_cut_digest is not None
+        reservation_plan = reservation_book.prepare_restore_consumption_mutation(
+            event_key=_financial_scope_identity(
+                "atomic-fill-bust-reservation-event",
+                provider_id=economic_book.provider_id,
+                account_id=economic_book.account_id,
+                environment=economic_book.environment,
+                provider_environment=economic_book.provider_environment,
+                tail=cid,
+            ),
+            idempotency_key=_financial_scope_identity(
+                "atomic-fill-bust-reservation",
+                provider_id=economic_book.provider_id,
+                account_id=economic_book.account_id,
+                environment=economic_book.environment,
+                provider_environment=economic_book.provider_environment,
+                tail=idem,
+            ),
+            reservation_id=rid,
+            usage=reservation_usage,
+            committed_at=when,
+            expected_snapshot_digest=reservation_cut_digest,
+        )
 
     if not order_plan.already_committed:
         if len(active_before) != 1:
@@ -3917,9 +4633,32 @@ def commit_provider_fill_bust_with_economic_reversal(
     if economic_plan.already_committed and not order_plan.already_committed:
         economic_book.refresh()
         order_book.refresh()
+        if reservation_book is not None:
+            reservation_book.refresh()
         raise AccountingConflict(
             "economic fill reversal is committed without the matching OMS bust"
         )
+    if reservation_plan is not None:
+        if reservation_plan.already_committed and not (
+            economic_plan.already_committed and order_plan.already_committed
+        ):
+            economic_book.refresh()
+            order_book.refresh()
+            reservation_book.refresh()
+            raise AccountingConflict(
+                "reservation restoration is committed without the matching OMS/economic bust"
+            )
+        if (
+            economic_plan.already_committed
+            and order_plan.already_committed
+            and not reservation_plan.already_committed
+        ):
+            economic_book.refresh()
+            order_book.refresh()
+            reservation_book.refresh()
+            raise AccountingConflict(
+                "committed OMS/economic bust is missing reservation restoration"
+            )
 
     request = {
         "schema_version": "1.0.0",
@@ -3951,25 +4690,58 @@ def commit_provider_fill_bust_with_economic_reversal(
         },
         "economic_reversal": economic_plan.result,
     }
+    if reservation_plan is not None:
+        assert rid is not None
+        assert initial_fill_binding_event_id is not None
+        assert initial_fill_binding_request_digest is not None
+        request = {
+            **request,
+            "schema_version": "1.1.0",
+            "reservation_restoration": {
+                "reservation_id": rid,
+                "operation": "RESTORE_CONSUMPTION",
+                "idempotency_key": reservation_plan.idempotency_key,
+                "request": reservation_plan.request,
+                "aggregate_version": reservation_plan.aggregate_version,
+                "snapshot_digest": payload_digest(
+                    reservation_plan.snapshot_payload
+                ),
+                "source_fill_binding_event_id": (
+                    initial_fill_binding_event_id
+                ),
+                "source_fill_binding_request_digest": (
+                    initial_fill_binding_request_digest
+                ),
+            },
+        }
+        result = {
+            **result,
+            "reservation_restoration": {
+                "reservation_id": rid,
+                "snapshot": reservation_plan.snapshot_payload,
+            },
+        }
     command_identity = str(
         uuid5(
             NAMESPACE_URL,
             "https://commands.autotrade.local/atomic-fill-bust/"
-            + _scoped_identity(
+            + _financial_scope_identity(
                 "atomic-fill-bust-command",
-                economic_book.provider_id,
-                economic_book.account_id,
-                economic_book.environment,
-                cid,
+                provider_id=economic_book.provider_id,
+                account_id=economic_book.account_id,
+                environment=economic_book.environment,
+                provider_environment=economic_book.provider_environment,
+                tail=cid,
             ),
         )
     )
-    journal_idempotency_key = "atomic-fill-bust:" + _scoped_identity(
+    journal_idempotency_key = "atomic-fill-bust:" + _financial_scope_identity(
         "atomic-fill-bust-idempotency",
-        economic_book.provider_id,
-        economic_book.account_id,
-        economic_book.environment,
-        idem,
+        provider_id=economic_book.provider_id,
+        account_id=economic_book.account_id,
+        environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
+        tail=idem,
     )
     actor = "atomic-fill-bust-financial-integration"
 
@@ -3985,6 +4757,7 @@ def commit_provider_fill_bust_with_economic_reversal(
             )
         order_matches = []
         economic_matches = []
+        reservation_matches = []
         unexpected = []
         for event in raw_events:
             if not isinstance(event, Mapping):
@@ -4018,6 +4791,10 @@ def commit_provider_fill_bust_with_economic_reversal(
                 and payload.get("provider_id") == economic_book.provider_id
                 and payload.get("account_id") == economic_book.account_id
                 and payload.get("environment") == economic_book.environment
+                and payload.get(
+                    "provider_environment",
+                    economic_book.environment,
+                ) == economic_book.provider_environment
                 and payload.get("batch_digest") == economic_plan.batch_digest
                 and payload.get("transactions")
                 == [
@@ -4026,21 +4803,69 @@ def commit_provider_fill_bust_with_economic_reversal(
             ):
                 economic_matches.append(event)
                 continue
+            if reservation_plan is not None and (
+                event.get("event_type") == "ReservationMutationCommitted"
+                and event.get("aggregate_type") == "reservation_book"
+                and event.get("aggregate_id") == reservation_book.scope_id
+                and event.get("aggregate_version")
+                == reservation_plan.aggregate_version
+                and isinstance(payload, Mapping)
+                and payload.get("environment")
+                == reservation_book.environment
+                and payload.get("account_id") == reservation_book.account_id
+                and payload.get("operation") == "RESTORE_CONSUMPTION"
+                and payload.get("idempotency_key")
+                == reservation_plan.idempotency_key
+                and payload.get("request") == reservation_plan.request
+                and payload.get("request_hash")
+                == payload_digest(reservation_plan.request)
+                and payload.get("snapshot")
+                == reservation_plan.snapshot_payload
+                and payload_digest(payload) == event.get("payload_hash")
+            ):
+                reservation_matches.append(event)
+                continue
             unexpected.append(event)
-        if len(economic_matches) != 1 or len(order_matches) > 1 or unexpected:
-            raise AccountingConflict(
-                "atomic fill bust command is bound to unexpected durable effects"
-            )
-        # Fresh atomic composition owns both events. OMS-only recovery owns the
-        # missing finance event and names the immutable pre-existing OMS event.
-        if len(raw_events) == 2 and len(order_matches) != 1:
-            raise AccountingConflict(
-                "fresh atomic fill bust command does not own its OMS event"
-            )
-        if len(raw_events) not in {1, 2}:
-            raise AccountingConflict(
-                "atomic fill bust command has invalid effect cardinality"
-            )
+
+        if reservation_plan is None:
+            if len(economic_matches) != 1 or len(order_matches) > 1 or unexpected:
+                raise AccountingConflict(
+                    "atomic fill bust command is bound to unexpected durable effects"
+                )
+            # Fresh legacy composition owns both events. OMS-only recovery owns
+            # the missing finance event and names the immutable pre-existing OMS event.
+            if len(raw_events) == 2 and len(order_matches) != 1:
+                raise AccountingConflict(
+                    "fresh atomic fill bust command does not own its OMS event"
+                )
+            if len(raw_events) not in {1, 2}:
+                raise AccountingConflict(
+                    "atomic fill bust command has invalid effect cardinality"
+                )
+        else:
+            if (
+                len(economic_matches) != 1
+                or len(reservation_matches) != 1
+                or len(order_matches) > 1
+                or unexpected
+            ):
+                raise AccountingConflict(
+                    "atomic fill bust command is bound to unexpected durable effects"
+                )
+            # Fresh composition owns OMS + economic + reservation events.
+            # Exact OMS-only recovery owns only the two missing financial effects.
+            if len(raw_events) == 3 and len(order_matches) != 1:
+                raise AccountingConflict(
+                    "fresh reservation-aware fill bust command does not own its OMS event"
+                )
+            if len(raw_events) == 2 and order_matches:
+                raise AccountingConflict(
+                    "reservation-aware OMS recovery has invalid effect ownership"
+                )
+            if len(raw_events) not in {2, 3}:
+                raise AccountingConflict(
+                    "reservation-aware fill bust command has invalid effect cardinality"
+                )
 
     if economic_plan.already_committed and order_plan.already_committed:
         try:
@@ -4055,16 +4880,20 @@ def commit_provider_fill_bust_with_economic_reversal(
         except ValueError as error:
             economic_book.refresh()
             order_book.refresh()
+            if reservation_book is not None:
+                reservation_book.refresh()
             raise AccountingConflict(
-                "OMS bust/economic reversal durable command authority is invalid"
+                "OMS bust/economic/reservation durable command authority is invalid"
             ) from error
         if authority is None:
             raise AccountingConflict(
-                "OMS bust and economic reversal exist without one atomic/recovery command authority"
+                "OMS bust and financial effects exist without one atomic/recovery command authority"
             )
         validate_command_authority(authority)
         economic_book.refresh()
         order_book.refresh()
+        if reservation_book is not None:
+            reservation_book.refresh()
         return False
 
     if economic_plan.envelope is None:
@@ -4075,11 +4904,18 @@ def commit_provider_fill_bust_with_economic_reversal(
         raise AccountingConflict(
             "fresh fill bust is missing its durable OMS event"
         )
+    if reservation_plan is not None and reservation_plan.envelope is None:
+        raise AccountingConflict(
+            "fresh fill bust is missing its durable reservation restoration event"
+        )
 
     events: list[tuple[dict[str, Any], str | None]] = []
     if not order_plan.already_committed:
         assert order_plan.envelope is not None
         events.append((order_plan.envelope, order_plan.outbox_topic))
+    if reservation_plan is not None:
+        assert reservation_plan.envelope is not None
+        events.append((reservation_plan.envelope, None))
     events.append((economic_plan.envelope, "autotrade.economic.events"))
 
     try:
@@ -4094,6 +4930,9 @@ def commit_provider_fill_bust_with_economic_reversal(
             state_version=max(
                 order_plan.aggregate_version,
                 economic_plan.aggregate_version,
+                0
+                if reservation_plan is None
+                else reservation_plan.aggregate_version,
             ),
             expected_journal_sequence=evidence_journal_sequence,
             events=events,
@@ -4101,10 +4940,14 @@ def commit_provider_fill_bust_with_economic_reversal(
     except Exception:
         economic_book.refresh()
         order_book.refresh()
+        if reservation_book is not None:
+            reservation_book.refresh()
         raise
 
     economic_book.refresh()
     order_book.refresh()
+    if reservation_book is not None:
+        reservation_book.refresh()
     recorded = order_book.order(
         projected_fill.client_order_id
     ).snapshot()
@@ -4116,6 +4959,14 @@ def commit_provider_fill_bust_with_economic_reversal(
         raise AccountingConflict(
             "atomic fill bust economic reversal did not replay"
         )
+    if reservation_plan is not None:
+        assert reservation_book is not None
+        assert rid is not None
+        restored = reservation_book.get(rid)
+        if restored != reservation_plan.snapshot:
+            raise AccountingConflict(
+                "atomic fill bust reservation restoration did not replay"
+            )
     return inserted
 
 def commit_provider_fill_with_reservation_consumption(
@@ -4137,6 +4988,7 @@ def commit_provider_fill_with_reservation_consumption(
     order_book: DurableOrderBookProjection | None = None,
     order_event_key: str | None = None,
     order_evidence_refs: Sequence[Mapping[str, object]] | None = None,
+    expected_journal_sequence: int | None = None,
 ) -> bool:
     """Atomically book one provider fill and consume only evidence-derived resources.
 
@@ -4149,6 +5001,24 @@ def commit_provider_fill_with_reservation_consumption(
 
     if type(economic_book) is not DurableProviderEconomicBook:
         raise TypeError("economic_book must be exact DurableProviderEconomicBook")
+    if type(projected_fill) is not ProjectedFillEvidence:
+        raise TypeError("projected_fill must be exact ProjectedFillEvidence")
+    if type(provider_fill) is not ProviderFillEvidence:
+        raise TypeError("provider_fill must be exact ProviderFillEvidence")
+    normalized_instrument = _text(
+        expected_instrument,
+        name="expected_instrument",
+    )
+    normalized_settlement = _text(
+        settlement_currency,
+        name="settlement_currency",
+    ).upper()
+    normalized_family = _text(asset_family, name="asset_family").upper()
+    normalized_observed_at = (
+        None
+        if observed_at is None
+        else _instant_text(observed_at, name="observed_at")
+    )
     _require_durable_provider_economic_book_authority(economic_book)
     _require_same_financial_journal_generation(
         economic_book,
@@ -4163,11 +5033,11 @@ def commit_provider_fill_with_reservation_consumption(
         provider_id=economic_book.provider_id,
         projected_fill=projected_fill,
         provider_fill=provider_fill,
-        expected_instrument=expected_instrument,
-        settlement_currency=settlement_currency,
+        expected_instrument=normalized_instrument,
+        settlement_currency=normalized_settlement,
         reservation_snapshot=snapshot,
-        asset_family=asset_family,
-        observed_at=observed_at,
+        asset_family=normalized_family,
+        observed_at=normalized_observed_at,
     )
     if plan.reservation_id != rid:
         raise AccountingConflict(
@@ -4188,9 +5058,13 @@ def commit_provider_fill_with_reservation_consumption(
         committed_at=when,
     )
     if order_book is None:
-        if order_event_key is not None or order_evidence_refs is not None:
+        if (
+            order_event_key is not None
+            or order_evidence_refs is not None
+            or expected_journal_sequence is not None
+        ):
             raise ValueError(
-                "order_event_key/evidence require order_book"
+                "order_event_key/evidence/expected journal sequence require order_book"
             )
         if economic_book.environment in {"PAPER", "LIVE"}:
             raise AccountingConflict(
@@ -4219,6 +5093,13 @@ def commit_provider_fill_with_reservation_consumption(
         raise AccountingConflict(
             "provider-evidenced OMS composition requires client_order_id"
         )
+    if expected_journal_sequence is not None and (
+        type(expected_journal_sequence) is not int
+        or expected_journal_sequence < 0
+    ):
+        raise ValueError(
+            "expected_journal_sequence must be an exact non-negative integer"
+        )
     order_plan = order_book.prepare_record_fill_mutation(
         event_key=order_event_key,
         client_order_id=projected_fill.client_order_id,
@@ -4230,6 +5111,13 @@ def commit_provider_fill_with_reservation_consumption(
         committed_at=when,
         evidence_refs=order_evidence_refs,
     )
+    if (
+        expected_journal_sequence is not None
+        and order_plan.journal_sequence_cut != expected_journal_sequence
+    ):
+        raise AccountingConflict(
+            "journal sequence changed after validated recovery cut"
+        )
     return commit_economic_batch_with_reservation_consumption(
         economic_book,
         reservation_book,
@@ -4263,6 +5151,7 @@ def _snapshot_external_cash_activity(
         "provider_id",
         "account_id",
         "environment",
+        "provider_environment",
         "activity_id",
         "activity_type",
         "origin",
@@ -4280,6 +5169,7 @@ def _snapshot_external_cash_activity(
         "provider_id",
         "account_id",
         "environment",
+        "provider_environment",
         "activity_id",
         "activity_type",
         "origin",
@@ -4305,6 +5195,7 @@ def _snapshot_external_cash_activity(
         provider_id=state["provider_id"],
         account_id=state["account_id"],
         environment=state["environment"],
+        provider_environment=state["provider_environment"],
         activity_id=state["activity_id"],
         activity_type=state["activity_type"],
         origin=state["origin"],
@@ -4322,6 +5213,7 @@ def _snapshot_external_cash_activity(
             "provider_id",
             "account_id",
             "environment",
+            "provider_environment",
             "activity_id",
             "activity_type",
             "origin",
@@ -4338,6 +5230,7 @@ def _snapshot_external_cash_activity(
         snapshot.provider_id,
         snapshot.account_id,
         snapshot.environment,
+        snapshot.provider_environment,
         snapshot.activity_id,
         snapshot.activity_type,
         snapshot.origin,
@@ -4410,6 +5303,22 @@ def book_external_provider_cash_activity(
         raise ValueError("provider activity evidence account_id mismatch")
     if activity.environment != scope:
         raise ValueError("provider activity evidence environment mismatch")
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=activity.provider_environment,
+    )
+    if activity.provider_environment != provider_scope:
+        raise ValueError("provider activity evidence provider_environment mismatch")
+    provider_environment_payload = _provider_environment_payload(
+        provider_environment=provider_scope,
+        environment=scope,
+    )
+    provider_scope_payload = (
+        {}
+        if provider_environment_payload is None
+        else {"provider_environment": provider_environment_payload}
+    )
     if activity.origin not in _ALLOWED_EXTERNAL_ORIGINS:
         raise ValueError(
             "only MANUAL or EXTERNAL provider activity may be booked as an external cash flow"
@@ -4457,12 +5366,22 @@ def book_external_provider_cash_activity(
         provider_id=provider,
         account_id=account,
         environment=scope,
+        provider_environment=provider_scope,
         activity_id=activity.activity_id,
     )
     book_id = _book_id(
         provider_id=provider,
         account_id=account,
         environment=scope,
+        provider_environment=provider_scope,
+    )
+    _require_unambiguous_provider_economic_history(
+        store,
+        store_identity,
+        provider_id=provider,
+        account_id=account,
+        environment=scope,
+        scoped_book_id=book_id,
     )
     cause_event_id = f"provider-activity:{identity}"
     transaction_id = str(
@@ -4483,10 +5402,12 @@ def book_external_provider_cash_activity(
         "provider_id": provider,
         "account_id": account,
         "environment": scope,
+        **provider_scope_payload,
         "activity": {
             "provider_id": activity.provider_id,
             "account_id": activity.account_id,
             "environment": activity.environment,
+            **provider_scope_payload,
             "activity_id": activity.activity_id,
             "activity_type": activity.activity_type,
             "origin": activity.origin,
@@ -4500,6 +5421,7 @@ def book_external_provider_cash_activity(
         "provider_id": provider,
         "account_id": account,
         "environment": scope,
+        **provider_scope_payload,
         "activity_id": activity.activity_id,
         "transaction_id": transaction_id,
         "amount": amount_text,
@@ -4584,6 +5506,7 @@ def book_external_provider_cash_activity(
             or economic_payload.get("provider_id") != provider
             or economic_payload.get("account_id") != account
             or economic_payload.get("environment") != scope
+            or economic_payload.get("provider_environment", scope) != provider_scope
             or economic_payload.get("source_activity_identity") != identity
             or economic_payload.get("transaction")
             != _transaction_payload(transaction)
@@ -4658,6 +5581,7 @@ def book_external_provider_cash_activity(
         "provider_id": provider,
         "account_id": account,
         "environment": scope,
+        **provider_scope_payload,
         "source_activity_identity": identity,
         "observed_at": observed_text,
         "transaction": _transaction_payload(transaction),
@@ -4719,13 +5643,15 @@ def load_provider_account_economic_book(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> EconomicBook:
-    """Rebuild canonical economics from the one durable provider/account journal."""
+    """Rebuild canonical economics from one exact provider-domain journal."""
 
     durable = DurableProviderEconomicBook(
         store,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     return EconomicBook(durable.transactions)

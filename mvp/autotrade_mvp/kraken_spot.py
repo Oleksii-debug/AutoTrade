@@ -14,13 +14,20 @@ from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
+from weakref import ref as weakref_ref
 from hashlib import sha256
 import json
 import re
 import zlib
 
 from .capabilities import CapabilitySnapshot
-from .provider_core import ProviderResponseObservation, ProviderSubmissionObservation, Surface
+from .provider_core import (
+    ProviderResponseObservation,
+    ProviderSubmissionObservation,
+    Surface,
+    provider_response_observation_require_scope,
+    provider_submission_observation_projection,
+)
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -612,6 +619,294 @@ def prepare_spot_order_request(
         _factory_token=_KRAKEN_SPOT_PREPARED_REQUEST_FACTORY_TOKEN,
     )
 
+
+def _install_kraken_spot_prepared_request_authority(builder):
+    """Bind Spot prepared requests to the canonical factory result."""
+
+    prepared_type = KrakenSpotPreparedRequest
+    prepared_ref = weakref_ref
+    prepared_init = prepared_type.__init__
+    prepared_init_code = prepared_init.__code__
+    prepared_post_init = prepared_type.__post_init__
+    prepared_post_init_code = prepared_post_init.__code__
+    builder_code = builder.__code__
+    intent_type = KrakenSpotOrderIntent
+    intent_init = intent_type.__init__
+    intent_init_code = intent_init.__code__
+    intent_create = intent_type.create.__func__
+    intent_create_code = intent_create.__code__
+    capability_type = CapabilitySnapshot
+    datetime_type = datetime
+    decimal_type = Decimal
+    bool_type = bool
+    capability_admits = capability_type.admits
+    capability_admits_code = capability_admits.__code__
+    canonical_instant = _instant
+    canonical_instant_code = canonical_instant.__code__
+    canonical_client_id = validate_spot_client_order_id
+    canonical_client_id_code = canonical_client_id.__code__
+    canonical_text = _text
+    canonical_text_code = canonical_text.__code__
+    canonical_environment = _environment
+    canonical_environment_code = canonical_environment.__code__
+    canonical_decimal_text = _decimal_text
+    canonical_decimal_text_code = canonical_decimal_text.__code__
+    canonical_docs = KRAKEN_SPOT_DOCS
+    error_type = KrakenSpotAdapterError
+    type_error = TypeError
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_str = str
+    canonical_getattr = getattr
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    attribute_error_type = AttributeError
+    mapping_proxy_type = MappingProxyType
+    canonical_isinstance = isinstance
+    mapping_type = Mapping
+    canonical_dict = dict
+    canonical_json_module = json
+    canonical_json_dumps = json.dumps
+    canonical_sha256 = sha256
+    value_error_type = ValueError
+    factory_token = _KRAKEN_SPOT_PREPARED_REQUEST_FACTORY_TOKEN
+
+    bindings: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+    def authority_changed():
+        raise error_type("Kraken Spot prepared request authority changed")
+
+    def implementation_changed():
+        if (
+            KrakenSpotPreparedRequest is not prepared_type
+            or KrakenSpotOrderIntent is not intent_type
+            or intent_type.__init__ is not intent_init
+            or canonical_getattr(intent_init, "__code__", None) is not intent_init_code
+            or canonical_getattr(intent_type.create, "__func__", None) is not intent_create
+            or canonical_getattr(intent_create, "__code__", None) is not intent_create_code
+            or CapabilitySnapshot is not capability_type
+            or datetime is not datetime_type
+            or Decimal is not decimal_type
+            or bool is not bool_type
+            or capability_type.admits is not capability_admits
+            or canonical_getattr(capability_admits, "__code__", None)
+            is not capability_admits_code
+            or prepared_type.__init__ is not prepared_init
+            or canonical_getattr(prepared_init, "__code__", None)
+            is not prepared_init_code
+            or prepared_type.__post_init__ is not prepared_post_init
+            or canonical_getattr(prepared_post_init, "__code__", None)
+            is not prepared_post_init_code
+            or canonical_getattr(builder, "__code__", None) is not builder_code
+            or _instant is not canonical_instant
+            or canonical_getattr(canonical_instant, "__code__", None)
+            is not canonical_instant_code
+            or validate_spot_client_order_id is not canonical_client_id
+            or canonical_getattr(canonical_client_id, "__code__", None)
+            is not canonical_client_id_code
+            or _text is not canonical_text
+            or canonical_getattr(canonical_text, "__code__", None)
+            is not canonical_text_code
+            or _environment is not canonical_environment
+            or canonical_getattr(canonical_environment, "__code__", None)
+            is not canonical_environment_code
+            or _decimal_text is not canonical_decimal_text
+            or canonical_getattr(canonical_decimal_text, "__code__", None)
+            is not canonical_decimal_text_code
+            or KRAKEN_SPOT_DOCS is not canonical_docs
+            or KrakenSpotAdapterError is not error_type
+            or TypeError is not type_error
+            or ValueError is not value_error_type
+            or isinstance is not canonical_isinstance
+            or Mapping is not mapping_type
+            or dict is not canonical_dict
+            or json is not canonical_json_module
+            or json.dumps is not canonical_json_dumps
+            or sha256 is not canonical_sha256
+            or _KRAKEN_SPOT_PREPARED_REQUEST_FACTORY_TOKEN is not factory_token
+            or type is not canonical_type
+            or id is not canonical_id
+            or tuple is not canonical_tuple
+            or str is not canonical_str
+            or getattr is not canonical_getattr
+            or object is not canonical_object
+            or AttributeError is not attribute_error_type
+            or MappingProxyType is not mapping_proxy_type
+            or weakref_ref is not prepared_ref
+        ):
+            authority_changed()
+
+    def snapshot(value):
+        try:
+            return (
+                object_getattribute(value, "endpoint"),
+                object_getattribute(value, "body"),
+                object_getattribute(value, "account_id"),
+                object_getattribute(value, "environment"),
+                object_getattribute(value, "capability_snapshot_id"),
+                object_getattribute(value, "documentation_refs"),
+                object_getattribute(value, "instrument_version"),
+                object_getattribute(value, "body_sha256"),
+            )
+        except attribute_error_type:
+            authority_changed()
+
+    def same_text(value, expected):
+        if canonical_type(value) is not canonical_str or value != expected:
+            authority_changed()
+
+    def same_text_tuple(value, expected):
+        if canonical_type(value) is not canonical_tuple:
+            authority_changed()
+        for item in value:
+            if canonical_type(item) is not canonical_str:
+                authority_changed()
+        if value != expected:
+            authority_changed()
+
+    def require_canonical_kraken_spot_prepared_request(value):
+        implementation_changed()
+        if canonical_type(value) is not prepared_type:
+            raise type_error("prepared_request must be exact KrakenSpotPreparedRequest")
+        binding = bindings.get(canonical_id(value))
+        if binding is None:
+            authority_changed()
+        bound_ref, expected = binding
+        if bound_ref() is not value:
+            authority_changed()
+        current = snapshot(value)
+        same_text(current[0], expected[0])
+        if (
+            current[1] is not expected[1]
+            or canonical_type(current[1]) is not mapping_proxy_type
+        ):
+            authority_changed()
+        same_text(current[2], expected[2])
+        same_text(current[3], expected[3])
+        same_text(current[4], expected[4])
+        same_text_tuple(current[5], expected[5])
+        same_text(current[6], expected[6])
+        same_text(current[7], expected[7])
+        return value
+
+    def canonical_intent(value):
+        if canonical_type(value) is not intent_type:
+            raise type_error("intent must be exact KrakenSpotOrderIntent")
+        try:
+            raw = (
+                object_getattribute(value, "instrument_version"),
+                object_getattribute(value, "pair"),
+                object_getattribute(value, "side"),
+                object_getattribute(value, "order_type"),
+                object_getattribute(value, "volume"),
+                object_getattribute(value, "price"),
+                object_getattribute(value, "time_in_force"),
+                object_getattribute(value, "post_only"),
+            )
+        except attribute_error_type:
+            authority_changed()
+        for text_value in (raw[0], raw[1], raw[2], raw[3], raw[6]):
+            if canonical_type(text_value) is not canonical_str:
+                authority_changed()
+        if canonical_type(raw[4]) is not decimal_type:
+            authority_changed()
+        if raw[5] is not None and canonical_type(raw[5]) is not decimal_type:
+            authority_changed()
+        if canonical_type(raw[7]) is not bool_type:
+            authority_changed()
+        rebuilt = intent_create(
+            intent_type,
+            instrument_version=raw[0],
+            pair=raw[1],
+            side=raw[2],
+            order_type=raw[3],
+            volume=raw[4],
+            price=raw[5],
+            time_in_force=raw[6],
+            post_only=raw[7],
+        )
+        rebuilt_raw = (
+            object_getattribute(rebuilt, "instrument_version"),
+            object_getattribute(rebuilt, "pair"),
+            object_getattribute(rebuilt, "side"),
+            object_getattribute(rebuilt, "order_type"),
+            object_getattribute(rebuilt, "volume"),
+            object_getattribute(rebuilt, "price"),
+            object_getattribute(rebuilt, "time_in_force"),
+            object_getattribute(rebuilt, "post_only"),
+        )
+        if rebuilt_raw != raw:
+            authority_changed()
+        return rebuilt
+
+    def canonical_prepare_spot_order_request(
+        intent: KrakenSpotOrderIntent,
+        *,
+        client_order_id: str,
+        account_id: str,
+        environment: str,
+        capability: CapabilitySnapshot,
+        at: datetime,
+    ) -> KrakenSpotPreparedRequest:
+        implementation_changed()
+        if canonical_type(capability) is not capability_type:
+            raise type_error("capability must be exact CapabilitySnapshot")
+        if canonical_type(at) is not datetime_type:
+            raise type_error("at must be exact datetime")
+        for name, value in (
+            ("client_order_id", client_order_id),
+            ("account_id", account_id),
+            ("environment", environment),
+        ):
+            if canonical_type(value) is not canonical_str:
+                raise type_error(f"{name} must be exact str")
+        intent = canonical_intent(intent)
+        prepared = builder(
+            intent,
+            client_order_id=client_order_id,
+            account_id=account_id,
+            environment=environment,
+            capability=capability,
+            at=at,
+        )
+        implementation_changed()
+        if canonical_type(prepared) is not prepared_type:
+            authority_changed()
+
+        dead = [
+            key
+            for key, (existing_ref, _snapshot) in canonical_tuple(bindings.items())
+            if existing_ref() is None
+        ]
+        for key in dead:
+            bindings.pop(key, None)
+
+        object_id = canonical_id(prepared)
+        previous = bindings.get(object_id)
+        if previous is not None and previous[0]() is not None:
+            authority_changed()
+        bindings[object_id] = (prepared_ref(prepared), snapshot(prepared))
+        require_canonical_kraken_spot_prepared_request(prepared)
+        return prepared
+
+    return (
+        canonical_prepare_spot_order_request,
+        require_canonical_kraken_spot_prepared_request,
+    )
+
+
+_unissued_prepare_spot_order_request = prepare_spot_order_request
+(
+    prepare_spot_order_request,
+    require_canonical_kraken_spot_prepared_request,
+) = _install_kraken_spot_prepared_request_authority(
+    _unissued_prepare_spot_order_request
+)
+del _unissued_prepare_spot_order_request
+del _install_kraken_spot_prepared_request_authority
+
+
 def _uuid_text(value: object, *, name: str) -> str:
     text = _text(value, name=name)
     try:
@@ -632,14 +927,111 @@ def _iso_utc_text(value: object, *, name: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _prepared_submission_projection(
+    prepared_request: KrakenSpotPreparedRequest,
+    *,
+    _prepared_type=KrakenSpotPreparedRequest,
+    _canonical_type=type,
+    _canonical_str=str,
+    _canonical_any=any,
+    _type_error=TypeError,
+    _error_type=KrakenSpotAdapterError,
+    _object_getattribute=object.__getattribute__,
+    _mapping_proxy_type=MappingProxyType,
+) -> Mapping[str, object]:
+    """Read one exact prepared AddOrder request without virtual callbacks."""
+
+    if _canonical_type(prepared_request) is not _prepared_type:
+        raise _type_error(
+            "prepared_request must be exact KrakenSpotPreparedRequest"
+        )
+    body = _object_getattribute(prepared_request, "body")
+    if _canonical_type(body) is not _mapping_proxy_type:
+        raise _error_type(
+            "Kraken Spot prepared request body authority changed"
+        )
+    client_order_id = body.get("cl_ord_id")
+    fields = {
+        "endpoint": _object_getattribute(prepared_request, "endpoint"),
+        "account_id": _object_getattribute(prepared_request, "account_id"),
+        "environment": _object_getattribute(prepared_request, "environment"),
+        "capability_snapshot_id": _object_getattribute(
+            prepared_request,
+            "capability_snapshot_id",
+        ),
+        "instrument_version": _object_getattribute(
+            prepared_request,
+            "instrument_version",
+        ),
+        "body_sha256": _object_getattribute(prepared_request, "body_sha256"),
+        "client_order_id": client_order_id,
+    }
+    if _canonical_any(
+        _canonical_type(value) is not _canonical_str
+        for value in fields.values()
+    ):
+        raise _error_type(
+            "Kraken Spot prepared request authority changed"
+        )
+    return _mapping_proxy_type(fields)
+
+
+def _install_prepared_submission_projection_authority(projector, verifier):
+    """Keep prepared-scope authority outside mutable keyword defaults."""
+
+    projector_code = projector.__code__
+    verifier_code = verifier.__code__
+    prepared_type = KrakenSpotPreparedRequest
+    canonical_type = type
+    canonical_str = str
+    canonical_any = any
+    type_error = TypeError
+    error_type = KrakenSpotAdapterError
+    object_getattribute = object.__getattribute__
+    mapping_proxy_type = MappingProxyType
+    canonical_getattr = getattr
+
+    def sealed_prepared_submission_projection(
+        prepared_request: KrakenSpotPreparedRequest,
+    ) -> Mapping[str, object]:
+        if (
+            projector.__code__ is not projector_code
+            or require_canonical_kraken_spot_prepared_request is not verifier
+            or canonical_getattr(verifier, "__code__", None) is not verifier_code
+        ):
+            raise error_type("Kraken Spot prepared response authority is unavailable")
+        verifier(prepared_request)
+        return projector(
+            prepared_request,
+            _prepared_type=prepared_type,
+            _canonical_type=canonical_type,
+            _canonical_str=canonical_str,
+            _canonical_any=canonical_any,
+            _type_error=type_error,
+            _error_type=error_type,
+            _object_getattribute=object_getattribute,
+            _mapping_proxy_type=mapping_proxy_type,
+        )
+
+    return sealed_prepared_submission_projection
+
+
+_unsealed_prepared_submission_projection = _prepared_submission_projection
+_prepared_submission_projection = _install_prepared_submission_projection_authority(
+    _unsealed_prepared_submission_projection,
+    require_canonical_kraken_spot_prepared_request,
+)
+del _unsealed_prepared_submission_projection
+del _install_prepared_submission_projection_authority
+
+
 def _validate_submission_scope(
     prepared_request: KrakenSpotPreparedRequest,
     *,
     source_uri: str,
 ) -> str:
-    if not isinstance(prepared_request, KrakenSpotPreparedRequest):
-        raise TypeError("prepared_request must be KrakenSpotPreparedRequest")
-    if prepared_request.environment != "LIVE":
+    prepared = _prepared_submission_projection(prepared_request)
+    if prepared["environment"] != "LIVE":
         raise KrakenSpotAdapterError(
             "Kraken Spot provider submission evidence is qualified only for LIVE"
         )
@@ -651,43 +1043,112 @@ def _validate_submission_scope(
     return source
 
 
-def _submission_evidence(
+def _submission_projection(
     observation: ProviderSubmissionObservation,
+    *,
+    prepared_request: KrakenSpotPreparedRequest,
+    _projection=provider_submission_observation_projection,
+    _projection_code=provider_submission_observation_projection.__code__,
+    _observation_type=ProviderSubmissionObservation,
+) -> Mapping[str, object]:
+    """Authenticate one durable write observation before virtual access."""
+
+    if _projection.__code__ is not _projection_code:
+        raise KrakenSpotAdapterError(
+            "provider submission observation consumer authority is unavailable"
+        )
+    if type(observation) is not _observation_type:
+        raise TypeError(
+            "observation must be durable ProviderSubmissionObservation"
+        )
+    prepared = _prepared_submission_projection(prepared_request)
+    projected = _projection(observation)
+    cid = validate_spot_client_order_id(
+        prepared["client_order_id"]
+    )
+    expected = (
+        ("provider_id", "KRAKEN", "provider"),
+        ("endpoint", prepared["endpoint"], "endpoint"),
+        ("request_sha256", prepared["body_sha256"], "request digest"),
+        (
+            "capability_snapshot_ids",
+            (prepared["capability_snapshot_id"],),
+            "capability",
+        ),
+        (
+            "instrument_versions",
+            (prepared["instrument_version"],),
+            "instrument",
+        ),
+        ("account_id", prepared["account_id"], "account"),
+        ("environment", prepared["environment"], "environment"),
+        ("client_order_id", cid, "client-order"),
+    )
+    for key, expected_value, label in expected:
+        if projected[key] != expected_value:
+            raise KrakenSpotAdapterError(
+                f"provider-write provenance {label} mismatch"
+            )
+    return projected
+
+
+def _install_submission_projection_authority(projector):
+    """Keep durable observation projection authority outside mutable defaults."""
+
+    projector_code = projector.__code__
+    projection = provider_submission_observation_projection
+    projection_code = projection.__code__
+    observation_type = ProviderSubmissionObservation
+    error_type = KrakenSpotAdapterError
+
+    def sealed_submission_projection(
+        observation: ProviderSubmissionObservation,
+        *,
+        prepared_request: KrakenSpotPreparedRequest,
+    ) -> Mapping[str, object]:
+        if projector.__code__ is not projector_code:
+            raise error_type(
+                "provider submission observation consumer authority is unavailable"
+            )
+        return projector(
+            observation,
+            prepared_request=prepared_request,
+            _projection=projection,
+            _projection_code=projection_code,
+            _observation_type=observation_type,
+        )
+
+    return sealed_submission_projection
+
+
+_unsealed_submission_projection = _submission_projection
+_submission_projection = _install_submission_projection_authority(
+    _unsealed_submission_projection
+)
+del _unsealed_submission_projection
+del _install_submission_projection_authority
+
+
+def _submission_evidence(
+    projection: Mapping[str, object],
     *,
     prepared_request: KrakenSpotPreparedRequest,
     source_uri: str,
 ) -> dict[str, str]:
-    if not isinstance(observation, ProviderSubmissionObservation):
-        raise TypeError(
-            "observation must be durable ProviderSubmissionObservation"
-        )
     source = _validate_submission_scope(
         prepared_request,
         source_uri=source_uri,
-    )
-    cid = validate_spot_client_order_id(
-        prepared_request.body.get("cl_ord_id")
-    )
-    observation.require_scope(
-        provider_id="KRAKEN",
-        endpoint=prepared_request.endpoint,
-        prepared_request_sha256=prepared_request.body_sha256,
-        capability_snapshot_ids=(prepared_request.capability_snapshot_id,),
-        instrument_versions=(prepared_request.instrument_version,),
-        account_id=prepared_request.account_id,
-        environment=prepared_request.environment,
-        client_order_id=cid,
     )
     return {
         "artifact_id": str(
             uuid5(
                 NAMESPACE_URL,
-                f"{source}#{observation.evidence_ref}",
+                f"{source}#{projection['evidence_ref']}",
             )
         ),
-        "sha256": observation.response_sha256,
+        "sha256": projection["response_sha256"],
         "source_uri": source,
-        "observed_at": observation.observed_at,
+        "observed_at": projection["sent_at"],
         "rights_id": "provider-observation-kraken-spot",
     }
 
@@ -727,8 +1188,9 @@ def parse_spot_submission_response(
         prepared_request,
         source_uri=source_uri,
     )
+    prepared = _prepared_submission_projection(prepared_request)
     cid = validate_spot_client_order_id(
-        prepared_request.body.get("cl_ord_id")
+        prepared["client_order_id"]
     )
     if type(transport_ambiguous) is not bool:
         raise TypeError("transport_ambiguous must be boolean")
@@ -746,26 +1208,31 @@ def parse_spot_submission_response(
             "retry_disposition": "RECONCILE_FIRST",
         }
 
-    if not isinstance(observation, ProviderSubmissionObservation):
-        raise TypeError(
-            "observation must be durable ProviderSubmissionObservation"
-        )
-    if observation.response_binding.attempt_id != aid:
+    projection = _submission_projection(
+        observation,
+        prepared_request=prepared_request,
+    )
+    if projection["attempt_id"] != aid:
         raise KrakenSpotAdapterError("submission observation attempt_id mismatch")
     evidence = [
         _submission_evidence(
-            observation,
+            projection,
             prepared_request=prepared_request,
             source_uri=source,
         )
     ]
-    payload = observation.payload
+    payload = projection["payload"]
     if not isinstance(payload, Mapping):
         raise KrakenSpotAdapterError("provider response payload must be an object")
     errors = payload.get("error", ())
     if isinstance(errors, (str, bytes)) or not isinstance(errors, (list, tuple)):
         raise KrakenSpotAdapterError("Kraken error field must be a sequence")
-    nonempty_errors = tuple(str(item) for item in errors if str(item))
+    for item in errors:
+        if type(item) is not str or item != item.strip():
+            raise KrakenSpotAdapterError(
+                "Kraken error entries must be canonical exact text"
+            )
+    nonempty_errors = tuple(item for item in errors if item)
     if spot_submission_requires_reconciliation(payload):
         return {
             "attempt_id": aid,
@@ -791,7 +1258,15 @@ def parse_spot_submission_response(
     txids = result.get("txid")
     if isinstance(txids, (str, bytes)) or not isinstance(txids, (list, tuple)) or not txids:
         raise KrakenSpotAdapterError("successful response must contain exactly one transaction id")
-    normalized = tuple(_text(value, name="txid") for value in txids)
+    normalized_values: list[str] = []
+    for value in txids:
+        normalized_value = _text(value, name="txid")
+        if type(value) is not str or normalized_value != value:
+            raise KrakenSpotAdapterError(
+                "Kraken transaction id must be canonical exact text"
+            )
+        normalized_values.append(normalized_value)
+    normalized = tuple(normalized_values)
     if len(normalized) != 1:
         raise KrakenSpotAdapterError(
             "canonical SubmissionResult requires exactly one provider order id"
@@ -804,6 +1279,173 @@ def parse_spot_submission_response(
         "evidence": evidence,
         "retry_disposition": "NEVER",
     }
+
+
+def _install_spot_submission_response_parser(parser, prepared_projection):
+    """Pin the prepared-scope verifier across Spot response normalization."""
+
+    parser_code = parser.__code__
+    projection_code = prepared_projection.__code__
+    error_type = KrakenSpotAdapterError
+    canonical_getattr = getattr
+
+    def sealed_parse_spot_submission_response(
+        *,
+        attempt_id: str,
+        prepared_request: KrakenSpotPreparedRequest,
+        source_uri: str,
+        observation: ProviderSubmissionObservation | None = None,
+        transport_ambiguous: bool = False,
+    ) -> dict[str, object]:
+        if (
+            _prepared_submission_projection is not prepared_projection
+            or canonical_getattr(prepared_projection, "__code__", None)
+            is not projection_code
+            or canonical_getattr(parser, "__code__", None) is not parser_code
+        ):
+            raise error_type(
+                "Kraken Spot prepared response authority is unavailable"
+            )
+        return parser(
+            attempt_id=attempt_id,
+            prepared_request=prepared_request,
+            source_uri=source_uri,
+            observation=observation,
+            transport_ambiguous=transport_ambiguous,
+        )
+
+    return sealed_parse_spot_submission_response
+
+
+parse_spot_submission_response = _install_spot_submission_response_parser(
+    parse_spot_submission_response,
+    _prepared_submission_projection,
+)
+del _install_spot_submission_response_parser
+
+def _install_spot_submission_response_parser_authority(parser):
+    """Fence mutable parser dependencies before financial normalization."""
+
+    parser_code = parser.__code__
+    uuid_text = _uuid_text
+    uuid_text_code = uuid_text.__code__
+    validate_scope = _validate_submission_scope
+    validate_scope_code = validate_scope.__code__
+    prepared_projection = _prepared_submission_projection
+    prepared_projection_code = prepared_projection.__code__
+    client_order_validator = validate_spot_client_order_id
+    client_order_validator_code = client_order_validator.__code__
+    submission_projection = _submission_projection
+    submission_projection_code = submission_projection.__code__
+    submission_evidence = _submission_evidence
+    submission_evidence_code = submission_evidence.__code__
+    reconciliation_classifier = spot_submission_requires_reconciliation
+    reconciliation_classifier_code = reconciliation_classifier.__code__
+    canonical_text = _text
+    canonical_text_code = canonical_text.__code__
+    canonical_uuid = UUID
+    value_error_type = ValueError
+    attribute_error_type = AttributeError
+    canonical_re = re
+    canonical_re_fullmatch = canonical_re.fullmatch
+    canonical_re_fullmatch_code = canonical_re_fullmatch.__code__
+    free_client_id_pattern = _FREE_CLIENT_ID
+    canonical_uuid5 = uuid5
+    canonical_uuid5_code = canonical_uuid5.__code__
+    canonical_namespace = NAMESPACE_URL
+    error_type = KrakenSpotAdapterError
+    type_error = TypeError
+    canonical_type = type
+    canonical_bool = bool
+    canonical_isinstance = isinstance
+    canonical_any = any
+    mapping_type = Mapping
+    canonical_str = str
+    canonical_bytes = bytes
+    canonical_list = list
+    canonical_tuple = tuple
+    canonical_len = len
+    canonical_getattr = getattr
+
+    def guarded(
+        *,
+        attempt_id: str,
+        prepared_request: KrakenSpotPreparedRequest,
+        source_uri: str,
+        observation: ProviderSubmissionObservation | None = None,
+        transport_ambiguous: bool = False,
+    ) -> dict[str, object]:
+        if (
+            canonical_getattr(parser, "__code__", None) is not parser_code
+            or _uuid_text is not uuid_text
+            or canonical_getattr(uuid_text, "__code__", None) is not uuid_text_code
+            or _validate_submission_scope is not validate_scope
+            or canonical_getattr(validate_scope, "__code__", None) is not validate_scope_code
+            or _prepared_submission_projection is not prepared_projection
+            or canonical_getattr(prepared_projection, "__code__", None)
+            is not prepared_projection_code
+            or validate_spot_client_order_id is not client_order_validator
+            or canonical_getattr(client_order_validator, "__code__", None)
+            is not client_order_validator_code
+            or _submission_projection is not submission_projection
+            or canonical_getattr(submission_projection, "__code__", None)
+            is not submission_projection_code
+            or _submission_evidence is not submission_evidence
+            or canonical_getattr(submission_evidence, "__code__", None)
+            is not submission_evidence_code
+            or spot_submission_requires_reconciliation
+            is not reconciliation_classifier
+            or canonical_getattr(reconciliation_classifier, "__code__", None)
+            is not reconciliation_classifier_code
+            or _text is not canonical_text
+            or canonical_getattr(canonical_text, "__code__", None)
+            is not canonical_text_code
+            or UUID is not canonical_uuid
+            or ValueError is not value_error_type
+            or AttributeError is not attribute_error_type
+            or re is not canonical_re
+            or canonical_re.fullmatch is not canonical_re_fullmatch
+            or canonical_getattr(canonical_re_fullmatch, "__code__", None)
+            is not canonical_re_fullmatch_code
+            or _FREE_CLIENT_ID is not free_client_id_pattern
+            or uuid5 is not canonical_uuid5
+            or canonical_getattr(canonical_uuid5, "__code__", None)
+            is not canonical_uuid5_code
+            or NAMESPACE_URL is not canonical_namespace
+            or KrakenSpotAdapterError is not error_type
+            or TypeError is not type_error
+            or type is not canonical_type
+            or bool is not canonical_bool
+            or isinstance is not canonical_isinstance
+            or any is not canonical_any
+            or Mapping is not mapping_type
+            or str is not canonical_str
+            or bytes is not canonical_bytes
+            or list is not canonical_list
+            or tuple is not canonical_tuple
+            or len is not canonical_len
+            or getattr is not canonical_getattr
+        ):
+            raise error_type(
+                "Kraken Spot prepared response authority is unavailable"
+            )
+        return parser(
+            attempt_id=attempt_id,
+            prepared_request=prepared_request,
+            source_uri=source_uri,
+            observation=observation,
+            transport_ambiguous=transport_ambiguous,
+        )
+
+    return guarded
+
+
+_unsealed_parse_spot_submission_response = parse_spot_submission_response
+parse_spot_submission_response = _install_spot_submission_response_parser_authority(
+    _unsealed_parse_spot_submission_response
+)
+del _unsealed_parse_spot_submission_response
+del _install_spot_submission_response_parser_authority
 
 
 @dataclass(frozen=True)
@@ -1108,12 +1750,13 @@ def pagination_page_from_observation(
     if spec is None:
         raise KrakenSpotAdapterError("unsupported Kraken pagination surface")
     endpoint, records_key, maximum_limit = spec
-    observation.require_scope(
+    projection = provider_response_observation_require_scope(
+        observation,
         provider_id="KRAKEN",
         surface=Surface.ACTIVITIES,
         endpoint=endpoint,
     )
-    payload = observation.payload
+    payload = projection["payload"]
     if not isinstance(payload, Mapping):
         raise KrakenSpotAdapterError("Kraken pagination response must be an object")
     raw_errors = payload.get("error")
@@ -1143,7 +1786,7 @@ def pagination_page_from_observation(
             "Kraken pagination requires non-negative provider count"
         )
 
-    query = observation.query_binding.query
+    query = projection["query"]
     if query.get("without_count") == "true":
         raise KrakenSpotAdapterError(
             "without_count response cannot prove Kraken pagination coverage"
@@ -1167,8 +1810,8 @@ def pagination_page_from_observation(
 
     return KrakenSpotPageEvidence(
         surface=normalized,
-        account_id=observation.account_id,
-        environment=observation.environment,
+        account_id=projection["account_id"],
+        environment=projection["environment"],
         offset=offset,
         limit=limit,
         record_count=len(records),
@@ -1179,7 +1822,7 @@ def pagination_page_from_observation(
             )
         ),
         total_count=total_count,
-        evidence_ref=observation.evidence_ref,
+        evidence_ref=projection["evidence_ref"],
         filter_items=tuple(
             sorted(
                 (str(key), str(value))
@@ -1260,12 +1903,13 @@ def open_orders_snapshot_from_observation(
 
     if not isinstance(observation, ProviderResponseObservation):
         raise TypeError("observation must be ProviderResponseObservation")
-    observation.require_scope(
+    projection = provider_response_observation_require_scope(
+        observation,
         provider_id="KRAKEN",
         surface=Surface.ACTIVITIES,
         endpoint="/0/private/OpenOrders",
     )
-    payload = observation.payload
+    payload = projection["payload"]
     if not isinstance(payload, Mapping):
         raise KrakenSpotAdapterError(
             "Kraken open-orders response must be an object"
@@ -1289,16 +1933,16 @@ def open_orders_snapshot_from_observation(
         raise KrakenSpotAdapterError(
             "Kraken open-orders result must contain open object"
         )
-    query = observation.query_binding.query
+    query = projection["query"]
     restricting = {"userref", "cl_ord_id"} & set(query)
     if restricting:
         raise KrakenSpotAdapterError(
             "filtered Kraken OpenOrders cannot prove account-wide completeness"
         )
     return KrakenSpotOpenOrdersSnapshotEvidence(
-        account_id=observation.account_id,
-        environment=observation.environment,
-        evidence_ref=observation.evidence_ref,
+        account_id=projection["account_id"],
+        environment=projection["environment"],
+        evidence_ref=projection["evidence_ref"],
         order_ids=tuple(sorted(_text(str(value), name="provider_order_id") for value in orders)),
         filter_items=tuple(sorted((str(key), str(value)) for key, value in query.items())),
         _factory_token=_KRAKEN_SPOT_OPEN_ORDERS_FACTORY_TOKEN,
@@ -1402,14 +2046,15 @@ def parse_trade_history(
 
     if not isinstance(observation, ProviderResponseObservation):
         raise TypeError("observation must be ProviderResponseObservation")
-    observation.require_scope(
+    projection = provider_response_observation_require_scope(
+        observation,
         provider_id="KRAKEN",
         surface=Surface.ACTIVITIES,
         endpoint="/0/private/TradesHistory",
     )
-    response = observation.payload
-    account_id = observation.account_id
-    environment = observation.environment
+    response = projection["payload"]
+    account_id = projection["account_id"]
+    environment = projection["environment"]
     if not isinstance(response, Mapping):
         raise TypeError("response must be a mapping")
     raw_errors = response.get("error")
@@ -1472,7 +2117,7 @@ def parse_trade_history(
                 fee_amount=raw["fee"],
                 fee_currency=_text(fee_currency_by_pair[pair], name="fee_currency"),
                 trade_time=_seconds_to_utc(raw.get("time"), name="time"),
-                evidence_refs=(observation.evidence_ref,),
+                evidence_refs=(projection["evidence_ref"],),
             )
         )
     return tuple(fills)

@@ -17,13 +17,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-22.04, windows-2025]
     runs-on: ${{ matrix.os }}
     # The retained 120-episode unattended/recovery scenario now exceeds the
     # former 10-minute Linux budget while still making forward progress.
     # Preserve a finite hang boundary on both runners without timing out the
     # canonical core verification before it can produce exact-head evidence.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 30 || 20 }}
+    # A live exact-head Windows run on 2026-10-06 was externally cancelled at
+    # the 30-minute boundary while the retained 120-episode recovery scenario
+    # was still making forward progress; keep sufficient measured headroom.
+    timeout-minutes: ${{ matrix.os == 'windows-2025' && 45 || 20 }}
     env:
       AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}

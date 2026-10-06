@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
@@ -20,6 +21,7 @@ from mvp.autotrade_mvp.authority import (
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.reconciliation import (
     ResourceAvailabilityEvidence,
     SnapshotConsistencyEvidence,
@@ -39,6 +41,45 @@ from mvp.autotrade_mvp.risk import (
 
 INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
 OTHER_INSTRUMENT_ID = "22222222-2222-4222-8222-222222222222"
+
+
+
+def future_instrument_version(
+    *,
+    settlement_method: str = "CASH",
+    delivery_cutoff: datetime | None = None,
+) -> InstrumentVersion:
+    cutoff = (
+        datetime(2026, 9, 29, 12, tzinfo=timezone.utc)
+        if delivery_cutoff is None
+        else delivery_cutoff
+    )
+    return InstrumentVersion(
+        instrument_id=INSTRUMENT_ID,
+        version=1,
+        provider_id="TEST_PROVIDER",
+        venue_id="TEST_VENUE",
+        provider_symbol="ABC-FUT-202609",
+        asset_class="FUTURE",
+        base_currency="ABC",
+        quote_currency="USD",
+        settlement_currency="USD",
+        quantity_unit="CONTRACT",
+        contract_multiplier=Decimal("1"),
+        price_tick=Decimal("0.01"),
+        quantity_step=Decimal("1"),
+        minimum_quantity=Decimal("1"),
+        calendar_id="CONTINUOUS_24_7",
+        timezone_id="UTC",
+        effective_from=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        payoff="LINEAR",
+        underlying_id="33333333-3333-4333-8333-333333333333@1",
+        expiry=datetime(2026, 9, 30, 21, tzinfo=timezone.utc),
+        last_trade_at=datetime(2026, 9, 30, 20, tzinfo=timezone.utc),
+        delivery_cutoff=cutoff,
+        settlement_method=settlement_method,
+        margin_model_id="TEST_FUTURES_MARGIN_V1",
+    )
 
 
 def instrument_ref(version=1, instrument_id=INSTRUMENT_ID):
@@ -314,6 +355,7 @@ def authority_service(
     risk_context: RiskContext | None = None,
     risk_policy: RiskPolicy | None = None,
     resolver=None,
+    instrument_registry: InstrumentRegistry | None = None,
 ) -> AuthorityService:
     selected_resolver = resolver
     if selected_resolver is None:
@@ -326,6 +368,7 @@ def authority_service(
     return AuthorityService(
         store,
         risk_authority_resolver=selected_resolver,
+        instrument_registry=instrument_registry,
     )
 
 
@@ -337,6 +380,34 @@ class AuthorityTests(unittest.TestCase):
         service = AuthorityService()
         with self.assertRaisesRegex(TypeError, "AuthorityPolicy"):
             service.register_policy(MutablePolicy())
+
+    def test_simulation_policy_registration_uses_explicit_frozen_time(self):
+        class NoWallClock:
+            fromisoformat = staticmethod(authority_module.datetime.fromisoformat)
+
+            @staticmethod
+            def now(*args, **kwargs):
+                raise AssertionError("simulation registration cannot read wall clock")
+
+        frozen = "2026-09-24T18:00:00.123456Z"
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            service = authority_service(store)
+            item = policy(environments={"SIMULATION"}, autonomous=True)
+            with patch.object(authority_module, "datetime", NoWallClock):
+                self.assertTrue(service.register_policy(item, simulation_time=frozen))
+            events = store.load_events("authority_state", "canonical")
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["event_type"], "AuthorityPolicyRegistered")
+            self.assertEqual(events[0]["committed_at"], frozen)
+
+            restarted = authority_service(store)
+            with patch.object(authority_module, "datetime", NoWallClock):
+                self.assertFalse(restarted.register_policy(item, simulation_time=frozen))
+            self.assertEqual(len(store.load_events("authority_state", "canonical")), 1)
+
+        with self.assertRaisesRegex(ValueError, "SIMULATION-only"):
+            AuthorityService().register_policy(policy(), simulation_time=frozen)
 
     def test_confirmation_is_bound_to_exact_intent_and_single_use(self):
         service = AuthorityService()
@@ -3207,6 +3278,226 @@ class AuthorityTests(unittest.TestCase):
                 ),
                 (False, "reservation_state_changed"),
             )
+
+
+    def test_future_new_exposure_uses_service_owned_instrument_registry(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            version = future_instrument_version()
+            registry = InstrumentRegistry(versions=(version,))
+            future_context = replace(
+                public_risk_context(),
+                equivalent_exposure_per_unit={"ABC": Decimal("1")},
+            )
+            future_intent = RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                instrument_type="FUTURE",
+            )
+            authority = authority_service(
+                store,
+                risk_context=future_context,
+                instrument_registry=registry,
+            )
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            admitted = authority.admit(
+                command_id="future-open",
+                idempotency_key="future-open",
+                admission_id="future-open",
+                policy_id=item.policy_id,
+                intent_id="future-open",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_book=reservations,
+                reservation_id="future-open",
+                **public_financial_kwargs(
+                    store,
+                    risk_intent=future_intent,
+                    risk_context=future_context,
+                ),
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+
+    def test_future_new_exposure_without_service_registry_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            future_context = replace(
+                public_risk_context(),
+                equivalent_exposure_per_unit={"ABC": Decimal("1")},
+            )
+            future_intent = RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                instrument_type="FUTURE",
+            )
+            authority = authority_service(store, risk_context=future_context)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "product-selected InstrumentRegistry",
+            ):
+                authority.admit(
+                    command_id="future-no-registry",
+                    idempotency_key="future-no-registry",
+                    admission_id="future-no-registry",
+                    policy_id=item.policy_id,
+                    intent_id="future-no-registry",
+                    account_id="paper-1",
+                    environment="SIMULATION",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    reservation_book=reservations,
+                    reservation_id="future-no-registry",
+                    **public_financial_kwargs(
+                        store,
+                        risk_intent=future_intent,
+                        risk_context=future_context,
+                    ),
+                )
+            self.assertEqual(reservations.version, 0)
+
+    def test_physical_future_after_delivery_cutoff_fails_before_reservation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            version = future_instrument_version(
+                settlement_method="PHYSICAL",
+                delivery_cutoff=datetime(
+                    2026, 9, 24, 17, tzinfo=timezone.utc
+                ),
+            )
+            registry = InstrumentRegistry(versions=(version,))
+            future_context = replace(
+                public_risk_context(),
+                equivalent_exposure_per_unit={"ABC": Decimal("1")},
+            )
+            future_intent = RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                instrument_type="FUTURE",
+            )
+            authority = authority_service(
+                store,
+                risk_context=future_context,
+                instrument_registry=registry,
+            )
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            with self.assertRaisesRegex(AuthorityConflict, "DELIVERY_BLOCKED"):
+                authority.admit(
+                    command_id="future-delivery-blocked",
+                    idempotency_key="future-delivery-blocked",
+                    admission_id="future-delivery-blocked",
+                    policy_id=item.policy_id,
+                    intent_id="future-delivery-blocked",
+                    account_id="paper-1",
+                    environment="SIMULATION",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    reservation_book=reservations,
+                    reservation_id="future-delivery-blocked",
+                    **public_financial_kwargs(
+                        store,
+                        risk_intent=future_intent,
+                        risk_context=future_context,
+                    ),
+                )
+            self.assertEqual(reservations.version, 0)
+
+    def test_protective_reduce_only_future_is_not_blocked_by_delivery_cutoff(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            version = future_instrument_version(
+                settlement_method="PHYSICAL",
+                delivery_cutoff=datetime(
+                    2026, 9, 24, 17, tzinfo=timezone.utc
+                ),
+            )
+            registry = InstrumentRegistry(versions=(version,))
+            future_context = replace(
+                public_risk_context(),
+                positions={"ABC": Decimal("1")},
+                marks={"ABC": Decimal("100")},
+                instrument_types={"ABC": "FUTURE"},
+                equivalent_exposure_per_unit={"ABC": Decimal("1")},
+                stress_scenarios=({"ABC": Decimal("-0.10")},),
+            )
+            future_intent = RiskIntent.create(
+                symbol="ABC",
+                side="SELL",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                reduce_only=True,
+                action="REDUCE",
+                instrument_type="FUTURE",
+            )
+            authority = authority_service(
+                store,
+                risk_context=future_context,
+                instrument_registry=registry,
+            )
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            admitted = authority.admit(
+                command_id="future-protective-reduce",
+                idempotency_key="future-protective-reduce",
+                admission_id="future-protective-reduce",
+                policy_id=item.policy_id,
+                intent_id="future-protective-reduce",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_book=reservations,
+                reservation_id="future-protective-reduce",
+                **public_financial_kwargs(
+                    store,
+                    risk_intent=future_intent,
+                    risk_context=future_context,
+                ),
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
 
 
 if __name__ == "__main__":

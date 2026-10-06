@@ -546,7 +546,7 @@ def _install_authority_registry():
         int,
         tuple[
             weakref.ReferenceType[BybitExecutionFeeCurrencyAuthority],
-            BybitExecutionFeeCurrencyProjection,
+            tuple[tuple[str, object], ...],
         ],
     ] = {}
 
@@ -570,13 +570,17 @@ def _install_authority_registry():
             raise BybitFeeCurrencyAuthorityError(
                 "fee-currency authority identity collision"
             )
-        for field_name in authority_fields:
+        canonical_values = tuple(
+            (field_name, getattr(projection, field_name))
+            for field_name in authority_fields
+        )
+        for field_name, field_value in canonical_values:
             object.__setattr__(
                 value,
                 field_name,
-                getattr(projection, field_name),
+                field_value,
             )
-        states[object_id] = (weakref.ref(value), projection)
+        states[object_id] = (weakref.ref(value), canonical_values)
 
     def project(
         value: BybitExecutionFeeCurrencyAuthority,
@@ -588,19 +592,21 @@ def _install_authority_registry():
             raise BybitFeeCurrencyAuthorityError(
                 "fee-currency authority lacks canonical issuance"
             )
-        projection = state[1]
-        for field_name in authority_fields:
+        canonical_values = state[1]
+        projection_values = {}
+        for field_name, expected in canonical_values:
             try:
                 current = object.__getattribute__(value, field_name)
             except AttributeError as error:
                 raise BybitFeeCurrencyAuthorityError(
                     "fee-currency authority state changed"
                 ) from error
-            if current != getattr(projection, field_name):
+            if current != expected:
                 raise BybitFeeCurrencyAuthorityError(
                     "fee-currency authority state changed"
                 )
-        return projection
+            projection_values[field_name] = expected
+        return BybitExecutionFeeCurrencyProjection(**projection_values)
 
     return register, project
 

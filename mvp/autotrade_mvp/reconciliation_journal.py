@@ -326,6 +326,10 @@ def reconciliation_payload(
         "borrow_differences": _decimal_map(
             result.borrow_differences or {}
         ),
+        "settlement_differences": _decimal_map(
+            result.settlement_differences or {}
+        ),
+        "settlement_activity_complete": result.settlement_activity_complete,
         "submission_resolutions": [
             {
                 "attempt_id": item.attempt_id,

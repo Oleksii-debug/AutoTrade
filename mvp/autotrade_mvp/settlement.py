@@ -15,6 +15,7 @@ from typing import Iterable, Mapping
 from .accounting import EconomicBook, JournalTransaction, ScopedEconomicBook, _canonical_equity_fill_terms
 from .exact_decimal import (
     ExactDecimalError,
+    canonical_decimal_text,
     exact_add,
     exact_multiply,
     exact_subtract,
@@ -350,6 +351,124 @@ class BuyingPowerEvidence:
         if len(refs) != len(set(refs)):
             raise ValueError("evidence_refs must be unique")
         object.__setattr__(self, "evidence_refs", refs)
+
+    @property
+    def resource_key(self) -> str:
+        """Canonical reservation resource for separately evidenced margin credit."""
+
+        return f"MARGIN_CREDIT:{self.currency}"
+
+    def resource_detail(self) -> dict[str, str]:
+        """Serialize one typed provider buying-power observation for reconciliation."""
+
+        try:
+            credit = canonical_decimal_text(self.additional_credit)
+        except ExactDecimalError as error:
+            raise SettlementConflict(
+                "buying-power credit exceeds exact rendering authority"
+            ) from error
+        detail = {
+            "resource_type": "MARGIN_BUYING_POWER",
+            "credit_semantics": "ADDITIONAL_TO_SETTLED_CASH",
+            "provider_id": self.scope.provider_id,
+            "account_id": self.scope.account_id,
+            "environment": self.scope.environment,
+            "provider_environment": self.scope.provider_environment,
+            "currency": self.currency,
+            "additional_credit": credit,
+            "observed_at": self.observed_at.isoformat().replace("+00:00", "Z"),
+            "valid_until": self.valid_until.isoformat().replace("+00:00", "Z"),
+            "evidence_ref_count": str(len(self.evidence_refs)),
+        }
+        detail.update(
+            {
+                f"evidence_ref_{index}": reference
+                for index, reference in enumerate(self.evidence_refs)
+            }
+        )
+        return detail
+
+    @classmethod
+    def from_resource_detail(
+        cls,
+        detail: Mapping[str, object],
+    ) -> "BuyingPowerEvidence":
+        """Rebuild typed margin credit from the exact durable resource detail."""
+
+        if type(detail) is not dict:
+            raise TypeError("margin-credit resource detail must use an exact dict")
+        if detail.get("resource_type") != "MARGIN_BUYING_POWER":
+            raise ValueError("margin-credit resource detail has invalid resource_type")
+        if detail.get("credit_semantics") != "ADDITIONAL_TO_SETTLED_CASH":
+            raise ValueError(
+                "margin-credit evidence must be additional to settled cash"
+            )
+
+        raw_count = detail.get("evidence_ref_count")
+        if type(raw_count) is not str or not raw_count.isdigit():
+            raise ValueError("margin-credit evidence_ref_count is invalid")
+        count = int(raw_count)
+        if count < 1 or count > 64 or raw_count != str(count):
+            raise ValueError("margin-credit evidence_ref_count is invalid")
+
+        fixed = {
+            "resource_type",
+            "credit_semantics",
+            "provider_id",
+            "account_id",
+            "environment",
+            "provider_environment",
+            "currency",
+            "additional_credit",
+            "observed_at",
+            "valid_until",
+            "evidence_ref_count",
+        }
+        expected = fixed | {f"evidence_ref_{index}" for index in range(count)}
+        if set(detail) != expected:
+            raise ValueError("margin-credit resource detail fields are invalid")
+
+        def exact_text(field: str) -> str:
+            value = detail.get(field)
+            if type(value) is not str or not value.strip():
+                raise TypeError(f"margin-credit {field} must be exact text")
+            return value.strip()
+
+        def exact_instant(field: str) -> datetime:
+            text = exact_text(field)
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError as error:
+                raise ValueError(
+                    f"margin-credit {field} must be an ISO timestamp"
+                ) from error
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError(
+                    f"margin-credit {field} must include a timezone"
+                )
+            return parsed.astimezone(timezone.utc)
+
+        scope = SettlementAccountScope(
+            provider_id=exact_text("provider_id"),
+            account_id=exact_text("account_id"),
+            environment=exact_text("environment"),
+            provider_environment=exact_text("provider_environment"),
+        )
+        return cls(
+            evidence_id=(
+                f"resource:{exact_text('provider_id')}:{exact_text('account_id')}:"
+                f"{exact_text('provider_environment')}:{exact_text('currency')}:"
+                f"{exact_text('observed_at')}"
+            ),
+            scope=scope,
+            currency=exact_text("currency"),
+            additional_credit=exact_text("additional_credit"),
+            observed_at=exact_instant("observed_at"),
+            valid_until=exact_instant("valid_until"),
+            evidence_refs=tuple(
+                exact_text(f"evidence_ref_{index}") for index in range(count)
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)

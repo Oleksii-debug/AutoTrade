@@ -15,6 +15,7 @@ from .exact_decimal import (
     parse_bounded_exact_decimal,
 )
 from .securities_borrow import BorrowAvailabilityEvidence
+from .settlement import BuyingPowerEvidence
 
 
 _REQUIRED_ABSENCE_SURFACES = frozenset(
@@ -351,6 +352,35 @@ class ResourceAvailabilityEvidence:
                     raise ValueError(
                         "resource availability outlives borrow evidence"
                     )
+            if resource.startswith("MARGIN_CREDIT:"):
+                buying_power = BuyingPowerEvidence.from_resource_detail(detail)
+                if buying_power.resource_key != resource:
+                    raise ValueError(
+                        "margin-credit resource identity does not match evidence scope"
+                    )
+                if (
+                    buying_power.scope.provider_id != self.provider_id
+                    or buying_power.scope.account_id != self.account_id
+                    or buying_power.scope.environment != self.environment
+                    or buying_power.scope.provider_environment
+                    != self.provider_environment
+                ):
+                    raise ValueError("margin-credit availability scope mismatch")
+                if buying_power.additional_credit != normalized[resource]:
+                    raise ValueError(
+                        "margin-credit amount differs from available resource amount"
+                    )
+                if (
+                    buying_power.observed_at < started
+                    or buying_power.observed_at > completed
+                ):
+                    raise ValueError(
+                        "margin-credit observation is outside snapshot cut"
+                    )
+                if valid > buying_power.valid_until:
+                    raise ValueError(
+                        "resource availability outlives margin-credit evidence"
+                    )
             normalized_details[resource] = MappingProxyType(
                 dict(sorted(detail.items()))
             )
@@ -364,6 +394,16 @@ class ResourceAvailabilityEvidence:
         if missing_borrow_details:
             raise ValueError(
                 "BORROW resources require typed securities-borrow evidence"
+            )
+        missing_margin_details = [
+            resource
+            for resource in normalized
+            if resource.startswith("MARGIN_CREDIT:")
+            and resource not in normalized_details
+        ]
+        if missing_margin_details:
+            raise ValueError(
+                "MARGIN_CREDIT resources require typed buying-power evidence"
             )
         object.__setattr__(
             self,

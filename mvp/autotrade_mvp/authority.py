@@ -39,6 +39,7 @@ from .securities_borrow import (
     borrow_resource_key,
     incremental_short_borrow_quantity,
 )
+from .settlement import BuyingPowerEvidence
 from .risk import (
     LiquidationHeadroomEvidence,
     LiquidationScope,
@@ -735,10 +736,14 @@ def _authority_service_capital_operations():
             or any(type(resource) is not str for resource in resources)
         ):
             raise AuthorityConflict("settlement capital resources are malformed")
-        cash_resources = tuple(
-            sorted(resource for resource in resources if resource.startswith("CASH:"))
+        capital_resources = tuple(
+            sorted(
+                resource
+                for resource in resources
+                if resource.startswith(("CASH:", "MARGIN_CREDIT:"))
+            )
         )
-        if not cash_resources:
+        if not capital_resources:
             return None
         if (
             type(provider_evidence) is not dict
@@ -858,12 +863,24 @@ def _authority_service_capital_operations():
         _selected_store, _identity, scope, scope_id = (
             DurableSettlementBook._selected_authority(settlement_book)
         )
+        raw_details = provider_evidence.get("resource_details", {})
+        if type(raw_details) is not dict:
+            raise AuthorityConflict(
+                "settlement capital provider resource details are malformed"
+            )
+        projection_at = _instant(
+            _authority_text(
+                provider_evidence.get("snapshot_query_completed_at"),
+                name="snapshot_query_completed_at",
+            ),
+            name="snapshot_query_completed_at",
+        )
         adjustments: dict[str, dict[str, str]] = {}
-        for resource in cash_resources:
+        for resource in capital_resources:
             raw_provider = provider_available.get(resource)
             if raw_provider is None:
                 raise AuthorityConflict(
-                    f"provider availability lacks required cash resource {resource}"
+                    f"provider availability lacks required capital resource {resource}"
                 )
             provider_amount = _authority_decimal(
                 raw_provider,
@@ -871,13 +888,56 @@ def _authority_service_capital_operations():
             )
             if provider_amount < 0:
                 raise AuthorityConflict(
-                    "provider cash availability must be non-negative"
+                    "provider capital availability must be non-negative"
                 )
-            currency = resource.removeprefix("CASH:")
-            local_amount = projection.available_to_spend(currency)
+            if resource.startswith("CASH:"):
+                currency = resource.removeprefix("CASH:")
+                buying_power = None
+                require_buying_power = False
+            else:
+                currency = resource.removeprefix("MARGIN_CREDIT:")
+                detail = raw_details.get(resource)
+                if type(detail) is not dict:
+                    raise AuthorityConflict(
+                        "margin-credit capital requires typed provider evidence"
+                    )
+                try:
+                    buying_power = BuyingPowerEvidence.from_resource_detail(
+                        detail
+                    )
+                except (TypeError, ValueError) as error:
+                    raise AuthorityConflict(
+                        "margin-credit provider evidence is invalid"
+                    ) from error
+                if (
+                    buying_power.scope != scope
+                    or buying_power.resource_key != resource
+                    or buying_power.additional_credit != provider_amount
+                ):
+                    raise AuthorityConflict(
+                        "margin-credit provider evidence differs from capital scope"
+                    )
+                require_buying_power = True
+
+            capital = projection.available_capital(
+                scope=scope,
+                currency=currency,
+                as_of=projection_at,
+                buying_power_evidence=buying_power,
+                require_buying_power_evidence=require_buying_power,
+            )
+            if capital.blocks_new_risk:
+                raise AuthorityConflict(
+                    "local settlement capital is unresolved and blocks new risk"
+                )
+            local_amount = (
+                capital.available_cash
+                if resource.startswith("CASH:")
+                else capital.additional_buying_power
+            )
             if local_amount < 0:
                 raise AuthorityConflict(
-                    "local spendable cash must be non-negative"
+                    "local capital availability must be non-negative"
                 )
             effective = min(provider_amount, local_amount)
             adjustments[resource] = {
@@ -1041,21 +1101,21 @@ def _canonical_settlement_capital_adjustment(
         or any(type(key) is not str for key in raw_resources)
     ):
         raise AuthorityConflict("settlement capital resources are malformed")
-    cash_resources = tuple(
+    capital_resources = tuple(
         sorted(
             resource
             for resource in required_resources
-            if resource.startswith("CASH:")
+            if resource.startswith(("CASH:", "MARGIN_CREDIT:"))
         )
     )
-    if set(raw_resources) != set(cash_resources):
+    if set(raw_resources) != set(capital_resources):
         raise AuthorityConflict(
             "settlement capital resources do not match reservation requirements"
         )
 
     effective: dict[str, Decimal] = {}
     canonical_resources: dict[str, dict[str, str]] = {}
-    for resource in cash_resources:
+    for resource in capital_resources:
         raw = raw_resources.get(resource)
         if (
             type(raw) is not dict
@@ -5816,7 +5876,7 @@ class AuthorityService:
                                 "current settlement capital authority changed"
                             )
                     for resource, raw_requirement in risk_requirements.items():
-                        if not resource.startswith("CASH:"):
+                        if not resource.startswith(("CASH:", "MARGIN_CREDIT:")):
                             continue
                         requirement = _decimal(
                             raw_requirement,

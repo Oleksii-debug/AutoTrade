@@ -30,6 +30,7 @@ from .securities_borrow import (
     BorrowAvailabilityEvidence,
     verify_provider_borrow_evidence,
 )
+from .settlement import BuyingPowerEvidence
 
 def _install_journal_store_call():
     """Freeze reconciliation journal dispatch to canonical store operations."""
@@ -1036,7 +1037,10 @@ def load_account_resource_availability_evidence(
     #   2. its provider resource query must have started after the settlement
     #      fact became available. Merely wrapping an old provider snapshot in a
     #      newer reconciliation event must never restore reservation authority.
-    if any(resource.startswith("CASH:") for resource in requested):
+    if any(
+        resource.startswith(("CASH:", "MARGIN_CREDIT:"))
+        for resource in requested
+    ):
         checkpoint_sequence = checkpoint.get("journal_sequence")
         if type(checkpoint_sequence) is not int or checkpoint_sequence <= 0:
             raise ValueError(
@@ -1163,6 +1167,43 @@ def load_account_resource_availability_evidence(
             )
         if resource.startswith("CASH:"):
             availability[resource] = canonical_available[resource]
+            continue
+        if resource.startswith("MARGIN_CREDIT:"):
+            detail = raw_details.get(resource)
+            if type(detail) is not dict:
+                raise ValueError(
+                    "MARGIN_CREDIT resource lacks typed buying-power evidence"
+                )
+            buying_power = BuyingPowerEvidence.from_resource_detail(detail)
+            if (
+                buying_power.resource_key != resource
+                or buying_power.scope.provider_id != provider
+                or buying_power.scope.account_id != account
+                or buying_power.scope.environment != scope
+                or buying_power.scope.provider_environment != provider_scope
+            ):
+                raise ValueError("margin-credit availability evidence scope mismatch")
+            if buying_power.additional_credit != canonical_available[resource]:
+                raise ValueError(
+                    "margin-credit amount differs from available resource amount"
+                )
+            if (
+                buying_power.observed_at < snapshot_started
+                or buying_power.observed_at > completed
+            ):
+                raise ValueError(
+                    "margin-credit availability observation is outside snapshot cut"
+                )
+            if valid_until > buying_power.valid_until or current >= buying_power.valid_until:
+                raise ValueError("margin-credit availability evidence is expired")
+            availability[resource] = canonical_available[resource]
+            selected_details[resource] = {
+                _text(key, name="margin-credit detail key"): _text(
+                    value,
+                    name=f"margin-credit detail {key}",
+                )
+                for key, value in detail.items()
+            }
             continue
         if not resource.startswith("BORROW:"):
             raise ValueError(

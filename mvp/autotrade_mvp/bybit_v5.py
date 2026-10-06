@@ -798,7 +798,10 @@ def _install_bybit_prepared_submission_authority(
         if bound_ref() is not value:
             authority_changed()
         current = snapshot(value)
-        if current[1] is not expected[1] or current[:1] + current[2:] != expected[:1] + expected[2:]:
+        if (
+            current[1] is not expected[1]
+            or current[:1] + current[2:] != expected[:1] + expected[2:]
+        ):
             authority_changed()
         if canonical_type(current[1]) is not mapping_proxy_type:
             authority_changed()
@@ -870,7 +873,6 @@ def _install_bybit_prepared_submission_authority(
 
     return canonical_prepare_order_submission, require_canonical_bybit_prepared_submission
 
-
 _unissued_prepare_order_submission = prepare_order_submission
 (
     prepare_order_submission,
@@ -880,6 +882,18 @@ del _unissued_prepare_order_submission
 del _install_bybit_prepared_submission_authority
 
 def _install_guarded_order_projection(verifier):
+    """Capture the final prepared-request projection TCB outside module aliases."""
+
+    verifier_code = verifier.__code__
+    prepared_type = BybitPreparedSubmission
+    error_type = ProviderCoreError
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    canonical_dict = dict
+    mapping_proxy_type = MappingProxyType
+    canonical_getattr = getattr
+
+    def _install_guarded_order_projection(verifier):
     """Capture the final prepared-request projection TCB outside module aliases."""
 
     verifier_code = verifier.__code__
@@ -951,171 +965,243 @@ guarded_order_projection = _install_guarded_order_projection(
 )
 del _install_guarded_order_projection
 
+def _install_submission_response_parser(
+    prepared_projection,
+    observation_projection,
+):
+    """Seal final Bybit ACK/reject normalization behind canonical projections."""
 
-def _submission_projection(
-    observation: ProviderSubmissionObservation,
-    *,
-    prepared_request: BybitPreparedSubmission,
-    _projection=provider_submission_observation_projection,
-    _projection_code=provider_submission_observation_projection.__code__,
-    _observation_type=ProviderSubmissionObservation,
-) -> Mapping[str, object]:
-    """Verify one write observation before any virtual field or method access."""
+    prepared_projection_code = prepared_projection.__code__
+    observation_projection_code = observation_projection.__code__
+    observation_type = ProviderSubmissionObservation
+    error_type = ProviderCoreError
+    type_error = TypeError
+    value_error = ValueError
+    canonical_type = type
+    canonical_str = str
+    canonical_int = int
+    canonical_bool = bool
+    canonical_tuple = tuple
+    canonical_mapping_proxy = MappingProxyType
+    canonical_uuid = UUID
+    canonical_uuid5 = uuid5
+    canonical_namespace = NAMESPACE_URL
+    canonical_datetime = datetime
+    canonical_timezone = timezone
+    canonical_timedelta = timedelta
+    canonical_divmod = divmod
+    client_id_pattern = _CLIENT_ID
+    rest_bases = MappingProxyType(dict(_REST_BASE_BY_ENVIRONMENT))
+    ambiguous_codes = frozenset(_AMBIGUOUS_RESPONSE_CODES)
 
-    if _projection.__code__ is not _projection_code:
-        raise ProviderCoreError(
-            "provider submission observation consumer authority is unavailable"
+    def authority_changed():
+        raise error_type("Bybit submission response parser authority changed")
+
+    def implementation_changed():
+        if (
+            guarded_order_projection is not prepared_projection
+            or prepared_projection.__code__ is not prepared_projection_code
+            or provider_submission_observation_projection
+            is not observation_projection
+            or observation_projection.__code__ is not observation_projection_code
+            or ProviderSubmissionObservation is not observation_type
+            or ProviderCoreError is not error_type
+            or TypeError is not type_error
+            or ValueError is not value_error
+            or type is not canonical_type
+            or str is not canonical_str
+            or int is not canonical_int
+            or bool is not canonical_bool
+            or tuple is not canonical_tuple
+            or MappingProxyType is not canonical_mapping_proxy
+            or UUID is not canonical_uuid
+            or uuid5 is not canonical_uuid5
+            or NAMESPACE_URL is not canonical_namespace
+            or datetime is not canonical_datetime
+            or timezone is not canonical_timezone
+            or timedelta is not canonical_timedelta
+            or divmod is not canonical_divmod
+            or _CLIENT_ID is not client_id_pattern
+        ):
+            authority_changed()
+
+    def exact_text(value, name):
+        if canonical_type(value) is not canonical_str:
+            raise error_type(f"{name} is required")
+        normalized = value.strip()
+        if not normalized:
+            raise error_type(f"{name} is required")
+        return normalized
+
+    def exact_client_id(value):
+        client_id = exact_text(value, "client_order_id")
+        if client_id_pattern.fullmatch(client_id) is None:
+            raise error_type(
+                "client_order_id must be 1-36 letters, numbers, dashes or underscores"
+            )
+        return client_id
+
+    def exact_uuid_text(value, name):
+        value_text = exact_text(value, name)
+        try:
+            canonical_uuid(value_text)
+        except value_error as error:
+            raise error_type(f"{name} must be a UUID") from error
+        return value_text
+
+    def exact_mapping(value, name):
+        if canonical_type(value) is not canonical_mapping_proxy:
+            raise error_type(f"{name} must be an object")
+        return value
+
+    def exact_integer(value, name):
+        if canonical_type(value) is not canonical_int:
+            raise error_type(f"{name} must be an integer")
+        return value
+
+    def millis_to_utc(value, name):
+        milliseconds = exact_integer(value, name)
+        if milliseconds < 0:
+            raise error_type(f"{name} must be at least 0")
+        seconds, remainder = canonical_divmod(milliseconds, 1000)
+        instant = canonical_datetime.fromtimestamp(
+            seconds,
+            tz=canonical_timezone.utc,
+        ) + canonical_timedelta(milliseconds=remainder)
+        return instant.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    def evidence_from_projection(observed, prepared):
+        source_uri = (
+            rest_bases[prepared["provider_environment"]]
+            + prepared["endpoint"]
         )
-    if type(observation) is not _observation_type:
-        raise TypeError(
-            "observation must be durable ProviderSubmissionObservation"
-        )
-    projected = _projection(observation)
-    expected_client_id = _client_order_id(
-        prepared_request.body.get("orderLinkId")
-    )
-    expected = (
-        ("provider_id", "BYBIT", "provider"),
-        ("endpoint", prepared_request.endpoint, "endpoint"),
-        (
-            "request_sha256",
-            prepared_request.body_sha256,
-            "request digest",
-        ),
-        (
-            "capability_snapshot_ids",
-            prepared_request.capability_snapshot_ids,
-            "capability",
-        ),
-        (
-            "instrument_versions",
-            prepared_request.instrument_versions,
-            "instrument",
-        ),
-        ("account_id", prepared_request.account_id, "account"),
-        ("environment", prepared_request.environment, "environment"),
-        ("client_order_id", expected_client_id, "client-order"),
-    )
-    for key, expected_value, label in expected:
-        if projected[key] != expected_value:
-            raise ProviderCoreError(
-                f"provider-write provenance {label} mismatch"
-            )
-    return projected
-
-
-def _submission_evidence(
-    projection: Mapping[str, object],
-    *,
-    prepared_request: BybitPreparedSubmission,
-) -> dict[str, str]:
-    require_canonical_bybit_prepared_submission(prepared_request)
-    source_uri = (
-        _REST_BASE_BY_ENVIRONMENT[prepared_request.provider_environment]
-        + prepared_request.endpoint
-    )
-    return {
-        "artifact_id": str(
-            uuid5(
-                NAMESPACE_URL,
-                f"{source_uri}#{projection['evidence_ref']}",
-            )
-        ),
-        "sha256": projection["response_sha256"],
-        "source_uri": source_uri,
-        "observed_at": projection["sent_at"],
-        "rights_id": "provider-observation-bybit",
-    }
-
-
-def parse_submission_response(
-    *,
-    attempt_id: str,
-    prepared_request: BybitPreparedSubmission,
-    observation: ProviderSubmissionObservation | None = None,
-    transport_ambiguous: bool = False,
-) -> dict[str, Any]:
-    """Map one exact durable Bybit create-order response to SubmissionResult."""
-
-    aid = _uuid_text(attempt_id, name="attempt_id")
-    require_canonical_bybit_prepared_submission(prepared_request)
-    cid = _client_order_id(prepared_request.body.get("orderLinkId"))
-    if type(transport_ambiguous) is not bool:
-        raise ProviderCoreError("transport_ambiguous must be boolean")
-    if transport_ambiguous:
-        if observation is not None:
-            raise ProviderCoreError(
-                "ambiguous transport cannot also claim an authoritative response"
-            )
         return {
-            "attempt_id": aid,
-            "outcome": "UNKNOWN",
-            "client_order_id": cid,
-            "reason_code": "BYBIT_TRANSPORT_AMBIGUOUS",
-            "evidence": [],
-            "retry_disposition": "RECONCILE_FIRST",
+            "artifact_id": canonical_str(
+                canonical_uuid5(
+                    canonical_namespace,
+                    f"{source_uri}#{observed['evidence_ref']}",
+                )
+            ),
+            "sha256": observed["response_sha256"],
+            "source_uri": source_uri,
+            "observed_at": observed["sent_at"],
+            "rights_id": "provider-observation-bybit",
         }
-    projection = _submission_projection(
-        observation,
-        prepared_request=prepared_request,
-    )
-    if projection["attempt_id"] != aid:
-        raise ProviderCoreError("Bybit submission observation attempt_id mismatch")
-    evidence = [
-        _submission_evidence(
-            projection,
-            prepared_request=prepared_request,
-        )
-    ]
-    envelope = _mapping(projection["payload"], name="response")
-    code = _integer(envelope.get("retCode"), name="retCode")
-    provider_received_at = (
-        _millis_to_utc(envelope.get("time"), name="response.time")
-        if envelope.get("time") is not None
-        else None
-    )
 
-    if code == 0:
-        result = _mapping(envelope.get("result"), name="result")
-        provider_order_id = _text(result.get("orderId"), name="result.orderId")
-        echoed_client_id = _text(
-            result.get("orderLinkId"), name="result.orderLinkId"
-        )
-        if echoed_client_id != cid:
-            raise ProviderCoreError(
-                "Bybit orderLinkId response does not match request"
+    def parse_submission_response(
+        *,
+        attempt_id: str,
+        prepared_request: BybitPreparedSubmission,
+        observation: ProviderSubmissionObservation | None = None,
+        transport_ambiguous: bool = False,
+    ) -> dict[str, Any]:
+        """Map one authenticated durable Bybit create-order response."""
+
+        implementation_changed()
+        aid = exact_uuid_text(attempt_id, "attempt_id")
+        prepared = prepared_projection(prepared_request)
+        cid = exact_client_id(prepared["body"].get("orderLinkId"))
+
+        if canonical_type(transport_ambiguous) is not canonical_bool:
+            raise error_type("transport_ambiguous must be boolean")
+        if transport_ambiguous:
+            if observation is not None:
+                raise error_type(
+                    "ambiguous transport cannot also claim an authoritative response"
+                )
+            return {
+                "attempt_id": aid,
+                "outcome": "UNKNOWN",
+                "client_order_id": cid,
+                "reason_code": "BYBIT_TRANSPORT_AMBIGUOUS",
+                "evidence": [],
+                "retry_disposition": "RECONCILE_FIRST",
+            }
+
+        if canonical_type(observation) is not observation_type:
+            raise type_error(
+                "observation must be durable ProviderSubmissionObservation"
             )
+        observed = observation_projection(observation)
+        if observed["attempt_id"] != aid:
+            raise error_type("Bybit submission observation attempt_id mismatch")
+        if (
+            observed["provider_id"] != "BYBIT"
+            or observed["endpoint"] != prepared["endpoint"]
+            or observed["request_sha256"] != prepared["body_sha256"]
+            or observed["capability_snapshot_ids"]
+            != canonical_tuple(prepared["capability_snapshot_ids"])
+            or observed["instrument_versions"]
+            != canonical_tuple(prepared["instrument_versions"])
+            or observed["account_id"] != prepared["account_id"]
+            or observed["environment"] != prepared["environment"]
+            or observed["client_order_id"] != cid
+        ):
+            raise error_type("provider-write provenance scope mismatch")
+
+        evidence = [evidence_from_projection(observed, prepared)]
+        envelope = exact_mapping(observed["payload"], "response")
+        code = exact_integer(envelope.get("retCode"), "retCode")
+        response_time = envelope.get("time")
+        provider_received_at = (
+            millis_to_utc(response_time, "response.time")
+            if response_time is not None
+            else None
+        )
+
+        if code == 0:
+            result = exact_mapping(envelope.get("result"), "result")
+            provider_order_id = exact_text(
+                result.get("orderId"),
+                "result.orderId",
+            )
+            echoed_client_id = exact_text(
+                result.get("orderLinkId"),
+                "result.orderLinkId",
+            )
+            if echoed_client_id != cid:
+                raise error_type(
+                    "Bybit orderLinkId response does not match request"
+                )
+            return {
+                "attempt_id": aid,
+                "outcome": "ACKNOWLEDGED",
+                "provider_order_id": provider_order_id,
+                "client_order_id": cid,
+                **(
+                    {"provider_received_at": provider_received_at}
+                    if provider_received_at is not None
+                    else {}
+                ),
+                "evidence": evidence,
+                "retry_disposition": "NEVER",
+            }
+
+        outcome = "UNKNOWN" if code in ambiguous_codes else "REJECTED"
         return {
             "attempt_id": aid,
-            "outcome": "ACKNOWLEDGED",
-            "provider_order_id": provider_order_id,
+            "outcome": outcome,
             "client_order_id": cid,
             **(
                 {"provider_received_at": provider_received_at}
                 if provider_received_at is not None
                 else {}
             ),
+            "reason_code": f"BYBIT_{code}",
             "evidence": evidence,
-            "retry_disposition": "NEVER",
+            "retry_disposition": (
+                "RECONCILE_FIRST" if outcome == "UNKNOWN" else "NEVER"
+            ),
         }
 
-    outcome = "UNKNOWN" if code in _AMBIGUOUS_RESPONSE_CODES else "REJECTED"
-    return {
-        "attempt_id": aid,
-        "outcome": outcome,
-        "client_order_id": cid,
-        **(
-            {"provider_received_at": provider_received_at}
-            if provider_received_at is not None
-            else {}
-        ),
-        "reason_code": f"BYBIT_{code}",
-        "evidence": evidence,
-        "retry_disposition": (
-            "RECONCILE_FIRST" if outcome == "UNKNOWN" else "NEVER"
-        ),
-    }
+    return parse_submission_response
 
+
+parse_submission_response = _install_submission_response_parser(
+    guarded_order_projection,
+    provider_submission_observation_projection,
+)
+del _install_submission_response_parser
 
 def parse_executions(
     observation: ProviderResponseObservation,

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections import UserDict
+from collections.abc import Iterator, Mapping
 from datetime import datetime, timezone
 from decimal import Decimal
-from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any
 
 
 class PayloadSnapshotError(ValueError):
@@ -15,6 +16,39 @@ class PayloadSnapshotError(ValueError):
 _MAX_PAYLOAD_CONTAINER_ITEMS = 20_000
 _MAX_PAYLOAD_NODES = 100_000
 _MAX_PAYLOAD_DEPTH = 64
+
+
+class FrozenMarketPayload(Mapping[str, Any]):
+    """Module-owned immutable mapping used after raw market ingress.
+
+    The tuple representation is intentionally revalidated on every admission.
+    Even if a caller obtains an instance and mutates its private slot via
+    object.__setattr__, re-admission never executes caller-defined container
+    callbacks and will fail closed on malformed state.
+    """
+
+    __slots__ = ("_items",)
+
+    def __init__(self, items: tuple[tuple[str, Any], ...]) -> None:
+        if type(items) is not tuple:
+            raise TypeError("FrozenMarketPayload items must be an exact tuple")
+        object.__setattr__(self, "_items", items)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("FrozenMarketPayload is immutable")
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __iter__(self) -> Iterator[str]:
+        for key, _ in self._items:
+            yield key
+
+    def __getitem__(self, key: str) -> Any:
+        for current_key, value in self._items:
+            if current_key == key:
+                return value
+        raise KeyError(key)
 
 
 class _SnapshotBudget:
@@ -33,6 +67,62 @@ class _SnapshotBudget:
         self.remaining_nodes -= 1
 
 
+def _mapping_items_without_callbacks(
+    value: object,
+    *,
+    path: str,
+) -> tuple[tuple[str, Any], ...]:
+    """Read only exact built-in or module-owned mapping state."""
+
+    if type(value) is dict:
+        if len(value) > _MAX_PAYLOAD_CONTAINER_ITEMS:
+            raise PayloadSnapshotError(
+                f"{path} exceeds the market payload container resource envelope"
+            )
+        return tuple(value.items())
+
+    if type(value) is UserDict:
+        # Exact UserDict compatibility must not re-open dynamic attribute
+        # dispatch. Read the instance dictionary through object directly so a
+        # same-process rebind of UserDict.__getattribute__ cannot execute inside
+        # market admission.
+        state = object.__getattribute__(value, "__dict__")
+        if type(state) is not dict:
+            raise PayloadSnapshotError(f"{path} UserDict state is invalid")
+        data = dict.get(state, "data")
+        if type(data) is not dict:
+            raise PayloadSnapshotError(f"{path} UserDict state is invalid")
+        if len(data) > _MAX_PAYLOAD_CONTAINER_ITEMS:
+            raise PayloadSnapshotError(
+                f"{path} exceeds the market payload container resource envelope"
+            )
+        return tuple(dict.items(data))
+
+    if type(value) is FrozenMarketPayload:
+        items = value._items
+        if type(items) is not tuple:
+            raise PayloadSnapshotError(f"{path} frozen mapping state is invalid")
+        if len(items) > _MAX_PAYLOAD_CONTAINER_ITEMS:
+            raise PayloadSnapshotError(
+                f"{path} exceeds the market payload container resource envelope"
+            )
+        validated: list[tuple[str, Any]] = []
+        for entry in items:
+            if type(entry) is not tuple or len(entry) != 2:
+                raise PayloadSnapshotError(f"{path} frozen mapping state is invalid")
+            key, item = entry
+            if type(key) is not str:
+                raise PayloadSnapshotError(
+                    f"{path} mapping keys must be exact strings"
+                )
+            validated.append((key, item))
+        return tuple(validated)
+
+    raise PayloadSnapshotError(
+        f"{path} must use an exact dict/UserDict or admitted frozen market payload"
+    )
+
+
 def _snapshot(
     value: Any,
     *,
@@ -46,34 +136,42 @@ def _snapshot(
             f"{path} exceeds the market payload nesting resource envelope"
         )
     budget.consume(path=path)
-    if isinstance(value, Mapping):
-        if len(value) > _MAX_PAYLOAD_CONTAINER_ITEMS:
-            raise PayloadSnapshotError(
-                f"{path} exceeds the market payload container resource envelope"
-            )
+
+    if type(value) in {dict, UserDict, FrozenMarketPayload}:
         identity = id(value)
         if identity in active:
             raise PayloadSnapshotError(f"{path} contains a reference cycle")
         active.add(identity)
         try:
-            frozen: dict[str, Any] = {}
-            for key, item in value.items():
+            frozen_items: list[tuple[str, Any]] = []
+            seen_keys: set[str] = set()
+            for key, item in _mapping_items_without_callbacks(value, path=path):
                 if type(key) is not str:
                     raise PayloadSnapshotError(
                         f"{path} mapping keys must be exact strings"
                     )
-                frozen[key] = _snapshot(
-                    item,
-                    path=f"{path}.{key}",
-                    active=active,
-                    budget=budget,
-                    depth=depth + 1,
+                if key in seen_keys:
+                    raise PayloadSnapshotError(
+                        f"{path} contains duplicate mapping keys"
+                    )
+                seen_keys.add(key)
+                frozen_items.append(
+                    (
+                        key,
+                        _snapshot(
+                            item,
+                            path=f"{path}.{key}",
+                            active=active,
+                            budget=budget,
+                            depth=depth + 1,
+                        ),
+                    )
                 )
-            return MappingProxyType(frozen)
+            return FrozenMarketPayload(tuple(frozen_items))
         finally:
             active.remove(identity)
 
-    if isinstance(value, (list, tuple)):
+    if type(value) is list or type(value) is tuple:
         if len(value) > _MAX_PAYLOAD_CONTAINER_ITEMS:
             raise PayloadSnapshotError(
                 f"{path} exceeds the market payload container resource envelope"
@@ -97,9 +195,6 @@ def _snapshot(
             active.remove(identity)
 
     # Never retain caller-defined scalar subclasses as admitted authority.
-    # Containers are rebuilt above; exact immutable scalars are retained, while
-    # datetimes are detached from any caller-owned tzinfo implementation by
-    # normalizing once to an exact built-in UTC datetime.
     if value is None:
         return None
     if type(value) in (str, bool, int, Decimal):
@@ -128,11 +223,13 @@ def _snapshot(
     )
 
 
-def snapshot_market_payload(value: Mapping[str, Any]) -> Mapping[str, Any]:
+def snapshot_market_payload(value: object) -> FrozenMarketPayload:
     """Return a recursively detached immutable snapshot of one market payload."""
 
-    if not isinstance(value, Mapping):
-        raise PayloadSnapshotError("payload must be an object")
+    if type(value) not in {dict, UserDict, FrozenMarketPayload}:
+        raise PayloadSnapshotError(
+            "payload must use an exact dict/UserDict or admitted frozen market payload"
+        )
     frozen = _snapshot(
         value,
         path="payload",
@@ -140,8 +237,13 @@ def snapshot_market_payload(value: Mapping[str, Any]) -> Mapping[str, Any]:
         budget=_SnapshotBudget(),
         depth=0,
     )
-    assert isinstance(frozen, Mapping)
+    if type(frozen) is not FrozenMarketPayload:
+        raise PayloadSnapshotError("payload did not normalize to a frozen object")
     return frozen
 
 
-__all__ = ["PayloadSnapshotError", "snapshot_market_payload"]
+__all__ = [
+    "FrozenMarketPayload",
+    "PayloadSnapshotError",
+    "snapshot_market_payload",
+]

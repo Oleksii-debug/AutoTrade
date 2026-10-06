@@ -1,3 +1,4 @@
+from collections import UserDict
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
@@ -84,6 +85,63 @@ class CallbackTimedelta(timedelta):
     def __le__(self, other):
         type(self).calls += 1
         raise AssertionError("caller timedelta code must not execute")
+
+
+class CallbackDict(dict):
+    calls = 0
+
+    def _fail(self):
+        type(self).calls += 1
+        raise AssertionError("caller mapping code must not execute")
+
+    def __len__(self):
+        return self._fail()
+
+    def __iter__(self):
+        return self._fail()
+
+    def __getitem__(self, key):
+        return self._fail()
+
+    def items(self):
+        return self._fail()
+
+
+class CallbackList(list):
+    calls = 0
+
+    def _fail(self):
+        type(self).calls += 1
+        raise AssertionError("caller sequence code must not execute")
+
+    def __len__(self):
+        return self._fail()
+
+    def __iter__(self):
+        return self._fail()
+
+    def __getitem__(self, key):
+        return self._fail()
+
+
+class CallbackUserDict(UserDict):
+    calls = 0
+
+    def _fail(self):
+        type(self).calls += 1
+        raise AssertionError("caller UserDict code must not execute")
+
+    def __len__(self):
+        return self._fail()
+
+    def __iter__(self):
+        return self._fail()
+
+    def __getitem__(self, key):
+        return self._fail()
+
+    def items(self):
+        return self._fail()
 
 
 def at(month=9, day=24, hour=16, minute=0, second=0):
@@ -359,6 +417,165 @@ class MarketNormalizationTests(unittest.TestCase):
         )
         self.assertEqual(accepted.adapter_version, TEST_ADAPTER_V1)
         self.assertIn("CORRECTION", accepted.quality_flags)
+
+    def test_market_payload_rejects_executable_containers_before_callbacks(self):
+        CallbackDict.calls = 0
+        CallbackList.calls = 0
+
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "payload must use an exact dict",
+        ):
+            raw(
+                "TRADE",
+                CallbackDict(
+                    {"price": "100.01", "quantity": "1", "side": "buy"}
+                ),
+            )
+
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "unsupported value type CallbackList",
+        ):
+            raw(
+                "BOOK_SNAPSHOT",
+                {
+                    "bids": CallbackList([["99.99", "1"]]),
+                    "asks": [],
+                },
+                stream="book",
+            )
+
+        self.assertEqual(CallbackDict.calls, 0)
+        self.assertEqual(CallbackList.calls, 0)
+
+        CallbackUserDict.calls = 0
+        hostile_user_dict = CallbackUserDict(
+            {"price": "100.01", "quantity": "1", "side": "buy"}
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "payload must use an exact dict",
+        ):
+            raw("TRADE", hostile_user_dict)
+        self.assertEqual(CallbackUserDict.calls, 0)
+
+        exact_user_dict = UserDict(
+            {"price": "100.01", "quantity": "1", "side": "buy"}
+        )
+        admitted = raw("TRADE", exact_user_dict)
+        exact_user_dict["price"] = "999.99"
+        self.assertEqual(admitted.payload["price"], "100.01")
+
+    def test_exact_userdict_snapshot_bypasses_rebound_attribute_dispatch(self):
+        payload = UserDict(
+            {"price": "100.01", "quantity": "1", "side": "buy"}
+        )
+        original_getattribute = UserDict.__getattribute__
+        calls = []
+
+        def hostile_getattribute(value, name):
+            calls.append(name)
+            raise AssertionError("UserDict attribute dispatch executed")
+
+        UserDict.__getattribute__ = hostile_getattribute
+        try:
+            admitted = raw("TRADE", payload)
+        finally:
+            UserDict.__getattribute__ = original_getattribute
+
+        self.assertEqual(calls, [])
+        self.assertEqual(admitted.payload["price"], "100.01")
+
+    def test_raw_evidence_rejects_executable_mapping_before_callbacks(self):
+        CallbackDict.calls = 0
+        hostile = CallbackDict(EVIDENCE)
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "raw_evidence_ref: payload must use an exact dict",
+        ):
+            raw(
+                "TRADE",
+                {"price": "100.01", "quantity": "1", "side": "buy"},
+                evidence=hostile,
+            )
+        self.assertEqual(CallbackDict.calls, 0)
+
+    def test_normalize_revalidates_tampered_payload_and_evidence_without_callbacks(self):
+        CallbackDict.calls = 0
+        normalizer = MarketNormalizer(registry())
+
+        payload_update = raw(
+            "TRADE",
+            {"price": "100.01", "quantity": "1", "side": "buy"},
+        )
+        object.__setattr__(
+            payload_update,
+            "payload",
+            CallbackDict(
+                {"price": "100.02", "quantity": "1", "side": "buy"}
+            ),
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "payload must use an exact dict",
+        ):
+            normalizer.normalize(payload_update)
+
+        evidence_update = raw(
+            "TRADE",
+            {"price": "100.01", "quantity": "1", "side": "buy"},
+            sequence=2,
+        )
+        object.__setattr__(
+            evidence_update,
+            "raw_evidence_ref",
+            CallbackDict(EVIDENCE),
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "raw_evidence_ref: payload must use an exact dict",
+        ):
+            normalizer.normalize(evidence_update)
+
+        self.assertEqual(CallbackDict.calls, 0)
+
+    def test_normalize_rejects_tampered_frozen_snapshot_state_without_callbacks(self):
+        CallbackList.calls = 0
+        normalizer = MarketNormalizer(registry())
+
+        payload_update = raw(
+            "TRADE",
+            {"price": "100.01", "quantity": "1", "side": "buy"},
+        )
+        object.__setattr__(
+            payload_update.payload,
+            "_items",
+            CallbackList([("price", "100.02")]),
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "frozen mapping state is invalid",
+        ):
+            normalizer.normalize(payload_update)
+
+        evidence_update = raw(
+            "TRADE",
+            {"price": "100.01", "quantity": "1", "side": "buy"},
+            sequence=3,
+        )
+        object.__setattr__(
+            evidence_update.raw_evidence_ref,
+            "_items",
+            CallbackList([("artifact_id", EVIDENCE["artifact_id"])]),
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "raw_evidence_ref: payload frozen mapping state is invalid",
+        ):
+            normalizer.normalize(evidence_update)
+
+        self.assertEqual(CallbackList.calls, 0)
 
     def test_normalizer_rejects_registry_subclass_before_use(self):
         CallbackRegistry.calls = 0

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 import re
@@ -591,8 +591,8 @@ class GuardedDispatcher:
         if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool) or owner_epoch < 1:
             raise ValueError("owner_epoch must be a positive integer")
         self.owner_epoch = owner_epoch
-        if not isinstance(prepared_lease_seconds, int) or isinstance(prepared_lease_seconds, bool) or prepared_lease_seconds < 1:
-            raise ValueError("prepared_lease_seconds must be a positive integer")
+        if type(prepared_lease_seconds) is not int or prepared_lease_seconds < 1:
+            raise ValueError("prepared_lease_seconds must be a positive exact integer")
         self.prepared_lease_seconds = prepared_lease_seconds
 
     def _journal_store_authority(self) -> JournalStore:
@@ -719,10 +719,10 @@ class GuardedDispatcher:
             raise RuntimeError(f"unsupported submission attempt state: {last['event_type']}")
 
         prepared_at = _instant(last["payload"]["prepared_at"])
-        age = (_instant(now) - prepared_at).total_seconds()
-        if age < 0:
+        elapsed = _instant(now) - prepared_at
+        if elapsed < timedelta(0):
             return DispatchOutcome("IN_PROGRESS", client_order_id, None, "clock_before_prepared_timestamp")
-        if age < self.prepared_lease_seconds:
+        if elapsed < timedelta(seconds=self.prepared_lease_seconds):
             return DispatchOutcome("IN_PROGRESS", client_order_id, None, "prepared_owner_lease_active")
         # SubmissionPrepared is durably before the irreversible boundary. If its
         # lease expires while no SubmissionSending exists, the journal proves

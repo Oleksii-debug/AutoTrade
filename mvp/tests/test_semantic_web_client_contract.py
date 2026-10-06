@@ -1963,5 +1963,98 @@ class SemanticWebClientContractTests(unittest.TestCase):
 
 
 
+    def test_snapshot_busy_is_structured_retryable_and_accessibly_fail_closed(self):
+        js = APP.read_text(encoding="utf-8")
+        fetch = js[js.index("async function jsonFetch"):js.index("function renderOperation")]
+        self.assertIn('const contentType = response.headers.get("Content-Type") || ""', fetch)
+        self.assertIn("errorBody = await response.json()", fetch)
+        self.assertIn("error.code = errorBody.error", fetch)
+        self.assertIn("error.retryable = true", fetch)
+
+        classifier = js[js.index("function isSnapshotBusy"):js.index("function reportSnapshotBusy")]
+        self.assertIn('error.status === 503', classifier)
+        self.assertIn('error.code === "SNAPSHOT_BUSY"', classifier)
+        self.assertIn("error.retryable === true", classifier)
+
+        busy = js[js.index("function reportSnapshotBusy"):js.index("async function jsonFetch")]
+        self.assertIn("invalidateSnapshotAuthority();", busy)
+        self.assertIn("Commands remain blocked", busy)
+        self.assertIn("waiting for one coherent snapshot", busy)
+        self.assertIn("queuePoliteAnnouncement(message)", busy)
+        self.assertNotIn("announce(message", busy)
+
+        poll = js[js.index("async function pollEvents()"):js.index("function newCommandPayload")]
+        self.assertIn("if (isSnapshotBusy(error))", poll)
+        self.assertIn("reportSnapshotBusy();", poll)
+        self.assertLess(
+            poll.index("if (isSnapshotBusy(error))"),
+            poll.index("Host synchronization failed. Displayed values may be stale."),
+        )
+
+        refresh = js[js.index("async function refreshStateFromUser"):js.index("async function start")]
+        self.assertIn("if (isSnapshotBusy(error))", refresh)
+        self.assertIn("reportSnapshotBusy();", refresh)
+
+    def test_refresh_reveals_same_page_for_still_matching_selected_evidence(self):
+        js = APP.read_text(encoding="utf-8")
+        preserve = js[js.index("function preserveTableSelection"):js.index("function appendProjectionRow")]
+        self.assertIn("revealBookmarkedTablePage(body, bookmark);", preserve)
+        reveal = js[js.index("function revealBookmarkedTablePage"):js.index("function restoreTableSelection")]
+        self.assertIn("const anchorRow = rowForSelectionEndpoint(body, bookmark.anchor);", reveal)
+        self.assertIn("const focusRow = rowForSelectionEndpoint(body, bookmark.focus);", reveal)
+        self.assertIn("const anchorIndex = matching.indexOf(anchorRow);", reveal)
+        self.assertIn("const focusIndex = matching.indexOf(focusRow);", reveal)
+        self.assertIn("if (anchorIndex < 0 || focusIndex < 0) return;", reveal)
+        self.assertIn("const anchorPage = Math.floor(anchorIndex / TABLE_PAGE_SIZE);", reveal)
+        self.assertIn("const focusPage = Math.floor(focusIndex / TABLE_PAGE_SIZE);", reveal)
+        self.assertIn("if (anchorPage !== focusPage) return;", reveal)
+        self.assertIn("view.page = anchorPage;", reveal)
+        self.assertIn("applyTableFilter(tool, {announce: false});", reveal)
+
+    def test_live_event_history_selection_has_stable_identity_and_page_reveal(self):
+        js = APP.read_text(encoding="utf-8")
+        render = js[js.index("function renderHostEvent"):js.index("function resetEventHistoryForScope")]
+        self.assertIn("const bookmark = captureTableSelection(body);", render)
+        self.assertIn('row.dataset.selectionKey = "event:" + cursor.toString();', render)
+        self.assertIn('row.dataset.selectionExact = "true";', render)
+        self.assertIn('reapplyTableFilter("event-history-body");', render)
+        self.assertLess(
+            render.index('reapplyTableFilter("event-history-body");'),
+            render.index("revealBookmarkedTablePage(body, bookmark);"),
+        )
+        self.assertLess(
+            render.index("revealBookmarkedTablePage(body, bookmark);"),
+            render.index("restoreTableSelection(body, bookmark);"),
+        )
+
+    def test_selection_restore_reveals_the_bookmarked_page_before_retargeting(self):
+        js = APP.read_text(encoding="utf-8")
+        reveal = js[js.index("function revealBookmarkedTablePage"):js.index("function restoreTableSelection")]
+        self.assertIn("const anchorIndex = matching.indexOf(anchorRow);", reveal)
+        self.assertIn("const focusIndex = matching.indexOf(focusRow);", reveal)
+        self.assertIn("const anchorPage = Math.floor(anchorIndex / TABLE_PAGE_SIZE);", reveal)
+        self.assertIn("if (anchorPage !== focusPage) return;", reveal)
+        self.assertIn("view.page = anchorPage;", reveal)
+        self.assertIn("applyTableFilter(tool, {announce: false});", reveal)
+        preserve = js[js.index("function preserveTableSelection"):js.index("function appendProjectionRow")]
+        self.assertLess(
+            preserve.index("revealBookmarkedTablePage(body, bookmark);"),
+            preserve.index("restoreTableSelection(body, bookmark);"),
+        )
+
+
+
+    def test_event_history_retention_is_cursor_based_not_dom_sort_based(self):
+        js = APP.read_text(encoding="utf-8")
+        render = js[js.index("function renderHostEvent"):js.index("function resetEventHistoryForScope")]
+        self.assertIn("const retained = filterableRows(body)", render)
+        self.assertIn("BigInt(left.dataset.hostEventCursor)", render)
+        self.assertIn("BigInt(right.dataset.hostEventCursor)", render)
+        self.assertIn("for (const expired of retained.slice(100)) expired.remove();", render)
+        self.assertNotIn("body.lastElementChild.remove()", render)
+
+if __name__ == "__main__":
+    unittest.main()
+
 if __name__ == "__main__":
     unittest.main()

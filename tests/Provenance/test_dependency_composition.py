@@ -90,6 +90,72 @@ class DependencyCompositionGateTests(unittest.TestCase):
             requirements,
         )
 
+    def test_root_build_dependency_is_exact_and_hash_qualified(self):
+        for blocker in (
+            "MALFORMED_ROOT_BUILD_SYSTEM",
+            "MISSING_ROOT_BUILD_REQUIREMENTS",
+            "MALFORMED_ROOT_BUILD_REQUIREMENT",
+            "ROOT_BUILD_REQUIREMENTS_DRIFT",
+        ):
+            self.assertNotIn(blocker, self.report.blockers)
+        self.assertFalse(
+            any(
+                blocker.startswith("NON_EXACT_ROOT_BUILD_REQUIREMENT:")
+                for blocker in self.report.blockers
+            )
+        )
+        root = Path(__file__).resolve().parents[2]
+        root_pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('requires = ["setuptools==84.0.0"]', root_pyproject)
+        requirements = (root / "requirements-dev.txt").read_text(encoding="utf-8")
+        self.assertIn("setuptools==84.0.0", requirements)
+
+    def test_root_build_dependency_drift_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "research").mkdir()
+            (root / ".github" / "workflows").mkdir(parents=True)
+            (root / "requirements-dev.txt").write_text(
+                "setuptools==84.0.0 \\\n"
+                "    --hash=sha256:"
+                "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670\n"
+                "jsonschema==4.26.0 \\\n"
+                "    --hash=sha256:"
+                "d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce\n",
+                encoding="utf-8",
+            )
+            (root / "pyproject.toml").write_text(
+                "[build-system]\n"
+                'requires = ["wheel>=1"]\n\n'
+                "[project]\n"
+                'name = "autotrade-exact-numeric"\n'
+                'version = "0.0.1"\n',
+                encoding="utf-8",
+            )
+            (root / "research" / "pyproject.toml").write_text(
+                "[build-system]\n"
+                'requires = ["setuptools==84.0.0"]\n\n'
+                "[project]\n"
+                'name = "sample"\n'
+                'version = "0.0.1"\n'
+                'dependencies = ["autotrade-exact-numeric==0.0.1"]\n\n'
+                "[project.optional-dependencies]\n"
+                'test = ["jsonschema==4.26.0"]\n',
+                encoding="utf-8",
+            )
+            (root / ".github" / "workflows" / "research-primitives.yml").write_text(
+                'paths:\n  - "requirements-dev.txt"\n'
+                'steps:\n'
+                '  - run: "python -m pip install --disable-pip-version-check '
+                '--force-reinstall --no-deps --only-binary=:all: --require-hashes '
+                '-r requirements-dev.txt"\n'
+                '  - run: python -m pip install --no-deps --no-build-isolation -e research\n',
+                encoding="utf-8",
+            )
+            blockers, _ = _python_blockers(root)
+            self.assertIn("NON_EXACT_ROOT_BUILD_REQUIREMENT:wheel>=1", blockers)
+            self.assertIn("ROOT_BUILD_REQUIREMENTS_DRIFT", blockers)
+
     def test_research_runtime_dependency_is_exact_and_source_bound(self):
         for blocker in (
             "MISSING_RESEARCH_RUNTIME_REQUIREMENTS",

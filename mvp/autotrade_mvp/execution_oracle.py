@@ -352,6 +352,11 @@ def assert_conservative_execution(
     market_time = _instant(observation.market_time, name="market_time")
     canonical_arrival = arrival.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
+    if order.already_triggered and not result.triggered:
+        raise ExecutionOracleError(
+            "triggered state cannot regress after prior STOP_LIMIT trigger"
+        )
+
     if result.triggered and not order.already_triggered:
         if order.order_type != "STOP_LIMIT":
             raise ExecutionOracleError(

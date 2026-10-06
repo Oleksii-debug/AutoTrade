@@ -122,6 +122,7 @@ class JournalStore(_JournalStoreImpl):
         if type(envelope) is not dict:
             raise TypeError("envelope must be an exact object")
         envelope = _impl._detach_json_value(envelope)
+        _impl._validate_canonical_event_envelope_if_claimed(envelope)
 
         event_id = _impl._require_canonical_durable_text(
             envelope.get("event_id"), name="event_id"
@@ -265,8 +266,14 @@ class JournalStore(_JournalStoreImpl):
             self,
             subject="outbox delivery-state store",
         )
-        event_id = JournalStore._require_text(event_id, "event_id")
-        topic = JournalStore._require_text(topic, "topic")
+        event_id = _impl._require_canonical_durable_text(
+            event_id,
+            name="event_id",
+        )
+        topic = _impl._require_canonical_durable_text(
+            topic,
+            name="outbox topic",
+        )
         with journal_store_authority_scope(self, identity):
             with JournalStore._connect(self) as connection:
                 connection.execute("BEGIN")
@@ -302,10 +309,18 @@ class JournalStore(_JournalStoreImpl):
                         )
 
                     raw_outbox_payload = row["outbox_payload_json"]
-                    if not isinstance(raw_outbox_payload, str):
-                        raise ValueError("outbox payload authority is missing")
+                    if type(raw_outbox_payload) is not str:
+                        raise ValueError("outbox payload authority is not exact text")
+                    stored_topic = _impl._require_canonical_durable_text(
+                        row["topic"],
+                        name="outbox topic",
+                    )
+                    if stored_topic != topic:
+                        raise ValueError(
+                            "outbox topic does not match requested recovery route"
+                        )
                     actual_outbox_hash = _impl._outbox_envelope_digest(
-                        str(row["topic"]),
+                        stored_topic,
                         raw_outbox_payload,
                     )
                     if row["envelope_hash"] != actual_outbox_hash:
@@ -339,13 +354,19 @@ class JournalStore(_JournalStoreImpl):
 
                     delivered_at = row["delivered_at"]
                     if delivered_at is not None:
-                        if not isinstance(delivered_at, str) or not delivered_at:
-                            raise ValueError("outbox delivered_at is invalid")
+                        _impl._require_canonical_durable_text(
+                            delivered_at,
+                            name="outbox delivered_at",
+                        )
+                    stored_outbox_id = _impl._require_canonical_durable_text(
+                        row["outbox_id"],
+                        name="outbox_id",
+                    )
                     result = {
-                        "outbox_id": str(row["outbox_id"]),
+                        "outbox_id": stored_outbox_id,
                         "event_id": event_id,
-                        "topic": topic,
-                        "envelope_hash": str(row["envelope_hash"]),
+                        "topic": stored_topic,
+                        "envelope_hash": actual_outbox_hash,
                         "delivered": delivered_at is not None,
                     }
                     connection.commit()

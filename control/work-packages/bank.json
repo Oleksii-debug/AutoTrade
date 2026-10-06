@@ -234,8 +234,8 @@
         "Exclusive mutation key: PERSISTENCE / journal-outbox",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "SQLite WAL journal/outbox and command-dedupe primitive implemented in mvp/autotrade_mvp/persistence.py with focused tests covering atomic event/outbox commit, idempotent replay, payload tamper rejection, aggregate-version gaps, event-ID conflicts, command idempotency conflicts and reopen persistence. Focused standalone suite passed 5/5 locally before commit. Remaining WP-05 work: integrate canonical EventEnvelope/UiCommand validation into the runtime, crash-at-each-commit-boundary qualification, projection rebuild equivalence, migration rollback/upgrade tests, Windows/exact-head CI and production placement under src/AutoTrade.Persistence/."
+      "proposed_status": "DONE",
+      "status_note": "DONE on main via Section-4 closure PR #2196, merge commit c0f929e25fbfc2df1f33b2746f5f486d9819ee74. Canonical JournalStore now covers atomic journal/outbox and command effects, exact dedupe/replay identity, one-snapshot journal/checkpoint cuts, full replay versus checkpoint-tail equivalence, hard-process crash boundaries, migration rollback/upgrade, canonical EventEnvelope and UiCommand persistence admission, exact durable storage-class/text ingress, first-event ownership, and physical backing-file authority with callback-safe JournalStoreIdentity/path fencing. Historical #1577/#1612/#2030/#2163 integration roles are superseded by #2196. Hosted exact-head jobs were queued without runner assignment at closure and are not recorded as PASS; broader WP-48/WP-49 recovery remains a separate gate."
     },
     {
       "id": "WP-06",

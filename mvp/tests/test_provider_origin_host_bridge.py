@@ -15,6 +15,7 @@ from mvp.autotrade_mvp.persistence import (
 )
 from mvp.autotrade_mvp.provider_core import (
     Surface,
+    observe_authenticated_json_response,
     prepare_authenticated_read_query,
 )
 from mvp.autotrade_mvp.provider_host_attestation import (
@@ -41,6 +42,7 @@ from mvp.autotrade_mvp.provider_origin_host_bridge import (
     ProviderOriginHostBridgeError,
     canonical_bybit_authenticated_read_rule_identity,
     canonical_provider_origin_journal_identity,
+    verify_bybit_direct_wire_observation_against_host_pins,
     verify_bybit_host_observed_against_canonical_journal,
 )
 from mvp.tests.test_bybit_v5 import READ_AT, read_capability
@@ -76,6 +78,24 @@ class ProviderOriginHostBridgeTests(unittest.TestCase):
             network_policy_identity="sha256:" + "3" * 64,
             transport_identity="UrllibJsonWireClient:v1",
         )
+
+    def test_plain_authenticated_read_observation_cannot_satisfy_direct_wire_host_pins(self):
+        query_binding = self._query_binding()
+        observation = observe_authenticated_json_response(
+            query_binding=query_binding,
+            http_status=200,
+            response_bytes=b'{"retCode":0,"result":{"list":[]}}',
+            observed_at=READ_AT + timedelta(seconds=1),
+        )
+        with self.assertRaisesRegex(
+            ProviderOriginHostBridgeError,
+            "lacks canonical direct-wire provenance",
+        ):
+            verify_bybit_direct_wire_observation_against_host_pins(
+                observation,
+                query_binding=query_binding,
+                pins=self._pins(),
+            )
 
     def _seed_provider_origin_rows(
         self,

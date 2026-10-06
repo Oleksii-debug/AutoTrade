@@ -39,6 +39,7 @@ from .securities_borrow import (
     borrow_resource_key,
     incremental_short_borrow_quantity,
 )
+from .settlement import BuyingPowerEvidence
 from .risk import (
     LiquidationHeadroomEvidence,
     LiquidationScope,
@@ -108,6 +109,18 @@ def _instant(value: str, *, name: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError(f"{name} must include a timezone")
     return parsed.astimezone(timezone.utc)
+
+def _authority_datetime_utc(value: object, *, name: str) -> datetime:
+    """Normalize exact built-in datetime authority without hostile tzinfo callbacks."""
+
+    if type(value) is not datetime:
+        raise TypeError(f"{name} must be an exact datetime")
+    selected_timezone = value.tzinfo
+    if type(selected_timezone) is not type(timezone.utc):
+        raise TypeError(f"{name} must use an exact built-in timezone")
+    if value.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware")
+    return value.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True, order=True)
@@ -718,6 +731,7 @@ def _authority_service_capital_operations():
         resources: tuple[str, ...],
         *,
         provider_evidence: Mapping[str, object] | None = None,
+        as_of: datetime | None = None,
         required: bool = False,
     ) -> dict[str, object] | None:
         settlement_book, economic_book = binding(service, required=required)
@@ -735,10 +749,14 @@ def _authority_service_capital_operations():
             or any(type(resource) is not str for resource in resources)
         ):
             raise AuthorityConflict("settlement capital resources are malformed")
-        cash_resources = tuple(
-            sorted(resource for resource in resources if resource.startswith("CASH:"))
+        capital_resources = tuple(
+            sorted(
+                resource
+                for resource in resources
+                if resource.startswith(("CASH:", "MARGIN_CREDIT:"))
+            )
         )
-        if not cash_resources:
+        if not capital_resources:
             return None
         if (
             type(provider_evidence) is not dict
@@ -858,12 +876,30 @@ def _authority_service_capital_operations():
         _selected_store, _identity, scope, scope_id = (
             DurableSettlementBook._selected_authority(settlement_book)
         )
+        raw_details = provider_evidence.get("resource_details", {})
+        if type(raw_details) is not dict:
+            raise AuthorityConflict(
+                "settlement capital provider resource details are malformed"
+            )
+        if as_of is None:
+            projection_at = _instant(
+                _authority_text(
+                    provider_evidence.get("snapshot_query_completed_at"),
+                    name="snapshot_query_completed_at",
+                ),
+                name="snapshot_query_completed_at",
+            )
+        else:
+            projection_at = _authority_datetime_utc(
+                as_of,
+                name="settlement capital as_of",
+            )
         adjustments: dict[str, dict[str, str]] = {}
-        for resource in cash_resources:
+        for resource in capital_resources:
             raw_provider = provider_available.get(resource)
             if raw_provider is None:
                 raise AuthorityConflict(
-                    f"provider availability lacks required cash resource {resource}"
+                    f"provider availability lacks required capital resource {resource}"
                 )
             provider_amount = _authority_decimal(
                 raw_provider,
@@ -871,13 +907,56 @@ def _authority_service_capital_operations():
             )
             if provider_amount < 0:
                 raise AuthorityConflict(
-                    "provider cash availability must be non-negative"
+                    "provider capital availability must be non-negative"
                 )
-            currency = resource.removeprefix("CASH:")
-            local_amount = projection.available_to_spend(currency)
+            if resource.startswith("CASH:"):
+                currency = resource.removeprefix("CASH:")
+                buying_power = None
+                require_buying_power = False
+            else:
+                currency = resource.removeprefix("MARGIN_CREDIT:")
+                detail = raw_details.get(resource)
+                if type(detail) is not dict:
+                    raise AuthorityConflict(
+                        "margin-credit capital requires typed provider evidence"
+                    )
+                try:
+                    buying_power = BuyingPowerEvidence.from_resource_detail(
+                        detail
+                    )
+                except (TypeError, ValueError) as error:
+                    raise AuthorityConflict(
+                        "margin-credit provider evidence is invalid"
+                    ) from error
+                if (
+                    buying_power.scope != scope
+                    or buying_power.resource_key != resource
+                    or buying_power.additional_credit != provider_amount
+                ):
+                    raise AuthorityConflict(
+                        "margin-credit provider evidence differs from capital scope"
+                    )
+                require_buying_power = True
+
+            capital = projection.available_capital(
+                scope=scope,
+                currency=currency,
+                as_of=projection_at,
+                buying_power_evidence=buying_power,
+                require_buying_power_evidence=require_buying_power,
+            )
+            if capital.blocks_new_risk:
+                raise AuthorityConflict(
+                    "local settlement capital is unresolved and blocks new risk"
+                )
+            local_amount = (
+                capital.available_cash
+                if resource.startswith("CASH:")
+                else capital.additional_buying_power
+            )
             if local_amount < 0:
                 raise AuthorityConflict(
-                    "local spendable cash must be non-negative"
+                    "local capital availability must be non-negative"
                 )
             effective = min(provider_amount, local_amount)
             adjustments[resource] = {
@@ -886,7 +965,14 @@ def _authority_service_capital_operations():
                 "effective_available": _canonical_decimal_text(effective),
             }
         return {
-            "schema_version": "settlement-capital-cut.v1",
+            "schema_version": (
+                "settlement-capital-cut.v2"
+                if any(
+                    resource.startswith("MARGIN_CREDIT:")
+                    for resource in capital_resources
+                )
+                else "settlement-capital-cut.v1"
+            ),
             "journal_sequence": after,
             "provider_id": scope.provider_id,
             "account_id": scope.account_id,
@@ -950,7 +1036,11 @@ def _canonical_settlement_capital_adjustment(
     }
     if set(value) != expected_fields:
         raise AuthorityConflict("settlement capital adjustment is malformed")
-    if value.get("schema_version") != "settlement-capital-cut.v1":
+    schema_version = value.get("schema_version")
+    if schema_version not in {
+        "settlement-capital-cut.v1",
+        "settlement-capital-cut.v2",
+    }:
         raise AuthorityConflict("settlement capital schema is unsupported")
     journal_sequence = value.get("journal_sequence")
     if type(journal_sequence) is not int or journal_sequence < 0:
@@ -1041,21 +1131,33 @@ def _canonical_settlement_capital_adjustment(
         or any(type(key) is not str for key in raw_resources)
     ):
         raise AuthorityConflict("settlement capital resources are malformed")
-    cash_resources = tuple(
+    capital_resources = tuple(
         sorted(
             resource
             for resource in required_resources
-            if resource.startswith("CASH:")
+            if resource.startswith(("CASH:", "MARGIN_CREDIT:"))
         )
     )
-    if set(raw_resources) != set(cash_resources):
+    expected_schema = (
+        "settlement-capital-cut.v2"
+        if any(
+            resource.startswith("MARGIN_CREDIT:")
+            for resource in capital_resources
+        )
+        else "settlement-capital-cut.v1"
+    )
+    if schema_version != expected_schema:
+        raise AuthorityConflict(
+            "settlement capital schema does not match reservation resources"
+        )
+    if set(raw_resources) != set(capital_resources):
         raise AuthorityConflict(
             "settlement capital resources do not match reservation requirements"
         )
 
     effective: dict[str, Decimal] = {}
     canonical_resources: dict[str, dict[str, str]] = {}
-    for resource in cash_resources:
+    for resource in capital_resources:
         raw = raw_resources.get(resource)
         if (
             type(raw) is not dict
@@ -1103,7 +1205,7 @@ def _canonical_settlement_capital_adjustment(
         }
     return (
         {
-            "schema_version": "settlement-capital-cut.v1",
+            "schema_version": schema_version,
             "journal_sequence": journal_sequence,
             "provider_id": canonical_provider,
             "account_id": canonical_account,
@@ -4998,6 +5100,7 @@ class AuthorityService:
                     canonical_available,
                     required_resource_names,
                     provider_evidence=availability_evidence,
+                    as_of=_instant(evaluated_at, name="evaluated_at"),
                     required=False,
                 )
                 if capital_cut is not None:
@@ -5786,6 +5889,7 @@ class AuthorityService:
                         current_provider_available,
                         tuple(sorted(risk_requirements)),
                         provider_evidence=current_provider_evidence,
+                        as_of=_instant(now, name="now"),
                         required=True,
                     )
                     assert current_capital is not None
@@ -5816,7 +5920,7 @@ class AuthorityService:
                                 "current settlement capital authority changed"
                             )
                     for resource, raw_requirement in risk_requirements.items():
-                        if not resource.startswith("CASH:"):
+                        if not resource.startswith(("CASH:", "MARGIN_CREDIT:")):
                             continue
                         requirement = _decimal(
                             raw_requirement,

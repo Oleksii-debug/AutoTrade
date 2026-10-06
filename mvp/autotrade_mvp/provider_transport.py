@@ -1108,6 +1108,15 @@ class SignedHttpRequest:
             or raw_url != raw_url.strip()
         ):
             raise ProviderTransportScopeError("signed request URL is invalid")
+        if (
+            not raw_url.isascii()
+            or any(
+                character <= " " or character == "\x7f"
+                for character in raw_url
+            )
+            or "\\" in raw_url
+        ):
+            raise ProviderTransportScopeError("signed request URL is invalid")
         parsed = urlsplit(raw_url)
         if (
             parsed.scheme != "https"
@@ -1306,6 +1315,17 @@ class AuthenticatedReadHttpRequest:
             type(raw_url) is not str
             or not raw_url
             or raw_url != raw_url.strip()
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read URL must be canonical HTTPS"
+            )
+        if (
+            not raw_url.isascii()
+            or any(
+                character <= " " or character == "\x7f"
+                for character in raw_url
+            )
+            or "\\" in raw_url
         ):
             raise ProviderTransportScopeError(
                 "authenticated-read URL must be canonical HTTPS"

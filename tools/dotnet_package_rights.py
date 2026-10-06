@@ -381,11 +381,50 @@ def _workflow_rights_blockers(
                 f"DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_NOT_FOUND:{project}"
             )
 
+    workflow_lines = workflow_text.splitlines()
     for project in sorted(set(package_projects)):
         relative = project.relative_to(root).as_posix()
         if relative not in seen:
             blockers.append(
                 f"DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_MISSING:{relative}"
+            )
+            continue
+
+        restore_command = f"dotnet restore {relative} --locked-mode"
+        verify_suffix = f"--project {relative}"
+        restore_lines = [
+            index
+            for index, raw in enumerate(workflow_lines, start=1)
+            if raw.strip().removeprefix("- ").strip() == f"run: {restore_command}"
+        ]
+        verify_lines = [
+            index
+            for index, raw in enumerate(workflow_lines, start=1)
+            if (
+                "tools/dotnet_package_rights.py" in raw
+                and "--verify-restored" in raw
+                and raw.strip().endswith(verify_suffix)
+            )
+        ]
+        if len(restore_lines) != 1 or len(verify_lines) != 1:
+            blockers.append(
+                f"DOTNET_PACKAGE_RIGHTS_VERIFY_ORDER_INVALID:{relative}"
+            )
+            continue
+        if restore_lines[0] >= verify_lines[0]:
+            blockers.append(
+                f"DOTNET_PACKAGE_RIGHTS_VERIFY_ORDER_INVALID:{relative}"
+            )
+            continue
+        later_restore = any(
+            index > verify_lines[0]
+            and raw.strip().removeprefix("- ").strip()
+            == f"run: {restore_command}"
+            for index, raw in enumerate(workflow_lines, start=1)
+        )
+        if later_restore:
+            blockers.append(
+                f"DOTNET_PACKAGE_RIGHTS_VERIFY_ORDER_INVALID:{relative}"
             )
     return sorted(blockers)
 

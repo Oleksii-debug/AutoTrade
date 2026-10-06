@@ -619,8 +619,6 @@ def _validate_bybit_option_delivery_query(
     if symbol is not None:
         if (
             type(symbol) is not str
-            or not symbol
-            or len(symbol) > 160
             or re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", symbol) is None
         ):
             raise ProviderTransportScopeError(
@@ -2636,6 +2634,7 @@ class KrakenSpotAuthenticatedReadSigner:
             raise TypeError(
                 "query_binding must be AuthenticatedReadQueryBinding"
             )
+        _require_authenticated_read_query_binding_authority(query_binding)
         if policy.provider_id != "KRAKEN" or policy.environment != "LIVE":
             raise ProviderTransportScopeError(
                 "Kraken Spot authenticated-read signer requires KRAKEN LIVE policy"
@@ -4556,6 +4555,7 @@ class BinanceSpotAuthenticatedReadSigner:
             raise TypeError(
                 "query_binding must be AuthenticatedReadQueryBinding"
             )
+        _require_authenticated_read_query_binding_authority(query_binding)
         if policy.provider_id != "BINANCE":
             raise ProviderTransportScopeError(
                 "Binance authenticated-read signer requires BINANCE policy"

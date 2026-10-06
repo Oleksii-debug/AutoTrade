@@ -291,6 +291,7 @@ class ProviderRouteReadTests(unittest.TestCase):
             )
             self.assertEqual(observation.qualification_id, q1.qualification_id)
             self.assertNotEqual(observation.qualification_id, q2.qualification_id)
+            self.assertEqual(observation.provider_environment, "TESTNET")
             self.assertEqual(
                 observation.route_semantics_digest,
                 binding.route_semantics_digest,

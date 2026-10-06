@@ -37,6 +37,7 @@ from mvp.autotrade_mvp.dispatch import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
+    ProviderCoreError,
     ProviderSubmissionObservation,
     Surface,
     observe_authenticated_json_response,
@@ -765,7 +766,7 @@ class AlpacaAdapterTests(unittest.TestCase):
                 observation=forged,
             )
 
-    def test_submission_consumer_does_not_call_rebindable_require_scope(self):
+    def test_submission_consumer_rejects_rebound_require_scope_without_callback(self):
         intent_id = "alpaca-no-virtual-scope"
         client_id = stable_client_order_id(
             "ALPACA",
@@ -787,14 +788,17 @@ class AlpacaAdapterTests(unittest.TestCase):
             side_effect=AssertionError(
                 "rebindable require_scope callback must not execute"
             ),
-        ):
-            result = parse_submission_response(
-                attempt_id=attempt,
-                prepared_request=prepared,
-                observation=observation,
-            )
-        self.assertEqual(result["outcome"], "ACKNOWLEDGED")
-        self.assertEqual(result["provider_order_id"], order_id)
+        ) as rebound:
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "provider submission observation authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
+                )
+        rebound.assert_not_called()
 
     def test_trade_activity_requires_order_and_fee_evidence(self):
         order_id = str(uuid4())

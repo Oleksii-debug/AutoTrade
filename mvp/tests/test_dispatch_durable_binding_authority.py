@@ -1894,6 +1894,68 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 ],
             )
 
+    def test_legacy_response_subclass_is_rejected_without_callback_execution(self):
+        class TrapDict(dict):
+            callbacks = 0
+
+            def items(self):
+                type(self).callbacks += 1
+                raise AssertionError("provider response items callback executed")
+
+            def __iter__(self):
+                type(self).callbacks += 1
+                raise AssertionError("provider response iteration callback executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            wire_calls = 0
+
+            def transport(_client_order_id, _request, guard):
+                nonlocal wire_calls
+                guard()
+                wire_calls += 1
+                return TrapDict({"accepted": True})
+
+            result = dispatcher.dispatch(
+                attempt_id="legacy-response-subclass-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda *_args: (True, "allowed"),
+                transport_send=transport,
+                submission_scope={"endpoint": "/orders"},
+            )
+
+            self.assertEqual(wire_calls, 1)
+            self.assertEqual(TrapDict.callbacks, 0)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("legacy-response-subclass-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:TypeError",
+            )
+
     def test_terminal_reread_rejects_post_append_tamper(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

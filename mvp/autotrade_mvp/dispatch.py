@@ -2137,11 +2137,16 @@ class GuardedDispatcher:
                 # A durable UNKNOWN retains the no-blind-retry property.
                 raise TypeError("exact provider response subtype is forbidden")
             else:
+                # Legacy provider wrappers may still return decoded JSON rather
+                # than ExactJsonTransportResponse. Detach that graph before
+                # payload hashing/persistence so dict/list subclasses or nested
+                # executable objects cannot run callbacks after the wire send.
+                legacy_response = _detach_submission_json(response)
                 sent_payload = {
                     "client_order_id": client_order_id,
-                    "response": response,
+                    "response": legacy_response,
                 }
-                outcome_response = response
+                outcome_response = legacy_response
             self._append(
                 attempt_id=attempt_id,
                 event_type=(

@@ -25,7 +25,7 @@ from .provider_core import (
 
 
 BYBIT_POSITION_MARGIN_PARSER_IDENTITY = "BYBIT_POSITION_MARGIN_V5_JSON_V1"
-BYBIT_POSITION_MARGIN_PARSER_VERSION = "1.0.1"
+BYBIT_POSITION_MARGIN_PARSER_VERSION = "1.0.2"
 BYBIT_POSITION_MARGIN_PARSER_CONTRACT_DIGEST = (
     "sha256:"
     + sha256(
@@ -57,7 +57,7 @@ BYBIT_POSITION_MARGIN_PARSER_CONTRACT_DIGEST = (
                 },
                 "economic_fields": {
                     "riskId": "EXACT_JSON_INTEGER_GTE_ZERO",
-                    "riskLimitValue": "BOUNDED_NONNEGATIVE_DECIMAL_TEXT_OR_EMPTY_ONLY_WHEN_RISK_ID_ZERO",
+                    "riskLimitValue": "BOUNDED_NONNEGATIVE_DECIMAL_TEXT_ZERO_WHEN_RISK_ID_ZERO",
                     "size": "BOUNDED_NONNEGATIVE_DECIMAL_TEXT",
                     "markPrice": "BOUNDED_POSITIVE_DECIMAL_TEXT",
                     "liqPrice": "EMPTY_OR_BOUNDED_POSITIVE_DECIMAL_TEXT",
@@ -291,14 +291,13 @@ def parse_bybit_position_margin_page(
         risk_limit = _decimal(
             row.get("riskLimitValue"),
             name=f"result.list[{index}].riskLimitValue",
-            allow_empty=True,
         )
         if risk_id == 0:
-            if risk_limit not in {None, Decimal("0")}:
+            if risk_limit != Decimal("0"):
                 raise BybitPositionMarginError(
-                    "riskId=0 requires empty or zero riskLimitValue"
+                    "riskId=0 requires zero riskLimitValue"
                 )
-        elif risk_limit is None or risk_limit <= 0:
+        elif risk_limit <= 0:
             raise BybitPositionMarginError(
                 "positive riskId requires positive riskLimitValue"
             )

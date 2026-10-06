@@ -160,13 +160,31 @@ class BybitPositionMarginParserTests(unittest.TestCase):
         self.assertIsNone(fact.leverage)
 
     def test_nonzero_risk_id_requires_positive_risk_limit_value(self):
-        for value in ("", "0"):
-            with self.subTest(value=value):
+        with self.assertRaisesRegex(
+            BybitPositionMarginError,
+            "positive riskId requires positive riskLimitValue",
+        ):
+            parse_bybit_position_margin_page(_response(_row(riskLimitValue="0")))
+
+    def test_risk_limit_value_is_required_decimal_text_for_all_tiers(self):
+        for risk_id in (0, 1):
+            with self.subTest(risk_id=risk_id):
                 with self.assertRaisesRegex(
                     BybitPositionMarginError,
-                    "positive riskId requires positive riskLimitValue",
+                    "riskLimitValue must not be empty",
                 ):
-                    parse_bybit_position_margin_page(_response(_row(riskLimitValue=value)))
+                    parse_bybit_position_margin_page(
+                        _response(_row(riskId=risk_id, riskLimitValue=""))
+                    )
+
+    def test_portfolio_margin_requires_documented_zero_risk_limit_value(self):
+        with self.assertRaisesRegex(
+            BybitPositionMarginError,
+            "riskId=0 requires zero riskLimitValue",
+        ):
+            parse_bybit_position_margin_page(
+                _response(_row(riskId=0, riskLimitValue="1"))
+            )
 
     def test_hedge_position_idx_requires_documented_side(self):
         for position_idx, side in ((1, "Sell"), (2, "Buy")):

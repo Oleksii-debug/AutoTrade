@@ -771,6 +771,14 @@ def observe_submission_json_response(
 
     if not isinstance(response_binding, SubmissionResponseBinding):
         raise TypeError("response_binding must be SubmissionResponseBinding")
+    if response_binding.terminal_state != "SENT":
+        raise ProviderCoreError(
+            "provider submission observation requires definitive SENT response"
+        )
+    if response_binding.response_encoding != "utf-8-json":
+        raise ProviderCoreError(
+            "provider-write JSON observation requires durable utf-8-json response bytes"
+        )
     provider = _text(provider_id, "provider_id").upper()
     if provider not in PROVIDERS:
         raise ProviderCoreError("unknown provider")
@@ -1111,6 +1119,10 @@ def _install_provider_submission_observation_authority(
                 "account_id": binding["account_id"],
                 "sent_at": binding["sent_at"],
                 "response_sha256": binding["response_sha256"],
+                "response_encoding": binding["response_encoding"],
+                "terminal_state": binding["terminal_state"],
+                "ambiguity_reason": binding["ambiguity_reason"],
+                "retry_disposition": binding["retry_disposition"],
                 "http_status": binding["http_status"],
                 "submission_scope": binding["submission_scope"],
                 "submission_scope_hash": binding["submission_scope_hash"],
@@ -1133,6 +1145,14 @@ def _install_provider_submission_observation_authority(
     ) -> ProviderSubmissionObservation:
         implementation_changed()
         binding = canonical_binding_projection(response_binding)
+        if binding["terminal_state"] != "SENT":
+            raise error_type(
+                "provider submission observation requires definitive SENT response"
+            )
+        if binding["response_encoding"] != "utf-8-json":
+            raise error_type(
+                "provider-write JSON observation requires durable utf-8-json response bytes"
+            )
 
         provider = canonical_text(provider_id, "provider_id").upper()
         if provider not in provider_ids:

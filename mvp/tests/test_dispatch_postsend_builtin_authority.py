@@ -1557,5 +1557,57 @@ class PostSendBuiltinAuthorityTests(unittest.TestCase):
             self.assertEqual(outbound, 1)
 
 
+    def test_dispatcher_staticmethod_code_mutation_before_guard_is_zero_wire(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            descriptor = GuardedDispatcher.__dict__["_outcome_from_terminal"]
+            original_outcome = descriptor.__func__
+            original_code = original_outcome.__code__
+            probe = []
+            outbound = 0
+            dispatch_module._dispatcher_staticmethod_executable_probe = probe
+
+            def forged_outcome(event, client_order_id):
+                _dispatcher_staticmethod_executable_probe.append(
+                    (event, client_order_id)
+                )
+                raise AssertionError("forged dispatcher staticmethod code executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                original_outcome.__code__ = forged_outcome.__code__
+                final_guard()
+                outbound += 1
+                return ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+
+            try:
+                with self.assertRaises(PermissionError):
+                    self._dispatch(
+                        dispatcher,
+                        attempt_id="preguard-dispatcher-staticmethod-code-a1",
+                        transport=transport,
+                    )
+                self.assertIs(original_outcome.__code__, original_code)
+            finally:
+                original_outcome.__code__ = original_code
+                vars(dispatch_module).pop(
+                    "_dispatcher_staticmethod_executable_probe",
+                    None,
+                )
+
+            self.assertEqual(probe, [])
+            self.assertEqual(outbound, 0)
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "preguard-dispatcher-staticmethod-code-a1",
+            )
+            self.assertEqual(event_types, ["SubmissionPrepared"])
+
+
 if __name__ == "__main__":
     unittest.main()

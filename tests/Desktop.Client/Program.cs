@@ -1949,8 +1949,49 @@ internal static class Program
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
+    static void ExplicitExternalHostConfigurationNeverFallsBackTest()
+    {
+        const System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.Static
+            | System.Reflection.BindingFlags.NonPublic;
+        var classifier = typeof(App).GetMethod(
+            "ExternalHostConfigurationRequested",
+            flags)
+            ?? throw new InvalidOperationException(
+                "external-host startup policy is missing");
+
+        bool Requested(string? uri, string? credentialTarget) =>
+            (bool)(classifier.Invoke(
+                null,
+                new object?[] { uri, credentialTarget })
+                ?? throw new InvalidOperationException(
+                    "external-host startup policy returned null"));
+
+        Check.True(
+            !Requested(null, null),
+            "absent external-host configuration did not select owned ZERO runtime");
+
+        foreach ((string? Uri, string? CredentialTarget) configured in new[]
+        {
+            ("", (string?)null),
+            ("   ", (string?)null),
+            ("\t", (string?)null),
+            ((string?)null, ""),
+            ((string?)null, "   "),
+            ((string?)null, "\t"),
+            ("http://127.0.0.1:8765/", (string?)null),
+            ((string?)null, "AutoTrade.HostSession:test"),
+        })
+        {
+            Check.True(
+                Requested(configured.Uri, configured.CredentialTarget),
+                "explicit external-host configuration silently fell back to owned ZERO runtime");
+        }
+    }
+
     public static async Task Main()
     {
+        ExplicitExternalHostConfigurationNeverFallsBackTest();
         WebExperienceSecurityPolicyOriginAndNavigationTest();
         WebExperienceSecurityPolicyCredentialForwardingTest();
         WebExperienceSecurityPolicyDisablesPrivilegedBrowserSurfacesTest();

@@ -596,6 +596,63 @@ class DispatchReconciliationAttemptIdentityTests(unittest.TestCase):
                 )
 
 
+    def test_recovery_rejects_sending_from_different_prepared_owner(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            aggregate_id = "modern-owner-mismatch"
+            prepared = {
+                "attempt_id": aggregate_id,
+                "intent_id": "owner-intent",
+                "provider": "TEST_PROVIDER",
+                "account_id": "acct",
+                "environment": "SIMULATION",
+                "client_order_id": "owner-client",
+                "owner_token": "owner-a",
+                "owner_epoch": 7,
+                "prepared_at": "2026-10-06T14:00:00Z",
+            }
+            sending = {
+                "client_order_id": "owner-client",
+                "owner_token": "owner-b",
+                "owner_epoch": 7,
+                "reason": "final_send_barrier_passed",
+            }
+            for version, event_type, payload in (
+                (1, "SubmissionPrepared", prepared),
+                (2, "SubmissionSending", sending),
+            ):
+                store.append_event(
+                    {
+                        "event_id": f"owner-mismatch-{version}",
+                        "event_type": event_type,
+                        "schema_version": "1.0.0",
+                        "aggregate_type": "submission_attempt",
+                        "aggregate_id": aggregate_id,
+                        "aggregate_version": str(version),
+                        "host_id": "local-mvp",
+                        "owner_epoch": "7",
+                        "environment": "SIMULATION",
+                        "occurred_at": "2026-10-06T14:00:00Z",
+                        "observed_at": "2026-10-06T14:00:00Z",
+                        "committed_at": "2026-10-06T14:00:00Z",
+                        "correlation_id": "owner-mismatch-correlation",
+                        "causation_id": None,
+                        "payload": payload,
+                        "payload_hash": payload_digest(payload),
+                        "evidence_refs": [],
+                    }
+                )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "SubmissionSending owner identity does not match SubmissionPrepared",
+            ):
+                unknown_submissions_from_dispatch(
+                    store,
+                    attempt_ids=(aggregate_id,),
+                )
+
+
     def test_recovery_rejects_executable_container_ingress_before_callbacks(self):
         class TrapIterable:
             def __iter__(self):

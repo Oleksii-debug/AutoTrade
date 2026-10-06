@@ -665,6 +665,11 @@ def _install_journal_store_authority():
 
     store_type = JournalStore
     canonical_getattr = getattr
+    canonical_setattr = setattr
+    canonical_type = type
+    canonical_dict = dict
+    canonical_tuple = tuple
+    canonical_id = id
     canonical_vars = vars
     identity_descriptor = store_type.__dict__.get("store_identity")
     operations = {
@@ -679,6 +684,134 @@ def _install_journal_store_authority():
     )
     if identity_descriptor is None:
         raise RuntimeError("submission journal identity authority is unavailable")
+
+    executable_states = []
+    seen_executables = set()
+    for _base, members in class_surfaces:
+        for _member_name, member in members:
+            pending = [member]
+            while pending:
+                candidate = pending.pop()
+                candidate_identity = canonical_id(candidate)
+                if candidate_identity in seen_executables:
+                    continue
+                seen_executables.add(candidate_identity)
+                for nested_name in (
+                    "__func__",
+                    "fget",
+                    "fset",
+                    "fdel",
+                    "__wrapped__",
+                ):
+                    nested = canonical_getattr(candidate, nested_name, None)
+                    if nested is not None and nested is not candidate:
+                        pending.append(nested)
+                candidate_code = canonical_getattr(candidate, "__code__", None)
+                if candidate_code is None:
+                    continue
+                candidate_kwdefaults = canonical_getattr(
+                    candidate,
+                    "__kwdefaults__",
+                    None,
+                )
+                if (
+                    candidate_kwdefaults is not None
+                    and canonical_type(candidate_kwdefaults) is not canonical_dict
+                ):
+                    raise RuntimeError(
+                        "submission journal executable keyword defaults are unavailable"
+                    )
+                candidate_kwdefaults_copy = (
+                    canonical_dict(candidate_kwdefaults)
+                    if canonical_type(candidate_kwdefaults) is canonical_dict
+                    else None
+                )
+                candidate_kwdefaults_fingerprint = (
+                    canonical_tuple(
+                        (canonical_id(key), canonical_id(value))
+                        for key, value in canonical_dict.items(
+                            candidate_kwdefaults
+                        )
+                    )
+                    if canonical_type(candidate_kwdefaults) is canonical_dict
+                    else None
+                )
+                executable_states.append(
+                    (
+                        candidate,
+                        candidate_code,
+                        canonical_getattr(candidate, "__defaults__", None),
+                        candidate_kwdefaults,
+                        candidate_kwdefaults_copy,
+                        candidate_kwdefaults_fingerprint,
+                    )
+                )
+    executable_states = canonical_tuple(executable_states)
+
+    def executable_state_is_unchanged() -> bool:
+        for (
+            function,
+            expected_code,
+            expected_defaults,
+            expected_kwdefaults,
+            _expected_kwdefaults_copy,
+            expected_kwdefaults_fingerprint,
+        ) in executable_states:
+            if (
+                canonical_getattr(function, "__code__", None) is not expected_code
+                or canonical_getattr(function, "__defaults__", None)
+                is not expected_defaults
+                or canonical_getattr(function, "__kwdefaults__", None)
+                is not expected_kwdefaults
+            ):
+                return False
+            if (
+                expected_kwdefaults_fingerprint is not None
+                and canonical_type(expected_kwdefaults) is canonical_dict
+                and canonical_tuple(
+                    (canonical_id(key), canonical_id(value))
+                    for key, value in canonical_dict.items(expected_kwdefaults)
+                )
+                != expected_kwdefaults_fingerprint
+            ):
+                return False
+        return True
+
+    def restore_executable_state() -> None:
+        for (
+            function,
+            expected_code,
+            expected_defaults,
+            expected_kwdefaults,
+            expected_kwdefaults_copy,
+            expected_kwdefaults_fingerprint,
+        ) in executable_states:
+            if canonical_getattr(function, "__code__", None) is not expected_code:
+                canonical_setattr(function, "__code__", expected_code)
+            if (
+                canonical_getattr(function, "__defaults__", None)
+                is not expected_defaults
+            ):
+                canonical_setattr(function, "__defaults__", expected_defaults)
+            if (
+                canonical_getattr(function, "__kwdefaults__", None)
+                is not expected_kwdefaults
+            ):
+                canonical_setattr(function, "__kwdefaults__", expected_kwdefaults)
+            if (
+                expected_kwdefaults_fingerprint is not None
+                and canonical_type(expected_kwdefaults) is canonical_dict
+            ):
+                current_fingerprint = canonical_tuple(
+                    (canonical_id(key), canonical_id(value))
+                    for key, value in canonical_dict.items(expected_kwdefaults)
+                )
+                if current_fingerprint != expected_kwdefaults_fingerprint:
+                    canonical_dict.clear(expected_kwdefaults)
+                    canonical_dict.update(
+                        expected_kwdefaults,
+                        expected_kwdefaults_copy,
+                    )
 
     def snapshot(store: JournalStore) -> tuple[object, object]:
         if JournalStore is not store_type:
@@ -702,6 +835,9 @@ def _install_journal_store_authority():
                     or current[member_name] is not member
                 ):
                     raise RuntimeError("submission journal class authority changed")
+        if not executable_state_is_unchanged():
+            restore_executable_state()
+            raise RuntimeError("submission journal executable authority changed")
         if type(store) is not store_type:
             raise TypeError("store must be the canonical JournalStore")
         state = canonical_vars(store)
@@ -2053,40 +2189,53 @@ class GuardedDispatcher:
         dispatcher_class_executable_states = []
         for _base, members in dispatcher_class_surfaces:
             for _name, member in members:
-                member_code = getattr(member, "__code__", None)
-                if member_code is None:
-                    continue
-                member_kwdefaults = getattr(member, "__kwdefaults__", None)
-                if (
-                    member_kwdefaults is not None
-                    and type(member_kwdefaults) is not dict
-                ):
-                    raise RuntimeError(
-                        "dispatcher method keyword defaults are unavailable"
+                member_executables = [member]
+                descriptor_function = getattr(member, "__func__", None)
+                if descriptor_function is not None:
+                    member_executables.append(descriptor_function)
+                for accessor_name in ("fget", "fset", "fdel"):
+                    accessor = getattr(member, accessor_name, None)
+                    if accessor is not None:
+                        member_executables.append(accessor)
+                for executable in member_executables:
+                    member_code = getattr(executable, "__code__", None)
+                    if member_code is None:
+                        continue
+                    member_kwdefaults = getattr(
+                        executable,
+                        "__kwdefaults__",
+                        None,
                     )
-                member_kwdefaults_copy = (
-                    dict(member_kwdefaults)
-                    if type(member_kwdefaults) is dict
-                    else None
-                )
-                member_kwdefaults_fingerprint = (
-                    tuple(
-                        (id(key), id(value))
-                        for key, value in dict.items(member_kwdefaults)
+                    if (
+                        member_kwdefaults is not None
+                        and type(member_kwdefaults) is not dict
+                    ):
+                        raise RuntimeError(
+                            "dispatcher method keyword defaults are unavailable"
+                        )
+                    member_kwdefaults_copy = (
+                        dict(member_kwdefaults)
+                        if type(member_kwdefaults) is dict
+                        else None
                     )
-                    if type(member_kwdefaults) is dict
-                    else None
-                )
-                dispatcher_class_executable_states.append(
-                    (
-                        member,
-                        member_code,
-                        getattr(member, "__defaults__", None),
-                        member_kwdefaults,
-                        member_kwdefaults_copy,
-                        member_kwdefaults_fingerprint,
+                    member_kwdefaults_fingerprint = (
+                        tuple(
+                            (id(key), id(value))
+                            for key, value in dict.items(member_kwdefaults)
+                        )
+                        if type(member_kwdefaults) is dict
+                        else None
                     )
-                )
+                    dispatcher_class_executable_states.append(
+                        (
+                            executable,
+                            member_code,
+                            getattr(executable, "__defaults__", None),
+                            member_kwdefaults,
+                            member_kwdefaults_copy,
+                            member_kwdefaults_fingerprint,
+                        )
+                    )
         dispatcher_class_executable_states = tuple(
             dispatcher_class_executable_states
         )
@@ -2156,6 +2305,12 @@ class GuardedDispatcher:
                 owner_epoch,
                 prepared_lease_seconds,
             ) = dispatch_call_authority
+            try:
+                _canonical_journal_authority_snapshot(authority_store)
+            except (RuntimeError, TypeError, PermissionError) as error:
+                raise _DispatchAuthorityChanged(
+                    "submission journal authority changed during dispatch"
+                ) from error
             current = (
                 self.environment,
                 self.account_id,
@@ -2373,36 +2528,6 @@ class GuardedDispatcher:
                 expected_prepared=expected_prepared,
             )
 
-        try:
-            authority_result = authority_check(intent_hash, now)
-        except Exception as error:
-            require_dispatch_call_authority()
-            reason = f"authority_check_failed_before_send:{type(error).__name__}"
-            self._append(
-                attempt_id=attempt_id,
-                event_type="SubmissionBlocked",
-                version=2,
-                payload={"client_order_id": client_order_id, "reason": reason},
-                now=now,
-            )
-            return DispatchOutcome(
-                "BLOCKED",
-                client_order_id,
-                None,
-                "authority_check_failed_before_send",
-            )
-        require_dispatch_call_authority()
-        allowed, reason = _validated_authority_result(authority_result)
-        if not allowed:
-            self._append(
-                attempt_id=attempt_id,
-                event_type="SubmissionBlocked",
-                version=2,
-                payload={"client_order_id": client_order_id, "reason": reason},
-                now=now,
-            )
-            return DispatchOutcome("BLOCKED", client_order_id, None, reason)
-
         guard_called = False
         barrier_passed = False
         barrier_now = now
@@ -2434,13 +2559,18 @@ class GuardedDispatcher:
             if final_barrier_clock is not None:
                 try:
                     barrier_now = final_barrier_clock()
+                    require_transport_module_authority()
+                    require_dispatch_call_authority()
                     parsed_barrier_now = _instant(barrier_now)
-                except Exception as error:
+                except snapshot_dispatch_authority_changed:
+                    raise
+                except snapshot_exception as error:
+                    require_transport_module_authority()
                     require_dispatch_call_authority()
                     barrier_now = now
                     reason = (
                         "final_barrier_clock_failed:"
-                        + type(error).__name__
+                        + snapshot_type(error).__name__
                     )
                     self._append(
                         attempt_id=attempt_id,
@@ -2453,6 +2583,7 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked(reason) from error
+                require_transport_module_authority()
                 require_dispatch_call_authority()
                 if parsed_barrier_now < _instant(now):
                     barrier_now = now
@@ -2485,12 +2616,17 @@ class GuardedDispatcher:
             if sender_check is not None:
                 try:
                     sender_check(self.owner_token, self.owner_epoch)
+                    require_transport_module_authority()
                     require_dispatch_call_authority()
-                except _DispatchAuthorityChanged:
+                except snapshot_dispatch_authority_changed:
                     raise
-                except Exception as error:
+                except snapshot_exception as error:
+                    require_transport_module_authority()
                     require_dispatch_call_authority()
-                    barrier_reason = f"sender_fence_rejected:{type(error).__name__}"
+                    barrier_reason = (
+                        "sender_fence_rejected:"
+                        + snapshot_type(error).__name__
+                    )
                     self._append(
                         attempt_id=attempt_id,
                         event_type="SubmissionBlocked",
@@ -2506,13 +2642,16 @@ class GuardedDispatcher:
                     raise DispatchBlocked(barrier_reason) from error
             try:
                 authority_result = authority_check(intent_hash, barrier_now)
-            except _DispatchAuthorityChanged:
+                require_transport_module_authority()
+                require_dispatch_call_authority()
+            except snapshot_dispatch_authority_changed:
                 raise
-            except Exception as error:
+            except snapshot_exception as error:
+                require_transport_module_authority()
                 require_dispatch_call_authority()
                 barrier_reason = (
                     "authority_check_failed_at_final_barrier:"
-                    + type(error).__name__
+                    + snapshot_type(error).__name__
                 )
                 self._append(
                     attempt_id=attempt_id,
@@ -2522,6 +2661,7 @@ class GuardedDispatcher:
                     now=barrier_now,
                 )
                 raise DispatchBlocked(barrier_reason) from error
+            require_transport_module_authority()
             require_dispatch_call_authority()
             allowed_now, barrier_reason = _validated_authority_result(authority_result)
             if not allowed_now:
@@ -2641,46 +2781,6 @@ class GuardedDispatcher:
         snapshot_module_globals_set = snapshot_module_globals.__setitem__
         snapshot_module_globals_pop = snapshot_module_globals.pop
         snapshot_builtin_missing = object()
-        snapshot_postsend_global_names = (
-            "_builtins",
-            "type",
-            "id",
-            "tuple",
-            "frozenset",
-            "dict",
-            "set",
-            "len",
-            "any",
-            "all",
-            "vars",
-            "getattr",
-            "setattr",
-            "delattr",
-            "isinstance",
-            "str",
-            "int",
-            "bool",
-            "max",
-            "range",
-            "enumerate",
-            "Exception",
-            "ValueError",
-            "TypeError",
-            "RuntimeError",
-            "PermissionError",
-            "DispatchBlocked",
-            "_DispatchAuthorityChanged",
-        )
-        snapshot_postsend_global_state = snapshot_tuple(
-            (
-                name,
-                snapshot_module_globals_get(
-                    name,
-                    snapshot_builtin_missing,
-                ),
-            )
-            for name in snapshot_postsend_global_names
-        )
         snapshot_builtin_namespace = snapshot_getattr(
             _builtins,
             "__dict__",
@@ -2700,6 +2800,23 @@ class GuardedDispatcher:
             raise RuntimeError(
                 "post-send builtin namespace keys are unavailable"
             )
+        snapshot_postsend_global_names = (
+            "_builtins",
+            "DispatchBlocked",
+            "_DispatchAuthorityChanged",
+        ) + snapshot_tuple(
+            name for name, _value in snapshot_postsend_builtin_state
+        )
+        snapshot_postsend_global_state = snapshot_tuple(
+            (
+                name,
+                snapshot_module_globals_get(
+                    name,
+                    snapshot_builtin_missing,
+                ),
+            )
+            for name in snapshot_postsend_global_names
+        )
         snapshot_postsend_helper_names = (
             "_canonical_journal_authority_snapshot",
             "_journal_store_call",
@@ -3656,12 +3773,54 @@ class GuardedDispatcher:
 
         def require_transport_module_authority() -> None:
             builtin_namespace_changed = restore_postsend_builtin_namespace()
-            helper_changed = restore_postsend_helper_authority()
             restore_postsend_builtin_globals()
-            if builtin_namespace_changed or helper_changed:
+            helper_changed = restore_postsend_helper_authority()
+            exact_response_changed = restore_exact_response_authority()
+            if (
+                builtin_namespace_changed
+                or helper_changed
+                or exact_response_changed
+            ):
                 raise snapshot_dispatch_authority_changed(
                     "dispatcher module authority changed before final send barrier"
                 )
+
+        try:
+            authority_result = authority_check(intent_hash, now)
+            require_transport_module_authority()
+            require_dispatch_call_authority()
+        except snapshot_dispatch_authority_changed:
+            raise
+        except snapshot_exception as error:
+            require_transport_module_authority()
+            require_dispatch_call_authority()
+            reason = (
+                "authority_check_failed_before_send:"
+                + snapshot_type(error).__name__
+            )
+            self._append(
+                attempt_id=attempt_id,
+                event_type="SubmissionBlocked",
+                version=2,
+                payload={"client_order_id": client_order_id, "reason": reason},
+                now=now,
+            )
+            return DispatchOutcome(
+                "BLOCKED",
+                client_order_id,
+                None,
+                "authority_check_failed_before_send",
+            )
+        allowed, reason = _validated_authority_result(authority_result)
+        if not allowed:
+            self._append(
+                attempt_id=attempt_id,
+                event_type="SubmissionBlocked",
+                version=2,
+                payload={"client_order_id": client_order_id, "reason": reason},
+                now=now,
+            )
+            return DispatchOutcome("BLOCKED", client_order_id, None, reason)
 
         postsend_builtin_authority_changed = False
         postsend_helper_authority_changed = False
@@ -3678,6 +3837,11 @@ class GuardedDispatcher:
                     restore_postsend_builtin_namespace()
                     or postsend_builtin_authority_changed
                 )
+                # Remove module-global shadows of builtins before any
+                # restoration helper runs. The exact-response restorer itself
+                # uses builtin names such as zip, so a transport-installed
+                # module global must never execute inside the firebreak.
+                restore_postsend_builtin_globals()
                 postsend_helper_authority_changed = (
                     restore_postsend_helper_authority()
                     or postsend_helper_authority_changed
@@ -3686,7 +3850,6 @@ class GuardedDispatcher:
                     restore_exact_response_authority()
                     or exact_response_authority_changed
                 )
-                restore_postsend_builtin_globals()
             if (
                 postsend_builtin_authority_changed
                 or postsend_helper_authority_changed

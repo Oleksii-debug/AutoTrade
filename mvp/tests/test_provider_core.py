@@ -28,6 +28,7 @@ from mvp.autotrade_mvp.provider_core import (
     classify_write_outcome,
     observe_submission_json_response,
     provider_definition,
+    provider_submission_observation_projection,
 )
 
 
@@ -146,6 +147,36 @@ class ProviderCoreTests(unittest.TestCase):
             )
             self.assertIs(type(observation.payload["sequence"]), int)
             self.assertEqual(observation.response_sha256, binding.response_sha256)
+
+            with (
+                patch.object(
+                    ProviderSubmissionObservation,
+                    "response_binding",
+                    property(lambda _observation: None),
+                    create=True,
+                ),
+                patch.object(
+                    ProviderSubmissionObservation,
+                    "endpoint",
+                    property(lambda _observation: "/forged"),
+                    create=True,
+                ),
+            ):
+                sealed = provider_submission_observation_projection(observation)
+                self.assertEqual(sealed["provider_id"], "BYBIT")
+                self.assertEqual(sealed["endpoint"], "/v5/order/create")
+                self.assertEqual(
+                    sealed["response_sha256"],
+                    binding.response_sha256,
+                )
+                self.assertEqual(observation.provider_id, "BYBIT")
+                observation.require_scope(
+                    provider_id="BYBIT",
+                    endpoint="/v5/order/create",
+                    prepared_request_sha256=request_sha,
+                    capability_snapshot_ids=("cap-1",),
+                    instrument_versions=("BTCUSD:v1",),
+                )
 
     def test_invalid_response_cannot_bypass_sealed_dispatch_decoder(self):
         with TemporaryDirectory() as directory:

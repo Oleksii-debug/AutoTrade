@@ -23,7 +23,14 @@ from .diagnostics import build_diagnostic_snapshot
 from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import require_current_reconciliation_checkpoint
 from .recovery import HostState, OwnerFence, RecoveryController
-from .store_identity import observe_database_identity, require_database_identity
+from .store_identity import (
+    JournalStoreIdentity,
+    connection_main_identity,
+    observe_database_identity,
+    require_database_identity,
+    require_exact_journal_store_identity,
+    same_journal_backing_object,
+)
 from .simulation_runtime_checkpoint import (
     AutonomousRuntimeCheckpointError,
     checkpoint_path as autonomous_runtime_checkpoint_path,
@@ -216,31 +223,74 @@ def _utc_text(value: object, *, name: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _open_existing_sqlite_read_only(
+    path: Path,
+    *,
+    subject: str,
+) -> tuple[sqlite3.Connection, JournalStoreIdentity]:
+    """Open one existing journal without creating or migrating authority state."""
+
+    if path.is_symlink() or not path.is_file():
+        raise BackupIntegrityError(f"{subject} is missing or unsafe")
+
+    connection: sqlite3.Connection | None = None
+    try:
+        expected_identity = observe_database_identity(path)
+        database_uri = (
+            Path(expected_identity.canonical_path).as_uri() + "?mode=ro"
+        )
+        connection = sqlite3.connect(
+            database_uri,
+            uri=True,
+            timeout=5,
+        )
+        connection.execute("PRAGMA query_only = ON")
+        opened_identity = connection_main_identity(connection)
+        if not same_journal_backing_object(
+            expected_identity,
+            opened_identity,
+        ):
+            raise BackupIntegrityError(
+                f"{subject} backing identity changed while opening"
+            )
+        return connection, expected_identity
+    except BackupIntegrityError:
+        if connection is not None:
+            connection.close()
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as error:
+        if connection is not None:
+            try:
+                connection.close()
+            except sqlite3.Error:
+                pass
+        raise BackupIntegrityError(f"{subject} is unreadable") from error
+
+
 def _recovery_owner_scopes_from_journal(
     journal_path: Path,
 ) -> tuple[str, ...]:
     """Discover durable recovery-owner scopes without guessing account authority."""
 
+    connection, _identity = _open_existing_sqlite_read_only(
+        journal_path,
+        subject="Recovery owner scope journal",
+    )
     try:
-        connection = sqlite3.connect(str(journal_path), timeout=5)
-        rows = connection.execute(
-            """
-            SELECT DISTINCT aggregate_id
-            FROM events
-            WHERE aggregate_type = ?
-            ORDER BY aggregate_id
-            """,
-            ("recovery_owner",),
-        ).fetchall()
-    except (sqlite3.Error, OSError) as error:
+        with closing(connection):
+            rows = connection.execute(
+                """
+                SELECT DISTINCT aggregate_id
+                FROM events
+                WHERE aggregate_type = ?
+                ORDER BY aggregate_id
+                """,
+                ("recovery_owner",),
+            ).fetchall()
+    except sqlite3.Error as error:
         raise BackupIntegrityError(
             "Recovery owner scope evidence is unreadable"
         ) from error
-    finally:
-        try:
-            connection.close()
-        except (UnboundLocalError, sqlite3.Error):
-            pass
 
     scopes: list[str] = []
     for row in rows:
@@ -261,27 +311,26 @@ def _recovery_owner_chain_from_journal(
     """Read sender-fence history without mutating the restored SQLite journal."""
 
     scope = _nonempty_text(owner_scope, name="owner_scope")
+    connection, _identity = _open_existing_sqlite_read_only(
+        journal_path,
+        subject="Recovery owner journal",
+    )
     try:
-        connection = sqlite3.connect(str(journal_path), timeout=5)
-        connection.row_factory = sqlite3.Row
-        rows = connection.execute(
-            """
-            SELECT event_type, aggregate_version, payload_json, payload_hash
-            FROM events
-            WHERE aggregate_type = ? AND aggregate_id = ?
-            ORDER BY aggregate_version
-            """,
-            ("recovery_owner", scope),
-        ).fetchall()
-    except (sqlite3.Error, OSError) as error:
+        with closing(connection):
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT event_type, aggregate_version, payload_json, payload_hash
+                FROM events
+                WHERE aggregate_type = ? AND aggregate_id = ?
+                ORDER BY aggregate_version
+                """,
+                ("recovery_owner", scope),
+            ).fetchall()
+    except sqlite3.Error as error:
         raise BackupIntegrityError(
             "Recovery owner journal evidence is unreadable"
         ) from error
-    finally:
-        try:
-            connection.close()
-        except (UnboundLocalError, sqlite3.Error):
-            pass
 
     chain: list[OwnerFence] = []
     for expected_epoch, row in enumerate(rows, start=1):
@@ -388,10 +437,15 @@ def _restore_provenance_payload(value: object) -> dict[str, Any]:
     return payload
 
 
-def _journal_backing_identity_ref(store: JournalStore) -> str:
+def _journal_backing_identity_ref(
+    identity: JournalStoreIdentity,
+) -> str:
     """Digest only the backing-object identity, never relocatable path text."""
 
-    identity = store.store_identity
+    identity = require_exact_journal_store_identity(
+        identity,
+        subject="restore journal backing identity",
+    )
     if identity.identity_source == "posix_stat":
         material = {
             "identity_source": "posix_stat",
@@ -421,7 +475,9 @@ def _append_restore_provenance(
     store = JournalStore(root / "state" / "journal.sqlite3")
     bound_marker = {
         **marker,
-        "restored_journal_backing_identity": _journal_backing_identity_ref(store),
+        "restored_journal_backing_identity": _journal_backing_identity_ref(
+            store.store_identity
+        ),
     }
     payload = _restore_provenance_payload(
         {key: bound_marker.get(key) for key in _RESTORE_PROVENANCE_FIELDS}
@@ -459,49 +515,88 @@ def _append_restore_provenance(
 
 
 def _load_restore_provenance(root: Path) -> dict[str, Any] | None:
-    """Read the latest restore generation from canonical journal authority."""
+    """Read restore provenance without initializing or migrating JournalStore."""
 
     journal_path = root / "state" / "journal.sqlite3"
-    # Validation must never manufacture replacement durable authority.  The
-    # JournalStore constructor initializes a database when the path is absent,
-    # so reject missing/unsafe restore state before opening it.
-    if journal_path.is_symlink() or not journal_path.is_file():
-        raise BackupIntegrityError(
-            "Restore provenance journal is missing or unsafe"
-        )
+    connection, identity = _open_existing_sqlite_read_only(
+        journal_path,
+        subject="Restore provenance journal",
+    )
+    current_backing_identity = _journal_backing_identity_ref(identity)
     try:
-        store = JournalStore(journal_path)
-        current_backing_identity = _journal_backing_identity_ref(store)
-        events = store.load_events(
-            _RESTORE_PROVENANCE_AGGREGATE_TYPE,
-            _RESTORE_PROVENANCE_AGGREGATE_ID,
-        )
-    except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as error:
+        with closing(connection):
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT
+                    event_id,
+                    event_type,
+                    aggregate_type,
+                    aggregate_id,
+                    aggregate_version,
+                    payload_json,
+                    payload_hash,
+                    committed_at
+                FROM events
+                WHERE aggregate_type = ? AND aggregate_id = ?
+                ORDER BY aggregate_version
+                """,
+                (
+                    _RESTORE_PROVENANCE_AGGREGATE_TYPE,
+                    _RESTORE_PROVENANCE_AGGREGATE_ID,
+                ),
+            ).fetchall()
+    except sqlite3.Error as error:
         raise BackupIntegrityError(
-            "Restore provenance journal authority is unavailable"
+            "Restore provenance journal authority is unreadable"
         ) from error
-    if not events:
+
+    if not rows:
         return None
-    event = events[-1]
+
+    latest_payload: dict[str, Any] | None = None
+    for expected_version, row in enumerate(rows, start=1):
+        if (
+            row["event_type"] != _RESTORE_PROVENANCE_EVENT_TYPE
+            or row["aggregate_type"] != _RESTORE_PROVENANCE_AGGREGATE_TYPE
+            or row["aggregate_id"] != _RESTORE_PROVENANCE_AGGREGATE_ID
+            or type(row["aggregate_version"]) is not int
+            or row["aggregate_version"] != expected_version
+        ):
+            raise BackupIntegrityError(
+                "Restore provenance journal event chain is invalid"
+            )
+        try:
+            raw_payload = json.loads(row["payload_json"])
+        except (TypeError, json.JSONDecodeError) as error:
+            raise BackupIntegrityError(
+                "Restore provenance journal payload is invalid"
+            ) from error
+        payload = _restore_provenance_payload(raw_payload)
+        manifest_digest = payload["backup_manifest_sha256"]
+        expected_event_id = (
+            f"restore-stage:{manifest_digest.removeprefix('sha256:')}:"
+            f"{expected_version}"
+        )
+        if (
+            row["event_id"] != expected_event_id
+            or row["payload_hash"] != payload_digest(payload)
+            or row["committed_at"] != payload["restored_at"]
+        ):
+            raise BackupIntegrityError(
+                "Restore provenance journal event binding is invalid"
+            )
+        latest_payload = payload
+
+    assert latest_payload is not None
     if (
-        event.get("event_type") != _RESTORE_PROVENANCE_EVENT_TYPE
-        or event.get("aggregate_type") != _RESTORE_PROVENANCE_AGGREGATE_TYPE
-        or event.get("aggregate_id") != _RESTORE_PROVENANCE_AGGREGATE_ID
+        latest_payload["restored_journal_backing_identity"]
+        != current_backing_identity
     ):
-        raise BackupIntegrityError("Restore provenance journal event is invalid")
-    payload = _restore_provenance_payload(event.get("payload"))
-    if payload["restored_journal_backing_identity"] != current_backing_identity:
         raise BackupIntegrityError(
             "Restore journal backing generation differs from durable provenance"
         )
-    if (
-        event.get("payload_hash") != payload_digest(payload)
-        or event.get("committed_at") != payload["restored_at"]
-    ):
-        raise BackupIntegrityError(
-            "Restore provenance journal event binding is invalid"
-        )
-    return payload
+    return latest_payload
 
 
 def _read_restore_marker(root: Path) -> dict[str, Any]:

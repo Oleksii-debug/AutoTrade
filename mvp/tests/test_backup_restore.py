@@ -803,6 +803,49 @@ class BackupRestoreTests(unittest.TestCase):
                 (copied / "RESTORE_RECONCILIATION_COMPLETE.json").exists()
             )
 
+    def test_restore_gate_validation_never_initializes_journal_store(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+
+            with patch.object(
+                backup_module,
+                "JournalStore",
+                side_effect=AssertionError(
+                    "restore gate validation must remain read-only"
+                ),
+            ):
+                self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_restore_provenance_reader_rejects_chain_version_gap(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            journal = restored / "state" / "journal.sqlite3"
+            connection = sqlite3.connect(str(journal))
+            try:
+                connection.execute(
+                    """
+                    UPDATE events
+                    SET aggregate_version = 2
+                    WHERE aggregate_type = ?
+                      AND aggregate_id = ?
+                    """,
+                    ("backup_restore", "restore-authority"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            self.assertTrue(restore_requires_reconciliation(restored))
+            self.assertFalse(
+                (restored / "RESTORE_RECONCILIATION_COMPLETE.json").exists()
+            )
+
     def test_restore_validation_never_recreates_missing_journal(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

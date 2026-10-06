@@ -5,6 +5,7 @@ from copy import deepcopy
 from hashlib import sha256
 import sys
 import unittest
+from unittest.mock import patch
 
 import mvp.autotrade_mvp.provider_host_attestation as attestation
 from mvp.autotrade_mvp.provider_host_attestation import (
@@ -498,6 +499,57 @@ class ProviderHostAttestationTests(unittest.TestCase):
                     "durable_prepared"
                 ]["journal_identity"],
             )
+
+
+    def test_spki_encoded_length_rejects_before_base64_decode(self):
+        with patch.object(
+            attestation.base64,
+            "b64decode",
+            side_effect=AssertionError("base64 decode must remain unreachable"),
+        ) as decoder:
+            with self.assertRaisesRegex(
+                HostProviderAttestationError,
+                "invalid encoded length",
+            ):
+                attestation._canonical_base64(
+                    "AAAA",
+                    name="public_key_spki_base64",
+                    expected_length=91,
+                )
+        decoder.assert_not_called()
+
+    def test_observed_response_size_bound_rejects_before_base64_decode(self):
+        prepared, observed, session_id, key_sha, _response = _fixture()
+        changed = deepcopy(observed)
+        changed["response_base64"] = "AAAAA"
+        original_max = attestation._MAX_RESPONSE_BYTES
+        attestation._MAX_RESPONSE_BYTES = 1
+        try:
+            with patch.object(
+                attestation,
+                "verify_host_prepared_attestation",
+                return_value=object(),
+            ), patch.object(
+                attestation.base64,
+                "b64decode",
+                side_effect=AssertionError("base64 decode must remain unreachable"),
+            ) as decoder:
+                with self.assertRaisesRegex(
+                    HostProviderAttestationError,
+                    "exceeds the maximum evidence size",
+                ):
+                    verify_host_observed_attestation(
+                        changed,
+                        expected_session_identity=session_id,
+                        expected_public_key_sha256=key_sha,
+                        expected_query=prepared["query"],
+                        expected_journal_identity=observed[
+                            "durable_prepared"
+                        ]["journal_identity"],
+                    )
+            decoder.assert_not_called()
+        finally:
+            attestation._MAX_RESPONSE_BYTES = original_max
 
 
 if __name__ == "__main__":

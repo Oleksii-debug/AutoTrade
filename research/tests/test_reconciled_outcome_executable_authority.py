@@ -138,6 +138,66 @@ class ReconciledOutcomeExecutableAuthorityTests(unittest.TestCase):
             self.assertEqual(reverified, fact)
             self.assertEqual(calls, [])
 
+    def test_late_internal_module_globals_cannot_retarget_reconciled_fact_authority(self):
+        calls: list[str] = []
+        with TemporaryDirectory() as directory:
+            memory = self._memory(Path(directory) / "memory.sqlite3")
+            expected = self._fact(memory)
+
+            def hostile(*args, **kwargs):
+                calls.append("hostile")
+                raise AssertionError(
+                    "late reconciled-outcome module global must not execute"
+                )
+
+            with (
+                patch.object(reconciled_module, "_COVERAGE_READ", new=hostile),
+                patch.object(reconciled_module, "_COVERAGE_VERIFY", new=hostile),
+                patch.object(reconciled_module, "_validate_query", new=hostile),
+                patch.object(reconciled_module, "_hash", new=hostile),
+                patch.object(
+                    reconciled_module,
+                    "_assert_memory_authority",
+                    new=hostile,
+                ),
+                patch.object(
+                    reconciled_module,
+                    "_verify_fact_integrity",
+                    new=hostile,
+                ),
+                patch.object(reconciled_module, "_cutoff", new=hostile),
+                patch.object(reconciled_module, "_text", new=hostile),
+                patch.object(reconciled_module, "_digest", new=hostile),
+                patch.object(reconciled_module, "_freeze", new=hostile),
+                patch.object(reconciled_module, "_canonical_value", new=hostile),
+                patch.object(reconciled_module, "_fact_identity_payload", new=hostile),
+                patch.object(reconciled_module, "ExperienceMemory", new=object),
+                patch.object(
+                    reconciled_module,
+                    "CoveragePopulationSnapshot",
+                    new=object,
+                ),
+                patch.object(reconciled_module, "MemoryIntegrityError", new=RuntimeError),
+                patch.object(reconciled_module, "MappingProxyType", new=object),
+                patch.object(reconciled_module, "datetime", new=object),
+                patch.object(reconciled_module, "timezone", new=object),
+                patch.object(reconciled_module, "UUID", new=object),
+                patch.object(reconciled_module, "sha256", new=hostile),
+            ):
+                resolved = resolve_reconciled_outcome_fact(
+                    memory,
+                    episode_id=EPISODE_ID,
+                    causal_cutoff=BASE + timedelta(days=1),
+                    granted_permissions={"RESEARCH"},
+                    task="exec-authority",
+                    instrument_family="EQUITY",
+                )
+                reverified = reverify_reconciled_outcome_fact(memory, expected)
+
+            self.assertEqual(resolved, expected)
+            self.assertEqual(reverified, expected)
+            self.assertEqual(calls, [])
+
     def test_late_module_global_resolver_rebinding_cannot_retarget_bound_bridge(self):
         calls: list[str] = []
         with TemporaryDirectory() as directory:

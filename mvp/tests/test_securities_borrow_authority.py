@@ -4,6 +4,7 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localc
 from hashlib import sha256
 from tempfile import TemporaryDirectory
 import unittest
+import weakref
 
 from mvp.autotrade_mvp.authority import (
     AuthoritativeRiskSnapshot,
@@ -372,6 +373,56 @@ def _rewrite_risk_event_without_borrow_quantity_unit(store, risk_decision_id):
 
 
 class SecuritiesBorrowAuthorityTests(unittest.TestCase):
+    def test_instrument_registry_binding_rejects_retarget_before_financial_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = _authority(store, quantity_unit="share")
+            callbacks = [
+                ref.__callback__
+                for ref in weakref.getweakrefs(authority)
+                if ref.__callback__ is not None
+            ]
+            self.assertEqual(callbacks, [])
+            object.__setattr__(
+                authority,
+                "_selected_instrument_registry",
+                _instrument_registry(quantity_unit="contract"),
+            )
+            checkpoint = _checkpoint(store)
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "instrument lifetime binding was modified",
+            ):
+                _admit_short(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    suffix="registry-retarget",
+                    reserved=None,
+                )
+            self.assertEqual(reservations.version, 0)
+
+    def test_instrument_registry_subclass_is_not_canonical_authority(self):
+        class InstrumentRegistrySubclass(InstrumentRegistry):
+            pass
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(
+                TypeError,
+                "exact InstrumentRegistry",
+            ):
+                AuthorityService(
+                    store,
+                    evidence_artifact_store=artifact_store_for(store),
+                    instrument_registry=InstrumentRegistrySubclass(),
+                )
+
     def test_increasing_short_requires_canonical_instrument_registry_before_mutation(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

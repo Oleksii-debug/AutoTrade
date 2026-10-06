@@ -382,17 +382,19 @@ def qualify(
                     evidence_root=directory,
                     qualification_receipt=receipt,
                 )
-            verify_canonical.assert_called_once()
-            call = verify_canonical.call_args
+            self.assertGreaterEqual(verify_canonical.call_count, 1)
+            if decision.status is RecoveryEvidenceStatus.PASS:
+                self.assertEqual(verify_canonical.call_count, 2)
             self_selected = {
                 "policy",
                 "expected_policy_id",
                 "expected_policy_version",
             }
-            if self_selected & set(call.kwargs):
-                raise AssertionError(
-                    "recovery qualification forwarded caller-selected trust authority"
-                )
+            for call in verify_canonical.call_args_list:
+                if self_selected & set(call.kwargs):
+                    raise AssertionError(
+                        "recovery qualification forwarded caller-selected trust authority"
+                    )
             return decision
         return qualify_recovery_release(
             policy=policy,

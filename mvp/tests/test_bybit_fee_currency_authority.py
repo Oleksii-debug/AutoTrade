@@ -421,6 +421,31 @@ class BybitFeeCurrencyAuthorityTests(unittest.TestCase):
             )
         self.assertEqual(callbacks, [])
 
+    def test_returned_projection_is_a_detached_copy(self):
+        _instrument, _registry, capability, _qualification, authority = issued_fixture()
+        observation = execution_response(account_capability=capability)
+
+        projection = project_bybit_execution_fee_currency_authority(authority)
+        self.assertEqual(projection.fee_currency, "USDT")
+        object.__setattr__(projection, "fee_currency", "USDC")
+
+        fresh_projection = project_bybit_execution_fee_currency_authority(authority)
+        self.assertEqual(fresh_projection.fee_currency, "USDT")
+
+        fill = parse_executions(
+            observation,
+            instrument_versions={"ETHPERP": INSTRUMENT_REF},
+            fee_currency_authorities=(authority,),
+        )[0]
+        self.assertEqual(fill.fee_currency, "USDT")
+
+        object.__setattr__(authority, "fee_currency", "USDC")
+        with self.assertRaisesRegex(
+            BybitFeeCurrencyAuthorityError,
+            "state changed",
+        ):
+            project_bybit_execution_fee_currency_authority(authority)
+
     def test_direct_mutated_or_non_tuple_authority_input_fails_closed(self):
         with self.assertRaisesRegex(
             BybitFeeCurrencyAuthorityError,

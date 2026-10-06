@@ -941,6 +941,58 @@ del _resolve_authoritative_corporate_action_impl
 del _register_authoritative_corporate_action
 
 
+def _bind_authoritative_corporate_action_projection(
+    require_authority,
+    mapping_proxy_type,
+):
+    def authoritative_corporate_action_projection(
+        value: AuthoritativeCorporateAction,
+    ) -> Mapping[str, object]:
+        """Return an inert issuer-verified projection for downstream composition."""
+
+        trusted = require_authority(value)
+        event = trusted.event
+        payload = mapping_proxy_type(dict(event.payload))
+        return mapping_proxy_type(
+            {
+                "provider_id": trusted.provider_id,
+                "account_id": trusted.account_id,
+                "environment": trusted.environment,
+                "external_event_id": trusted.external_event_id,
+                "provider_revision": trusted.provider_revision,
+                "evidence_ref": trusted.evidence_ref,
+                "raw_evidence_digest": trusted.raw_evidence_digest,
+                "query_digest": trusted.query_digest,
+                "capability_snapshot_id": trusted.capability_snapshot_id,
+                "provider_instrument_version": trusted.provider_instrument_version,
+                "observed_at": trusted.observed_at,
+                "provenance_digest": trusted.provenance_digest,
+                "corrects_external_event_id": trusted.corrects_external_event_id,
+                "instrument_id": event.instrument_id,
+                "instrument_version": event.instrument_version,
+                "kind": event.kind,
+                "effective_at": (
+                    event.effective_at.isoformat().replace("+00:00", "Z")
+                    if event.effective_at is not None
+                    else None
+                ),
+                "source_sequence": event.source_sequence,
+                "payload": payload,
+            }
+        )
+
+    return authoritative_corporate_action_projection
+
+
+authoritative_corporate_action_projection = (
+    _bind_authoritative_corporate_action_projection(
+        _require_authoritative_corporate_action,
+        MappingProxyType,
+    )
+)
+del _bind_authoritative_corporate_action_projection
+
+
 class CorporateActionEvidenceConflict(CorporateActionEvidenceError):
     """Durable provider action identity conflicts with retained evidence."""
 

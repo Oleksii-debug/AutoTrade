@@ -203,6 +203,8 @@ class TrustedChronologyCutTests(unittest.TestCase):
             unresolved_limits=tuple(unresolved_limits),
             schema_version="1.0.0",
             verification_method="RSA_PKCS1V15_SHA256",
+            attestation_json="{}",
+            signature_b64="AA==",
             release_artifact_id=release_id,
             release_artifact_sha256=release_sha,
         )

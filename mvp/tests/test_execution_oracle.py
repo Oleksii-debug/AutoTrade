@@ -421,6 +421,30 @@ class ExecutionOracleTests(unittest.TestCase):
         self.assertTrue(result.triggered)
         assert_conservative_execution(order=o, observation=q, model=m, result=result)
 
+    def test_oracle_rejects_trigger_state_regression_after_prior_stop_trigger(self):
+        o = order(
+            order_type="STOP_LIMIT",
+            limit_price="102",
+            stop_price="100",
+            already_triggered=True,
+        )
+        q = observation(ask="101")
+        m = model()
+        result = simulate_execution(o, q, m)
+        self.assertIn(result.status, {"FILLED", "PARTIAL"})
+        self.assertTrue(result.triggered)
+        forged = replace(result, triggered=False)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "triggered state cannot regress",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=forged,
+            )
+
     def test_oracle_rejects_forged_stop_trigger_without_price_evidence(self):
         o = order(
             order_type="STOP_LIMIT",

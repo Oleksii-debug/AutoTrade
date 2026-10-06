@@ -354,6 +354,10 @@ class ResourceAvailabilityEvidence:
                     )
             if resource.startswith("MARGIN_CREDIT:"):
                 buying_power = BuyingPowerEvidence.from_resource_detail(detail)
+                if buying_power.resource_detail() != detail:
+                    raise ValueError(
+                        "margin-credit resource detail must use canonical encoding"
+                    )
                 if buying_power.resource_key != resource:
                     raise ValueError(
                         "margin-credit resource identity does not match evidence scope"

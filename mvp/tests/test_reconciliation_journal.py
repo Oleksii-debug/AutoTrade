@@ -186,6 +186,48 @@ class ReconciliationJournalTests(unittest.TestCase):
                 evidence_refs=("provider:snapshot-only",),
             )
 
+
+    def test_margin_credit_detail_requires_canonical_encoding(self):
+        buying_power = BuyingPowerEvidence(
+            evidence_id="margin-credit-canonical",
+            scope=SettlementAccountScope(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            ),
+            currency="USD",
+            additional_credit="250",
+            observed_at=datetime(
+                2026, 9, 24, 18, 59, 30, tzinfo=timezone.utc
+            ),
+            valid_until=datetime(
+                2026, 9, 24, 19, 5, 0, tzinfo=timezone.utc
+            ),
+            evidence_refs=("provider:margin-credit:canonical",),
+        )
+        detail = buying_power.resource_detail()
+        detail["additional_credit"] = "250.0"
+        with self.assertRaisesRegex(
+            ValueError,
+            "must use canonical encoding",
+        ):
+            ResourceAvailabilityEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                snapshot_id="margin-credit-noncanonical",
+                query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+                provider_as_of="2026-09-24T18:59:59Z",
+                valid_until="2026-09-24T19:05:00Z",
+                available_resources={"MARGIN_CREDIT:USD": "250"},
+                resource_details={"MARGIN_CREDIT:USD": detail},
+                evidence_refs=(
+                    "provider:snapshot:canonical",
+                    "provider:margin-credit:canonical",
+                ),
+            )
+
     def test_persisted_margin_credit_ref_tamper_fails_closed(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

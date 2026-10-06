@@ -1175,6 +1175,10 @@ def load_account_resource_availability_evidence(
                     "MARGIN_CREDIT resource lacks typed buying-power evidence"
                 )
             buying_power = BuyingPowerEvidence.from_resource_detail(detail)
+            if buying_power.resource_detail() != detail:
+                raise ValueError(
+                    "margin-credit resource detail must use canonical encoding"
+                )
             if (
                 buying_power.resource_key != resource
                 or buying_power.scope.provider_id != provider

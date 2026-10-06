@@ -1933,6 +1933,9 @@ class AblationQualificationAuthority:
 # module-global or class attribute is rebound.
 _registered_policy_context = AblationQualificationAuthority._bound_context
 
+_REGISTERED_ABLATION_DECISION_POLICY = ScientificRegistry.ablation_decision_policy
+_REGISTERED_ABLATION_VALUE_POLICY = ScientificRegistry.ablation_value_policy
+
 del _register_ablation_authority_binding
 del _resolve_ablation_authority_binding
 del _make_ablation_qualification_authority_init
@@ -1962,6 +1965,30 @@ def _qualified_inconclusive(
     )
 
 
+def _registered_decision_policy(authority: object):
+    registry, _memory, _artifacts, protocol_id, protocol_hash, *_rest = (
+        _registered_policy_context(authority)
+    )
+    policy = _REGISTERED_ABLATION_DECISION_POLICY(registry, protocol_id)
+    if policy.protocol_id != protocol_id or policy.protocol_hash != protocol_hash:
+        raise ProtocolViolation(
+            "registered ablation decision policy does not match qualification binding"
+        )
+    return policy
+
+
+def _registered_value_policy(authority: object):
+    registry, _memory, _artifacts, protocol_id, protocol_hash, *_rest = (
+        _registered_policy_context(authority)
+    )
+    policy = _REGISTERED_ABLATION_VALUE_POLICY(registry, protocol_id)
+    if policy.protocol_id != protocol_id or policy.protocol_hash != protocol_hash:
+        raise ProtocolViolation(
+            "registered ablation value policy does not match qualification binding"
+        )
+    return policy
+
+
 def evaluate_qualified_incremental_value(
     target_component: str,
     pairs: Iterable[AblationPair],
@@ -1984,15 +2011,26 @@ def evaluate_qualified_incremental_value(
     owner evidence and one immutable historical economic cut are available.
     """
 
-    selected_input = tuple(pairs)
     trusted = authority is not None
     if trusted:
         if type(authority) is not AblationQualificationAuthority:
             raise TypeError(
                 "authority must be the canonical AblationQualificationAuthority or None"
             )
-        caller_outcomes = tuple(canonical_outcomes)
-        if population is not None or caller_outcomes:
+        if type(pairs) not in {list, tuple}:
+            raise TypeError(
+                "pairs must be an exact list or tuple for authority-backed qualification"
+            )
+        if type(canonical_outcomes) not in {list, tuple}:
+            raise TypeError(
+                "canonical_outcomes must be an exact list or tuple for authority-backed qualification"
+            )
+        if type(outcome_refs) not in {list, tuple}:
+            raise TypeError(
+                "outcome_refs must be an exact list or tuple for authority-backed qualification"
+            )
+        selected_input = tuple(pairs)
+        if population is not None or len(canonical_outcomes) != 0:
             raise ValueError(
                 "authority-backed qualification does not accept caller-authored population/outcomes"
             )
@@ -2001,23 +2039,67 @@ def evaluate_qualified_incremental_value(
             raise TypeError(
                 "outcome_refs must contain canonical AblationOutcomeArtifactRef values"
             )
-        if type(minimum_pairs) is not int or minimum_pairs < 2:
-            raise ValueError("minimum_pairs must be an integer >= 2")
-        required = _decimal(required_lower_bound, "required_lower_bound")
-        multiplier = _decimal(
-            uncertainty_multiplier,
-            "uncertainty_multiplier",
-        )
-        if multiplier < 0:
-            raise ValueError("uncertainty_multiplier must be non-negative")
         target = _identity_text(target_component, "target_component")
         _validate_pairs(target, selected_input)
 
-        # #718/#1097: the current authority can authenticate the outcome envelope
-        # but cannot independently resolve utility, cost, correction lineage, and
-        # one immutable historical economic cut from their canonical owners.
-        # Do not execute a caller-selected persistent authority and then treat
-        # hash-shaped fields in that envelope as terminal economic evidence.
+        # Terminal statistical geometry is protocol authority. Caller thresholds
+        # remain API-compatibility inputs only and cannot make qualification
+        # easier or harder after the protocol is registered.
+        try:
+            registered_decision = _registered_decision_policy(authority)
+        except (ProtocolViolation, KeyError, TypeError, ValueError):
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=Decimal("0"),
+                uncertainty_multiplier=Decimal("0"),
+                reason="registered_ablation_decision_policy_unavailable",
+            )
+        required = _decimal(
+            registered_decision.required_lower_bound,
+            "registered required_lower_bound",
+        )
+        multiplier = _decimal(
+            registered_decision.uncertainty_multiplier,
+            "registered uncertainty_multiplier",
+        )
+        if registered_decision.decision_rule != _ABLATION_DECISION_RULE:
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="registered_ablation_decision_rule_unsupported",
+            )
+        if (
+            type(registered_decision.minimum_pairs) is not int
+            or registered_decision.minimum_pairs < 2
+        ):
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="registered_ablation_decision_policy_unavailable",
+            )
+
+        try:
+            registered_value = _registered_value_policy(authority)
+        except (ProtocolViolation, KeyError, TypeError, ValueError):
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="registered_ablation_value_policy_unavailable",
+            )
+        if registered_value.fx_valuation_ref is not None:
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="registered_ablation_fx_valuation_evidence_unavailable",
+            )
+
+        # Policy selection is now independent and preregistered. Numeric utility
+        # and the complete registered cost composite remain separately owned and
+        # are deliberately not inferred from caller outcome fields.
         return _qualified_inconclusive(
             target_component=target,
             required_lower_bound=required,
@@ -2025,6 +2107,7 @@ def evaluate_qualified_incremental_value(
             reason="canonical_utility_cost_owner_evidence_unavailable",
         )
     else:
+        selected_input = tuple(pairs)
         if tuple(outcome_refs):
             raise ValueError("outcome_refs require AblationQualificationAuthority")
         if type(population) is not RegisteredAblationPopulation:

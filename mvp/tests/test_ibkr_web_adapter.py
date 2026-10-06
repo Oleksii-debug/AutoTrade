@@ -563,8 +563,8 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(execution.permanent_order_id, "778899")
         self.assertEqual(execution.quantity, Decimal("0.5"))
 
-    def test_execution_permanent_order_id_must_be_positive_integer(self):
-        for invalid in (None, True, 0, -1, "778899", _HostileInt(778899)):
+    def test_execution_permanent_order_id_must_be_non_negative_integer(self):
+        for invalid in (None, True, -1, "778899", _HostileInt(778899)):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(IbkrWebAdapterError):
                     IbkrExecutionEvidence.create(
@@ -1032,8 +1032,8 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 "size": Decimal("0.5"),
                 "price": "220.10",
                 "commission": "-0.35",
-                "trade_time": "20260924-20:00:01",
-            "trade_time_r": 1790280001000,
+                    "trade_time": "20260924-20:00:01",
+                "trade_time_r": 1790280001000,
             }
         ]
         observation = ibkr_trade_observation([rows[0], dict(rows[0])])
@@ -1076,6 +1076,22 @@ class IbkrWebAdapterTests(unittest.TestCase):
         )
         self.assertEqual(fills[0].trade_time, "2026-09-24T20:00:01Z")
 
+        manual = parse_web_api_trades(
+            ibkr_trade_observation([dict(base, order_ref="")]),
+            instrument_versions_by_conid={265598: "AAPL:v1"},
+            fee_currency_by_execution_id={"exec-time-1": "USD"},
+        )
+        self.assertIsNone(manual[0].client_order_id)
+
+        combo = parse_web_api_trades(
+            ibkr_trade_observation(
+                [dict(base, conidEx="265598;;;43645865/1,9408/-1")]
+            ),
+            instrument_versions_by_conid={265598: "AAPL:v1"},
+            fee_currency_by_execution_id={"exec-time-1": "USD"},
+        )
+        self.assertEqual(combo[0].instrument, "AAPL:v1")
+
         with self.assertRaisesRegex(IbkrWebAdapterError, "trade_time_r conflict"):
             parse_web_api_trades(
                 ibkr_trade_observation([dict(base, trade_time_r=1790280002000)]),
@@ -1100,7 +1116,9 @@ class IbkrWebAdapterTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(IbkrWebAdapterError, "conidEx"):
             parse_web_api_trades(
-                ibkr_trade_observation([dict(base, conidEx="999999")]),
+                ibkr_trade_observation(
+                    [dict(base, conidEx="999999;;;43645865/1,9408/-1")]
+                ),
                 instrument_versions_by_conid={265598: "AAPL:v1"},
                 fee_currency_by_execution_id={"exec-time-1": "USD"},
             )
@@ -1115,7 +1133,8 @@ class IbkrWebAdapterTests(unittest.TestCase):
             "size": "1",
             "price": "100",
             "commission": "0.25",
-            "trade_time": "2026-09-24T20:00:01Z",
+            "trade_time": "20260924-20:00:01",
+            "trade_time_r": 1790280001000,
         }
         with self.assertRaisesRegex(IbkrWebAdapterError, "account"):
             parse_web_api_trades(
@@ -1147,7 +1166,8 @@ class IbkrWebAdapterTests(unittest.TestCase):
             "size": "1",
             "price": "100",
             "commission": "0.25",
-            "trade_time": "2026-09-24T20:00:01Z",
+            "trade_time": "20260924-20:00:01",
+            "trade_time_r": 1790280001000,
         }
         with self.assertRaisesRegex(IbkrWebAdapterError, "identifiers conflict"):
             parse_web_api_trades(
@@ -1167,7 +1187,8 @@ class IbkrWebAdapterTests(unittest.TestCase):
             "size": "1",
             "price": "100",
             "commission": "0.25",
-            "trade_time": "2026-09-24T20:00:01Z",
+            "trade_time": "20260924-20:00:01",
+            "trade_time_r": 1790280001000,
         }
         observation = ibkr_trade_observation([row])
         invalid_cases = (
@@ -1227,7 +1248,8 @@ class IbkrWebAdapterTests(unittest.TestCase):
             "size": "1",
             "price": "100",
             "commission": "0.25",
-            "trade_time": "2026-09-24T20:00:01Z",
+            "trade_time": "20260924-20:00:01",
+            "trade_time_r": 1790280001000,
         }
         fills = parse_web_api_trades(
             ibkr_trade_observation([dict(base, size=1.0)]),
@@ -1252,7 +1274,8 @@ class IbkrWebAdapterTests(unittest.TestCase):
             "size": "1",
             "price": "100",
             "commission": "0.25",
-            "trade_time": "2026-09-24T20:00:01Z",
+            "trade_time": "20260924-20:00:01",
+            "trade_time_r": 1790280001000,
         }
         fills = parse_web_api_trades(
             ibkr_trade_observation([base]),
@@ -1590,7 +1613,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
         )
         object.__setattr__(execution, "permanent_order_id", "0778899")
         with self.assertRaisesRegex(
-            IbkrWebAdapterError, "canonical positive integer text"
+            IbkrWebAdapterError, "canonical non-negative integer text"
         ):
             execution_to_reconciliation_fill(
                 execution,

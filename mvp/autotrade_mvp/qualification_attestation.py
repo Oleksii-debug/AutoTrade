@@ -360,7 +360,7 @@ class TrustRoot:
             raise QualificationTrustError("public_exponent is invalid")
         scopes = tuple(self.allowed_scopes)
         if not scopes or not all(
-            isinstance(item, QualificationScope) for item in scopes
+            type(item) is QualificationScope for item in scopes
         ):
             raise QualificationTrustError(
                 "allowed_scopes must contain QualificationScope values"
@@ -425,7 +425,7 @@ class QualificationTrustPolicy:
             _token(self.policy_version, name="policy_version"),
         )
         roots = tuple(self.roots)
-        if not roots or not all(isinstance(item, TrustRoot) for item in roots):
+        if not roots or not all(type(item) is TrustRoot for item in roots):
             raise QualificationTrustError("roots must contain TrustRoot values")
         roots = tuple(sorted(roots, key=lambda item: item.root_id))
         if len({item.root_id for item in roots}) != len(roots):
@@ -516,7 +516,7 @@ class QualificationAttestation:
         )
         refs = tuple(self.evidence_refs)
         if not refs or not all(
-            isinstance(item, EvidenceArtifactRef) for item in refs
+            type(item) is EvidenceArtifactRef for item in refs
         ):
             raise QualificationTrustError(
                 "evidence_refs must contain evidence artifacts"

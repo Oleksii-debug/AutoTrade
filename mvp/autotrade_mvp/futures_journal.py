@@ -110,12 +110,15 @@ def _instant_from_text(value: object) -> datetime:
 
 
 def _scope_payload(scope: FuturesSettlementScope) -> dict[str, str | None]:
-    return {
+    payload: dict[str, str | None] = {
         "source_id": scope.source_id,
         "provider_id": scope.provider_id,
         "account_id": scope.account_id,
         "environment": scope.environment,
     }
+    if scope.provider_environment is not None:
+        payload["provider_environment"] = scope.provider_environment
+    return payload
 
 
 def _evidence_payload(evidence: FuturesSettlementEvidence) -> dict[str, Any]:
@@ -153,6 +156,7 @@ def _evidence_from_payload(value: object) -> FuturesSettlementEvidence:
             provider_id=scope_value.get("provider_id"),
             account_id=scope_value.get("account_id"),
             environment=scope_value.get("environment"),
+            provider_environment=scope_value.get("provider_environment"),
         ),
         effective_at=_instant_from_text(value.get("effective_at")),
         sequence=value.get("sequence"),
@@ -262,7 +266,7 @@ def provider_settlement_evidence_metadata(
     scope = evidence.scope
     if scope.provider_id is None or scope.account_id is None or scope.environment is None:
         raise FuturesError("provider settlement evidence requires provider/account/environment")
-    return {
+    metadata: dict[str, object] = {
         "evidence_type": _SETTLEMENT_EVIDENCE_TYPE,
         "provider_id": scope.provider_id,
         "account_id": scope.account_id,
@@ -272,6 +276,9 @@ def provider_settlement_evidence_metadata(
         "instrument_version": evidence.instrument_version,
         "observation_id": evidence.observation_id,
     }
+    if scope.provider_environment is not None:
+        metadata["provider_environment"] = scope.provider_environment
+    return metadata
 
 
 

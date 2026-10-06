@@ -135,8 +135,6 @@ class SettlementRuleBinding:
                 raise TypeError("effective_to must be a date value")
             if self.effective_to <= self.effective_from:
                 raise ValueError("effective_to must be after effective_from")
-        if not isinstance(self.evidence_refs, tuple) or not self.evidence_refs:
-            raise ValueError("evidence_refs must be a non-empty tuple")
         refs = tuple(_text(item, name="evidence_ref") for item in self.evidence_refs)
         if len(refs) != len(set(refs)):
             raise ValueError("evidence_refs must be unique")
@@ -327,11 +325,24 @@ class BuyingPowerEvidence:
     evidence_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
+        if type(self.evidence_id) is not str:
+            raise TypeError("evidence_id must be exact text")
+        if type(self.scope) is not SettlementAccountScope:
+            raise TypeError("scope must be exact SettlementAccountScope")
+        if type(self.currency) is not str:
+            raise TypeError("currency must be exact text")
+        if type(self.observed_at) is not datetime or type(self.valid_until) is not datetime:
+            raise TypeError("buying-power timestamps must be exact datetime values")
+        if (
+            type(self.evidence_refs) is not tuple
+            or not self.evidence_refs
+            or any(type(item) is not str for item in self.evidence_refs)
+        ):
+            raise TypeError("evidence_refs must be a non-empty exact-text tuple")
+
         object.__setattr__(
             self, "evidence_id", _text(self.evidence_id, name="evidence_id")
         )
-        if not isinstance(self.scope, SettlementAccountScope):
-            raise TypeError("scope must be SettlementAccountScope")
         object.__setattr__(
             self, "currency", _text(self.currency, name="currency").upper()
         )
@@ -1037,11 +1048,15 @@ class SettlementBook:
     ) -> CapitalAvailabilityProjection:
         """Project spendable capital without treating receivables as cash."""
 
-        if not isinstance(scope, SettlementAccountScope):
-            raise TypeError("scope must be SettlementAccountScope")
+        if type(scope) is not SettlementAccountScope:
+            raise TypeError("scope must be exact SettlementAccountScope")
+        if type(currency) is not str:
+            raise TypeError("currency must be exact text")
+        if type(as_of) is not datetime:
+            raise TypeError("as_of must be an exact datetime")
         unit = _text(currency, name="currency").upper()
         point = _utc(as_of, name="as_of")
-        if not isinstance(require_buying_power_evidence, bool):
+        if type(require_buying_power_evidence) is not bool:
             raise TypeError("require_buying_power_evidence must be boolean")
 
         overdue: list[str] = []
@@ -1065,9 +1080,9 @@ class SettlementBook:
         additional_credit = Decimal("0")
         credit_unknown = False
         if buying_power_evidence is not None:
-            if not isinstance(buying_power_evidence, BuyingPowerEvidence):
+            if type(buying_power_evidence) is not BuyingPowerEvidence:
                 raise TypeError(
-                    "buying_power_evidence must be BuyingPowerEvidence"
+                    "buying_power_evidence must be exact BuyingPowerEvidence"
                 )
             if (
                 buying_power_evidence.scope != scope

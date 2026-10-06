@@ -790,13 +790,20 @@ def run_vertical_slice(
         "symbol": symbol, "input": [str(x) for x in normalized],
         "intent": intent.client_order_id if intent else None,
     })[:20]
+    # "already_filled" is a replay-only operational observation. The durable
+    # evidence describes the original causal admission that created the fill,
+    # so replay must reconstruct the same semantic risk outcome instead of
+    # permitting an arbitrary persisted label to bypass equality checks.
+    evidence_risk_outcome = (
+        "admitted" if risk_reason == "already_filled" else risk_reason
+    )
     fresh_evidence = {
         "schema_version": 1,
         "evidence_id": evidence_id,
         "input_hash": _stable_hash([str(item) for item in normalized]),
         "decision": decision.side,
         "decision_reason": decision.reason,
-        "risk_outcome": risk_reason,
+        "risk_outcome": evidence_risk_outcome,
         "order_id": intent.client_order_id if intent else None,
         "fill_id": fill.fill_id if fill else None,
         "cash": str(ledger.cash),
@@ -823,6 +830,7 @@ def run_vertical_slice(
         "input_hash",
         "decision",
         "decision_reason",
+        "risk_outcome",
         "order_id",
         "fill_id",
         "cash",

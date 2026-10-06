@@ -227,6 +227,36 @@ class VerticalSliceTests(unittest.TestCase):
             ):
                 run_vertical_slice([100, 101, 102, 103], directory)
 
+    def test_replay_rejects_jointly_tampered_risk_outcome_before_checkpoint_write(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            evidence_path = Path(directory) / "learning-evidence.jsonl"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            evidence_id = checkpoint["evidence_ids"][0]
+            checkpoint["evidence_records"][evidence_id]["risk_outcome"] = "forged"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            row = json.loads(evidence_path.read_text(encoding="utf-8"))
+            row["risk_outcome"] = "forged"
+            evidence_path.write_text(
+                json.dumps(row, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            import mvp.autotrade_mvp.pipeline as pipeline_module
+
+            with patch.object(
+                pipeline_module,
+                "_atomic_json",
+                side_effect=AssertionError("checkpoint rewrite before evidence rejection"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Checkpoint evidence conflicts with this episode",
+                ):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
     def test_checkpoint_ledger_mismatch_is_rejected(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

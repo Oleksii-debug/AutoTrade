@@ -166,5 +166,49 @@ class AccessibleStatusTests(unittest.TestCase):
         self.assertIn("Economic edge: unproven", text)
 
 
+    def test_unknown_state_fails_closed_as_corrupt(self):
+        text = format_accessible_status(
+            {
+                "status": "future_state",
+                "symbol": "SIM",
+                "economic_edge_claim": "PROVEN",
+            }
+        )
+        self.assertIn("System state: Corrupt or unreadable state", text)
+        self.assertIn("Replay verification: unavailable", text)
+        self.assertIn(
+            "Action required: inspect or restore the simulated state before continuing",
+            text,
+        )
+        self.assertNotIn("Instrument: SIM", text)
+        self.assertIn("Economic edge: unproven", text)
+
+    def test_hostile_enum_subclasses_are_rejected_before_equality_callbacks(self):
+        class TrapEnum(str):
+            def __eq__(self, other):
+                raise AssertionError("caller-controlled equality executed")
+
+            def __hash__(self):
+                return str.__hash__(self)
+
+        running = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": TrapEnum("canonical_journal"),
+                "session_status": TrapEnum("BLOCKED"),
+                "fills": {},
+            },
+            {
+                "valuation_status": TrapEnum("MARK_UNAVAILABLE"),
+                "reconciled": False,
+            },
+        )
+        self.assertIn("System state: Running", running)
+        self.assertNotIn("Episode:", running)
+        self.assertNotIn("Blocked reason:", running)
+        self.assertNotIn("Portfolio valuation and profit or loss: unavailable", running)
+        self.assertIn("Economic edge: unproven", running)
+
+
 if __name__ == "__main__":
     unittest.main()

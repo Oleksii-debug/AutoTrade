@@ -470,6 +470,38 @@ def _authoritative_corporate_action_operations():
             value.corrects_external_event_id,
         )
 
+    def detached(
+        state: tuple[object, ...],
+    ) -> AuthoritativeCorporateAction:
+        event_state = state[0]
+        event = CorporateEvent.create(
+            event_id=event_state[0],
+            instrument_id=event_state[1],
+            instrument_version=event_state[2],
+            kind=event_state[3],
+            effective_date=event_state[4],
+            source_revision=event_state[5],
+            payload=dict(event_state[6]),
+            source_sequence=event_state[7],
+            effective_at=event_state[8],
+        )
+        return AuthoritativeCorporateAction(
+            event=event,
+            evidence_ref=state[1],
+            provider_id=state[2],
+            account_id=state[3],
+            environment=state[4],
+            external_event_id=state[5],
+            provider_revision=state[6],
+            raw_evidence_digest=state[7],
+            query_digest=state[8],
+            capability_snapshot_id=state[9],
+            provider_instrument_version=state[10],
+            observed_at=state[11],
+            provenance_digest=state[12],
+            corrects_external_event_id=state[13],
+        )
+
     def prune_dead() -> None:
         dead = [
             object_id
@@ -495,7 +527,9 @@ def _authoritative_corporate_action_operations():
                 )
             states[object_id] = (weakref.ref(value), current)
 
-    def require(value: AuthoritativeCorporateAction) -> None:
+    def require(
+        value: AuthoritativeCorporateAction,
+    ) -> AuthoritativeCorporateAction:
         if type(value) is not AuthoritativeCorporateAction:
             raise TypeError(
                 "accepted must be canonical AuthoritativeCorporateAction"
@@ -511,6 +545,9 @@ def _authoritative_corporate_action_operations():
             raise CorporateActionEvidenceError(
                 "canonical corporate action changed after resolver issuance"
             )
+        trusted = detached(state[1])
+        register(trusted)
+        return trusted
 
     return register, require
 
@@ -1350,8 +1387,8 @@ def _bind_durable_corporate_action_verifier(
         self,
         accepted: AuthoritativeCorporateAction,
     ) -> PreparedCorporateActionEvidenceMutation:
-        require_authority(accepted)
-        return prepare_record_mutation(self, accepted)
+        trusted = require_authority(accepted)
+        return prepare_record_mutation(self, trusted)
 
     return verified_prepare_record_mutation
 

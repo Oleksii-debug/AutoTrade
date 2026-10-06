@@ -3,6 +3,7 @@ from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
 import unittest
+import weakref
 
 from mvp.autotrade_mvp.accounting import book_equity_fill
 from mvp.autotrade_mvp.capabilities import (
@@ -282,6 +283,59 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
             permission_scope="ORDER.READ",
         )
         return authority, book
+
+    def test_funding_authority_binding_exposes_no_erasable_weakref_callback(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, _ = self.authority(store, [sealed_funding()])
+            references = weakref.getweakrefs(authority)
+            self.assertTrue(references)
+            self.assertTrue(
+                all(reference.__callback__ is None for reference in references)
+            )
+
+    def test_paper_and_live_funding_reject_content_evidence_before_resolver_callback(self):
+        evidence = sealed_funding()
+
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment), TemporaryDirectory() as directory:
+                touched = []
+
+                def resolver(_reference):
+                    touched.append("called")
+                    return evidence
+
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                book = DurableProviderEconomicBook(
+                    store,
+                    provider_id="BINANCE",
+                    account_id="acct-1",
+                    environment=environment,
+                )
+                seed_position(book)
+                authority = DurablePerpetualFundingAuthority(
+                    store,
+                    economic_book=book,
+                    instrument_registry=InstrumentRegistry(
+                        versions=(perpetual_version(),)
+                    ),
+                    evidence_resolver=resolver,
+                    funding_endpoints=frozenset({ENDPOINT}),
+                    permission_scope="ORDER.READ",
+                )
+
+                with self.assertRaisesRegex(
+                    PerpetualFundingError,
+                    "requires durable provider-origin authority",
+                ):
+                    authority.apply(evidence.evidence_ref)
+
+                self.assertEqual(touched, [])
+                self.assertEqual(
+                    store.load_events_by_aggregate_type("perpetual_funding"),
+                    [],
+                )
+                self.assertEqual(len(book.transactions), 1)
 
     def test_arbitrary_funding_normalizer_cannot_be_injected(self):
         evidence = sealed_funding()

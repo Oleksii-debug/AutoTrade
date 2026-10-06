@@ -1195,7 +1195,7 @@ BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST = (
                     "endpoint": "/v5/asset/delivery-record",
                     "permission_scope": "ACCOUNT.READ",
                     "category": "option",
-                    "symbol": "EXACT_INSTRUMENT_SYMBOL",
+                    "symbol": "OPTIONAL_EXACT_INSTRUMENT_SYMBOL_FILTER",
                 },
                 "query_fields": [
                     "category",

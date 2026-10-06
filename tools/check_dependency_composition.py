@@ -162,9 +162,50 @@ def _python_blockers(root: Path) -> tuple[list[str], list[str]]:
     project = document.get("project")
     if not isinstance(project, dict):
         blockers.append("MALFORMED_RESEARCH_PROJECT")
+        runtime_requires_raw = None
         optional_dependencies = None
     else:
+        runtime_requires_raw = project.get("dependencies")
         optional_dependencies = project.get("optional-dependencies")
+
+    runtime_requires: list[str] = []
+    if not isinstance(runtime_requires_raw, list) or not runtime_requires_raw:
+        blockers.append("MISSING_RESEARCH_RUNTIME_REQUIREMENTS")
+    else:
+        for requirement in runtime_requires_raw:
+            if not isinstance(requirement, str):
+                blockers.append("MALFORMED_RESEARCH_RUNTIME_REQUIREMENT")
+                continue
+            runtime_requires.append(requirement)
+            if not is_exact_python_requirement(requirement):
+                blockers.append(
+                    f"NON_EXACT_RESEARCH_RUNTIME_REQUIREMENT:{requirement}"
+                )
+
+    try:
+        root_document = tomllib.loads(
+            (root / "pyproject.toml").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        blockers.append("UNREADABLE_ROOT_PYPROJECT")
+    else:
+        root_project = root_document.get("project")
+        if not isinstance(root_project, dict):
+            blockers.append("MALFORMED_ROOT_PROJECT")
+        else:
+            root_name = root_project.get("name")
+            root_version = root_project.get("version")
+            if (
+                not isinstance(root_name, str)
+                or not root_name
+                or not isinstance(root_version, str)
+                or not root_version
+            ):
+                blockers.append("MALFORMED_ROOT_PROJECT_IDENTITY")
+            else:
+                expected_runtime = [f"{root_name}=={root_version}"]
+                if runtime_requires != expected_runtime:
+                    blockers.append("RESEARCH_RUNTIME_REQUIREMENTS_DRIFT")
     if not isinstance(optional_dependencies, dict):
         blockers.append("MALFORMED_RESEARCH_OPTIONAL_DEPENDENCIES")
         test_requires_raw = None

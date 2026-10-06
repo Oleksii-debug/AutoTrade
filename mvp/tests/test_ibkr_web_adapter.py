@@ -263,6 +263,71 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 maximum_session_age_seconds=30,
             )
 
+    def test_session_financial_guard_ignores_runtime_private_rebinding(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        forged = IbkrBrokerageSessionStatus(
+            connected=True,
+            authenticated=True,
+            established=True,
+            competing=False,
+            observed_at=NOW - timedelta(seconds=1),
+        )
+        self.assertFalse(
+            hasattr(
+                ibkr_web_module,
+                "_require_ibkr_brokerage_session_observation",
+            )
+        )
+        ibkr_web_module._require_ibkr_brokerage_session_observation = (
+            lambda *_args, **_kwargs: None
+        )
+        try:
+            with self.assertRaisesRegex(
+                IbkrWebAdapterError,
+                "/iserver/auth/status provider observation",
+            ):
+                prepare_normalized_order(
+                    intent,
+                    client_order_id="at-runtime-session-rebind",
+                    capability=capability(),
+                    session=forged,
+                    at=NOW,
+                    maximum_session_age_seconds=30,
+                )
+        finally:
+            delattr(
+                ibkr_web_module,
+                "_require_ibkr_brokerage_session_observation",
+            )
+
+    def test_session_parser_rejects_runtime_endpoint_authority_rebinding(self):
+        observation = ibkr_session_observation(
+            {
+                "connected": True,
+                "authenticated": True,
+                "established": True,
+                "competing": False,
+            }
+        )
+        original = ibkr_web_module.IBKR_WEB_BROKERAGE_STATUS_ENDPOINT
+        ibkr_web_module.IBKR_WEB_BROKERAGE_STATUS_ENDPOINT = "/iserver/accounts"
+        try:
+            with self.assertRaisesRegex(
+                IbkrWebAdapterError,
+                "session observation authority changed",
+            ):
+                brokerage_session_status_from_observation(observation)
+        finally:
+            ibkr_web_module.IBKR_WEB_BROKERAGE_STATUS_ENDPOINT = original
+
     def test_brokerage_status_requires_exact_authenticated_read_scope(self):
         observation = ibkr_session_observation(
             {

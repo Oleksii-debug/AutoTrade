@@ -191,3 +191,24 @@ terminal baseline + Verify success, clean review state, ahead-only/current-main
 reconciliation, merge, and post-merge source readback.  Queued/pending CI is not
 qualification evidence, and none of these changes grant PAPER/LIVE/provider,
 economic-edge/profitability, signed-release or NVDA qualification.
+
+
+## 2026-10-06 STOP_LIMIT trigger-state monotonicity closure
+
+Final oracle review found two symmetric state-authority gaps and closed both:
+
+- once a STOP_LIMIT order is already durably triggered, a simulated/qualified
+  result may not regress triggered state back to false, including partial fills;
+- when one causally eligible post-arrival observation with positive qualified
+  capacity independently proves the stop was touched, the result may not omit
+  the newly observed trigger.
+
+The inverse fence already remains active: a result cannot mint triggered=true
+without causal stop evidence. Direct oracle regressions and the actual qualified
+execution wrapper now exercise both directions. These are execution-state
+integrity repairs; they do not grant provider/PAPER/LIVE or profitability
+authority.
+
+The final closure rule remains exact-head terminal baseline + Verify +
+reconvergence-integrity success, clean review state, current-main topology,
+merge and post-merge readback.

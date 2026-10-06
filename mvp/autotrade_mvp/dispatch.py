@@ -2580,6 +2580,14 @@ class GuardedDispatcher:
         decoder_json_loads_kwdefault_items = snapshot_tuple(
             decoder_json_loads_kwdefaults.items()
         )
+        if any(
+            snapshot_type(key) is not str
+            for key, _value in decoder_json_loads_kwdefault_items
+        ):
+            raise RuntimeError(
+                "exact JSON decoder default keys are unavailable"
+            )
+        decoder_json_loads_kwdefault_missing = object()
         decoder_json_decoder = decoder_json_namespace_get("JSONDecoder")
         decoder_json_decoder_methods = snapshot_tuple(
             (
@@ -2736,11 +2744,29 @@ class GuardedDispatcher:
                 "__kwdefaults__",
                 None,
             )
-            if (
+            kwdefaults_changed = (
                 snapshot_type(current_json_loads_kwdefaults) is not snapshot_dict
-                or snapshot_tuple(current_json_loads_kwdefaults.items())
-                != decoder_json_loads_kwdefault_items
-            ):
+                or snapshot_len(current_json_loads_kwdefaults)
+                != snapshot_len(decoder_json_loads_kwdefault_items)
+            )
+            if not kwdefaults_changed:
+                for current_key in current_json_loads_kwdefaults:
+                    if snapshot_type(current_key) is not str:
+                        kwdefaults_changed = True
+                        break
+            if not kwdefaults_changed:
+                current_kwdefault_get = current_json_loads_kwdefaults.get
+                for key, expected_value in decoder_json_loads_kwdefault_items:
+                    if (
+                        current_kwdefault_get(
+                            key,
+                            decoder_json_loads_kwdefault_missing,
+                        )
+                        is not expected_value
+                    ):
+                        kwdefaults_changed = True
+                        break
+            if kwdefaults_changed:
                 snapshot_setattr(
                     decoder_json_loads,
                     "__kwdefaults__",

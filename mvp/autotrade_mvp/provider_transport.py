@@ -574,14 +574,20 @@ def _bybit_delivery_query_integer(
     minimum: int = 0,
     maximum: int | None = None,
 ) -> int:
-    if type(value) is not str or not value or not value.isascii() or not value.isdigit():
+    if (
+        type(value) is not str
+        or not value
+        or len(value) > 20
+        or not value.isascii()
+        or not value.isdigit()
+    ):
         raise ProviderTransportScopeError(
-            f"Bybit option delivery {name} must be canonical integer text"
+            f"Bybit option delivery {name} must be bounded canonical integer text"
         )
     parsed = int(value, 10)
     if str(parsed) != value or parsed < minimum:
         raise ProviderTransportScopeError(
-            f"Bybit option delivery {name} must be canonical integer text"
+            f"Bybit option delivery {name} must be bounded canonical integer text"
         )
     if maximum is not None and parsed > maximum:
         raise ProviderTransportScopeError(

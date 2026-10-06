@@ -37,10 +37,22 @@ def _exact_decimal(value: Decimal | str | int, *, name: str) -> Decimal:
     return parse_bounded_exact_decimal(value)
 
 
-def _money(value: Decimal | str | int) -> Decimal:
-    return round_fraction_to_quantum(
-        as_fraction(_exact_decimal(value, name="money")),
-        MONEY_QUANTUM, mode="HALF_EVEN",
+def _money(
+    value: Decimal | str | int,
+    *,
+    _quantum: Decimal = MONEY_QUANTUM,
+    _parse=parse_bounded_exact_decimal,
+    _fraction=as_fraction,
+    _round=round_fraction_to_quantum,
+) -> Decimal:
+    """Quantize money through the process-frozen exact numeric dependencies."""
+
+    if isinstance(value, bool) or isinstance(value, float):
+        raise TypeError("money must use Decimal, string or integer input")
+    return _round(
+        _fraction(_parse(value)),
+        _quantum,
+        mode="HALF_EVEN",
     )
 
 

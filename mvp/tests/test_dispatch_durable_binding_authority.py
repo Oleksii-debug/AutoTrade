@@ -8,6 +8,8 @@ from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
     load_submission_response_binding,
+    stable_client_order_id,
+    submission_attempt_aggregate_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 
@@ -198,6 +200,107 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                         attempt_id="binding-type-a1",
                     )
 
+
+
+    def test_public_identity_boundaries_reject_string_subclasses_without_executing_them(self):
+        class TrapText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("caller-controlled strip executed")
+
+            def upper(self):
+                raise AssertionError("caller-controlled upper executed")
+
+            def lower(self):
+                raise AssertionError("caller-controlled lower executed")
+
+            def replace(self, *args, **kwargs):
+                raise AssertionError("caller-controlled replace executed")
+
+        trap = TrapText("SIMULATION")
+        with self.assertRaisesRegex(ValueError, "environment must be REPLAY"):
+            submission_attempt_aggregate_id(
+                environment=trap,
+                account_id="acct",
+                attempt_id="attempt",
+            )
+        with self.assertRaisesRegex(ValueError, "account_id is required"):
+            submission_attempt_aggregate_id(
+                environment="SIMULATION",
+                account_id=TrapText("acct"),
+                attempt_id="attempt",
+            )
+        with self.assertRaisesRegex(ValueError, "attempt_id is required"):
+            submission_attempt_aggregate_id(
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id=TrapText("attempt"),
+            )
+        with self.assertRaisesRegex(ValueError, "provider is required"):
+            stable_client_order_id(
+                TrapText("provider"),
+                "intent",
+                environment="SIMULATION",
+                account_id="acct",
+            )
+        with self.assertRaisesRegex(ValueError, "intent_id is required"):
+            stable_client_order_id(
+                "provider",
+                TrapText("intent"),
+                environment="SIMULATION",
+                account_id="acct",
+            )
+        with self.assertRaisesRegex(ValueError, "environment must be REPLAY"):
+            stable_client_order_id(
+                "provider",
+                "intent",
+                environment=trap,
+                account_id="acct",
+            )
+        with self.assertRaisesRegex(ValueError, "account_id is required"):
+            stable_client_order_id(
+                "provider",
+                "intent",
+                environment="SIMULATION",
+                account_id=TrapText("acct"),
+            )
+        with self.assertRaisesRegex(TypeError, "client_id_format must be text"):
+            stable_client_order_id(
+                "provider",
+                "intent",
+                environment="SIMULATION",
+                account_id="acct",
+                client_id_format=TrapText("TOKEN"),
+            )
+
+    def test_dispatcher_constructor_rejects_string_subclass_scope_and_owner(self):
+        class TrapText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("caller-controlled strip executed")
+
+            def upper(self):
+                raise AssertionError("caller-controlled upper executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(ValueError, "environment must be REPLAY"):
+                GuardedDispatcher(
+                    store,
+                    environment=TrapText("SIMULATION"),
+                    account_id="acct",
+                )
+            with self.assertRaisesRegex(ValueError, "account_id is required"):
+                GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id=TrapText("acct"),
+                )
+            with self.assertRaisesRegex(ValueError, "owner_token must be exact non-empty text"):
+                GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token=TrapText("owner"),
+                )
 
 
 if __name__ == "__main__":

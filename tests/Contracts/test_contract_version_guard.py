@@ -34,30 +34,43 @@ def write_semantic_validator(
     validator_id: str = "dataset-authority-v1",
     expected: str = "valid",
 ):
+    manifest_path = root / "contracts" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    version = manifest["contract_version"]
+
     corpus = root / "contracts" / "fixtures" / "semantic.corpus.json"
     corpus.parent.mkdir(parents=True, exist_ok=True)
     corpus.write_text(
         json.dumps({
+            "contract_version": version,
+            "validator_id": validator_id,
             "cases": [
                 {
                     "id": "shared-case",
                     "expected": expected,
                 }
-            ]
+            ],
         }),
         encoding="utf-8",
     )
-    manifest_path = root / "contracts" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    bindings = {
+        "python": "contracts/bindings/python/a.py",
+        "csharp": "src/AutoTrade.Contracts/A.cs",
+        "typescript": "contracts/bindings/typescript/a.js",
+    }
+    for relative in bindings.values():
+        binding = root / relative
+        binding.parent.mkdir(parents=True, exist_ok=True)
+        binding.write_text("binding\n", encoding="utf-8")
+
     manifest["semantic_validators"] = [
         {
             "id": validator_id,
             "schema": "a.schema.json",
             "definition": "A",
             "corpus": "contracts/fixtures/semantic.corpus.json",
-            "bindings": {
-                "python": "contracts/bindings/python/a.py",
-            },
+            "bindings": bindings,
         }
     ]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -180,6 +193,24 @@ class ContractVersionGuardTests(unittest.TestCase):
 
             write_tree(Path(right), version="6.0.0", defs=current_defs)
             self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_semantic_validator_missing_binding_fails_closed(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left), version="6.0.0")
+            write_semantic_validator(Path(left))
+            write_tree(Path(right), version="7.0.0")
+            write_semantic_validator(Path(right))
+            missing = (
+                Path(right)
+                / "contracts"
+                / "bindings"
+                / "typescript"
+                / "a.js"
+            )
+            missing.unlink()
+
+            with self.assertRaisesRegex(ValueError, "typescript binding does not exist"):
+                evaluate(Path(left), Path(right))
 
     def test_semantic_validator_corpus_change_requires_major_increment(self):
         with TemporaryDirectory() as left, TemporaryDirectory() as right:

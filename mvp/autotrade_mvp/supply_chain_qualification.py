@@ -623,7 +623,7 @@ def qualify_supply_chain(
                     ref.media_type,
                     ref.evidence_kind,
                 )
-                for ref in trust_receipt.attestation.evidence_refs
+                for ref in accepted_trust.evidence_refs
             }
             if attested_refs != expected_refs:
                 record(

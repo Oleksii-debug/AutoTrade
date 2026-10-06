@@ -1808,6 +1808,7 @@ class _DurableProviderEconomicBookAuthority:
     provider_id: str
     account_id: str
     environment: str
+    provider_environment: str
     book_id: str
     projection_digest: str
 
@@ -1895,6 +1896,7 @@ def _install_durable_provider_economic_book_authority():
             state.get("provider_id") != authority.provider_id
             or state.get("account_id") != authority.account_id
             or state.get("environment") != authority.environment
+            or state.get("provider_environment") != authority.provider_environment
             or state.get("book_id") != authority.book_id
         ):
             raise AccountingConflict(
@@ -1927,6 +1929,7 @@ def _install_durable_provider_economic_book_authority():
             provider_id=authority.provider_id,
             account_id=authority.account_id,
             environment=authority.environment,
+            provider_environment=authority.provider_environment,
             book_id=authority.book_id,
             projection_digest=authority.projection_digest,
         )
@@ -1954,6 +1957,7 @@ def _install_durable_provider_economic_book_authority():
         provider_id: str,
         account_id: str,
         environment: str,
+        provider_environment: str | None = None,
     ) -> None:
         if type(value) is not DurableProviderEconomicBook:
             raise TypeError("economic_book must be exact DurableProviderEconomicBook")
@@ -1980,6 +1984,12 @@ def _install_durable_provider_economic_book_authority():
             environment=environment,
             account_id=account_id,
         )
+        provider_environment_value = _provider_environment(
+            provider_id=object.__getattribute__(value, "provider_id"),
+            environment=object.__getattribute__(value, "environment"),
+            provider_environment=provider_environment,
+        )
+        object.__setattr__(value, "provider_environment", provider_environment_value)
         object.__setattr__(
             value,
             "book_id",
@@ -1999,6 +2009,7 @@ def _install_durable_provider_economic_book_authority():
                 provider_id=state["provider_id"],
                 account_id=state["account_id"],
                 environment=state["environment"],
+                provider_environment=state["provider_environment"],
                 book_id=state["book_id"],
                 projection_digest=_economic_projection_digest(state["_book"]),
             ),
@@ -2106,7 +2117,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
     _SINGLE_EVENT = "EconomicTransactionBooked"
     _ACTOR = "provider-economic-accounting"
     _AUTHORITY_STATE_NAMES = frozenset(
-        {"store", "provider_id", "account_id", "environment", "book_id", "_book"}
+        {"store", "provider_id", "account_id", "environment", "provider_environment", "book_id", "_book"}
     )
 
     def __getattribute__(self, name: str):
@@ -2153,6 +2164,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         provider_id: str,
         account_id: str,
         environment: str,
+        provider_environment: str | None = None,
     ):
         _initialize_durable_provider_economic_book(
             self,
@@ -2160,6 +2172,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=provider_id,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         )
 
     def _events(self) -> list[dict[str, Any]]:

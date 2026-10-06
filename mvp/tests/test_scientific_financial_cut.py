@@ -137,6 +137,35 @@ class ScientificFinancialCutTests(unittest.TestCase):
         with self.assertRaises(AttributeError):
             object.__setattr__(cut, "hidden_authority", "forged")
 
+    def test_direct_cut_value_canonicalizes_scope_identity(self):
+        canonical = ScientificFinancialCut(
+            scientific_protocol_id="protocol-1",
+            gate_profile_digest=_SHA,
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            reconciliation_event_id="checkpoint-1",
+            reconciliation_journal_sequence=2,
+            journal_sequence=3,
+            journal_population_digest=_SHA,
+            reconciliation_checkpoint_digest=_SHA,
+        )
+        alias = ScientificFinancialCut(
+            scientific_protocol_id="protocol-1",
+            gate_profile_digest=_SHA,
+            provider_id="test_provider",
+            account_id="test-account",
+            environment="paper",
+            reconciliation_event_id="checkpoint-1",
+            reconciliation_journal_sequence=2,
+            journal_sequence=3,
+            journal_population_digest=_SHA,
+            reconciliation_checkpoint_digest=_SHA,
+        )
+        self.assertEqual(alias.provider_id, "TEST_PROVIDER")
+        self.assertEqual(alias.environment, "PAPER")
+        self.assertEqual(alias.cut_digest, canonical.cut_digest)
+
     def test_bool_is_not_accepted_as_journal_sequence(self):
         with self.assertRaisesRegex(ValueError, "non-negative integer"):
             ScientificFinancialCut(

@@ -202,6 +202,32 @@ class IbkrProviderResponseIngressTests(unittest.TestCase):
             )
         self.assertFalse(_StringificationTrap.str_called)
 
+    def test_cancel_requested_ticket_is_exact_and_non_executable(self):
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "provider_order_id must be canonical exact text",
+        ):
+            parse_cancel_response(
+                provider_order_id=" 123456789",
+                payload={
+                    "msg": "Request was submitted",
+                    "order_id": 123456789,
+                },
+            )
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "provider_order_id must be canonical exact text",
+        ):
+            parse_cancel_response(
+                provider_order_id=_ExecutableStr("123456789"),
+                payload={
+                    "msg": "Request was submitted",
+                    "order_id": 123456789,
+                },
+            )
+        self.assertFalse(_ExecutableStr.strip_called)
+
     def test_trade_reconciliation_rejects_observation_subclass_before_callbacks(self):
         forged = object.__new__(_ExecutableObservation)
         from mvp.autotrade_mvp.ibkr_web import parse_web_api_trades

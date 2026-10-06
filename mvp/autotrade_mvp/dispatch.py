@@ -1502,6 +1502,7 @@ class GuardedDispatcher:
             if guard_called:
                 raise RuntimeError("final send guard may be consumed only once")
             guard_called = True
+            self._require_dispatch_authority_state()
             # request_frozen is a recursively immutable canonical JSON snapshot.
             # Transport cannot pass the barrier for one payload and then mutate
             # the same object before its actual provider call.

@@ -456,6 +456,31 @@ class ExecutionRealismTests(unittest.TestCase):
                 source_evidence_binding=INSTRUMENT_BINDING,
             )
 
+    def test_price_grid_issuance_ignores_instance_shadowed_registry_exact(self):
+        instrument = canonical_instrument()
+        registry = InstrumentRegistry(
+            calendars=(TradingCalendar.continuous_24_7(),),
+            versions=(instrument,),
+        )
+        forged_instrument = canonical_instrument(price_tick="100")
+        forged_calls = 0
+
+        def forged_exact(_instrument_version):
+            nonlocal forged_calls
+            forged_calls += 1
+            return forged_instrument
+
+        registry.exact = forged_exact
+        grid = ExecutionPriceGrid.from_registry(registry, INSTRUMENT_REF)
+
+        self.assertEqual(forged_calls, 0)
+        self.assertEqual(grid.instrument_version, INSTRUMENT_REF)
+        self.assertEqual(grid.price_quantum, Decimal("0.01"))
+        self.assertEqual(
+            grid.instrument_metadata_binding,
+            instrument.metadata_evidence_binding(),
+        )
+
     def test_price_grid_issuance_requires_exact_registry_and_metadata_evidence(self):
         with self.assertRaisesRegex(TypeError, "registry must be exact InstrumentRegistry"):
             ExecutionPriceGrid.from_registry(object(), INSTRUMENT_REF)

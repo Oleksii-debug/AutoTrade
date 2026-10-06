@@ -39,7 +39,7 @@ from urllib.request import (
 
 from .capabilities import CapabilityRegistry, CapabilitySnapshot
 from .bybit_v5 import _AMBIGUOUS_RESPONSE_CODES as _BYBIT_AMBIGUOUS_RESPONSE_CODES
-from .dispatch import ExactJsonTransportResponse
+from .dispatch import ExactJsonTransportResponse, ExactOpaqueTransportResponse
 from .exact_decimal import ExactDecimalError, parse_canonical_decimal_text
 from .persistence import JournalStore, payload_digest
 from .kraken_futures import validate_futures_client_order_id
@@ -982,7 +982,11 @@ class TradingWireResponse:
         ):
             raise ProviderTransportScopeError("HTTP status must be an integer 100..599")
         try:
-            require_provider_response_bytes(self.body, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+            require_provider_response_bytes(
+                self.body,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
+            )
         except (TypeError, ValueError) as error:
             raise ProviderTransportError("invalid or oversized trading response") from error
 
@@ -1035,7 +1039,11 @@ class UrllibJsonWireClient:
 
     def _bounded_body(self, raw: bytes, *, max_bytes: int) -> bytes:
         try:
-            return require_provider_response_bytes(raw, max_bytes=max_bytes)
+            return require_provider_response_bytes(
+                raw,
+                max_bytes=max_bytes,
+                allow_empty=True,
+            )
         except (TypeError, ValueError) as error:
             raise ProviderTransportError("invalid or oversized provider HTTP response") from error
 
@@ -1189,13 +1197,51 @@ def _exact_trading_response(
 
 def _bybit_exact_trading_response(
     value: object,
-) -> ExactJsonTransportResponse:
-    """Preserve Bybit post-send uncertainty for reconciliation.
+) -> ExactJsonTransportResponse | ExactOpaqueTransportResponse:
+    """Preserve Bybit post-send uncertainty and exact opaque error evidence.
 
-    Durable dispatch must agree with the canonical Bybit response parser:
-    every HTTP non-2xx write result is reconciliation-first, and documented
-    ambiguous business codes remain UNKNOWN even when the HTTP layer is 2xx.
+    HTTP ambiguity is classified before JSON syntax. Parseable bodies retain
+    the exact JSON receipt contract; non-JSON/empty non-2xx bodies remain exact
+    bounded opaque reconciliation evidence and can never become SENT authority.
     """
+
+    if type(value) is TradingWireResponse:
+        status = value.http_status
+        if type(status) is not int or not 100 <= status <= 599:
+            raise ProviderTransportError("invalid trading HTTP response status")
+        try:
+            raw = require_provider_response_bytes(
+                value.body,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
+            )
+        except (TypeError, ValueError) as error:
+            raise ProviderTransportError(
+                "invalid or oversized trading response"
+            ) from error
+        if status < 200 or status > 299:
+            reason = (
+                "bybit_http_5xx_execution_unknown"
+                if status >= 500
+                else "bybit_http_non_2xx_execution_unknown"
+            )
+            if raw:
+                try:
+                    exact = ExactJsonTransportResponse(raw, http_status=status)
+                except ValueError:
+                    exact = None
+                if exact is not None:
+                    return ExactJsonTransportResponse(
+                        exact.response_bytes,
+                        http_status=status,
+                        requires_reconciliation=True,
+                        ambiguity_reason=reason,
+                    )
+            return ExactOpaqueTransportResponse(
+                raw,
+                http_status=status,
+                ambiguity_reason=reason,
+            )
 
     exact = _exact_trading_response(value)
     status = exact.http_status
@@ -1205,23 +1251,6 @@ def _bybit_exact_trading_response(
             requires_reconciliation=True,
             ambiguity_reason="bybit_http_status_unavailable_execution_unknown",
         )
-    if 500 <= status <= 599:
-        return ExactJsonTransportResponse(
-            exact.response_bytes,
-            http_status=status,
-            requires_reconciliation=True,
-            ambiguity_reason="bybit_http_5xx_execution_unknown",
-        )
-    if status is not None and (status < 200 or status > 299):
-        return ExactJsonTransportResponse(
-            exact.response_bytes,
-            http_status=status,
-            requires_reconciliation=True,
-            ambiguity_reason="bybit_http_non_2xx_execution_unknown",
-        )
-    # Transport uncertainty is authoritative before response-body syntax.
-    # A gateway may emit HTML/text on 5xx; preserve exact post-SEND evidence
-    # without requiring provider JSON first.
     parsed = exact.payload
     if (
         type(parsed) is dict
@@ -1235,7 +1264,6 @@ def _bybit_exact_trading_response(
             ambiguity_reason="bybit_ambiguous_ret_code_execution_unknown",
         )
     return exact
-
 
 def _kraken_spot_exact_trading_response(
     value: object,
@@ -1292,16 +1320,42 @@ def _alpaca_exact_trading_response(
 
 def _binance_exact_trading_response(
     value: object,
-) -> ExactJsonTransportResponse:
-    """Conservatively classify Binance Spot order-send execution uncertainty.
+) -> ExactJsonTransportResponse | ExactOpaqueTransportResponse:
+    """Conservatively classify Binance Spot order-send execution uncertainty."""
 
-    Binance documents that 5xx does NOT mean the matching engine rejected the
-    order. It also identifies -1007 as execution-status-unknown. Preserve the
-    exact status and response bytes for reconciliation; NEVER blindly retry
-    after GuardedDispatcher's irreversible send barrier. Validated ordinary
-    4xx denials and successful responses retain their existing semantics.
-    This classification is no substitute for qualified provider-origin truth.
-    """
+    if type(value) is TradingWireResponse:
+        status = value.http_status
+        if type(status) is not int or not 100 <= status <= 599:
+            raise ProviderTransportError("invalid trading HTTP response status")
+        try:
+            raw = require_provider_response_bytes(
+                value.body,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
+            )
+        except (TypeError, ValueError) as error:
+            raise ProviderTransportError(
+                "invalid or oversized trading response"
+            ) from error
+        if 500 <= status <= 599:
+            if raw:
+                try:
+                    exact = ExactJsonTransportResponse(raw, http_status=status)
+                except ValueError:
+                    exact = None
+                if exact is not None:
+                    return ExactJsonTransportResponse(
+                        exact.response_bytes,
+                        http_status=status,
+                        requires_reconciliation=True,
+                        ambiguity_reason="binance_spot_http_5xx_execution_unknown",
+                    )
+            return ExactOpaqueTransportResponse(
+                raw,
+                http_status=status,
+                ambiguity_reason="binance_spot_http_5xx_execution_unknown",
+            )
+
     exact = _exact_trading_response(value)
     status = exact.http_status
     if status is None:
@@ -1317,8 +1371,6 @@ def _binance_exact_trading_response(
             requires_reconciliation=True,
             ambiguity_reason="binance_spot_http_5xx_execution_unknown",
         )
-    # A post-SEND 5xx is execution-unknown even when an upstream proxy returns
-    # non-JSON bytes, so only decode payload after transport ambiguity is fenced.
     parsed = exact.payload
     if type(parsed) is dict and type(parsed.get("code")) is int and parsed["code"] == -1007:
         return ExactJsonTransportResponse(
@@ -1328,7 +1380,6 @@ def _binance_exact_trading_response(
             ambiguity_reason="binance_spot_backend_timeout_execution_unknown",
         )
     return exact
-
 
 def _whitebit_exact_trading_response(
     value: object,

@@ -2521,6 +2521,7 @@ class GuardedDispatcher:
         snapshot_tuple = tuple
         snapshot_dict = dict
         snapshot_len = len
+        snapshot_delattr = delattr
         snapshot_module_globals = globals()
         snapshot_module_globals_get = snapshot_module_globals.get
         snapshot_module_globals_set = snapshot_module_globals.__setitem__
@@ -2565,6 +2566,8 @@ class GuardedDispatcher:
         decoder_function = snapshot_defaults[1]
         decoder_digest = snapshot_defaults[2]
         decoder_json_module = json
+        decoder_json_module_type = snapshot_type(decoder_json_module)
+        decoder_json_module_type_setattr = decoder_json_module_type.__setattr__
         decoder_json_namespace = vars(decoder_json_module)
         decoder_json_namespace_get = decoder_json_namespace.get
         decoder_json_namespace_set = decoder_json_namespace.__setitem__
@@ -2603,6 +2606,12 @@ class GuardedDispatcher:
         decoder_json_decoder_namespace = vars(decoder_json_decoder)
         decoder_json_decoder_namespace_get = (
             decoder_json_decoder_namespace.get
+        )
+        decoder_json_decoder_surface = snapshot_tuple(
+            decoder_json_decoder_namespace.items()
+        )
+        decoder_json_decoder_expected_names = snapshot_tuple(
+            name for name, _member in decoder_json_decoder_surface
         )
         decoder_json_decoder_methods = snapshot_tuple(
             (
@@ -2660,6 +2669,10 @@ class GuardedDispatcher:
             if name in {"JSONObject", "JSONArray", "scanstring"}
         )
         decoder_scanner_module = decoder_runtime_globals_get("scanner")
+        decoder_scanner_module_type = snapshot_type(decoder_scanner_module)
+        decoder_scanner_module_type_setattr = (
+            decoder_scanner_module_type.__setattr__
+        )
         decoder_scanner_namespace = vars(decoder_scanner_module)
         decoder_scanner_namespace_get = decoder_scanner_namespace.get
         decoder_scanner_namespace_set = decoder_scanner_namespace.__setitem__
@@ -2800,6 +2813,23 @@ class GuardedDispatcher:
 
         def restore_exact_response_authority() -> bool:
             changed = False
+            if snapshot_type(decoder_json_module) is not decoder_json_module_type:
+                decoder_json_module_type_setattr(
+                    decoder_json_module,
+                    "__class__",
+                    decoder_json_module_type,
+                )
+                changed = True
+            if (
+                snapshot_type(decoder_scanner_module)
+                is not decoder_scanner_module_type
+            ):
+                decoder_scanner_module_type_setattr(
+                    decoder_scanner_module,
+                    "__class__",
+                    decoder_scanner_module_type,
+                )
+                changed = True
             for name, expected in exact_response_module_bindings:
                 if snapshot_module_globals_get(name) is not expected:
                     snapshot_module_globals_set(name, expected)
@@ -2985,6 +3015,25 @@ class GuardedDispatcher:
                         decoder_json_decoder,
                         method_name,
                         expected_method,
+                    )
+                    changed = True
+            current_decoder_names = snapshot_tuple(
+                decoder_json_decoder.__dict__
+            )
+            if current_decoder_names != decoder_json_decoder_expected_names:
+                for name in current_decoder_names:
+                    if name not in decoder_json_decoder_expected_names:
+                        snapshot_delattr(decoder_json_decoder, name)
+                        changed = True
+            for name, expected_member in decoder_json_decoder_surface:
+                if (
+                    decoder_json_decoder.__dict__.get(name)
+                    is not expected_member
+                ):
+                    snapshot_setattr(
+                        decoder_json_decoder,
+                        name,
+                        expected_member,
                     )
                     changed = True
             if (

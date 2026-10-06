@@ -3,6 +3,7 @@ from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from mvp.autotrade_mvp.alpaca import (
@@ -36,6 +37,7 @@ from mvp.autotrade_mvp.dispatch import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
+    ProviderSubmissionObservation,
     Surface,
     observe_authenticated_json_response,
     observe_submission_json_response,
@@ -729,6 +731,70 @@ class AlpacaAdapterTests(unittest.TestCase):
                     "client_order_id": client_id,
                 },
             )
+
+    def test_submission_consumer_rejects_subclass_before_virtual_callback(self):
+        intent_id = "alpaca-hostile-observation"
+        client_id = stable_client_order_id(
+            "ALPACA",
+            intent_id,
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        attempt, prepared, _observation = self._durable_submission_observation(
+            payload={
+                "id": str(uuid4()),
+                "client_order_id": client_id,
+            },
+            intent_id=intent_id,
+        )
+
+        class HostileObservation(ProviderSubmissionObservation):
+            def __getattribute__(self, _name):
+                raise AssertionError(
+                    "virtual callback executed before authority verification"
+                )
+
+        forged = object.__new__(HostileObservation)
+        with self.assertRaisesRegex(
+            TypeError,
+            "durable ProviderSubmissionObservation",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=forged,
+            )
+
+    def test_submission_consumer_does_not_call_rebindable_require_scope(self):
+        intent_id = "alpaca-no-virtual-scope"
+        client_id = stable_client_order_id(
+            "ALPACA",
+            intent_id,
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        order_id = str(uuid4())
+        attempt, prepared, observation = self._durable_submission_observation(
+            payload={
+                "id": order_id,
+                "client_order_id": client_id,
+            },
+            intent_id=intent_id,
+        )
+        with patch.object(
+            ProviderSubmissionObservation,
+            "require_scope",
+            side_effect=AssertionError(
+                "rebindable require_scope callback must not execute"
+            ),
+        ):
+            result = parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+        self.assertEqual(result["outcome"], "ACKNOWLEDGED")
+        self.assertEqual(result["provider_order_id"], order_id)
 
     def test_trade_activity_requires_order_and_fee_evidence(self):
         order_id = str(uuid4())

@@ -347,5 +347,26 @@ class RetentionTests(unittest.TestCase):
             )
         self.assertEqual(calls, [])
 
+
+    def test_metric_class_descriptor_drift_fails_before_descriptor_execution(self):
+        calls = []
+        metrics = {
+            "old": metric("old", "0.10", "0.10"),
+            "new": metric("new", "0.05", "0.20"),
+        }
+
+        def hostile_get(_self):
+            calls.append("get")
+            raise AssertionError("hostile metric descriptor executed")
+
+        self.assertNotIn("candidate_net_score", RegimeMetric.__dict__)
+        setattr(RegimeMetric, "candidate_net_score", property(hostile_get))
+        try:
+            with self.assertRaisesRegex(TypeError, "class field descriptors changed"):
+                evaluate_retention(metrics, policy())
+        finally:
+            delattr(RegimeMetric, "candidate_net_score")
+        self.assertEqual(calls, [])
+
 if __name__ == "__main__":
     unittest.main()

@@ -938,6 +938,21 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 {"exec-lookup": 123},
                 "values must be exact text",
             ),
+            (
+                {265598: " AAPL:v1"},
+                {"exec-lookup": "USD"},
+                "values must be exact text",
+            ),
+            (
+                {265598: "AAPL:v1"},
+                {" exec-lookup": "USD"},
+                "keys must be exact text",
+            ),
+            (
+                {265598: "AAPL:v1"},
+                {"exec-lookup": " USD"},
+                "values must be exact text",
+            ),
         )
         for instruments, currencies, message in invalid_cases:
             with self.subTest(message=message), self.assertRaisesRegex(

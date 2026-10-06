@@ -21,6 +21,7 @@ from mvp.autotrade_mvp.provider_transport import (
     DirectAuthenticatedReadExecutionReceipt,
     ProviderTransportError,
     ProviderTransportScopeError,
+    UrllibJsonWireClient,
     _validated_bybit_authenticated_read_wire_semantics_digest,
     direct_authenticated_read_execution_receipt,
     direct_authenticated_read_execution_receipt_snapshot,
@@ -379,6 +380,32 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
                 changed,
                 binding,
             )
+
+    def test_execute_direct_capability_expiry_during_quota_wait_is_zero_wire(self):
+        capability, binding = self.binding()
+        events = []
+        now = [READ_AT]
+        direct_client = UrllibJsonWireClient(max_response_bytes=64)
+
+        def quota(*_args):
+            events.append("quota")
+            now[0] = READ_AT + timedelta(hours=2)
+
+        transport, resolver, _registry = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=direct_client,
+            quota_gate=quota,
+            clock_utc=lambda: now[0],
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "current capability",
+        ):
+            transport.execute_direct(binding)
+
+        self.assertEqual(events, ["quota", "capability"])
+        self.assertEqual(resolver.calls, [])
 
     def test_execute_direct_rejects_injected_wire_before_quota_or_secret(self):
         capability, binding = self.binding()

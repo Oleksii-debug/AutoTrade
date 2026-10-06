@@ -741,6 +741,24 @@ class KrakenSpotExecutionStreamRecovery:
         self._crosscheck_order_ids.clear()
         self._crosscheck_evidence_refs.clear()
 
+    def require_transport_reconciliation(self, *, reason: str) -> None:
+        """Mark lost stream continuity without inventing a provider sequence."""
+
+        canonical_reason = _canonical_text(reason, name="recovery_reason")
+        if self.phase == self.DISCONNECTED:
+            raise KrakenSpotStreamError(
+                "Kraken transport reconciliation requires an active stream generation"
+            )
+        self.phase = self.GAP_RECONCILIATION_REQUIRED
+        self._gap_expected_sequence = (
+            None if self._last_sequence is None else self._last_sequence + 1
+        )
+        self._gap_observed_sequence = None
+        self._gap_evidence_ref = None
+        self._recovery_reason = canonical_reason
+        self._snapshot_order_ids = ()
+        self._buffered_updates.clear()
+
     def apply_subscription_ack(
         self,
         acknowledgement: KrakenSpotExecutionsSubscriptionAck,

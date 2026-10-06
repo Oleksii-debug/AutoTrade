@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 BASE_VERIFIED_COMMANDS = (
     "python tools/generate_common_scalar_bindings.py --check",
+    "python tools/generate_contract_shape_bindings.py --check",
     "python tools/generate_host_api_routes.py --check",
     "python tools/generate_common_scalar_corpus.py --check",
     "python -m unittest discover -s tests/Contracts -v",
@@ -35,10 +36,12 @@ BASE_VERIFIED_COMMANDS = (
         "dotnet run --project tests/Contracts.DotNet/Contracts.DotNet.csproj "
         "--configuration Release -- "
         "contracts/fixtures/common-scalars.corpus.json "
-        "contracts/fixtures/dataset-manifest.semantic.corpus.json"
+        "contracts/fixtures/dataset-manifest.semantic.corpus.json "
+        "contracts/fixtures/contract-shapes.corpus.json"
     ),
     "node tests/Contracts.TypeScript/common-scalars.test.cjs",
     "node tests/Contracts.TypeScript/dataset-manifest.test.cjs",
+    "node tests/Contracts.TypeScript/contract-shapes.test.cjs",
     "node tests/Contracts.TypeScript/host-api-routes.test.cjs",
 )
 
@@ -112,6 +115,39 @@ def _input_versions() -> dict[str, object]:
     validators = manifest.get("semantic_validators", [])
     if not isinstance(validators, list) or not validators:
         raise ValueError("at least one semantic validator must be declared")
+
+    shape_conformance = manifest.get("shape_conformance")
+    if not isinstance(shape_conformance, dict):
+        raise ValueError("contracts manifest must define shape_conformance")
+    if shape_conformance.get("scope") != "closed-object-shape-subset":
+        raise ValueError("shape_conformance scope must be closed-object-shape-subset")
+    shape_corpus_relative = shape_conformance.get("corpus")
+    shape_bindings = shape_conformance.get("bindings")
+    if not isinstance(shape_bindings, dict) or set(shape_bindings) != {
+        "python",
+        "csharp",
+        "typescript",
+    }:
+        raise ValueError(
+            "shape_conformance must declare python/csharp/typescript bindings"
+        )
+    shape_corpus_path = _repo_file(
+        shape_corpus_relative,
+        label="shape conformance corpus",
+    )
+    shape_corpus = _json(shape_corpus_path)
+    if shape_corpus.get("contract_version") != contract_version:
+        raise ValueError("shape conformance corpus contract_version mismatch")
+    if shape_corpus.get("scope") != shape_conformance.get("scope"):
+        raise ValueError("shape conformance corpus scope mismatch")
+    shape_cases = shape_corpus.get("cases")
+    if not isinstance(shape_cases, list) or not shape_cases:
+        raise ValueError("shape conformance corpus must contain cases")
+    checked_shape_bindings: dict[str, str] = {}
+    for language, relative in shape_bindings.items():
+        _repo_file(relative, label=f"shape conformance {language} binding")
+        assert isinstance(relative, str)
+        checked_shape_bindings[language] = relative
 
     schema_names = manifest.get("schemas", [])
     if not isinstance(schema_names, list):
@@ -233,6 +269,13 @@ def _input_versions() -> dict[str, object]:
         "exact_numeric_package_version": package_version,
         "research_exact_numeric_dependency": expected_dependency,
         "semantic_validators": semantic_validators,
+        "shape_conformance": {
+            "scope": shape_conformance["scope"],
+            "corpus": shape_corpus_relative,
+            "bindings": checked_shape_bindings,
+            "definition_count": shape_corpus.get("definition_count"),
+            "case_count": len(shape_cases),
+        },
     }
 
 

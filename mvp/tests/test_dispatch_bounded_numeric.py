@@ -333,7 +333,20 @@ class DispatchBoundedNumericTransportTests(unittest.TestCase):
             def payload(self):
                 called.append("payload")
                 raise AssertionError("subtype getter")
-        hostile = HostileResponse(raw)
+        # The exact response issuer now rejects subclasses at construction.
+        # Forge one without running __post_init__ so the dispatcher still proves
+        # that a post-SEND subtype cannot invoke hostile virtual properties or
+        # become a definitive terminal result.
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact transport response authority is unavailable",
+        ):
+            HostileResponse(raw)
+        hostile = object.__new__(HostileResponse)
+        object.__setattr__(hostile, "response_bytes", raw)
+        object.__setattr__(hostile, "http_status", None)
+        object.__setattr__(hostile, "requires_reconciliation", False)
+        object.__setattr__(hostile, "ambiguity_reason", None)
         with TemporaryDirectory() as directory:
             store = JournalStore(directory + "/journal.sqlite3")
             dispatcher = GuardedDispatcher(

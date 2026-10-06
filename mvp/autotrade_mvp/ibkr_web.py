@@ -10,12 +10,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Mapping
 import hashlib
 import json
 import re
+
+from autotrade_numeric.exact_decimal import (
+    ExactDecimalError,
+    parse_bounded_exact_decimal,
+)
 
 from .capabilities import CapabilitySnapshot
 from .provider_core import ProviderResponseObservation, Surface
@@ -74,22 +79,22 @@ def _optional_provider_text(value: object, *, name: str) -> str | None:
 
 
 def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise IbkrWebAdapterError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise IbkrWebAdapterError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise IbkrWebAdapterError(f"{name} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except (ExactDecimalError, TypeError) as error:
+        raise IbkrWebAdapterError(
+            f"{name} must use bounded exact decimal input"
+        ) from error
     if positive and result <= 0:
         raise IbkrWebAdapterError(f"{name} must be positive")
     return result
 
 
 def _instant(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
-        raise IbkrWebAdapterError(f"{name} must be timezone-aware")
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise IbkrWebAdapterError(
+            f"{name} must be an exact timezone-aware datetime"
+        )
     return value.astimezone(timezone.utc)
 
 

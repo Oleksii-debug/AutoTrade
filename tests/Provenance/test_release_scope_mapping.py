@@ -287,7 +287,11 @@ class ReleaseScopeMappingTests(unittest.TestCase):
 
     def test_sbom_application_source_must_match_composition(self):
         document, _ = _sbom()
-        document["packages"][0]["versionInfo"] = "f" * 40
+        application = next(
+            item for item in document["packages"]
+            if item["name"] == "AutoTrade"
+        )
+        application["versionInfo"] = "f" * 40
         raw = (
             json.dumps(document, sort_keys=True, separators=(",", ":"))
             + "\n"
@@ -329,7 +333,16 @@ class ReleaseScopeMappingTests(unittest.TestCase):
 
     def test_sbom_duplicate_spdx_identity_fails(self):
         document, _ = _sbom()
-        document["packages"][1]["SPDXID"] = "SPDXRef-Package-AutoTrade"
+        webview = next(
+            item for item in document["packages"]
+            if item["name"] == "Microsoft.Web.WebView2"
+        )
+        webview["SPDXID"] = "SPDXRef-Package-AutoTrade"
+        dependency = next(
+            relation for relation in document["relationships"]
+            if relation.get("relationshipType") == "DEPENDS_ON"
+        )
+        dependency["relatedSpdxElement"] = "SPDXRef-Package-AutoTrade"
         raw = (
             json.dumps(document, sort_keys=True, separators=(",", ":"))
             + "\n"

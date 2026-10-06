@@ -36,6 +36,7 @@ def availability() -> BorrowAvailabilityEvidence:
         locate_id="locate-authenticated-snapshot",
         provider_revision="availability-snapshot-r1",
         capacity_quantity="100",
+        quantity_unit="share",
         hard_to_borrow=False,
         observed_at="2026-10-03T17:00:30Z",
         effective_at="2026-10-03T17:00:00Z",
@@ -55,6 +56,7 @@ def recall() -> BorrowRecallEvidence:
         instrument_version=1,
         provider_revision="recall-snapshot-r1",
         quantity="3",
+        quantity_unit="share",
         observed_at="2026-10-03T17:00:30Z",
         effective_at="2026-10-03T17:00:00Z",
         deadline="2026-10-03T18:00:00Z",
@@ -73,6 +75,7 @@ def resolution() -> BorrowRecallResolutionEvidence:
         instrument_version=1,
         provider_revision="resolution-snapshot-r1",
         resolved_quantity="1",
+        quantity_unit="share",
         observed_at="2026-10-03T17:10:30Z",
         effective_at="2026-10-03T17:10:00Z",
         evidence_ref="provider:resolution-snapshot-r1",
@@ -214,6 +217,7 @@ class SecuritiesBorrowAuthenticatedSnapshotTests(unittest.TestCase):
                 environment=ENVIRONMENT,
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
+                quantity_unit="share",
                 evidence_artifact_store=artifacts,
             )
 
@@ -253,6 +257,7 @@ class SecuritiesBorrowAuthenticatedSnapshotTests(unittest.TestCase):
                 environment=ENVIRONMENT,
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
+                quantity_unit="share",
                 evidence_artifact_store=artifacts,
             )
             self.assertEqual(projection.record_recall(bound), bound.quantity)
@@ -269,6 +274,7 @@ class SecuritiesBorrowAuthenticatedSnapshotTests(unittest.TestCase):
                     environment=ENVIRONMENT,
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
+                    quantity_unit="share",
                     evidence_artifact_store=malicious,
                 )
 

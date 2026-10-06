@@ -858,6 +858,9 @@ class DispatchTests(unittest.TestCase):
                 "len",
                 "dict",
                 "ValueError",
+                "require_provider_json_depth",
+                "require_provider_response_bytes",
+                "HARD_MAX_PROVIDER_RESPONSE_BYTES",
             ):
                 with self.subTest(name=name):
                     with patch.object(

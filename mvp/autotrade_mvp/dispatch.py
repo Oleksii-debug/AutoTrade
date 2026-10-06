@@ -647,6 +647,8 @@ def _install_submission_response_binding_authority(loader):
     attempt_id_code = canonical_attempt_id.__code__
     canonical_decode = _decode_exact_json_bytes
     decode_code = canonical_decode.__code__
+    canonical_require_json_depth = require_provider_json_depth
+    require_json_depth_code = canonical_require_json_depth.__code__
     canonical_require_response_bytes = require_provider_response_bytes
     require_response_bytes_code = canonical_require_response_bytes.__code__
     canonical_hard_response_bytes = HARD_MAX_PROVIDER_RESPONSE_BYTES
@@ -742,9 +744,13 @@ def _install_submission_response_binding_authority(loader):
             or _decode_exact_json_bytes is not canonical_decode
             or canonical_getattr(canonical_decode, "__code__", None)
             is not decode_code
+            or require_provider_json_depth is not canonical_require_json_depth
+            or canonical_getattr(canonical_require_json_depth, "__code__", None)
+            is not require_json_depth_code
             or require_provider_response_bytes is not canonical_require_response_bytes
             or canonical_getattr(canonical_require_response_bytes, "__code__", None)
             is not require_response_bytes_code
+            or type(HARD_MAX_PROVIDER_RESPONSE_BYTES) is not canonical_int
             or HARD_MAX_PROVIDER_RESPONSE_BYTES != canonical_hard_response_bytes
             or _freeze_json is not canonical_freeze
             or canonical_getattr(canonical_freeze, "__code__", None)

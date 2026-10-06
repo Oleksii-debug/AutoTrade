@@ -777,13 +777,18 @@ class IbkrCancelRequest:
             )
         if type(self.query) is not dict:
             raise TypeError("cancel query must be an exact dict")
-        allowed = {"manualIndicator", "extOperator"}
-        if not set(self.query).issubset(allowed):
-            raise IbkrWebAdapterError("cancel query contains unsupported fields")
+        # Snapshot exact-dict entries without hashing or virtual dispatching
+        # caller-controlled key objects. Key type is proven before allowlist
+        # membership, so a str subclass cannot execute __hash__ in this
+        # financial cancel boundary.
+        items = tuple(dict.items(self.query))
+        allowed = frozenset({"manualIndicator", "extOperator"})
         normalized: dict[str, str] = {}
-        for key, value in self.query.items():
+        for key, value in items:
             if type(key) is not str or type(value) is not str:
                 raise IbkrWebAdapterError("cancel query must use exact text")
+            if key not in allowed:
+                raise IbkrWebAdapterError("cancel query contains unsupported fields")
             if not value or value != value.strip():
                 raise IbkrWebAdapterError("cancel query must use canonical text")
             normalized[key] = value

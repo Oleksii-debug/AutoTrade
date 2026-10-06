@@ -3473,6 +3473,140 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             )
             self.assertEqual(restored.attempt_id, "binding-type-a1")
 
+    def test_binding_loader_rejects_canonical_json_code_and_global_retarget(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+
+            canonical = dispatch_module.canonical_json
+            original_code = canonical.__code__
+
+            def forged_canonical_json(_value):
+                raise AssertionError("forged canonical JSON executed")
+
+            try:
+                canonical.__code__ = forged_canonical_json.__code__
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "submission response binding authority is unavailable",
+                ):
+                    load_submission_response_binding(
+                        JournalStore(path),
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id="binding-type-a1",
+                    )
+            finally:
+                canonical.__code__ = original_code
+
+            canonical_globals = canonical.__globals__
+            original_json = canonical_globals["json"]
+
+            class ForgedJson:
+                @staticmethod
+                def dumps(*_args, **_kwargs):
+                    raise AssertionError("forged canonical JSON module executed")
+
+            try:
+                canonical_globals["json"] = ForgedJson
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "submission response binding authority is unavailable",
+                ):
+                    load_submission_response_binding(
+                        JournalStore(path),
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id="binding-type-a1",
+                    )
+            finally:
+                canonical_globals["json"] = original_json
+
+            restored = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-type-a1",
+            )
+            self.assertEqual(restored.attempt_id, "binding-type-a1")
+
+    def test_binding_loader_rejects_json_encoder_and_regex_rebinding_before_callbacks(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            callbacks = 0
+
+            def forged(*_args, **_kwargs):
+                nonlocal callbacks
+                callbacks += 1
+                raise AssertionError("rebound canonicalization authority executed")
+
+            original_dumps = dispatch_module.json.dumps
+            original_encoder = dispatch_module.json.JSONEncoder
+            original_fullmatch = dispatch_module.re.fullmatch
+
+            class ForgedEncoder:
+                def __init__(self, **_kwargs):
+                    forged()
+
+            cases = (
+                (
+                    "json.dumps",
+                    lambda: setattr(dispatch_module.json, "dumps", forged),
+                    lambda: setattr(dispatch_module.json, "dumps", original_dumps),
+                ),
+                (
+                    "json.JSONEncoder",
+                    lambda: setattr(
+                        dispatch_module.json,
+                        "JSONEncoder",
+                        ForgedEncoder,
+                    ),
+                    lambda: setattr(
+                        dispatch_module.json,
+                        "JSONEncoder",
+                        original_encoder,
+                    ),
+                ),
+                (
+                    "re.fullmatch",
+                    lambda: setattr(dispatch_module.re, "fullmatch", forged),
+                    lambda: setattr(
+                        dispatch_module.re,
+                        "fullmatch",
+                        original_fullmatch,
+                    ),
+                ),
+            )
+            for surface, mutate, restore in cases:
+                try:
+                    mutate()
+                    with self.subTest(surface=surface), self.assertRaisesRegex(
+                        ValueError,
+                        "submission response binding authority is unavailable",
+                    ):
+                        load_submission_response_binding(
+                            JournalStore(path),
+                            environment="SIMULATION",
+                            account_id="acct",
+                            attempt_id="binding-type-a1",
+                        )
+                finally:
+                    restore()
+                self.assertEqual(callbacks, 0)
+
+            restored = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-type-a1",
+            )
+            self.assertEqual(restored.attempt_id, "binding-type-a1")
+
     def test_response_binding_constructor_rejects_polymorphic_authority_inputs(self):
         from mvp.autotrade_mvp import dispatch as dispatch_module
 

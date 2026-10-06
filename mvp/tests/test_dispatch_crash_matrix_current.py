@@ -45,6 +45,7 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
         transport,
         authority_check=None,
         sender_check=None,
+        final_barrier_clock=None,
     ):
         return dispatcher.dispatch(
             attempt_id=attempt_id,
@@ -56,6 +57,7 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
             authority_check=authority_check or self._allow,
             transport_send=transport,
             sender_check=sender_check,
+            final_barrier_clock=final_barrier_clock,
             submission_scope={"endpoint": "/orders"},
         )
 
@@ -226,6 +228,61 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
             self.assertEqual(
                 recovered.reason,
                 "prepared_owner_lease_expired_before_send",
+            )
+
+    def test_final_barrier_clock_death_stays_pre_sending_and_zero_wire(self):
+        with TemporaryDirectory() as directory:
+            path = self._path(directory)
+            dispatcher = self._dispatcher(path)
+            clock_calls = 0
+            outbound = 0
+
+            def final_barrier_clock():
+                nonlocal clock_calls
+                clock_calls += 1
+                raise SimulatedProcessDeath("inside final barrier clock")
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                raise AssertionError("wire must remain unreachable")
+
+            with self.assertRaisesRegex(
+                SimulatedProcessDeath,
+                "inside final barrier clock",
+            ):
+                self._dispatch(
+                    dispatcher,
+                    attempt_id="crash-final-clock",
+                    now="2026-10-06T16:33:30Z",
+                    transport=transport,
+                    final_barrier_clock=final_barrier_clock,
+                )
+
+            self.assertEqual(clock_calls, 1)
+            self.assertEqual(outbound, 0)
+            self.assertEqual(
+                self._event_types(path, dispatcher, "crash-final-clock"),
+                ["SubmissionPrepared"],
+            )
+
+            restarted = self._dispatcher(path, owner_token="owner-b")
+            recovered = self._dispatch(
+                restarted,
+                attempt_id="crash-final-clock",
+                now="2026-10-06T16:34:31Z",
+                transport=self._forbidden_transport,
+            )
+            self.assertEqual(recovered.status, "BLOCKED")
+            self.assertEqual(
+                recovered.reason,
+                "prepared_owner_lease_expired_before_send",
+            )
+            self.assertEqual(clock_calls, 1)
+            self.assertEqual(
+                self._event_types(path, restarted, "crash-final-clock"),
+                ["SubmissionPrepared", "SubmissionBlocked"],
             )
 
     def test_paper_sender_fence_death_stays_pre_sending_and_zero_wire(self):

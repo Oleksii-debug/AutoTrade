@@ -305,82 +305,159 @@ def provider_borrow_evidence_metadata(evidence: object) -> dict[str, object]:
     return metadata
 
 
-def verify_provider_borrow_evidence(
-    evidence: object,
-    artifact_store: ArtifactStore,
-) -> str:
-    evidence = _exact_evidence(evidence)
-    if type(artifact_store) is not ArtifactStore:
-        raise BorrowEvidenceError(
-            "provider borrow evidence requires the exact canonical ArtifactStore"
-        )
-    artifact_id, digest, canonical_ref = _immutable_evidence_ref(
-        evidence.evidence_ref
-    )
-    expected_receipt = provider_borrow_evidence_receipt(evidence)
-    expected_metadata = provider_borrow_evidence_metadata(evidence)
-    try:
-        manifest, raw = ArtifactStore.read_authenticated_snapshot(
-            artifact_store,
-            artifact_id,
-        )
-        if type(manifest) is not dict or not isinstance(raw, bytes):
-            raise ArtifactIntegrityError(
-                "borrow evidence snapshot has unsupported representation"
-            )
-        if manifest.get("artifact_id") != artifact_id:
-            raise ArtifactIntegrityError(
-                "borrow evidence artifact identity mismatch"
-            )
-        manifest_hash = manifest.get("manifest_hash")
-        if (
-            not isinstance(manifest_hash, str)
-            or not manifest_hash.startswith("sha256:")
-            or len(manifest_hash) != 71
-            or any(ch not in "0123456789abcdef" for ch in manifest_hash[7:])
-        ):
-            raise ArtifactIntegrityError(
-                "borrow evidence manifest lacks integrity binding"
-            )
-        if manifest.get("sha256") != f"sha256:{digest}":
-            raise ArtifactIntegrityError(
-                "borrow evidence digest does not match manifest"
-            )
-        if manifest.get("media_type") != BORROW_PROVIDER_EVIDENCE_MEDIA_TYPE:
-            raise ArtifactIntegrityError(
-                "borrow evidence has unsupported media type"
-            )
-        if manifest.get("metadata") != expected_metadata:
-            raise ArtifactIntegrityError(
-                "borrow evidence metadata differs from financial scope"
-            )
-        rights = manifest.get("rights")
-        if not isinstance(rights, dict) or rights.get("storage") is not True:
-            raise ArtifactIntegrityError(
-                "borrow evidence lacks storage provenance"
-            )
-        parsed = strict_json_loads(raw.decode("utf-8"))
-    except (
-        ArtifactIntegrityError,
-        FileNotFoundError,
-        OSError,
-        UnicodeError,
-        ValueError,
-        TypeError,
-    ) as error:
-        raise BorrowEvidenceError(
-            "provider borrow evidence verification failed"
-        ) from error
-    if parsed != expected_receipt:
-        raise BorrowEvidenceError(
-            "provider borrow evidence does not match supplied economics"
-        )
-    if raw != canonical_json(expected_receipt).encode("utf-8"):
-        raise BorrowEvidenceError(
-            "provider borrow evidence must use canonical JSON bytes"
-        )
-    return canonical_ref
+def _build_provider_borrow_evidence_verifier():
+    """Freeze the provider-evidence interpretation boundary against late retargets."""
 
+    availability_type = BorrowAvailabilityEvidence
+    recall_type = BorrowRecallEvidence
+    resolution_type = BorrowRecallResolutionEvidence
+    artifact_store_type = ArtifactStore
+    artifact_integrity_error = ArtifactIntegrityError
+    availability_detail = BorrowAvailabilityEvidence.resource_detail
+    recall_payload = BorrowRecallEvidence.payload
+    resolution_payload = BorrowRecallResolutionEvidence.payload
+    immutable_evidence_ref = _immutable_evidence_ref
+    json_loads = strict_json_loads
+    canonical_renderer = canonical_json
+    evidence_media_type = BORROW_PROVIDER_EVIDENCE_MEDIA_TYPE
+    evidence_type = BORROW_PROVIDER_EVIDENCE_TYPE
+    schema_version = BORROW_PROVIDER_EVIDENCE_SCHEMA_VERSION
+    replace_evidence = replace
+
+    def verify(
+        evidence: object,
+        artifact_store: ArtifactStore,
+    ) -> str:
+        evidence_type_obj = type(evidence)
+        if evidence_type_obj not in {
+            availability_type,
+            recall_type,
+            resolution_type,
+        }:
+            raise TypeError(
+                "securities-borrow evidence must use an exact canonical type"
+            )
+        evidence = replace_evidence(evidence)
+        if type(artifact_store) is not artifact_store_type:
+            raise BorrowEvidenceError(
+                "provider borrow evidence requires the exact canonical ArtifactStore"
+            )
+
+        if evidence_type_obj is availability_type:
+            kind = "AVAILABILITY"
+            observation = availability_detail(evidence)
+        elif evidence_type_obj is recall_type:
+            kind = "RECALL"
+            observation = recall_payload(evidence)
+        else:
+            kind = "RECALL_RESOLUTION"
+            observation = resolution_payload(evidence)
+        observation = dict(observation)
+        observation.pop("evidence_ref", None)
+
+        expected_receipt = {
+            "schema_version": schema_version,
+            "evidence_type": evidence_type,
+            "observation_kind": kind,
+            "observation": observation,
+        }
+        expected_metadata: dict[str, object] = {
+            "evidence_type": evidence_type,
+            "observation_kind": kind,
+            "provider_id": evidence.provider_id,
+            "account_id": evidence.account_id,
+            "environment": evidence.environment,
+            **(
+                {}
+                if evidence.provider_environment == evidence.environment
+                else {"provider_environment": evidence.provider_environment}
+            ),
+            "instrument_id": evidence.instrument_id,
+            "instrument_version": evidence.instrument_version,
+            "quantity_unit": evidence.quantity_unit,
+            "provider_revision": evidence.provider_revision,
+        }
+        if evidence_type_obj is availability_type:
+            expected_metadata["locate_id"] = evidence.locate_id
+        elif evidence_type_obj is recall_type:
+            expected_metadata["recall_id"] = evidence.recall_id
+        else:
+            expected_metadata["recall_id"] = evidence.recall_id
+            expected_metadata["resolution_id"] = evidence.resolution_id
+
+        artifact_id, digest, canonical_ref = immutable_evidence_ref(
+            evidence.evidence_ref
+        )
+        try:
+            manifest, raw = artifact_store_type.read_authenticated_snapshot(
+                artifact_store,
+                artifact_id,
+            )
+            if type(manifest) is not dict or not isinstance(raw, bytes):
+                raise artifact_integrity_error(
+                    "borrow evidence snapshot has unsupported representation"
+                )
+            if manifest.get("artifact_id") != artifact_id:
+                raise artifact_integrity_error(
+                    "borrow evidence artifact identity mismatch"
+                )
+            manifest_hash = manifest.get("manifest_hash")
+            if (
+                not isinstance(manifest_hash, str)
+                or not manifest_hash.startswith("sha256:")
+                or len(manifest_hash) != 71
+                or any(
+                    ch not in "0123456789abcdef"
+                    for ch in manifest_hash[7:]
+                )
+            ):
+                raise artifact_integrity_error(
+                    "borrow evidence manifest lacks integrity binding"
+                )
+            if manifest.get("sha256") != f"sha256:{digest}":
+                raise artifact_integrity_error(
+                    "borrow evidence digest does not match manifest"
+                )
+            if manifest.get("media_type") != evidence_media_type:
+                raise artifact_integrity_error(
+                    "borrow evidence has unsupported media type"
+                )
+            if manifest.get("metadata") != expected_metadata:
+                raise artifact_integrity_error(
+                    "borrow evidence metadata differs from financial scope"
+                )
+            rights = manifest.get("rights")
+            if not isinstance(rights, dict) or rights.get("storage") is not True:
+                raise artifact_integrity_error(
+                    "borrow evidence lacks storage provenance"
+                )
+            parsed = json_loads(raw.decode("utf-8"))
+        except (
+            artifact_integrity_error,
+            FileNotFoundError,
+            OSError,
+            UnicodeError,
+            ValueError,
+            TypeError,
+        ) as error:
+            raise BorrowEvidenceError(
+                "provider borrow evidence verification failed"
+            ) from error
+        if parsed != expected_receipt:
+            raise BorrowEvidenceError(
+                "provider borrow evidence does not match supplied economics"
+            )
+        if raw != canonical_renderer(expected_receipt).encode("utf-8"):
+            raise BorrowEvidenceError(
+                "provider borrow evidence must use canonical JSON bytes"
+            )
+        return canonical_ref
+
+    return verify
+
+
+verify_provider_borrow_evidence = _build_provider_borrow_evidence_verifier()
+del _build_provider_borrow_evidence_verifier
 
 def _borrow_resource_key_from_identity(identity: list[object]) -> str:
     canonical = json.dumps(identity, ensure_ascii=True, separators=(",", ":"))

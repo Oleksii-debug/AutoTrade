@@ -65,6 +65,17 @@ def _project(path: Path) -> dict:
     return project
 
 
+
+def _repo_file(relative: object, *, label: str) -> Path:
+    if not isinstance(relative, str) or not relative:
+        raise ValueError(f"{label} must be non-empty text")
+    path = (ROOT / relative).resolve()
+    if not path.is_relative_to(ROOT.resolve()):
+        raise ValueError(f"{label} escapes repository root: {relative}")
+    if not path.is_file():
+        raise ValueError(f"{label} does not exist: {relative}")
+    return path
+
 def _input_versions() -> dict[str, object]:
     manifest = _json(ROOT / "contracts" / "manifest.json")
     fixtures = _json(ROOT / "contracts" / "fixtures" / "manifest.json")
@@ -101,22 +112,116 @@ def _input_versions() -> dict[str, object]:
     validators = manifest.get("semantic_validators", [])
     if not isinstance(validators, list) or not validators:
         raise ValueError("at least one semantic validator must be declared")
-    semantic_validators: list[dict[str, str]] = []
+
+    schema_names = manifest.get("schemas", [])
+    if not isinstance(schema_names, list):
+        raise ValueError("contracts manifest schemas must be an array")
+
+    semantic_validators: list[dict[str, object]] = []
+    seen_ids: set[str] = set()
+    expected_languages = {"python", "csharp", "typescript"}
     for entry in validators:
         if not isinstance(entry, dict):
             raise ValueError("semantic validator declaration must be an object")
+
         values = {
             key: entry.get(key)
             for key in ("id", "schema", "definition", "corpus")
         }
         if not all(isinstance(value, str) and value for value in values.values()):
             raise ValueError("semantic validator identity fields must be non-empty text")
-        corpus_path = ROOT / values["corpus"]
-        if not corpus_path.is_file():
+
+        validator_id = values["id"]
+        schema_name = values["schema"]
+        definition = values["definition"]
+        corpus_relative = values["corpus"]
+        assert isinstance(validator_id, str)
+        assert isinstance(schema_name, str)
+        assert isinstance(definition, str)
+        assert isinstance(corpus_relative, str)
+
+        if validator_id in seen_ids:
+            raise ValueError(f"duplicate semantic validator id: {validator_id}")
+        seen_ids.add(validator_id)
+        if schema_name not in schema_names:
             raise ValueError(
-                f"semantic validator corpus does not exist: {values['corpus']}"
+                f"semantic validator {validator_id} schema is not declared in manifest"
             )
-        semantic_validators.append(values)
+
+        schema_path = _repo_file(
+            f"contracts/jsonschema/{schema_name}",
+            label=f"semantic validator {validator_id} schema",
+        )
+        schema_payload = _json(schema_path)
+        definitions = schema_payload.get("$defs", {})
+        if not isinstance(definitions, dict) or definition not in definitions:
+            raise ValueError(
+                f"semantic validator {validator_id} definition does not exist"
+            )
+        definition_payload = definitions[definition]
+        if (
+            not isinstance(definition_payload, dict)
+            or definition_payload.get("x-autotrade-semantic-validator") != validator_id
+        ):
+            raise ValueError(
+                f"semantic validator {validator_id} schema annotation mismatch"
+            )
+
+        corpus_path = _repo_file(
+            corpus_relative,
+            label=f"semantic validator {validator_id} corpus",
+        )
+        corpus_payload = _json(corpus_path)
+        if corpus_payload.get("validator_id") != validator_id:
+            raise ValueError(
+                f"semantic validator {validator_id} corpus validator_id mismatch"
+            )
+        if corpus_payload.get("contract_version") != contract_version:
+            raise ValueError(
+                f"semantic validator {validator_id} corpus contract_version mismatch"
+            )
+        cases = corpus_payload.get("cases")
+        if not isinstance(cases, list) or not cases:
+            raise ValueError(
+                f"semantic validator {validator_id} corpus must contain cases"
+            )
+
+        bindings = entry.get("bindings")
+        if not isinstance(bindings, dict) or set(bindings) != expected_languages:
+            raise ValueError(
+                f"semantic validator {validator_id} must declare python/csharp/typescript bindings"
+            )
+        checked_bindings: dict[str, str] = {}
+        for language, relative in bindings.items():
+            _repo_file(
+                relative,
+                label=f"semantic validator {validator_id} {language} binding",
+            )
+            assert isinstance(relative, str)
+            checked_bindings[language] = relative
+
+        installed = entry.get("installed_bindings", {})
+        if not isinstance(installed, dict):
+            raise ValueError(
+                f"semantic validator {validator_id} installed_bindings must be an object"
+            )
+        checked_installed: dict[str, str] = {}
+        for language, relative in installed.items():
+            _repo_file(
+                relative,
+                label=f"semantic validator {validator_id} installed {language} binding",
+            )
+            assert isinstance(relative, str)
+            checked_installed[language] = relative
+
+        semantic_validators.append(
+            {
+                **values,
+                "bindings": checked_bindings,
+                "installed_bindings": checked_installed,
+                "case_count": len(cases),
+            }
+        )
 
     return {
         "contract_version": contract_version,

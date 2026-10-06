@@ -1186,6 +1186,30 @@ _BYBIT_OPTION_DELIVERY_DECIMAL_RE = re.compile(
 _BYBIT_OPTION_DELIVERY_CURSOR_RE = re.compile(
     r"^(?:[A-Za-z0-9._~-]|%[0-9A-F]{2})+$"
 )
+_BYBIT_OPTION_DELIVERY_MAX_RANGE_MS = 30 * 24 * 60 * 60 * 1000
+_BYBIT_OPTION_DELIVERY_QUERY_FIELDS = frozenset(
+    {"category", "symbol", "startTime", "endTime", "expDate", "limit", "cursor"}
+)
+
+
+def _bybit_option_delivery_query_integer(value: object, *, name: str) -> int:
+    if (
+        type(value) is not str
+        or not value
+        or len(value) > 20
+        or not value.isascii()
+        or not value.isdigit()
+    ):
+        raise ProviderCoreError(
+            f"Bybit option delivery query {name} must be canonical integer text"
+        )
+    parsed = int(value, 10)
+    if str(parsed) != value:
+        raise ProviderCoreError(
+            f"Bybit option delivery query {name} must be canonical integer text"
+        )
+    return parsed
+
 
 
 def _bybit_option_delivery_decimal_text(
@@ -1251,12 +1275,70 @@ def parse_option_delivery_page(
         endpoint=BYBIT_DOCUMENTED_ENDPOINTS["OPTION_DELIVERIES"],
     )
     binding = observation.query_binding
+    query = binding.query
     if (
         binding.permission_scope != "ACCOUNT.READ"
-        or binding.query.get("category") != "option"
+        or type(query.get("category")) is not str
+        or query.get("category") != "option"
     ):
         raise ProviderCoreError(
             "Bybit option delivery evidence requires ACCOUNT.READ category=option"
+        )
+    unsupported_query = set(query) - _BYBIT_OPTION_DELIVERY_QUERY_FIELDS
+    if unsupported_query:
+        raise ProviderCoreError(
+            "Bybit option delivery evidence contains unsupported query fields"
+        )
+
+    requested_symbol = query.get("symbol")
+    if requested_symbol is not None and (
+        type(requested_symbol) is not str
+        or re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", requested_symbol) is None
+    ):
+        raise ProviderCoreError(
+            "Bybit option delivery query symbol is non-canonical"
+        )
+
+    start_ms = (
+        _bybit_option_delivery_query_integer(query["startTime"], name="startTime")
+        if "startTime" in query
+        else None
+    )
+    end_ms = (
+        _bybit_option_delivery_query_integer(query["endTime"], name="endTime")
+        if "endTime" in query
+        else None
+    )
+    if start_ms is not None and end_ms is not None:
+        if end_ms < start_ms or end_ms - start_ms > _BYBIT_OPTION_DELIVERY_MAX_RANGE_MS:
+            raise ProviderCoreError(
+                "Bybit option delivery query time range is non-canonical"
+            )
+    effective_start_ms = (
+        start_ms
+        if start_ms is not None
+        else (
+            end_ms - _BYBIT_OPTION_DELIVERY_MAX_RANGE_MS
+            if end_ms is not None
+            else None
+        )
+    )
+    effective_end_ms = (
+        end_ms
+        if end_ms is not None
+        else (
+            start_ms + _BYBIT_OPTION_DELIVERY_MAX_RANGE_MS
+            if start_ms is not None
+            else None
+        )
+    )
+    requested_exp_date = query.get("expDate")
+    if requested_exp_date is not None and (
+        type(requested_exp_date) is not str
+        or re.fullmatch(r"[0-3][0-9][A-Z]{3}[0-9]{2}", requested_exp_date) is None
+    ):
+        raise ProviderCoreError(
+            "Bybit option delivery query expDate is non-canonical"
         )
 
     envelope = _mapping(observation.payload, name="response")
@@ -1338,6 +1420,26 @@ def parse_option_delivery_page(
                 f"result.list[{index}].deliveryTime must be an exact non-negative integer"
             )
         delivery_time_ms = delivery_time_value
+        if requested_symbol is not None and symbol != requested_symbol:
+            raise ProviderCoreError(
+                "Bybit option delivery row violates requested symbol filter"
+            )
+        if (
+            effective_start_ms is not None
+            and delivery_time_ms < effective_start_ms
+        ) or (
+            effective_end_ms is not None
+            and delivery_time_ms > effective_end_ms
+        ):
+            raise ProviderCoreError(
+                "Bybit option delivery row violates requested time range"
+            )
+        if requested_exp_date is not None:
+            symbol_parts = symbol.split("-")
+            if len(symbol_parts) < 4 or symbol_parts[1] != requested_exp_date:
+                raise ProviderCoreError(
+                    "Bybit option delivery row violates requested expiry filter"
+                )
         if "entryPrice" in row:
             entry_price = _bybit_option_delivery_decimal_text(
                 row["entryPrice"],

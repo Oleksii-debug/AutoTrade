@@ -277,7 +277,7 @@ def parse_bybit_position_margin_page(
         risk_limit = _decimal(
             row.get("riskLimitValue"),
             name=f"result.list[{index}].riskLimitValue",
-            allow_empty=risk_id == 0,
+            allow_empty=True,
         )
         if risk_id == 0:
             if risk_limit not in {None, Decimal("0")}:

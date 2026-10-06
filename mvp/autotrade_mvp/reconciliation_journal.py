@@ -1040,6 +1040,17 @@ def load_account_resource_availability_evidence(
                 or lifecycle_payload.get("environment") != scope
             ):
                 continue
+            lifecycle_provider_environment = lifecycle_payload.get(
+                "provider_environment"
+            )
+            if lifecycle_provider_environment is None:
+                if provider == "BYBIT":
+                    raise ValueError(
+                        "BYBIT option lifecycle financial truth lacks provider_environment"
+                    )
+                lifecycle_provider_environment = lifecycle_payload.get("environment")
+            if lifecycle_provider_environment != provider_scope:
+                continue
             if lifecycle_sequence >= checkpoint_sequence:
                 raise ValueError(
                     "availability checkpoint predates option lifecycle financial truth"

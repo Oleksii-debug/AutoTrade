@@ -745,5 +745,200 @@ class PostSendBuiltinAuthorityTests(unittest.TestCase):
             self.assertEqual(callbacks, 0)
 
 
+    def test_post_send_helper_rebinding_is_unknown_and_restart_no_resend(self):
+        surfaces = (
+            "_canonical_journal_authority_snapshot",
+            "_journal_store_call",
+            "_envelope",
+            "_detach_submission_json",
+            "submission_attempt_aggregate_id",
+            "_event_id",
+            "_identity_digest",
+            "_instant",
+            "payload_digest",
+            "canonical_json",
+            "_canonical_submission_event_instant",
+            "_exact_response_terminal_semantics_are_canonical",
+            "_has_exact_response_markers",
+            "uuid5",
+            "NAMESPACE_URL",
+            "DispatchOutcome",
+        )
+        for surface in surfaces:
+            with self.subTest(surface=surface), TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                dispatcher = self._dispatcher(path)
+                original = getattr(dispatch_module, surface)
+                hostile_calls = 0
+                outbound = 0
+
+                def forged(*_args, **_kwargs):
+                    nonlocal hostile_calls
+                    hostile_calls += 1
+                    raise AssertionError(f"rebound {surface} executed")
+
+                def transport(_client_order_id, _request, final_guard):
+                    nonlocal outbound
+                    final_guard()
+                    outbound += 1
+                    response = ExactJsonTransportResponse(
+                        b'{"accepted":true}',
+                        http_status=200,
+                    )
+                    setattr(dispatch_module, surface, forged)
+                    return response
+
+                attempt_id = f"postsend-helper-{surface}"
+                try:
+                    first = self._dispatch(
+                        dispatcher,
+                        attempt_id=attempt_id,
+                        transport=transport,
+                    )
+                    self.assertIs(getattr(dispatch_module, surface), original)
+                finally:
+                    setattr(dispatch_module, surface, original)
+
+                self.assertEqual(hostile_calls, 0)
+                self.assertEqual(outbound, 1)
+                self.assertEqual(first.status, "UNKNOWN")
+                self.assertEqual(
+                    first.reason,
+                    "dispatcher_authority_changed_after_send_barrier",
+                )
+                event_types, _events = self._event_types(
+                    path,
+                    dispatcher,
+                    attempt_id,
+                )
+                self.assertEqual(
+                    event_types,
+                    ["SubmissionPrepared", "SubmissionSending"],
+                )
+
+                restarted = GuardedDispatcher(
+                    JournalStore(path),
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner-b",
+                )
+                replay = restarted.dispatch(
+                    attempt_id=attempt_id,
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T18:15:01Z",
+                    authority_check=lambda *_args: (
+                        _ for _ in ()
+                    ).throw(AssertionError("restart must not re-authorize")),
+                    transport_send=lambda *_args: (
+                        _ for _ in ()
+                    ).throw(AssertionError("restart must not resend")),
+                    submission_scope={"endpoint": "/orders"},
+                )
+                self.assertEqual(replay.status, "UNKNOWN")
+                self.assertEqual(
+                    replay.reason,
+                    "recovered_after_send_barrier_without_terminal_result",
+                )
+                self.assertEqual(hostile_calls, 0)
+                self.assertEqual(outbound, 1)
+
+    def test_post_send_helper_code_mutation_is_restored_and_unknown(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            helper = dispatch_module._detach_submission_json
+            original_code = helper.__code__
+            hostile_calls = 0
+
+            def forged(value, *, _active_containers=None):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("forged detach helper code executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                helper.__code__ = forged.__code__
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-helper-code-a1",
+                    transport=transport,
+                )
+                self.assertIs(helper.__code__, original_code)
+            finally:
+                helper.__code__ = original_code
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(
+                result.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-helper-code-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
+    def test_post_send_helper_kwdefaults_mutation_is_restored_and_unknown(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            helper = dispatch_module._detach_submission_json
+            original_kwdefaults = helper.__kwdefaults__
+            self.assertIsInstance(original_kwdefaults, dict)
+            baseline = dict(original_kwdefaults)
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                helper.__kwdefaults__["_active_containers"] = {"poison"}
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-helper-kwdefaults-a1",
+                    transport=transport,
+                )
+                self.assertIs(helper.__kwdefaults__, original_kwdefaults)
+                self.assertEqual(helper.__kwdefaults__, baseline)
+            finally:
+                helper.__kwdefaults__ = original_kwdefaults
+                original_kwdefaults.clear()
+                original_kwdefaults.update(baseline)
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(
+                result.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-helper-kwdefaults-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

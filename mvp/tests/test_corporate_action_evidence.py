@@ -6,6 +6,7 @@ import unittest
 import weakref
 
 from mvp.autotrade_mvp.corporate_action_evidence import (
+    AuthoritativeCorporateAction,
     CorporateActionEvidenceConflict,
     CorporateActionEvidenceError,
     CorporateActionObservation,
@@ -672,6 +673,44 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
             environment="SIMULATION",
         )
         return journal, durable
+
+    def test_manually_constructed_authoritative_action_cannot_reach_durable_store(self):
+        issued = self._accepted()
+        forged = AuthoritativeCorporateAction(**issued.__dict__)
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceError,
+                "lacks canonical resolver issuance authority",
+            ):
+                durable.record(forged)
+            self.assertEqual(
+                journal.load_events(
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
+
+    def test_post_issuance_action_mutation_is_rejected_before_journal_mutation(self):
+        accepted = self._accepted()
+        object.__setattr__(accepted, "provider_revision", "forged-revision")
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceError,
+                "changed after resolver issuance",
+            ):
+                durable.record(accepted)
+            self.assertEqual(
+                journal.load_events(
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
 
     def test_evidence_is_exactly_once_across_restart(self):
         accepted = self._accepted()

@@ -324,6 +324,42 @@ class AuthenticatedReadHttpRequestTests(unittest.TestCase):
         self.assertEqual(request.url, "https://localhost/iserver/accounts")
         self.assertEqual(request.method, "GET")
 
+    def test_url_rejects_parser_normalized_or_non_ascii_octets(self):
+        hostile_urls = (
+            "https://exa\nmple.com/iserver/accounts",
+            "https://exa\rmple.com/iserver/accounts",
+            "https://exa\tmple.com/iserver/accounts",
+            "https://example.com/iserver/ac\x00counts",
+            "https://example.com/iserver/ac\x1fcounts",
+            "https://example.com/iserver/ac\x7fcounts",
+            "https://example.com/iserver/ac\u0085counts",
+            "https://example.com/iserver\\accounts",
+            "https://example.com/iserver /accounts",
+        )
+        for url in hostile_urls:
+            with self.subTest(url=repr(url)):
+                with self.assertRaisesRegex(
+                    ProviderTransportScopeError,
+                    "authenticated-read URL must be canonical HTTPS",
+                ):
+                    AuthenticatedReadHttpRequest(
+                        url=url,
+                        headers={"Accept": "application/json"},
+                        timeout_seconds=5,
+                        method="GET",
+                    )
+
+        percent_encoded = AuthenticatedReadHttpRequest(
+            url="https://api.example.test/read?symbol=%E2%82%AC",
+            headers={"Accept": "application/json"},
+            timeout_seconds=5,
+            method="GET",
+        )
+        self.assertEqual(
+            percent_encoded.url,
+            "https://api.example.test/read?symbol=%E2%82%AC",
+        )
+
     def test_executable_text_subclasses_are_rejected_before_virtual_text_methods(self):
         class HostileText(str):
             def strip(self):

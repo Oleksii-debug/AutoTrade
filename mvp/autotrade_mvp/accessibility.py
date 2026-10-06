@@ -102,28 +102,60 @@ def accessible_status_state(status: Any) -> str:
 def _reservation_lines(status: dict[str, Any]) -> list[str]:
     reservations = _dict_get_exact(status, "active_reservations", [])
     if type(reservations) is not list:
-        return ["Active reservations: unavailable"]
+        return [
+            "Active reservations: unavailable; malformed state",
+            "Action required: inspect or restore reservation state before relying on exposure status",
+        ]
 
-    lines = [f"Active reservations: {len(reservations)}"]
+    detail_lines: list[str] = []
+    readable_entries = 0
+    malformed = False
     for index, item in enumerate(reservations, start=1):
         if type(item) is not dict:
-            lines.append(f"Reservation {index}: unavailable")
+            malformed = True
+            detail_lines.append(f"Reservation {index}: unavailable")
             continue
         remaining = _dict_get_exact(item, "remaining")
         state = _plain_text(_dict_get_exact(item, "state"))
         if type(remaining) is not dict:
-            lines.append(f"Reservation {index}: unavailable; state: {state}")
-            continue
-        if not remaining:
-            lines.append(f"Reservation {index}: no remaining resources; state: {state}")
-            continue
-        for resource, amount in remaining.items():
-            resource_text = _plain_text(resource)
-            amount_text = _plain_text(amount)
-            lines.append(
-                f"Reserved {resource_text}: {amount_text}; state: {state}"
+            malformed = True
+            detail_lines.append(
+                f"Reservation {index}: unavailable; state: {state}"
             )
-    return lines
+            continue
+
+        entry_readable = state != "Unavailable"
+        if not remaining:
+            detail_lines.append(
+                f"Reservation {index}: no remaining resources; state: {state}"
+            )
+        else:
+            for resource, amount in remaining.items():
+                resource_text = _plain_text(resource)
+                amount_text = _plain_text(amount)
+                if (
+                    resource_text == "Unavailable"
+                    or amount_text == "Unavailable"
+                ):
+                    malformed = True
+                    entry_readable = False
+                detail_lines.append(
+                    f"Reserved {resource_text}: {amount_text}; state: {state}"
+                )
+        if entry_readable:
+            readable_entries += 1
+        else:
+            malformed = True
+
+    if malformed:
+        lines = [
+            "Active reservations: unavailable; one or more reservation entries are malformed",
+            f"Structurally readable reservation entries: {readable_entries}",
+            "Action required: inspect or restore reservation state before relying on exposure status",
+        ]
+    else:
+        lines = [f"Active reservations: {readable_entries}"]
+    return lines + detail_lines
 
 
 def _cash_bucket_lines(economic_report: dict[str, Any]) -> list[str]:

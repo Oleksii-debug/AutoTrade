@@ -2390,10 +2390,10 @@ class JournalStore:
             or state_version < 0
         ):
             raise ValueError("state_version must be a non-negative integer")
-        request = _detach_json_value(request)
-        result = _detach_json_value(result)
-        request_hash = payload_digest(request)
-        result_json = canonical_json(result)
+        request_snapshot = _detach_json_value(request)
+        result_snapshot = _detach_json_value(result)
+        request_hash = payload_digest(request_snapshot)
+        result_json = canonical_json(result_snapshot)
         result_hash = (
             "sha256:" + sha256(result_json.encode("utf-8")).hexdigest()
         )
@@ -2460,6 +2460,8 @@ class JournalStore:
         )
         if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
+        if type(events) is not list:
+            raise TypeError("events must be an exact list")
         if not events:
             raise ValueError("At least one event is required")
         if (
@@ -2477,17 +2479,20 @@ class JournalStore:
             expected_whole_store_counts
         )
 
-        request = _detach_json_value(request)
-        result = _detach_json_value(result)
-        request_hash = payload_digest(request)
-        result_json = canonical_json(result)
+        request_snapshot = _detach_json_value(request)
+        result_snapshot = _detach_json_value(result)
+        request_hash = payload_digest(request_snapshot)
+        result_json = canonical_json(result_snapshot)
         result_hash = (
             "sha256:" + sha256(result_json.encode("utf-8")).hexdigest()
         )
         prepared: list[dict[str, Any]] = []
         seen_event_ids: set[str] = set()
 
-        for envelope, outbox_topic in events:
+        for event_item in events:
+            if type(event_item) is not tuple or len(event_item) != 2:
+                raise TypeError("event batch entries must be exact 2-tuples")
+            envelope, outbox_topic = event_item
             if type(envelope) is not dict:
                 raise TypeError("Each event envelope must be an exact dict")
             envelope = _detach_json_value(envelope)

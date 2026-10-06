@@ -39,6 +39,24 @@ class EmptyWriteResidualCurrentTests(unittest.TestCase):
             original,
         )
 
+    def test_response_resource_helper_code_mutation_fails_closed(self):
+        import mvp.autotrade_mvp.provider_transport as transport_module
+
+        helper = transport_module.require_provider_response_bytes
+        original_code = helper.__code__
+        forged_code = (
+            lambda raw, *, max_bytes=1, allow_empty=False: raw
+        ).__code__
+        try:
+            helper.__code__ = forged_code
+            with self.assertRaisesRegex(
+                transport_module.ProviderTransportScopeError,
+                "provider response resource authority changed",
+            ):
+                TradingWireResponse(http_status=200, body=b"{}")
+        finally:
+            helper.__code__ = original_code
+
     def test_response_resource_ceiling_rebinding_fails_closed(self):
         import mvp.autotrade_mvp.provider_transport as transport_module
         from unittest.mock import patch

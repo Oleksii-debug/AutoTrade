@@ -1965,11 +1965,15 @@ def _qualified_inconclusive(
     )
 
 
-def _registered_decision_policy(authority: object):
+def _registered_decision_policy(
+    authority: object,
+    _resolve_context=_registered_policy_context,
+    _read_policy=_REGISTERED_ABLATION_DECISION_POLICY,
+):
     registry, _memory, _artifacts, protocol_id, protocol_hash, *_rest = (
-        _registered_policy_context(authority)
+        _resolve_context(authority)
     )
-    policy = _REGISTERED_ABLATION_DECISION_POLICY(registry, protocol_id)
+    policy = _read_policy(registry, protocol_id)
     if policy.protocol_id != protocol_id or policy.protocol_hash != protocol_hash:
         raise ProtocolViolation(
             "registered ablation decision policy does not match qualification binding"
@@ -1977,11 +1981,15 @@ def _registered_decision_policy(authority: object):
     return policy
 
 
-def _registered_value_policy(authority: object):
+def _registered_value_policy(
+    authority: object,
+    _resolve_context=_registered_policy_context,
+    _read_policy=_REGISTERED_ABLATION_VALUE_POLICY,
+):
     registry, _memory, _artifacts, protocol_id, protocol_hash, *_rest = (
-        _registered_policy_context(authority)
+        _resolve_context(authority)
     )
-    policy = _REGISTERED_ABLATION_VALUE_POLICY(registry, protocol_id)
+    policy = _read_policy(registry, protocol_id)
     if policy.protocol_id != protocol_id or policy.protocol_hash != protocol_hash:
         raise ProtocolViolation(
             "registered ablation value policy does not match qualification binding"

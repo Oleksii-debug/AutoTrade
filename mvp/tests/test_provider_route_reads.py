@@ -370,6 +370,20 @@ class ProviderRouteReadTests(unittest.TestCase):
             parser_contract_digest,
             IBKR_BROKERAGE_ACCOUNTS_PARSER_CONTRACT_DIGEST,
         )
+        expected_rule_digest = "sha256:" + sha256(
+            canonical_json(
+                {
+                    "provider_id": "IBKR",
+                    "endpoint": "/iserver/accounts",
+                    "surface": "AUTHENTICATED_READ",
+                    "permission_scope": "ORDER.READ",
+                    "data_entitlement": "ACCOUNT",
+                    "success_statuses": [200],
+                    "http_method": "GET",
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(rule_digest, expected_rule_digest)
 
         missing_parser = _qualification_with_route_semantics({
             "PARSER_IDENTITY": IBKR_BROKERAGE_ACCOUNTS_PARSER_IDENTITY,
@@ -435,6 +449,20 @@ class ProviderRouteReadTests(unittest.TestCase):
             parser_contract_digest,
             IBKR_BROKERAGE_STATUS_PARSER_CONTRACT_DIGEST,
         )
+        expected_rule_digest = "sha256:" + sha256(
+            canonical_json(
+                {
+                    "provider_id": "IBKR",
+                    "endpoint": "/iserver/auth/status",
+                    "surface": "AUTHENTICATED_READ",
+                    "permission_scope": "ORDER.READ",
+                    "data_entitlement": "SESSION",
+                    "success_statuses": [200],
+                    "http_method": "POST",
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(rule_digest, expected_rule_digest)
 
         missing_parser = _qualification_with_route_semantics({
             "PARSER_IDENTITY": IBKR_BROKERAGE_STATUS_PARSER_IDENTITY,

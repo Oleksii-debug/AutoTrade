@@ -293,6 +293,8 @@ def capture_current_scientific_financial_cut(
 
         checkpoint = None
         checkpoint_error: Exception | None = None
+        checkpoint_content_error: FinancialCutConflict | None = None
+        reconciliation_sequence: int | None = None
         if latest_error is None and latest is not None:
             try:
                 checkpoint = require_current_reconciliation_checkpoint(
@@ -304,6 +306,34 @@ def capture_current_scientific_financial_cut(
                 )
             except (TypeError, ValueError) as error:
                 checkpoint_error = error
+            else:
+                try:
+                    checkpoint = _exact_dict(
+                        checkpoint,
+                        name="reconciliation_checkpoint",
+                    )
+                    reconciliation_sequence = checkpoint.get("journal_sequence")
+                    if (
+                        type(reconciliation_sequence) is not int
+                        or reconciliation_sequence <= 0
+                    ):
+                        raise FinancialCutConflict(
+                            "reconciliation checkpoint lacks durable journal sequence"
+                        )
+                    if reconciliation_sequence > frozen_sequence:
+                        raise FinancialCutConflict(
+                            "reconciliation checkpoint crossed the frozen financial cut"
+                        )
+                    population_checkpoint = _event_at_journal_sequence(
+                        store,
+                        journal_sequence=reconciliation_sequence,
+                    )
+                    if population_checkpoint != checkpoint:
+                        raise FinancialCutConflict(
+                            "reconciliation checkpoint does not match the frozen journal population"
+                        )
+                except FinancialCutConflict as error:
+                    checkpoint_content_error = error
         after = _exact_dict(
             JournalStore.whole_store_state_cut(store),
             name="journal_state_after",
@@ -325,23 +355,11 @@ def capture_current_scientific_financial_cut(
         raise FinancialCutConflict(
             "reconciliation checkpoint is not authoritative for the requested scope"
         ) from checkpoint_error
-    checkpoint = _exact_dict(checkpoint, name="reconciliation_checkpoint")
-    reconciliation_sequence = checkpoint.get("journal_sequence")
-    if type(reconciliation_sequence) is not int or reconciliation_sequence <= 0:
+    if checkpoint_content_error is not None:
+        raise checkpoint_content_error
+    if checkpoint is None or reconciliation_sequence is None:
         raise FinancialCutConflict(
-            "reconciliation checkpoint lacks durable journal sequence"
-        )
-    if reconciliation_sequence > frozen_sequence:
-        raise FinancialCutConflict(
-            "reconciliation checkpoint crossed the frozen financial cut"
-        )
-    population_checkpoint = _event_at_journal_sequence(
-        store,
-        journal_sequence=reconciliation_sequence,
-    )
-    if population_checkpoint != checkpoint:
-        raise FinancialCutConflict(
-            "reconciliation checkpoint does not match the frozen journal population"
+            "reconciliation checkpoint authority resolution was incomplete"
         )
 
     reconciliation_digest = payload_digest(checkpoint)

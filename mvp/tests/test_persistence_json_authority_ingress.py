@@ -52,6 +52,12 @@ class _HostileText(str):
     def __str__(self):
         raise AssertionError("hostile text stringification dispatched")
 
+    def strip(self, *args, **kwargs):
+        raise AssertionError("hostile text strip dispatched")
+
+    def upper(self, *args, **kwargs):
+        raise AssertionError("hostile text upper dispatched")
+
 
 class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
     def test_outer_event_subclass_is_rejected_before_virtual_get(self):
@@ -184,6 +190,33 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
             ):
                 store.append_event(candidate)
             self.assertEqual(store.current_journal_sequence(), 0)
+
+    def test_cyclic_payload_fails_closed_before_event_write(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            cycle = []
+            cycle.append(cycle)
+            candidate = _event("evt-cycle")
+            candidate["payload"] = cycle
+            candidate["payload_hash"] = "sha256:" + "0" * 64
+            with self.assertRaisesRegex(ValueError, "circular reference"):
+                store.append_event(candidate)
+            self.assertEqual(store.current_journal_sequence(), 0)
+
+    def test_command_text_subclasses_cannot_dispatch_strip_or_upper(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            result, inserted = store.record_command(
+                command_id=_HostileText(" cmd-text "),
+                actor=_HostileText(" operator "),
+                environment=_HostileText(" paper "),
+                idempotency_key=_HostileText(" key-text "),
+                request={"action": "TEST"},
+                result={"status": "ACCEPTED"},
+                state_version=0,
+            )
+            self.assertTrue(inserted)
+            self.assertEqual(result, {"status": "ACCEPTED"})
 
     def test_exact_tuple_keeps_legacy_json_array_semantics(self):
         self.assertEqual(

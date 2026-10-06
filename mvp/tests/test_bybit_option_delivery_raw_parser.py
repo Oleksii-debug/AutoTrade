@@ -134,9 +134,9 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
             "BYBIT_OPTION_DELIVERY_V5_JSON_V1",
         )
         self.assertEqual(BYBIT_OPTION_DELIVERY_PARSER_VERSION, "1.0.0")
-        self.assertRegex(
+        self.assertEqual(
             BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
-            r"^sha256:[0-9a-f]{64}$",
+            "sha256:97f9249f5846fa733cdcda1370b35a393758447057397902afd572d22afbbd97",
         )
         parsed = parse_option_delivery_page(observation(response()))
         self.assertIsInstance(parsed, BybitOptionDeliveryPage)

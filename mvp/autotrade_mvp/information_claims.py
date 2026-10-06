@@ -343,6 +343,130 @@ class InformationClaim:
         )
 
 
+_SOURCE_DOCUMENT_STATE_FIELDS = frozenset(
+    {
+        "source_id",
+        "source_revision",
+        "source_kind",
+        "title",
+        "passage",
+        "published_at",
+        "available_at",
+        "ingested_at",
+        "rights_basis",
+        "locator",
+    }
+)
+_INFORMATION_CLAIM_STATE_FIELDS = frozenset(
+    {
+        "claim_id",
+        "subject",
+        "predicate",
+        "value",
+        "source_id",
+        "source_revision",
+        "source_kind",
+        "published_at",
+        "available_at",
+        "ingested_at",
+        "passage_hash",
+        "locator",
+        "rights_basis",
+        "syndication_key",
+        "conflict_key",
+        "untrusted_content",
+        "permission_effect",
+    }
+)
+
+
+def _exact_instance_state(
+    value: object,
+    *,
+    expected_type: type,
+    expected_fields: frozenset[str],
+    subject: str,
+) -> dict[str, object]:
+    """Snapshot a canonical dataclass without dispatching through a subclass."""
+
+    if type(value) is not expected_type:
+        raise ValueError(f"{subject} must be exact {expected_type.__name__}")
+    raw_state = vars(value)
+    if type(raw_state) is not dict:
+        raise ValueError(f"{subject} state must be a canonical object")
+    state = dict.copy(raw_state)
+    if any(type(key) is not str for key in state) or set(state) != expected_fields:
+        raise ValueError(f"{subject} state is incomplete or has unexpected fields")
+    return state
+
+
+def _reseal_source_document(document: object) -> SourceDocument:
+    state = _exact_instance_state(
+        document,
+        expected_type=SourceDocument,
+        expected_fields=_SOURCE_DOCUMENT_STATE_FIELDS,
+        subject="document",
+    )
+    for field in (
+        "source_id",
+        "source_revision",
+        "source_kind",
+        "title",
+        "passage",
+        "rights_basis",
+        "locator",
+    ):
+        if type(state[field]) is not str:
+            raise ValueError(f"document {field} must be canonical text")
+    for field in ("published_at", "available_at", "ingested_at"):
+        if type(state[field]) is not datetime:
+            raise ValueError(f"document {field} must be exact datetime")
+    return SourceDocument.create(
+        source_id=state["source_id"],
+        source_revision=state["source_revision"],
+        source_kind=state["source_kind"],
+        title=state["title"],
+        passage=state["passage"],
+        published_at=state["published_at"],
+        available_at=state["available_at"],
+        ingested_at=state["ingested_at"],
+        rights_basis=state["rights_basis"],
+        locator=state["locator"],
+    )
+
+
+def _reseal_information_claim(claim: object) -> InformationClaim:
+    state = _exact_instance_state(
+        claim,
+        expected_type=InformationClaim,
+        expected_fields=_INFORMATION_CLAIM_STATE_FIELDS,
+        subject="claim",
+    )
+    for field in (
+        "claim_id",
+        "subject",
+        "predicate",
+        "value",
+        "source_id",
+        "source_revision",
+        "source_kind",
+        "passage_hash",
+        "locator",
+        "rights_basis",
+        "syndication_key",
+        "conflict_key",
+        "permission_effect",
+    ):
+        if type(state[field]) is not str:
+            raise ValueError(f"claim {field} must be canonical text")
+    for field in ("published_at", "available_at", "ingested_at"):
+        if type(state[field]) is not datetime:
+            raise ValueError(f"claim {field} must be exact datetime")
+    if type(state["untrusted_content"]) is not bool:
+        raise ValueError("claim untrusted_content must be exact bool")
+    return InformationClaim(**state)
+
+
 @dataclass(frozen=True)
 class InformationSnapshot:
     """Causal, content-addressed view of claims visible at one replay cutoff."""
@@ -353,14 +477,14 @@ class InformationSnapshot:
     def __post_init__(self) -> None:
         cutoff = _time(self.cutoff, name="cutoff")
         object.__setattr__(self, "cutoff", cutoff)
-        if not isinstance(self.claims, tuple):
-            raise ValueError("claims must be a tuple")
+        if type(self.claims) is not tuple:
+            raise ValueError("claims must be an exact tuple")
+        claims = tuple(_reseal_information_claim(claim) for claim in self.claims)
+        object.__setattr__(self, "claims", claims)
 
         seen: set[str] = set()
         seen_syndication: set[str] = set()
-        for claim in self.claims:
-            if not isinstance(claim, InformationClaim):
-                raise ValueError("snapshot claims must be InformationClaim values")
+        for claim in claims:
             if claim.available_at > cutoff or claim.ingested_at > cutoff:
                 raise ValueError("snapshot cannot contain future claims")
             if claim.claim_id in seen:
@@ -416,7 +540,7 @@ class ClaimStore:
 
     @property
     def claims(self) -> tuple[InformationClaim, ...]:
-        return tuple(self._claims)
+        return tuple(_reseal_information_claim(item) for item in self._claims)
 
     @staticmethod
     def build_claim(
@@ -426,8 +550,7 @@ class ClaimStore:
         predicate: str,
         value: str,
     ) -> InformationClaim:
-        if not isinstance(document, SourceDocument):
-            raise ValueError("document must be a SourceDocument")
+        document = _reseal_source_document(document)
         normalized_subject = _text(subject, name="subject")
         normalized_predicate = _text(predicate, name="predicate")
         normalized_value = _text(value, name="value")
@@ -468,6 +591,7 @@ class ClaimStore:
         )
 
     def add(self, claim: InformationClaim) -> tuple[InformationClaim, bool]:
+        claim = _reseal_information_claim(claim)
         if claim.permission_effect != "NONE" or claim.untrusted_content is not True:
             raise ValueError("information claims cannot grant authority")
         existing_history = self._history_by_id.get(claim.claim_id)
@@ -476,8 +600,8 @@ class ClaimStore:
                 raise ValueError("claim identity conflict")
             canonical_id = self._syndication.get(claim.syndication_key)
             if canonical_id is not None:
-                return self._by_id[canonical_id], False
-            return existing_history, False
+                return _reseal_information_claim(self._by_id[canonical_id]), False
+            return _reseal_information_claim(existing_history), False
 
         # Provenance history and the canonical deduplicated claim view have
         # different responsibilities. Every distinct source revision is
@@ -507,17 +631,18 @@ class ClaimStore:
                 del self._by_id[duplicate_id]
                 self._by_id[claim.claim_id] = claim
                 self._syndication[claim.syndication_key] = claim.claim_id
-                return claim, False
-            return existing_duplicate, False
+                return _reseal_information_claim(claim), False
+            return _reseal_information_claim(existing_duplicate), False
 
         self._claims.append(claim)
         self._by_id[claim.claim_id] = claim
         self._syndication[claim.syndication_key] = claim.claim_id
-        return claim, True
+        return _reseal_information_claim(claim), True
 
     def conflicts_for(self, claim: InformationClaim) -> tuple[InformationClaim, ...]:
+        claim = _reseal_information_claim(claim)
         return tuple(
-            item
+            _reseal_information_claim(item)
             for item in self._claims
             if item.conflict_key == claim.conflict_key and item.value != claim.value
         )
@@ -525,7 +650,8 @@ class ClaimStore:
     def available_at(self, cutoff: datetime) -> tuple[InformationClaim, ...]:
         time = _time(cutoff, name="cutoff")
         return tuple(
-            sorted(
+            _reseal_information_claim(item)
+            for item in sorted(
                 (
                     item
                     for item in self._claims
@@ -539,6 +665,151 @@ class ClaimStore:
             )
         )
 
+    def effective_at(self, cutoff: datetime) -> tuple[InformationClaim, ...]:
+        """Return causally visible claims after source-revision supersession.
+
+        Provenance history is never deleted. For decision inputs, however, a later
+        causally visible revision of the same source/subject/predicate/locator
+        supersedes the earlier revision. Syndicated duplicates are then collapsed
+        deterministically across the effective source views.
+        """
+
+        time = _time(cutoff, name="cutoff")
+        visible_history = [
+            item
+            for item in self._history_by_id.values()
+            if item.available_at <= time and item.ingested_at <= time
+        ]
+
+        # A source revision is one immutable source view. If the same
+        # source/revision asserts competing values for the same semantic fact,
+        # moving the extraction to another locator must not bypass the
+        # contradiction fence. Locator scopes revision supersession below; it
+        # is not an authority to make one revision self-contradictory.
+        revision_facts: dict[
+            tuple[str, str, str, str],
+            list[InformationClaim],
+        ] = {}
+        for item in visible_history:
+            revision_key = (
+                item.source_id,
+                item.source_revision,
+                item.subject,
+                item.predicate,
+            )
+            revision_facts.setdefault(revision_key, []).append(item)
+        for revision_claims in revision_facts.values():
+            if len({item.value for item in revision_claims}) > 1:
+                raise ValueError(
+                    "one source revision contains contradictory extracted values"
+                )
+
+        chains: dict[
+            tuple[str, str, str, str],
+            list[InformationClaim],
+        ] = {}
+        for item in visible_history:
+            key = (
+                item.source_id,
+                item.subject,
+                item.predicate,
+                item.locator,
+            )
+            chains.setdefault(key, []).append(item)
+
+        effective_per_source: list[InformationClaim] = []
+        for chain in chains.values():
+            # source_revision is opaque provenance text, not an ordering
+            # authority. If the latest causally visible source publications tie
+            # on published_at but disagree on value, availability/ingest order
+            # cannot manufacture a winner between revisions.
+            latest_published_at = max(item.published_at for item in chain)
+            latest_publications = [
+                item
+                for item in chain
+                if item.published_at == latest_published_at
+            ]
+            if len({item.value for item in latest_publications}) > 1:
+                raise ValueError(
+                    "source revisions with equal publication time have ambiguous ordering"
+                )
+            latest = max(
+                latest_publications,
+                key=lambda item: (
+                    # All candidates here assert the same semantic value. These
+                    # fields select deterministic provenance only; they do not
+                    # decide between competing source facts.
+                    item.available_at,
+                    item.ingested_at,
+                    item.claim_id,
+                ),
+            )
+            effective_per_source.append(latest)
+
+        representatives: dict[str, InformationClaim] = {}
+        for item in effective_per_source:
+            existing = representatives.get(item.syndication_key)
+            if existing is None:
+                representatives[item.syndication_key] = item
+                continue
+            existing_key = (
+                max(existing.available_at, existing.ingested_at),
+                existing.published_at,
+                existing.claim_id,
+            )
+            candidate_key = (
+                max(item.available_at, item.ingested_at),
+                item.published_at,
+                item.claim_id,
+            )
+            if candidate_key < existing_key:
+                representatives[item.syndication_key] = item
+
+        return tuple(
+            _reseal_information_claim(item)
+            for item in sorted(
+                representatives.values(),
+                key=lambda item: (
+                    max(item.available_at, item.ingested_at),
+                    item.published_at,
+                    item.claim_id,
+                ),
+            )
+        )
+
+    def contradiction_groups_at(
+        self,
+        cutoff: datetime,
+    ) -> tuple[tuple[InformationClaim, ...], ...]:
+        """Return current cross-source contradictions without resolving truth.
+
+        A contradiction group contains effective claims for one subject/predicate
+        with at least two distinct asserted values. The store reports disagreement;
+        it does not choose which source is correct.
+        """
+
+        effective = self.effective_at(cutoff)
+        groups: dict[tuple[str, str], list[InformationClaim]] = {}
+        for item in effective:
+            groups.setdefault((item.subject, item.predicate), []).append(item)
+        contradictions = [
+            tuple(items)
+            for _, items in sorted(groups.items())
+            if len({item.value for item in items}) > 1
+        ]
+        return tuple(contradictions)
+
+    def decision_snapshot_at(self, cutoff: datetime) -> InformationSnapshot:
+        """Build a causal snapshot suitable for decision/research inputs.
+
+        Historical snapshot_at() intentionally preserves every visible canonical
+        claim for provenance/replay. This method applies revision supersession
+        first, while still preserving unresolved cross-source contradictions.
+        """
+
+        time = _time(cutoff, name="cutoff")
+        return InformationSnapshot(cutoff=time, claims=self.effective_at(time))
+
     def snapshot_at(self, cutoff: datetime) -> InformationSnapshot:
         time = _time(cutoff, name="cutoff")
         return InformationSnapshot(cutoff=time, claims=self.available_at(time))
@@ -546,14 +817,19 @@ class ClaimStore:
     def revisions(self, source_id: str) -> tuple[InformationClaim, ...]:
         identifier = _text(source_id, name="source_id")
         return tuple(
-            sorted(
+            _reseal_information_claim(item)
+            for item in sorted(
                 (
                     item
                     for item in self._history_by_id.values()
                     if item.source_id == identifier
                 ),
                 key=lambda item: (
-                    max(item.available_at, item.ingested_at),
+                    # This is provenance/source history, not causal visibility.
+                    # A late ingest of an older source revision must keep source
+                    # chronology rather than reorder history by arrival time.
+                    item.published_at,
+                    item.available_at,
                     item.source_revision,
                     item.claim_id,
                 ),
@@ -578,8 +854,7 @@ def build_information_event(
 ) -> dict[str, object]:
     """Build a canonical InformationEvent v1.0.0 without granting authority."""
 
-    if not isinstance(document, SourceDocument):
-        raise ValueError("document must be a SourceDocument")
+    document = _reseal_source_document(document)
     canonical_information_id = _canonical_uuid(information_id, name="information_id")
     canonical_revision = _text(revision, name="revision")
     if re.fullmatch(r"0|[1-9][0-9]*", canonical_revision) is None:
@@ -592,7 +867,7 @@ def build_information_event(
         name="extraction_version",
     )
 
-    claim_values = tuple(claims)
+    claim_values = tuple(_reseal_information_claim(claim) for claim in claims)
     if len({claim.claim_id for claim in claim_values if isinstance(claim, InformationClaim)}) != len(claim_values):
         raise ValueError("claims must have unique identities")
 

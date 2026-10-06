@@ -2,6 +2,9 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
+
+import mvp.autotrade_mvp.reconciliation_journal as reconciliation_journal_module
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
@@ -27,24 +30,26 @@ from mvp.autotrade_mvp.reconciliation_journal import (
 )
 
 
-def snapshot(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER"):
+def snapshot(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER", provider_environment=None):
     return SnapshotConsistencyEvidence(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         mode="ATOMIC",
         query_started_at="2026-09-24T17:00:00Z",
         query_completed_at="2026-09-24T19:00:00Z",
     )
 
 
-def fill(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER"):
+def fill(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER", provider_environment=None):
     return ProviderFillEvidence.create(
                side="BUY",
                evidence_refs=("test:normalized-fill",),
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         provider_execution_id="e1",
         client_order_id="c1",
         instrument="ABC",
@@ -92,12 +97,14 @@ def reconciliation(**overrides):
     provider_id = values["provider_id"]
     account_id = values["account_id"]
     environment = values["environment"]
+    provider_environment = values.get("provider_environment")
     if "provider_fills" not in overrides:
         values["provider_fills"] = [
             fill(
                 provider_id=provider_id,
                 account_id=account_id,
                 environment=environment,
+                provider_environment=provider_environment,
             )
         ]
     if "snapshot_consistency" not in overrides:
@@ -105,6 +112,7 @@ def reconciliation(**overrides):
             provider_id=provider_id,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         )
     if "provider_activity_provider_id" not in overrides:
         values["provider_activity_provider_id"] = provider_id
@@ -114,6 +122,213 @@ def reconciliation(**overrides):
 
 
 class ReconciliationJournalTests(unittest.TestCase):
+    def test_checkpoint_writer_rejects_journal_store_subclass_before_callbacks(self):
+        class ExplosiveJournalStore(JournalStore):
+            calls = 0
+
+            def __getattribute__(self, name):
+                if name in {
+                    "load_events",
+                    "next_aggregate_version",
+                    "append_event",
+                    "get_event",
+                }:
+                    type(self).calls += 1
+                    raise AssertionError("reconciliation writer dispatched through subclass")
+                return super().__getattribute__(name)
+
+        hostile_store = object.__new__(ExplosiveJournalStore)
+        ExplosiveJournalStore.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact JournalStore"):
+            record_reconciliation_checkpoint(
+                hostile_store,
+                reconciliation_id="subclass-store",
+                result=reconciliation(),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+        self.assertEqual(ExplosiveJournalStore.calls, 0)
+
+    def test_checkpoint_writer_rechecks_late_instance_shadow_before_dispatch(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            calls = []
+
+            def explode(*_args, **_kwargs):
+                calls.append("load_events")
+                raise AssertionError("reconciliation writer invoked instance shadow")
+
+            original_payload = reconciliation_journal_module.reconciliation_payload
+
+            def inject_shadow(result, *, observed_at):
+                payload = original_payload(result, observed_at=observed_at)
+                store.load_events = explode
+                return payload
+
+            try:
+                with patch.object(
+                    reconciliation_journal_module,
+                    "reconciliation_payload",
+                    new=inject_shadow,
+                ):
+                    with self.assertRaisesRegex(TypeError, "shadowed"):
+                        record_reconciliation_checkpoint(
+                            store,
+                            reconciliation_id="late-shadow",
+                            result=reconciliation(),
+                            observed_at="2026-09-24T19:00:00Z",
+                            host_id="test-host",
+                            owner_epoch="epoch-1",
+                        )
+            finally:
+                if "load_events" in vars(store):
+                    del store.load_events
+
+            self.assertEqual(calls, [])
+            self.assertEqual(
+                JournalStore.load_events_by_aggregate_type(
+                    store,
+                    "account_reconciliation",
+                ),
+                [],
+            )
+
+    def test_scope_reader_rechecks_late_instance_shadow_before_dispatch(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            calls = []
+
+            def explode(*_args, **_kwargs):
+                calls.append("load_events_by_aggregate_type")
+                raise AssertionError("scope reader invoked instance shadow")
+
+            original_scope = reconciliation_journal_module._scope
+
+            def inject_shadow(**kwargs):
+                scope = original_scope(**kwargs)
+                store.load_events_by_aggregate_type = explode
+                return scope
+
+            try:
+                with patch.object(
+                    reconciliation_journal_module,
+                    "_scope",
+                    new=inject_shadow,
+                ):
+                    with self.assertRaisesRegex(TypeError, "shadowed"):
+                        load_latest_reconciliation_checkpoint_for_scope(
+                            store,
+                            provider_id="TEST_PROVIDER",
+                            account_id="test-account",
+                            environment="PAPER",
+                        )
+            finally:
+                if "load_events_by_aggregate_type" in vars(store):
+                    del store.load_events_by_aggregate_type
+
+            self.assertEqual(calls, [])
+
+    def test_checkpoint_writer_rejects_rebound_journal_class_operation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            calls = []
+
+            def explode(*_args, **_kwargs):
+                calls.append("load_events")
+                raise AssertionError("reconciliation invoked rebound class operation")
+
+            original = JournalStore.load_events
+            JournalStore.load_events = explode
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "reconciliation journal operation changed: load_events",
+                ):
+                    record_reconciliation_checkpoint(
+                        store,
+                        reconciliation_id="class-rebind",
+                        result=reconciliation(),
+                        observed_at="2026-09-24T19:00:00Z",
+                        host_id="test-host",
+                        owner_epoch="epoch-1",
+                    )
+            finally:
+                JournalStore.load_events = original
+
+            self.assertEqual(calls, [])
+            self.assertEqual(
+                JournalStore.load_events_by_aggregate_type(
+                    store,
+                    "account_reconciliation",
+                ),
+                [],
+            )
+
+    def test_checkpoint_writer_rejects_rebound_authority_guard(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            original = (
+                reconciliation_journal_module.require_exact_journal_store_authority
+            )
+            reconciliation_journal_module.require_exact_journal_store_authority = (
+                lambda *_args, **_kwargs: store.store_identity
+            )
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "reconciliation journal authority changed",
+                ):
+                    record_reconciliation_checkpoint(
+                        store,
+                        reconciliation_id="guard-rebind",
+                        result=reconciliation(),
+                        observed_at="2026-09-24T19:00:00Z",
+                        host_id="test-host",
+                        owner_epoch="epoch-1",
+                    )
+            finally:
+                reconciliation_journal_module.require_exact_journal_store_authority = (
+                    original
+                )
+
+            self.assertEqual(
+                JournalStore.load_events_by_aggregate_type(
+                    store,
+                    "account_reconciliation",
+                ),
+                [],
+            )
+
+    def test_checkpoint_writer_rejects_polymorphic_text_before_callback(self):
+        class ExplosiveText(str):
+            calls = 0
+
+            def strip(self):
+                type(self).calls += 1
+                raise AssertionError("reconciliation ingress invoked polymorphic text")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            ExplosiveText.calls = 0
+            with self.assertRaisesRegex(ValueError, "reconciliation_id is required"):
+                record_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id=ExplosiveText("hostile-reconciliation"),
+                    result=reconciliation(),
+                    observed_at="2026-09-24T19:00:00Z",
+                    host_id="test-host",
+                    owner_epoch="epoch-1",
+                )
+            self.assertEqual(ExplosiveText.calls, 0)
+            self.assertEqual(
+                JournalStore.load_events_by_aggregate_type(
+                    store,
+                    "account_reconciliation",
+                ),
+                [],
+            )
+
     def test_scoped_checkpoint_identity_cannot_collide_on_separator_characters(self):
         left = _reconciliation_aggregate_id(
             reconciliation_id="rid",
@@ -128,6 +343,78 @@ class ReconciliationJournalTests(unittest.TestCase):
             environment="PAPER",
         )
         self.assertNotEqual(left, right)
+
+    def test_bybit_checkpoint_identity_separates_testnet_and_demo(self):
+        testnet = reconciliation(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        demo = reconciliation(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        self.assertNotEqual(
+            _reconciliation_aggregate_id(
+                reconciliation_id="same",
+                provider_id=testnet.provider_id,
+                account_id=testnet.account_id,
+                environment=testnet.environment,
+                provider_environment=testnet.provider_environment,
+            ),
+            _reconciliation_aggregate_id(
+                reconciliation_id="same",
+                provider_id=demo.provider_id,
+                account_id=demo.account_id,
+                environment=demo.environment,
+                provider_environment=demo.provider_environment,
+            ),
+        )
+
+    def test_bybit_checkpoint_payload_persists_provider_environment(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            result = reconciliation(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-testnet",
+                result=result,
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            self.assertEqual(
+                checkpoint["payload"]["provider_environment"],
+                "TESTNET",
+            )
+            self.assertIsNotNone(
+                load_latest_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id="bybit-testnet",
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                )
+            )
+            self.assertIsNone(
+                load_latest_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id="bybit-testnet",
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                )
+            )
 
     def test_unexpected_fill_checkpoint_binds_exact_normalized_provider_evidence(self):
         with TemporaryDirectory() as directory:
@@ -236,6 +523,281 @@ class ReconciliationJournalTests(unittest.TestCase):
                 store.load_events_by_aggregate_type("account_reconciliation"),
                 [],
             )
+
+    def test_unexpected_fill_checkpoint_rejects_cross_provider_environment_binding(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            wrong_domain_fill = ProviderFillEvidence.create(
+                evidence_refs=("test:normalized-fill",),
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="DEMO",
+                provider_execution_id="external-exec-domain-1",
+                client_order_id=None,
+                instrument="BTCUSDT",
+                side="BUY",
+                quantity="1",
+                price="100",
+                fee_currency="USDT",
+                trade_time="2026-09-24T18:00:00Z",
+            )
+            result = reconciliation(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                local_execution_ids=[],
+                provider_fills=[],
+            )
+            forged = type(result)(
+                **{
+                    **result.__dict__,
+                    "unexpected_execution_ids": ("external-exec-domain-1",),
+                    "unexpected_provider_fills": (wrong_domain_fill,),
+                }
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "scope must match reconciliation result",
+            ):
+                record_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id="cross-domain-unexpected-fill",
+                    result=forged,
+                    observed_at="2026-09-24T19:00:00Z",
+                    host_id="test-host",
+                    owner_epoch="epoch-1",
+                )
+            self.assertEqual(
+                store.load_events_by_aggregate_type("account_reconciliation"),
+                [],
+            )
+
+    def test_checkpoint_rejects_cross_provider_environment_resource_availability(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            result = reconciliation(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            wrong_domain_availability = ResourceAvailabilityEvidence(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="DEMO",
+                snapshot_id="demo-resource-cut",
+                query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+                valid_until="2026-09-24T19:05:00Z",
+                available_resources={"CASH:USDT": "100"},
+                evidence_refs=("provider:demo-resource-cut",),
+            )
+            forged = type(result)(
+                **{
+                    **result.__dict__,
+                    "resource_availability": wrong_domain_availability,
+                }
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "resource availability scope must match reconciliation result",
+            ):
+                record_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id="cross-domain-resource-availability",
+                    result=forged,
+                    observed_at="2026-09-24T19:00:00Z",
+                    host_id="test-host",
+                    owner_epoch="epoch-1",
+                )
+            self.assertEqual(
+                store.load_events_by_aggregate_type("account_reconciliation"),
+                [],
+            )
+
+    def test_checkpoint_round_trip_distinguishes_unrequested_settlement(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="settlement-not-requested",
+                result=reconciliation(),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            self.assertFalse(
+                checkpoint["payload"]["settlement_reconciliation_performed"]
+            )
+            self.assertTrue(checkpoint["payload"]["settlement_activity_complete"])
+            self.assertEqual(checkpoint["payload"]["settlement_differences"], {})
+
+            reopened = JournalStore(path)
+            recovered = load_latest_reconciliation_checkpoint(
+                reopened,
+                reconciliation_id="settlement-not-requested",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            )
+            self.assertIsNotNone(recovered)
+            self.assertFalse(
+                recovered["payload"]["settlement_reconciliation_performed"]
+            )
+            self.assertTrue(recovered["payload"]["settlement_activity_complete"])
+            self.assertEqual(recovered["payload"]["settlement_differences"], {})
+
+    def test_checkpoint_round_trip_retains_clean_settlement_authority(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            result = reconciliation(
+                local_settled_cash={"USD": "900"},
+                provider_settled_cash={"USD": "900"},
+                local_unsettled_receivable={"USD": "125.50"},
+                provider_unsettled_receivable={"USD": "125.50"},
+                local_unsettled_payable={"USD": "25"},
+                provider_unsettled_payable={"USD": "25"},
+                settlement_activity_complete=True,
+            )
+
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="settlement-clean-round-trip",
+                result=result,
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            self.assertTrue(
+                checkpoint["payload"]["settlement_reconciliation_performed"]
+            )
+            self.assertTrue(checkpoint["payload"]["settlement_activity_complete"])
+            self.assertEqual(checkpoint["payload"]["settlement_differences"], {})
+
+            reopened = JournalStore(path)
+            recovered = load_latest_reconciliation_checkpoint(
+                reopened,
+                reconciliation_id="settlement-clean-round-trip",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            )
+            self.assertIsNotNone(recovered)
+            self.assertTrue(
+                recovered["payload"]["settlement_reconciliation_performed"]
+            )
+            self.assertTrue(recovered["payload"]["settlement_activity_complete"])
+            self.assertEqual(recovered["payload"]["settlement_differences"], {})
+
+    def test_checkpoint_round_trip_retains_incomplete_settlement_activity_block(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            result = reconciliation(
+                local_settled_cash={"USD": "900"},
+                provider_settled_cash={"USD": "900"},
+                local_unsettled_receivable={"USD": "125.50"},
+                provider_unsettled_receivable={"USD": "125.50"},
+                local_unsettled_payable={"USD": "25"},
+                provider_unsettled_payable={"USD": "25"},
+                settlement_activity_complete=False,
+            )
+            self.assertFalse(result.complete)
+            self.assertFalse(result.settlement_activity_complete)
+            self.assertEqual(result.settlement_differences, {})
+            self.assertIn("ACCOUNT", result.blocking_resources)
+
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="settlement-incomplete-round-trip",
+                result=result,
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            self.assertFalse(checkpoint["payload"]["complete"])
+            self.assertTrue(
+                checkpoint["payload"]["settlement_reconciliation_performed"]
+            )
+            self.assertFalse(checkpoint["payload"]["settlement_activity_complete"])
+            self.assertEqual(checkpoint["payload"]["settlement_differences"], {})
+            self.assertIn("ACCOUNT", checkpoint["payload"]["blocking_resources"])
+
+            reopened = JournalStore(path)
+            recovered = load_latest_reconciliation_checkpoint(
+                reopened,
+                reconciliation_id="settlement-incomplete-round-trip",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            )
+            self.assertIsNotNone(recovered)
+            self.assertFalse(recovered["payload"]["complete"])
+            self.assertTrue(
+                recovered["payload"]["settlement_reconciliation_performed"]
+            )
+            self.assertFalse(recovered["payload"]["settlement_activity_complete"])
+            self.assertEqual(recovered["payload"]["settlement_differences"], {})
+            self.assertIn("ACCOUNT", recovered["payload"]["blocking_resources"])
+
+    def test_checkpoint_round_trip_retains_settlement_mismatch_and_block(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            result = reconciliation(
+                local_settled_cash={"USD": "900"},
+                provider_settled_cash={"USD": "899"},
+                local_unsettled_receivable={"USD": "125.50"},
+                provider_unsettled_receivable={"USD": "125.50"},
+                local_unsettled_payable={"USD": "25"},
+                provider_unsettled_payable={"USD": "25"},
+                settlement_activity_complete=True,
+            )
+            self.assertFalse(result.complete)
+            self.assertEqual(result.settlement_differences["SETTLED:USD"], Decimal("-1"))
+            self.assertIn("CASH:USD", result.blocking_resources)
+
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="settlement-mismatch-round-trip",
+                result=result,
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            self.assertTrue(
+                checkpoint["payload"]["settlement_reconciliation_performed"]
+            )
+            self.assertEqual(
+                checkpoint["payload"]["settlement_differences"],
+                {"SETTLED:USD": "-1"},
+            )
+            self.assertIn("CASH:USD", checkpoint["payload"]["blocking_resources"])
+
+            reopened = JournalStore(path)
+            recovered = load_latest_reconciliation_checkpoint(
+                reopened,
+                reconciliation_id="settlement-mismatch-round-trip",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            )
+            self.assertIsNotNone(recovered)
+            self.assertFalse(recovered["payload"]["complete"])
+            self.assertTrue(recovered["payload"]["settlement_activity_complete"])
+            self.assertTrue(
+                recovered["payload"]["settlement_reconciliation_performed"]
+            )
+            self.assertEqual(
+                recovered["payload"]["settlement_differences"],
+                {"SETTLED:USD": "-1"},
+            )
+            self.assertIn("CASH:USD", recovered["payload"]["blocking_resources"])
 
     def test_checkpoint_round_trip_is_exact_and_idempotent(self):
         with TemporaryDirectory() as directory:
@@ -433,6 +995,151 @@ class ReconciliationJournalTests(unittest.TestCase):
                 max_age_seconds="60",
             )
             self.assertEqual(evidence["availability"], {"CASH:USD": "850"})
+
+    def test_bybit_option_lifecycle_freshness_is_provider_environment_scoped(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-testnet-before-lifecycle",
+                result=reconciliation(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    resource_availability=availability(
+                        provider_id="BYBIT",
+                        account_id="bybit-account",
+                        environment="PAPER",
+                        provider_environment="TESTNET",
+                    ),
+                ),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            demo_payload = {
+                "provider_id": "BYBIT",
+                "account_id": "bybit-account",
+                "environment": "PAPER",
+                "provider_environment": "DEMO",
+                "external_event_id": "demo-exercise",
+                "event_kind": "EXERCISE",
+            }
+            store.append_event(
+                {
+                    "event_id": "bybit-demo-option-lifecycle",
+                    "event_type": "OptionLifecycleApplied",
+                    "aggregate_type": "option_lifecycle",
+                    "aggregate_id": "bybit-demo-option-lifecycle-scope",
+                    "aggregate_version": "1",
+                    "payload": demo_payload,
+                    "payload_hash": payload_digest(demo_payload),
+                    "committed_at": "2026-09-24T19:00:10Z",
+                }
+            )
+            evidence = load_account_resource_availability_evidence(
+                store,
+                checkpoint_event_id=checkpoint["event_id"],
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                resources=("CASH:USD",),
+                now="2026-09-24T19:00:30Z",
+                max_age_seconds="60",
+            )
+            self.assertEqual(evidence["availability"], {"CASH:USD": "850"})
+
+            testnet_payload = {
+                **demo_payload,
+                "provider_environment": "TESTNET",
+                "external_event_id": "testnet-exercise",
+            }
+            store.append_event(
+                {
+                    "event_id": "bybit-testnet-option-lifecycle",
+                    "event_type": "OptionLifecycleApplied",
+                    "aggregate_type": "option_lifecycle",
+                    "aggregate_id": "bybit-testnet-option-lifecycle-scope",
+                    "aggregate_version": "1",
+                    "payload": testnet_payload,
+                    "payload_hash": payload_digest(testnet_payload),
+                    "committed_at": "2026-09-24T19:00:11Z",
+                }
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "predates option lifecycle financial truth",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                )
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-testnet-before-legacy-lifecycle",
+                result=reconciliation(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    resource_availability=availability(
+                        provider_id="BYBIT",
+                        account_id="bybit-account",
+                        environment="PAPER",
+                        provider_environment="TESTNET",
+                    ),
+                ),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            legacy_payload = {
+                "provider_id": "BYBIT",
+                "account_id": "bybit-account",
+                "environment": "PAPER",
+                "external_event_id": "legacy-exercise",
+                "event_kind": "EXERCISE",
+            }
+            store.append_event(
+                {
+                    "event_id": "bybit-legacy-option-lifecycle",
+                    "event_type": "OptionLifecycleApplied",
+                    "aggregate_type": "option_lifecycle",
+                    "aggregate_id": "bybit-legacy-option-lifecycle-scope",
+                    "aggregate_version": "1",
+                    "payload": legacy_payload,
+                    "payload_hash": payload_digest(legacy_payload),
+                    "committed_at": "2026-09-24T19:00:10Z",
+                }
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "BYBIT option lifecycle financial truth lacks provider_environment",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                )
 
     def test_option_lifecycle_fact_invalidates_cash_availability(self):
         with TemporaryDirectory() as directory:

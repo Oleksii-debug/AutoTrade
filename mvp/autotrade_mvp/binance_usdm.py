@@ -8,9 +8,9 @@ reconciliation contracts. Order acknowledgement is never execution evidence.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from hashlib import sha256
 import json
 import re
@@ -19,12 +19,19 @@ from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .capabilities import CapabilitySnapshot
+from .exact_decimal import ExactDecimalError, parse_bounded_exact_decimal
 from .provider_core import (
     ProviderCoreError,
     ProviderResponseObservation,
     Surface,
+    provider_response_observation_require_scope,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
+
+
+_MAX_UNIX_MILLIS = 253_402_300_799_999
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_PREPARED_REQUEST_TOKEN = object()
 
 
 BINANCE_USDM_ENDPOINTS: Mapping[str, str] = MappingProxyType(
@@ -51,21 +58,86 @@ class BinanceUsdmAdapterError(ProviderCoreError):
     """Raised when recorded Binance USD-M data violates the safe contract."""
 
 
+def _exact_json_object(value: object, *, name: str) -> dict[str, object]:
+    """Admit one raw decoded JSON object without caller mapping/key callbacks."""
+
+    if type(value) is not dict:
+        raise BinanceUsdmAdapterError(f"{name} must be an exact decoded object")
+    for key in value:
+        if type(key) is not str:
+            raise BinanceUsdmAdapterError(
+                f"{name} keys must be exact decoded strings"
+            )
+    return value
+
+
+def _exact_decoded_json_tree(value: object, *, name: str) -> object:
+    """Reject executable/aliased Python objects before provider evidence hashing."""
+
+    stack = [value]
+    seen_containers: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if current is None or type(current) in (str, bool, int, float):
+            continue
+        if type(current) is dict:
+            identity = id(current)
+            if identity in seen_containers:
+                raise BinanceUsdmAdapterError(
+                    f"{name} must be a decoded JSON tree without aliases or cycles"
+                )
+            seen_containers.add(identity)
+            for key, item in current.items():
+                if type(key) is not str:
+                    raise BinanceUsdmAdapterError(
+                        f"{name} keys must be exact decoded strings"
+                    )
+                stack.append(item)
+            continue
+        if type(current) is list:
+            identity = id(current)
+            if identity in seen_containers:
+                raise BinanceUsdmAdapterError(
+                    f"{name} must be a decoded JSON tree without aliases or cycles"
+                )
+            seen_containers.add(identity)
+            stack.extend(current)
+            continue
+        raise BinanceUsdmAdapterError(
+            f"{name} must contain only exact decoded JSON values"
+        )
+    return value
+
+
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
         raise BinanceUsdmAdapterError(f"{name} is required")
-    return value.strip()
+    stripped = value.strip()
+    if not stripped:
+        raise BinanceUsdmAdapterError(f"{name} is required")
+    return stripped
+
+
+def _freeze_request_body(value: object, *, name: str) -> Mapping[str, str]:
+    """Freeze an internally-shaped provider request without mapping callbacks."""
+
+    if type(value) is not dict:
+        raise BinanceUsdmAdapterError(f"{name} must be an exact request mapping")
+    frozen: dict[str, str] = {}
+    for key, item in value.items():
+        if type(key) is not str or type(item) is not str:
+            raise BinanceUsdmAdapterError(
+                f"{name} keys and values must be exact strings"
+            )
+        frozen[key] = item
+    return MappingProxyType(frozen)
 
 
 def _decimal(value: object, *, name: str, positive: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise BinanceUsdmAdapterError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise BinanceUsdmAdapterError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise BinanceUsdmAdapterError(f"{name} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise BinanceUsdmAdapterError(f"{name} must be a bounded exact decimal") from error
     if positive and result <= 0:
         raise BinanceUsdmAdapterError(f"{name} must be positive")
     return result
@@ -78,24 +150,41 @@ def _decimal_text(value: Decimal) -> str:
 
 
 def _utc(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
-        raise BinanceUsdmAdapterError(f"{name} must be timezone-aware")
+    # Keep caller-controlled datetime/tzinfo callbacks outside provider
+    # admission.  Exact stdlib datetime + datetime.timezone admits UTC and
+    # fixed offsets without invoking polymorphic temporal authority.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise BinanceUsdmAdapterError(
+            f"{name} must be an exact timezone-aware datetime"
+        )
     return value.astimezone(timezone.utc)
 
 
 def _millis(value: object, *, name: str) -> str:
-    if isinstance(value, bool):
-        raise BinanceUsdmAdapterError(f"{name} must be an integer millisecond timestamp")
-    if isinstance(value, int):
+    if type(value) is int:
         raw = value
-    elif isinstance(value, str) and value.isdigit():
+    elif type(value) is str and value.isdigit():
+        # Reject oversized provider text before Python integer materialization.
+        # The financial ingress contract owns a finite UTC time domain.
+        if len(value) > len(str(_MAX_UNIX_MILLIS)):
+            raise BinanceUsdmAdapterError(
+                f"{name} exceeds the supported UTC millisecond range"
+            )
         raw = int(value)
+        if str(raw) != value:
+            raise BinanceUsdmAdapterError(
+                f"{name} must be a canonical non-negative integer millisecond timestamp"
+            )
     else:
-        raise BinanceUsdmAdapterError(f"{name} must be an integer millisecond timestamp")
-    if raw < 0:
-        raise BinanceUsdmAdapterError(f"{name} must be non-negative")
+        raise BinanceUsdmAdapterError(
+            f"{name} must be an integer millisecond timestamp"
+        )
+    if raw < 0 or raw > _MAX_UNIX_MILLIS:
+        raise BinanceUsdmAdapterError(
+            f"{name} exceeds the supported UTC millisecond range"
+        )
     seconds, remainder = divmod(raw, 1000)
-    instant = datetime.fromtimestamp(seconds, tz=timezone.utc) + timedelta(milliseconds=remainder)
+    instant = _UNIX_EPOCH + timedelta(seconds=seconds, milliseconds=remainder)
     return instant.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
@@ -203,9 +292,18 @@ class BinanceUsdmPreparedRequest:
     body: Mapping[str, str]
     capability_snapshot_id: str
     documentation_refs: tuple[str, ...]
+    _preparation_token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
+    def __post_init__(self, _preparation_token: object | None) -> None:
+        if _preparation_token is not _PREPARED_REQUEST_TOKEN:
+            raise BinanceUsdmAdapterError(
+                "prepared request must come from canonical order preparation"
+            )
+        object.__setattr__(
+            self,
+            "body",
+            _freeze_request_body(self.body, name="prepared request body"),
+        )
 
 
 def _require_position_mode(
@@ -242,45 +340,56 @@ def prepare_order_request(
 ) -> BinanceUsdmPreparedRequest:
     """Prepare but never sign or send a USD-M order."""
 
-    if not isinstance(intent, BinanceUsdmOrderIntent):
-        raise TypeError("intent must be BinanceUsdmOrderIntent")
-    if not isinstance(capability, CapabilitySnapshot):
-        raise TypeError("capability must be CapabilitySnapshot")
+    if type(intent) is not BinanceUsdmOrderIntent:
+        raise TypeError("intent must be exact BinanceUsdmOrderIntent")
+    if type(capability) is not CapabilitySnapshot:
+        raise TypeError("capability must be exact CapabilitySnapshot")
+    canonical_intent = BinanceUsdmOrderIntent.create(
+        instrument_version=intent.instrument_version,
+        symbol=intent.symbol,
+        side=intent.side,
+        order_type=intent.order_type,
+        quantity=intent.quantity,
+        price=intent.price,
+        time_in_force=intent.time_in_force,
+        position_side=intent.position_side,
+        reduce_only=intent.reduce_only,
+    )
 
     point = _utc(at, name="at")
     client_id = validate_client_order_id(client_order_id)
     if capability.provider_id.upper() != "BINANCE":
         raise BinanceUsdmAdapterError("capability belongs to another provider")
-    if capability.instrument_version != intent.instrument_version:
+    if capability.instrument_version != canonical_intent.instrument_version:
         raise BinanceUsdmAdapterError(
             "capability instrument version does not match intent"
         )
     if not capability.admits(
         at=point,
-        order_type=intent.order_type,
-        time_in_force=intent.time_in_force or "NONE",
+        order_type=canonical_intent.order_type,
+        time_in_force=canonical_intent.time_in_force or "NONE",
         permission_scope="ORDER_WRITE",
     ):
         raise BinanceUsdmAdapterError(
             "exact capability evidence does not admit this order"
         )
 
-    _require_position_mode(capability=capability, intent=intent)
+    _require_position_mode(capability=capability, intent=canonical_intent)
 
     body: dict[str, str] = {
-        "symbol": intent.symbol,
-        "side": intent.side,
-        "type": intent.order_type,
-        "quantity": _decimal_text(intent.quantity),
+        "symbol": canonical_intent.symbol,
+        "side": canonical_intent.side,
+        "type": canonical_intent.order_type,
+        "quantity": _decimal_text(canonical_intent.quantity),
         "newClientOrderId": client_id,
         "newOrderRespType": "ACK",
-        "positionSide": intent.position_side,
+        "positionSide": canonical_intent.position_side,
     }
-    if intent.price is not None:
-        body["price"] = _decimal_text(intent.price)
-    if intent.time_in_force is not None:
-        body["timeInForce"] = intent.time_in_force
-    if intent.reduce_only:
+    if canonical_intent.price is not None:
+        body["price"] = _decimal_text(canonical_intent.price)
+    if canonical_intent.time_in_force is not None:
+        body["timeInForce"] = canonical_intent.time_in_force
+    if canonical_intent.reduce_only:
         body["reduceOnly"] = "true"
 
     # timestamp, recvWindow, API key and signature belong to the separately
@@ -290,6 +399,7 @@ def prepare_order_request(
         body=body,
         capability_snapshot_id=capability.snapshot_id,
         documentation_refs=BINANCE_USDM_DOCS,
+        _preparation_token=_PREPARED_REQUEST_TOKEN,
     )
 
 
@@ -333,8 +443,8 @@ def parse_order_ack(
 
     aid = _uuid(attempt_id, name="attempt_id")
     cid = validate_client_order_id(client_order_id)
-    if not isinstance(response, Mapping):
-        raise BinanceUsdmAdapterError("response must be an object")
+    response = _exact_json_object(response, name="order ACK response")
+    _exact_decoded_json_tree(response, name="order ACK response")
 
     echoed = validate_client_order_id(response.get("clientOrderId"))
     if echoed != cid:
@@ -344,7 +454,7 @@ def parse_order_ack(
 
     symbol = _provider_symbol(response.get("symbol"), name="response.symbol")
     order_id = response.get("orderId")
-    if isinstance(order_id, bool) or not isinstance(order_id, int) or order_id < 0:
+    if type(order_id) is not int or order_id < 0:
         raise BinanceUsdmAdapterError(
             "response.orderId must be a non-negative integer"
         )
@@ -369,20 +479,21 @@ def parse_account_trades(
 ) -> tuple[ProviderFillEvidence, ...]:
     """Map one authenticated exact-byte USD-M user-trade read to fills."""
 
-    if not isinstance(observation, ProviderResponseObservation):
-        raise TypeError("observation must be ProviderResponseObservation")
-    observation.require_scope(
+    if type(observation) is not ProviderResponseObservation:
+        raise TypeError("observation must be exact ProviderResponseObservation")
+    projection = provider_response_observation_require_scope(
+        observation,
         provider_id="BINANCE",
         surface=Surface.AUTHENTICATED_READ,
         endpoint=BINANCE_USDM_ENDPOINTS["EXECUTIONS"],
     )
-    rows = observation.payload
-    account_id = observation.account_id
-    environment = observation.environment
-    if not isinstance(rows, (list, tuple)):
-        raise BinanceUsdmAdapterError("trade rows must be an array")
-    if not isinstance(instrument_versions, Mapping):
-        raise BinanceUsdmAdapterError("instrument_versions must be a mapping")
+    rows = projection["payload"]
+    account_id = projection["account_id"]
+    environment = projection["environment"]
+    if type(rows) is not tuple:
+        raise BinanceUsdmAdapterError("trade rows must be an exact decoded array")
+    if type(instrument_versions) is not dict:
+        raise BinanceUsdmAdapterError("instrument_versions must be an exact dict")
     normalized_instruments: dict[str, str] = {}
     for raw_symbol, raw_instrument_version in instrument_versions.items():
         provider_symbol = _provider_symbol(
@@ -400,18 +511,14 @@ def parse_account_trades(
         normalized_instruments[provider_symbol] = instrument_version
 
     client_map = {} if client_ids_by_order_id is None else client_ids_by_order_id
-    if not isinstance(client_map, Mapping):
+    if type(client_map) is not dict:
         raise BinanceUsdmAdapterError(
-            "client_ids_by_order_id must be a mapping"
+            "client_ids_by_order_id must be an exact dict"
         )
     normalized_client_map: dict[int, str] = {}
     seen_client_ids: set[str] = set()
     for raw_order_id, raw_client_id in client_map.items():
-        if (
-            isinstance(raw_order_id, bool)
-            or not isinstance(raw_order_id, int)
-            or raw_order_id < 0
-        ):
+        if type(raw_order_id) is not int or raw_order_id < 0:
             raise BinanceUsdmAdapterError(
                 "client_ids_by_order_id keys must be non-negative integer order ids"
             )
@@ -425,9 +532,9 @@ def parse_account_trades(
 
     by_id: dict[str, ProviderFillEvidence] = {}
     for index, raw in enumerate(rows):
-        if not isinstance(raw, Mapping):
+        if type(raw) is not MappingProxyType:
             raise BinanceUsdmAdapterError(
-                f"trade row {index} must be an object"
+                f"trade row {index} must be an exact decoded object"
             )
 
         symbol = _provider_symbol(
@@ -442,11 +549,9 @@ def parse_account_trades(
         trade_id = raw.get("id")
         order_id = raw.get("orderId")
         if (
-            isinstance(trade_id, bool)
-            or not isinstance(trade_id, int)
+            type(trade_id) is not int
             or trade_id < 0
-            or isinstance(order_id, bool)
-            or not isinstance(order_id, int)
+            or type(order_id) is not int
             or order_id < 0
         ):
             raise BinanceUsdmAdapterError(
@@ -485,7 +590,7 @@ def parse_account_trades(
                 raw.get("commissionAsset"), name="commissionAsset"
             ),
             trade_time=_millis(raw.get("time"), name="trade.time"),
-            evidence_refs=(observation.evidence_ref,),
+            evidence_refs=(projection["evidence_ref"],),
         )
         previous = by_id.get(execution_id)
         if previous is not None and previous != fill:

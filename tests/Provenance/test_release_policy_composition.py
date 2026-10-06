@@ -1,0 +1,554 @@
+import json
+from pathlib import Path
+import subprocess
+from tempfile import TemporaryDirectory
+import unittest
+from unittest.mock import patch
+
+from tools.build_provenance_manifest import (
+    QUALIFICATION_TRUST_POLICY_COMPONENT_ID,
+    QUALIFICATION_TRUST_POLICY_COMPONENT_KIND,
+    QUALIFICATION_TRUST_POLICY_COMPONENT_PATH,
+    QUALIFICATION_TRUST_POLICY_COMPONENT_VERSION,
+    _QUALIFICATION_TRUST_POLICY_PIN_SOURCE_MAX_BYTES,
+    _trusted_git_environment,
+    _trusted_git_executable,
+    dependency_advisory_evidence_document,
+    git_blob_sha,
+    qualification_trust_policy_composition,
+    qualification_trust_policy_digest_from_git_source,
+    qualification_trust_policy_digest_from_source,
+    release_evidence_snapshot,
+)
+
+
+DIGEST = "sha256:" + "1" * 64
+
+
+def policy_component(*, digest: str = DIGEST, **overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "component_id": QUALIFICATION_TRUST_POLICY_COMPONENT_ID,
+        "kind": QUALIFICATION_TRUST_POLICY_COMPONENT_KIND,
+        "path": QUALIFICATION_TRUST_POLICY_COMPONENT_PATH,
+        "version": QUALIFICATION_TRUST_POLICY_COMPONENT_VERSION,
+        "sha256": digest,
+    }
+    value.update(overrides)
+    return value
+
+
+class ReleaseEvidenceSnapshotTests(unittest.TestCase):
+    @staticmethod
+    def evidence_bytes(*, source_sha: str, dependency_graph: object | None = None) -> bytes:
+        value: dict[str, object] = {
+            "qualified": True,
+            "schema_version": "1.0.0",
+            "source_sha": source_sha,
+            "evidence_refs": [
+                {
+                    "artifact_id": "release-evidence",
+                    "sha256": "sha256:" + "2" * 64,
+                    "observed_at": "2026-10-03T23:00:00Z",
+                }
+            ],
+        }
+        if dependency_graph is not None:
+            value["dependency_graph"] = dependency_graph
+        return json.dumps(value, sort_keys=True).encode("utf-8")
+
+    def test_release_evidence_snapshot_reads_authority_bytes_once(self):
+        path = Path("release-composition.json")
+        first_sha = "a" * 40
+        forged_sha = "b" * 40
+        with patch.object(
+            Path,
+            "read_bytes",
+            side_effect=[
+                self.evidence_bytes(source_sha=first_sha),
+                self.evidence_bytes(source_sha=forged_sha),
+            ],
+        ) as read_bytes:
+            qualified, reason, snapshot = release_evidence_snapshot(
+                path,
+                label="release composition",
+            )
+
+        self.assertTrue(qualified)
+        self.assertIsNone(reason)
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["source_sha"], first_sha)
+        self.assertEqual(read_bytes.call_count, 1)
+
+    def test_dependency_advisory_uses_the_same_held_snapshot(self):
+        path = Path("dependency-advisory.json")
+        expected_graph = {"python": ["pinned-wheel"]}
+        forged_graph = {"python": ["different-wheel"]}
+        with patch.object(
+            Path,
+            "read_bytes",
+            side_effect=[
+                self.evidence_bytes(
+                    source_sha="a" * 40,
+                    dependency_graph=expected_graph,
+                ),
+                self.evidence_bytes(
+                    source_sha="a" * 40,
+                    dependency_graph=forged_graph,
+                ),
+            ],
+        ) as read_bytes:
+            qualified, reason = dependency_advisory_evidence_document(
+                path,
+                expected_dependency_graph=expected_graph,
+                expected_source_sha="a" * 40,
+            )
+
+        self.assertTrue(qualified)
+        self.assertIsNone(reason)
+        self.assertEqual(read_bytes.call_count, 1)
+
+
+class ProvenanceGitAuthorityTests(unittest.TestCase):
+    def test_git_blob_identity_uses_trusted_git_boundary_not_caller_path(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        target = repository_root / "global.json"
+        object_id = "f" * 40
+
+        with patch(
+            "tools.build_provenance_manifest._trusted_git",
+            return_value=(object_id + "\n").encode("ascii"),
+        ) as trusted_git:
+            observed = git_blob_sha(target)
+
+        self.assertEqual(observed, object_id)
+        self.assertEqual(trusted_git.call_count, 1)
+        call = trusted_git.call_args
+        self.assertEqual(call.args, ("hash-object", "--stdin"))
+        self.assertEqual(call.kwargs["source_root"], repository_root.resolve())
+        self.assertEqual(
+            call.kwargs["input_bytes"],
+            target.read_bytes().replace(b"\r\n", b"\n"),
+        )
+        self.assertNotIn("text", call.kwargs)
+
+    def test_git_blob_identity_normalizes_checkout_crlf_before_hashing(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        provenance_root = repository_root / "provenance"
+        object_id = "e" * 40
+
+        with TemporaryDirectory(dir=provenance_root) as directory:
+            target = Path(directory) / "crlf.txt"
+            target.write_bytes(b"alpha\r\nbeta\r\n")
+            with patch(
+                "tools.build_provenance_manifest._trusted_git",
+                return_value=(object_id + "\n").encode("ascii"),
+            ) as trusted_git:
+                observed = git_blob_sha(target)
+
+        self.assertEqual(observed, object_id)
+        self.assertEqual(trusted_git.call_count, 1)
+        self.assertEqual(
+            trusted_git.call_args.kwargs["input_bytes"],
+            b"alpha\nbeta\n",
+        )
+
+
+
+
+class QualificationTrustPolicyPinSourceTests(unittest.TestCase):
+    def write_source(self, body: str) -> Path:
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "qualification_attestation.py"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def test_none_pin_remains_explicitly_unavailable(self):
+        path = self.write_source(
+            "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256: str | None = None\n"
+        )
+        self.assertIsNone(qualification_trust_policy_digest_from_source(path))
+
+    def test_literal_canonical_pin_is_read_without_importing_module(self):
+        path = self.write_source(
+            "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256: str | None = "
+            + repr(DIGEST)
+            + "\nraise RuntimeError('must never execute')\n"
+        )
+        self.assertEqual(
+            qualification_trust_policy_digest_from_source(path),
+            DIGEST,
+        )
+
+    def test_dynamic_pin_expression_fails_closed(self):
+        path = self.write_source(
+            "VALUE = " + repr(DIGEST) + "\n"
+            "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = VALUE\n"
+        )
+        with self.assertRaisesRegex(ValueError, "literal source definition"):
+            qualification_trust_policy_digest_from_source(path)
+
+    def test_tuple_or_augmented_rebinding_fails_closed(self):
+        for source in (
+            "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = None\n"
+            "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256, other = "
+            + repr((DIGEST, "x"))
+            + "\n",
+            "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = None\n"
+            "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 += 'x'\n",
+        ):
+            with self.subTest(source=source):
+                path = self.write_source(source)
+                with self.assertRaisesRegex(ValueError, "literal source definition"):
+                    qualification_trust_policy_digest_from_source(path)
+
+    def test_non_assignment_module_rebindings_fail_closed(self):
+        cases = (
+            (
+                "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = "
+                + repr(DIGEST)
+                + "\ndef _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256():\n"
+                "    return None\n"
+            ),
+            (
+                "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = "
+                + repr(DIGEST)
+                + "\nclass _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256:\n"
+                "    pass\n"
+            ),
+            (
+                "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = "
+                + repr(DIGEST)
+                + "\nimport os as _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256\n"
+            ),
+            (
+                "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = "
+                + repr(DIGEST)
+                + "\nfrom os import path as _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256\n"
+            ),
+            (
+                "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = "
+                + repr(DIGEST)
+                + "\ndel _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256\n"
+            ),
+            (
+                "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = "
+                + repr(DIGEST)
+                + "\ntry:\n"
+                "    raise RuntimeError()\n"
+                "except RuntimeError as _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256:\n"
+                "    pass\n"
+            ),
+        )
+        for source in cases:
+            with self.subTest(source=source):
+                path = self.write_source(source)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "one literal source definition",
+                ):
+                    qualification_trust_policy_digest_from_source(path)
+
+    def test_duplicate_pin_definition_fails_closed(self):
+        path = self.write_source(
+            "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = None\n"
+            "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = "
+            + repr(DIGEST)
+            + "\n"
+        )
+        with self.assertRaisesRegex(ValueError, "one literal source definition"):
+            qualification_trust_policy_digest_from_source(path)
+
+    def test_noncanonical_literal_pin_fails_closed(self):
+        path = self.write_source(
+            "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = 'not-a-digest'\n"
+        )
+        with self.assertRaisesRegex(ValueError, "canonical SHA-256"):
+            qualification_trust_policy_digest_from_source(path)
+
+    def test_malformed_pin_source_fails_closed(self):
+        path = self.write_source(
+            "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = (\n"
+        )
+        with self.assertRaisesRegex(ValueError, "unavailable or invalid"):
+            qualification_trust_policy_digest_from_source(path)
+
+    def _init_git_repo_with_pin_source(self, body: bytes) -> tuple[Path, Path, str]:
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        source = root / "mvp" / "autotrade_mvp" / "qualification_attestation.py"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(body)
+        trusted_git = _trusted_git_executable(source_root=root)
+
+        def git(*args: str) -> str:
+            completed = subprocess.run(
+                [trusted_git, *args],
+                cwd=root,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                env=_trusted_git_environment(),
+            )
+            return completed.stdout.strip()
+
+        git("init")
+        git("config", "user.name", "AutoTrade Test")
+        git("config", "user.email", "autotrade-test@example.invalid")
+        git("add", "mvp/autotrade_mvp/qualification_attestation.py")
+        git("commit", "-m", "pin source")
+        return root, source, git("rev-parse", "HEAD")
+
+    def test_release_pin_rejects_oversized_git_blob_before_parse(self):
+        root, _, source_sha = self._init_git_repo_with_pin_source(
+            b"#" * (_QUALIFICATION_TRUST_POLICY_PIN_SOURCE_MAX_BYTES + 1)
+        )
+        with self.assertRaisesRegex(ValueError, "exceeds bounded size"):
+            qualification_trust_policy_digest_from_git_source(
+                source_root=root,
+                source_sha=source_sha,
+            )
+
+    def test_release_pin_rejects_symlink_mode_even_when_blob_is_valid_python(self):
+        root, source, _ = self._init_git_repo_with_pin_source(
+            (
+                "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = None\n"
+            ).encode("utf-8")
+        )
+        trusted_git = _trusted_git_executable(source_root=root)
+
+        def git(*args: str) -> str:
+            completed = subprocess.run(
+                [trusted_git, *args],
+                cwd=root,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                env=_trusted_git_environment(),
+            )
+            return completed.stdout.strip()
+
+        blob_sha = git("hash-object", "-w", str(source))
+        git(
+            "update-index",
+            "--cacheinfo",
+            f"120000,{blob_sha},mvp/autotrade_mvp/qualification_attestation.py",
+        )
+        git("commit", "-m", "symlink-mode pin source")
+        source_sha = git("rev-parse", "HEAD")
+
+        with self.assertRaisesRegex(ValueError, "not a regular blob"):
+            qualification_trust_policy_digest_from_git_source(
+                source_root=root,
+                source_sha=source_sha,
+            )
+
+    def test_release_pin_is_read_from_selected_git_object_not_dirty_worktree(self):
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        source = root / "mvp" / "autotrade_mvp" / "qualification_attestation.py"
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = None\n",
+            encoding="utf-8",
+        )
+
+        trusted_git = _trusted_git_executable(source_root=root)
+
+        def git(*args: str) -> str:
+            completed = subprocess.run(
+                [trusted_git, *args],
+                cwd=root,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                env=_trusted_git_environment(),
+            )
+            return completed.stdout.strip()
+
+        git("init")
+        git("config", "user.name", "AutoTrade Test")
+        git("config", "user.email", "autotrade-test@example.invalid")
+        git("add", "mvp/autotrade_mvp/qualification_attestation.py")
+        git("commit", "-m", "pin source")
+        source_sha = git("rev-parse", "HEAD")
+        expected_blob = git(
+            "rev-parse",
+            f"{source_sha}:mvp/autotrade_mvp/qualification_attestation.py",
+        )
+
+        # The working tree now advertises a different pin. Release provenance
+        # must remain tied to the selected source commit.
+        source.write_text(
+            "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = "
+            + repr(DIGEST)
+            + "\n",
+            encoding="utf-8",
+        )
+        digest, blob_sha = qualification_trust_policy_digest_from_git_source(
+            source_root=root,
+            source_sha=source_sha,
+        )
+        self.assertIsNone(digest)
+        self.assertEqual(blob_sha, expected_blob)
+
+
+class QualificationTrustPolicyCompositionTests(unittest.TestCase):
+    def test_exact_policy_component_is_accepted(self):
+        document = {
+            "components": [
+                {
+                    "component_id": "unrelated",
+                    "kind": "runtime",
+                    "path": "bin/runtime.exe",
+                    "version": "1",
+                    "sha256": "sha256:" + "2" * 64,
+                },
+                policy_component(),
+            ]
+        }
+        self.assertEqual(
+            qualification_trust_policy_composition(
+                document,
+                expected_digest=DIGEST,
+            ),
+            (True, None, DIGEST),
+        )
+
+    def test_missing_source_controlled_pin_fails_closed(self):
+        self.assertEqual(
+            qualification_trust_policy_composition(
+                {"components": [policy_component()]},
+                expected_digest=None,
+            ),
+            (False, "policy_pin_missing", None),
+        )
+
+    def test_missing_policy_component_fails_closed(self):
+        self.assertEqual(
+            qualification_trust_policy_composition(
+                {"components": []},
+                expected_digest=DIGEST,
+            ),
+            (False, "component_missing", None),
+        )
+
+    def test_non_array_components_fail_closed(self):
+        self.assertEqual(
+            qualification_trust_policy_composition(
+                {"components": {}},
+                expected_digest=DIGEST,
+            ),
+            (False, "components_missing", None),
+        )
+
+    def test_non_object_component_fails_closed(self):
+        self.assertEqual(
+            qualification_trust_policy_composition(
+                {"components": ["not-an-object"]},
+                expected_digest=DIGEST,
+            ),
+            (False, "component_not_object", None),
+        )
+
+    def test_policy_path_and_id_cannot_select_two_different_components(self):
+        document = {
+            "components": [
+                policy_component(component_id="other"),
+                policy_component(path="other/policy.json"),
+            ]
+        }
+        self.assertEqual(
+            qualification_trust_policy_composition(
+                document,
+                expected_digest=DIGEST,
+            ),
+            (False, "component_ambiguous", None),
+        )
+
+    def test_policy_kind_cannot_create_second_split_identity(self):
+        document = {
+            "components": [
+                policy_component(),
+                policy_component(
+                    component_id="other-policy",
+                    path="other/policy.json",
+                ),
+            ]
+        }
+        self.assertEqual(
+            qualification_trust_policy_composition(
+                document,
+                expected_digest=DIGEST,
+            ),
+            (False, "component_ambiguous", None),
+        )
+
+    def test_component_id_is_canonical(self):
+        ok, reason, digest = qualification_trust_policy_composition(
+            {"components": [policy_component(component_id="other")]},
+            expected_digest=DIGEST,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "component_id_mismatch")
+        self.assertIsNone(digest)
+
+    def test_component_path_is_canonical(self):
+        ok, reason, digest = qualification_trust_policy_composition(
+            {"components": [policy_component(path="other/policy.json")]},
+            expected_digest=DIGEST,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "path_mismatch")
+        self.assertIsNone(digest)
+
+    def test_component_kind_and_version_are_canonical(self):
+        for field, replacement, expected_reason in (
+            ("kind", "runtime", "kind_mismatch"),
+            ("version", "caller-selected", "version_mismatch"),
+        ):
+            with self.subTest(field=field):
+                ok, reason, digest = qualification_trust_policy_composition(
+                    {"components": [policy_component(**{field: replacement})]},
+                    expected_digest=DIGEST,
+                )
+                self.assertFalse(ok)
+                self.assertEqual(reason, expected_reason)
+                self.assertIsNone(digest)
+
+    def test_policy_component_rejects_extra_caller_fields(self):
+        ok, reason, digest = qualification_trust_policy_composition(
+            {"components": [policy_component(extra_authority="caller")]},
+            expected_digest=DIGEST,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "component_fields_mismatch")
+        self.assertIsNone(digest)
+
+    def test_composition_cannot_override_policy_digest(self):
+        ok, reason, digest = qualification_trust_policy_composition(
+            {"components": [policy_component(digest="sha256:" + "3" * 64)]},
+            expected_digest=DIGEST,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "sha256_mismatch")
+        self.assertIsNone(digest)
+
+    def test_expected_digest_must_be_canonical(self):
+        with self.assertRaisesRegex(ValueError, "canonical SHA-256"):
+            qualification_trust_policy_composition(
+                {"components": [policy_component()]},
+                expected_digest="1" * 64,
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

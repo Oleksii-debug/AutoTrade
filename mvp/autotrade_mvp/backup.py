@@ -23,9 +23,40 @@ from .diagnostics import build_diagnostic_snapshot
 from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import require_current_reconciliation_checkpoint
 from .recovery import HostState, OwnerFence, RecoveryController
+from .store_identity import (
+    JournalStoreIdentity,
+    connection_main_identity,
+    observe_database_identity,
+    require_database_identity,
+    require_exact_journal_store_identity,
+    same_journal_backing_object,
+)
+from .simulation_runtime_checkpoint import (
+    AutonomousRuntimeCheckpointError,
+    checkpoint_path as autonomous_runtime_checkpoint_path,
+    verify_autonomous_runtime_checkpoint_backup_evidence,
+)
 
 
-BACKUP_SCHEMA_VERSION = 1
+BACKUP_SCHEMA_VERSION = 2
+_SUPPORTED_BACKUP_SCHEMA_VERSIONS = frozenset({1, BACKUP_SCHEMA_VERSION})
+_RUNTIME_CHECKPOINT_EVIDENCE_PATH = (
+    "restore-evidence/autonomous-runtime-checkpoint.json"
+)
+_RESTORE_PROVENANCE_EVENT_TYPE = "BackupRestoreStaged"
+_RESTORE_PROVENANCE_AGGREGATE_TYPE = "backup_restore"
+_RESTORE_PROVENANCE_AGGREGATE_ID = "restore-authority"
+_RESTORE_PROVENANCE_FIELDS = (
+    "backup_manifest_sha256",
+    "restored_at",
+    "runtime_checkpoint_evidence",
+    "runtime_checkpoint_reconstitution_required",
+    "runtime_checkpoint_evidence_sha256",
+    "source_owner_scope",
+    "source_owner_id",
+    "source_owner_epoch",
+    "restored_journal_backing_identity",
+)
 MANIFEST_NAME = "backup-manifest.json"
 MANIFEST_DIGEST_NAME = "backup-manifest.sha256"
 RESTORE_MARKER_NAME = "RESTORE_RECONCILIATION_REQUIRED.json"
@@ -192,31 +223,74 @@ def _utc_text(value: object, *, name: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _open_existing_sqlite_read_only(
+    path: Path,
+    *,
+    subject: str,
+) -> tuple[sqlite3.Connection, JournalStoreIdentity]:
+    """Open one existing journal without creating or migrating authority state."""
+
+    if path.is_symlink() or not path.is_file():
+        raise BackupIntegrityError(f"{subject} is missing or unsafe")
+
+    connection: sqlite3.Connection | None = None
+    try:
+        expected_identity = observe_database_identity(path)
+        database_uri = (
+            Path(expected_identity.canonical_path).as_uri() + "?mode=ro"
+        )
+        connection = sqlite3.connect(
+            database_uri,
+            uri=True,
+            timeout=5,
+        )
+        connection.execute("PRAGMA query_only = ON")
+        opened_identity = connection_main_identity(connection)
+        if not same_journal_backing_object(
+            expected_identity,
+            opened_identity,
+        ):
+            raise BackupIntegrityError(
+                f"{subject} backing identity changed while opening"
+            )
+        return connection, expected_identity
+    except BackupIntegrityError:
+        if connection is not None:
+            connection.close()
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as error:
+        if connection is not None:
+            try:
+                connection.close()
+            except sqlite3.Error:
+                pass
+        raise BackupIntegrityError(f"{subject} is unreadable") from error
+
+
 def _recovery_owner_scopes_from_journal(
     journal_path: Path,
 ) -> tuple[str, ...]:
     """Discover durable recovery-owner scopes without guessing account authority."""
 
+    connection, _identity = _open_existing_sqlite_read_only(
+        journal_path,
+        subject="Recovery owner scope journal",
+    )
     try:
-        connection = sqlite3.connect(str(journal_path), timeout=5)
-        rows = connection.execute(
-            """
-            SELECT DISTINCT aggregate_id
-            FROM events
-            WHERE aggregate_type = ?
-            ORDER BY aggregate_id
-            """,
-            ("recovery_owner",),
-        ).fetchall()
-    except (sqlite3.Error, OSError) as error:
+        with closing(connection):
+            rows = connection.execute(
+                """
+                SELECT DISTINCT aggregate_id
+                FROM events
+                WHERE aggregate_type = ?
+                ORDER BY aggregate_id
+                """,
+                ("recovery_owner",),
+            ).fetchall()
+    except sqlite3.Error as error:
         raise BackupIntegrityError(
             "Recovery owner scope evidence is unreadable"
         ) from error
-    finally:
-        try:
-            connection.close()
-        except (UnboundLocalError, sqlite3.Error):
-            pass
 
     scopes: list[str] = []
     for row in rows:
@@ -237,27 +311,26 @@ def _recovery_owner_chain_from_journal(
     """Read sender-fence history without mutating the restored SQLite journal."""
 
     scope = _nonempty_text(owner_scope, name="owner_scope")
+    connection, _identity = _open_existing_sqlite_read_only(
+        journal_path,
+        subject="Recovery owner journal",
+    )
     try:
-        connection = sqlite3.connect(str(journal_path), timeout=5)
-        connection.row_factory = sqlite3.Row
-        rows = connection.execute(
-            """
-            SELECT event_type, aggregate_version, payload_json, payload_hash
-            FROM events
-            WHERE aggregate_type = ? AND aggregate_id = ?
-            ORDER BY aggregate_version
-            """,
-            ("recovery_owner", scope),
-        ).fetchall()
-    except (sqlite3.Error, OSError) as error:
+        with closing(connection):
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT event_type, aggregate_version, payload_json, payload_hash
+                FROM events
+                WHERE aggregate_type = ? AND aggregate_id = ?
+                ORDER BY aggregate_version
+                """,
+                ("recovery_owner", scope),
+            ).fetchall()
+    except sqlite3.Error as error:
         raise BackupIntegrityError(
             "Recovery owner journal evidence is unreadable"
         ) from error
-    finally:
-        try:
-            connection.close()
-        except (UnboundLocalError, sqlite3.Error):
-            pass
 
     chain: list[OwnerFence] = []
     for expected_epoch, row in enumerate(rows, start=1):
@@ -303,6 +376,229 @@ def _recovery_owner_chain_from_journal(
     return tuple(chain)
 
 
+def _restore_provenance_payload(value: object) -> dict[str, Any]:
+    """Validate the journal-bound facts that define one restore generation."""
+
+    if type(value) is not dict or set(value) != set(_RESTORE_PROVENANCE_FIELDS):
+        raise BackupIntegrityError("Restore provenance payload is invalid")
+    payload = dict(value)
+    _canonical_sha256_ref(
+        payload["backup_manifest_sha256"],
+        name="backup_manifest_sha256",
+    )
+    _utc_text(payload["restored_at"], name="restored_at")
+    _nonempty_text(payload["source_owner_scope"], name="source_owner_scope")
+    owner_id = payload["source_owner_id"]
+    owner_epoch = payload["source_owner_epoch"]
+    if owner_id is None or owner_epoch is None:
+        if owner_id is not None or owner_epoch is not None:
+            raise BackupIntegrityError(
+                "Restore provenance source owner identity is partially bound"
+            )
+    else:
+        _nonempty_text(owner_id, name="source_owner_id")
+        if (
+            isinstance(owner_epoch, bool)
+            or not isinstance(owner_epoch, int)
+            or owner_epoch < 1
+        ):
+            raise BackupIntegrityError(
+                "Restore provenance source_owner_epoch is invalid"
+            )
+
+    _canonical_sha256_ref(
+        payload["restored_journal_backing_identity"],
+        name="restored_journal_backing_identity",
+    )
+
+    runtime_evidence = payload["runtime_checkpoint_evidence"]
+    reconstitution_required = payload[
+        "runtime_checkpoint_reconstitution_required"
+    ]
+    runtime_digest = payload["runtime_checkpoint_evidence_sha256"]
+    if runtime_evidence == "QUARANTINED":
+        if reconstitution_required is not True:
+            raise BackupIntegrityError(
+                "Restore provenance checkpoint evidence must require reconstitution"
+            )
+        _canonical_sha256_ref(
+            runtime_digest,
+            name="runtime_checkpoint_evidence_sha256",
+        )
+    elif runtime_evidence in {"ABSENT", "UNAVAILABLE_LEGACY_BACKUP"}:
+        if reconstitution_required is not False or runtime_digest is not None:
+            raise BackupIntegrityError(
+                "Restore provenance checkpoint absence claim is inconsistent"
+            )
+    else:
+        raise BackupIntegrityError(
+            "Restore provenance checkpoint evidence status is invalid"
+        )
+    return payload
+
+
+def _journal_backing_identity_ref(
+    identity: JournalStoreIdentity,
+) -> str:
+    """Digest only the backing-object identity, never relocatable path text."""
+
+    identity = require_exact_journal_store_identity(
+        identity,
+        subject="restore journal backing identity",
+    )
+    if identity.identity_source == "posix_stat":
+        material = {
+            "identity_source": "posix_stat",
+            "filesystem_device": identity.filesystem_device,
+            "filesystem_inode": identity.filesystem_inode,
+        }
+    elif identity.identity_source == "windows_by_handle":
+        material = {
+            "identity_source": "windows_by_handle",
+            "windows_volume_serial": identity.windows_volume_serial,
+            "windows_file_index_high": identity.windows_file_index_high,
+            "windows_file_index_low": identity.windows_file_index_low,
+        }
+    else:
+        raise BackupIntegrityError(
+            "Restore journal backing identity source is unsupported"
+        )
+    return payload_digest(material)
+
+
+def _append_restore_provenance(
+    root: Path,
+    marker: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind restore/checkpoint claims into the canonical durable journal."""
+
+    store = JournalStore(root / "state" / "journal.sqlite3")
+    bound_marker = {
+        **marker,
+        "restored_journal_backing_identity": _journal_backing_identity_ref(
+            store.store_identity
+        ),
+    }
+    payload = _restore_provenance_payload(
+        {key: bound_marker.get(key) for key in _RESTORE_PROVENANCE_FIELDS}
+    )
+    aggregate_version = store.next_aggregate_version(
+        _RESTORE_PROVENANCE_AGGREGATE_TYPE,
+        _RESTORE_PROVENANCE_AGGREGATE_ID,
+    )
+    journal_cut = store.current_journal_sequence()
+    manifest_digest = payload["backup_manifest_sha256"]
+    event_id = (
+        f"restore-stage:{manifest_digest.removeprefix('sha256:')}:"
+        f"{aggregate_version}"
+    )
+    envelope = {
+        "event_id": event_id,
+        "event_type": _RESTORE_PROVENANCE_EVENT_TYPE,
+        "aggregate_type": _RESTORE_PROVENANCE_AGGREGATE_TYPE,
+        "aggregate_id": _RESTORE_PROVENANCE_AGGREGATE_ID,
+        "aggregate_version": str(aggregate_version),
+        "payload": payload,
+        "payload_hash": payload_digest(payload),
+        "committed_at": payload["restored_at"],
+    }
+    try:
+        store.append_event(
+            envelope,
+            expected_journal_sequence=journal_cut,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as error:
+        raise BackupIntegrityError(
+            "Restore provenance could not be bound to the durable journal"
+        ) from error
+    return bound_marker
+
+
+def _load_restore_provenance(root: Path) -> dict[str, Any] | None:
+    """Read restore provenance without initializing or migrating JournalStore."""
+
+    journal_path = root / "state" / "journal.sqlite3"
+    connection, identity = _open_existing_sqlite_read_only(
+        journal_path,
+        subject="Restore provenance journal",
+    )
+    current_backing_identity = _journal_backing_identity_ref(identity)
+    try:
+        with closing(connection):
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT
+                    event_id,
+                    event_type,
+                    aggregate_type,
+                    aggregate_id,
+                    aggregate_version,
+                    payload_json,
+                    payload_hash,
+                    committed_at
+                FROM events
+                WHERE aggregate_type = ? AND aggregate_id = ?
+                ORDER BY aggregate_version
+                """,
+                (
+                    _RESTORE_PROVENANCE_AGGREGATE_TYPE,
+                    _RESTORE_PROVENANCE_AGGREGATE_ID,
+                ),
+            ).fetchall()
+    except sqlite3.Error as error:
+        raise BackupIntegrityError(
+            "Restore provenance journal authority is unreadable"
+        ) from error
+
+    if not rows:
+        return None
+
+    latest_payload: dict[str, Any] | None = None
+    for expected_version, row in enumerate(rows, start=1):
+        if (
+            row["event_type"] != _RESTORE_PROVENANCE_EVENT_TYPE
+            or row["aggregate_type"] != _RESTORE_PROVENANCE_AGGREGATE_TYPE
+            or row["aggregate_id"] != _RESTORE_PROVENANCE_AGGREGATE_ID
+            or type(row["aggregate_version"]) is not int
+            or row["aggregate_version"] != expected_version
+        ):
+            raise BackupIntegrityError(
+                "Restore provenance journal event chain is invalid"
+            )
+        try:
+            raw_payload = json.loads(row["payload_json"])
+        except (TypeError, json.JSONDecodeError) as error:
+            raise BackupIntegrityError(
+                "Restore provenance journal payload is invalid"
+            ) from error
+        payload = _restore_provenance_payload(raw_payload)
+        manifest_digest = payload["backup_manifest_sha256"]
+        expected_event_id = (
+            f"restore-stage:{manifest_digest.removeprefix('sha256:')}:"
+            f"{expected_version}"
+        )
+        if (
+            row["event_id"] != expected_event_id
+            or row["payload_hash"] != payload_digest(payload)
+            or row["committed_at"] != payload["restored_at"]
+        ):
+            raise BackupIntegrityError(
+                "Restore provenance journal event binding is invalid"
+            )
+        latest_payload = payload
+
+    assert latest_payload is not None
+    if (
+        latest_payload["restored_journal_backing_identity"]
+        != current_backing_identity
+    ):
+        raise BackupIntegrityError(
+            "Restore journal backing generation differs from durable provenance"
+        )
+    return latest_payload
+
+
 def _read_restore_marker(root: Path) -> dict[str, Any]:
     marker_path = root / RESTORE_MARKER_NAME
     if not marker_path.is_file() or marker_path.is_symlink():
@@ -344,6 +640,93 @@ def _read_restore_marker(root: Path) -> dict[str, Any]:
             or owner_epoch < 1
         ):
             raise BackupIntegrityError("source_owner_epoch is invalid")
+
+    provenance = _load_restore_provenance(root)
+    runtime_evidence_fields = {
+        "runtime_checkpoint_evidence",
+        "runtime_checkpoint_reconstitution_required",
+        "runtime_checkpoint_evidence_sha256",
+    }
+    runtime_fields_present = runtime_evidence_fields.intersection(marker)
+    if runtime_fields_present and runtime_fields_present != runtime_evidence_fields:
+        raise BackupIntegrityError(
+            "Restore runtime checkpoint evidence binding is partial"
+        )
+
+    evidence_path = root / _safe_relative_path(
+        _RUNTIME_CHECKPOINT_EVIDENCE_PATH
+    )
+    if not runtime_fields_present:
+        if provenance is not None:
+            raise BackupIntegrityError(
+                "Restore marker cannot downgrade journal-bound restore provenance"
+            )
+        # Restore markers emitted before portable checkpoint schema v2 did not
+        # carry this binding. They are safe to continue only when no
+        # quarantined checkpoint evidence exists at the now-reserved path.
+        # Normalize the legacy marker in memory so the next durable completion
+        # rewrite upgrades it; never infer resume authority from absence.
+        if evidence_path.exists() or evidence_path.is_symlink():
+            raise BackupIntegrityError(
+                "Legacy restore marker cannot coexist with runtime checkpoint evidence"
+            )
+        marker = {
+            **marker,
+            "runtime_checkpoint_evidence": "UNAVAILABLE_LEGACY_BACKUP",
+            "runtime_checkpoint_reconstitution_required": False,
+            "runtime_checkpoint_evidence_sha256": None,
+        }
+
+    runtime_evidence = marker.get("runtime_checkpoint_evidence")
+    reconstitution_required = marker.get(
+        "runtime_checkpoint_reconstitution_required"
+    )
+    runtime_evidence_sha256 = marker.get(
+        "runtime_checkpoint_evidence_sha256"
+    )
+    if runtime_evidence == "QUARANTINED":
+        if reconstitution_required is not True:
+            raise BackupIntegrityError(
+                "Restore runtime checkpoint evidence must require reconstitution"
+            )
+        expected_evidence_digest = _canonical_sha256_ref(
+            runtime_evidence_sha256,
+            name="runtime_checkpoint_evidence_sha256",
+        )
+        if evidence_path.is_symlink() or not evidence_path.is_file():
+            raise BackupIntegrityError(
+                "Restore runtime checkpoint evidence is missing or unsafe"
+            )
+        if expected_evidence_digest != f"sha256:{_sha256_file(evidence_path)}":
+            raise BackupIntegrityError(
+                "Restore runtime checkpoint evidence digest mismatch"
+            )
+    elif runtime_evidence in {"ABSENT", "UNAVAILABLE_LEGACY_BACKUP"}:
+        if (
+            reconstitution_required is not False
+            or runtime_evidence_sha256 is not None
+            or evidence_path.exists()
+            or evidence_path.is_symlink()
+        ):
+            raise BackupIntegrityError(
+                "Restore runtime checkpoint absence claim is inconsistent"
+            )
+    else:
+        raise BackupIntegrityError(
+            "Restore runtime checkpoint evidence status is invalid"
+        )
+
+    if provenance is None:
+        if runtime_fields_present:
+            raise BackupIntegrityError(
+                "Restore runtime checkpoint binding lacks durable journal provenance"
+            )
+    else:
+        for field in _RESTORE_PROVENANCE_FIELDS:
+            if marker.get(field) != provenance[field]:
+                raise BackupIntegrityError(
+                    "Restore marker conflicts with durable journal provenance"
+                )
     return marker
 
 
@@ -789,6 +1172,8 @@ def _expected_kind(path: str) -> str:
         ("state", "learning-evidence.jsonl"),
     }:
         return "runtime-state"
+    if parts == ("restore-evidence", "autonomous-runtime-checkpoint.json"):
+        return "runtime-checkpoint-evidence"
     if len(parts) >= 3 and parts[:2] == ("state", "order-intents") and parts[-1].endswith(".json"):
         return "order-intent"
     if (
@@ -1050,16 +1435,75 @@ def create_backup(
         raise BackupError("Backup destination must be outside source directories")
     _validate_artifact_source(artifacts)
 
+    # Freeze autonomous checkpoint presence and bytes before SQLite establishes
+    # the journal snapshot.  This checkpoint is causally bound to a JournalStore
+    # generation; accepting a checkpoint created or advanced after the SQLite cut
+    # would package two different runtime generations in one recovery bundle.
+    runtime_checkpoint_source = autonomous_runtime_checkpoint_path(state)
+    runtime_checkpoint_present_at_cut = (
+        runtime_checkpoint_source.exists()
+        or runtime_checkpoint_source.is_symlink()
+    )
+    runtime_checkpoint_digest_at_cut: str | None = None
+    runtime_checkpoint_source_store_identity = None
+    journal_source = state / "journal.sqlite3"
+    if runtime_checkpoint_present_at_cut:
+        try:
+            if (
+                runtime_checkpoint_source.is_symlink()
+                or not runtime_checkpoint_source.is_file()
+            ):
+                raise BackupError(
+                    "Autonomous runtime checkpoint source is not a regular file"
+                )
+            digest_before = _sha256_file(runtime_checkpoint_source)
+            if (
+                runtime_checkpoint_source.is_symlink()
+                or not runtime_checkpoint_source.is_file()
+            ):
+                raise BackupError(
+                    "Autonomous runtime checkpoint changed before journal snapshot"
+                )
+            digest_after = _sha256_file(runtime_checkpoint_source)
+        except OSError as error:
+            raise BackupError(
+                "Autonomous runtime checkpoint changed before journal snapshot"
+            ) from error
+        if digest_before != digest_after:
+            raise BackupError(
+                "Autonomous runtime checkpoint changed before journal snapshot"
+            )
+        runtime_checkpoint_digest_at_cut = digest_after
+        try:
+            # Capture backing authority without opening the JournalStore runtime:
+            # backup preflight must not initialize or migrate the source database.
+            runtime_checkpoint_source_store_identity = observe_database_identity(
+                journal_source
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            raise BackupError(
+                "Autonomous runtime checkpoint source journal identity is unavailable"
+            ) from error
+
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".autotrade-backup-", dir=target.parent))
     entries: list[dict[str, Any]] = []
     source_rechecks: list[tuple[Path, str]] = []
     try:
-        journal_source = state / "journal.sqlite3"
         journal_target = stage / "state" / "journal.sqlite3"
         journal_digest, journal_size, journal_schema = _backup_sqlite(
             journal_source, journal_target
         )
+        if runtime_checkpoint_source_store_identity is not None:
+            try:
+                require_database_identity(
+                    journal_source,
+                    runtime_checkpoint_source_store_identity,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as error:
+                raise BackupError(
+                    "Autonomous runtime checkpoint journal generation changed across snapshot"
+                ) from error
         entries.append(
             _entry(
                 "state/journal.sqlite3",
@@ -1078,6 +1522,73 @@ def create_backup(
                 digest, size = _copy_stable_file(source, stage / relative)
                 entries.append(_entry(relative.as_posix(), digest, size, "runtime-state"))
                 source_rechecks.append((source, digest))
+
+        # A whole-runtime checkpoint is sealed to the source JournalStore
+        # generation and to a local authority key. Preserve only its exact
+        # bytes as quarantined restore evidence. Never publish those bytes to
+        # the restored live checkpoint path and never copy the local authority
+        # key into a portable backup. A restored generation must issue fresh
+        # checkpoint authority after recovery/reconciliation has established
+        # the new durable generation.
+        runtime_checkpoint_evidence = "ABSENT"
+        runtime_checkpoint_present_after_journal = (
+            runtime_checkpoint_source.exists()
+            or runtime_checkpoint_source.is_symlink()
+        )
+        if (
+            runtime_checkpoint_present_after_journal
+            != runtime_checkpoint_present_at_cut
+        ):
+            raise BackupError(
+                "Autonomous runtime checkpoint inventory changed across journal snapshot"
+            )
+        if runtime_checkpoint_present_at_cut:
+            evidence_relative = _safe_relative_path(
+                _RUNTIME_CHECKPOINT_EVIDENCE_PATH
+            )
+            digest, size = _copy_stable_file(
+                runtime_checkpoint_source,
+                stage / evidence_relative,
+            )
+            if digest != runtime_checkpoint_digest_at_cut:
+                raise BackupError(
+                    "Autonomous runtime checkpoint changed across journal snapshot"
+                )
+            if runtime_checkpoint_source_store_identity is None:
+                raise BackupError(
+                    "Autonomous runtime checkpoint source journal identity is missing"
+                )
+            try:
+                checkpoint_document = (
+                    stage / evidence_relative
+                ).read_text(encoding="utf-8")
+                snapshot_store = JournalStore(journal_target)
+                verify_autonomous_runtime_checkpoint_backup_evidence(
+                    state,
+                    snapshot_store,
+                    source_store_identity=runtime_checkpoint_source_store_identity,
+                    checkpoint_document=checkpoint_document,
+                )
+            except (
+                AutonomousRuntimeCheckpointError,
+                OSError,
+                RuntimeError,
+                UnicodeError,
+                ValueError,
+            ) as error:
+                raise BackupError(
+                    "Autonomous runtime checkpoint does not match staged journal snapshot"
+                ) from error
+            entries.append(
+                _entry(
+                    _RUNTIME_CHECKPOINT_EVIDENCE_PATH,
+                    digest,
+                    size,
+                    "runtime-checkpoint-evidence",
+                )
+            )
+            source_rechecks.append((runtime_checkpoint_source, digest))
+            runtime_checkpoint_evidence = "QUARANTINED"
 
         intents_root = state / "order-intents"
         if intents_root.exists():
@@ -1114,6 +1625,7 @@ def create_backup(
             "journal_schema_version": journal_schema,
             "reconciliation_required_after_restore": True,
             "runtime_consistency_check": runtime_consistency_check,
+            "runtime_checkpoint_evidence": runtime_checkpoint_evidence,
             "files": sorted(entries, key=lambda item: item["path"]),
         }
         manifest_bytes = _canonical_json(manifest)
@@ -1125,6 +1637,46 @@ def create_backup(
         )
         verify_backup(stage)
         _fsync_directory_tree(stage)
+        # Close the final publication window too.  A checkpoint created,
+        # removed, or advanced after staging validation must abort this attempt;
+        # a later backup can capture the new causal generation coherently.
+        runtime_checkpoint_present_before_publish = (
+            runtime_checkpoint_source.exists()
+            or runtime_checkpoint_source.is_symlink()
+        )
+        if (
+            runtime_checkpoint_present_before_publish
+            != runtime_checkpoint_present_at_cut
+        ):
+            raise BackupError(
+                "Autonomous runtime checkpoint inventory changed before backup commit"
+            )
+        if runtime_checkpoint_source_store_identity is not None:
+            try:
+                require_database_identity(
+                    journal_source,
+                    runtime_checkpoint_source_store_identity,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as error:
+                raise BackupError(
+                    "Autonomous runtime checkpoint journal generation changed before backup commit"
+                ) from error
+        if runtime_checkpoint_present_at_cut:
+            try:
+                checkpoint_unchanged = (
+                    not runtime_checkpoint_source.is_symlink()
+                    and runtime_checkpoint_source.is_file()
+                    and _sha256_file(runtime_checkpoint_source)
+                    == runtime_checkpoint_digest_at_cut
+                )
+            except OSError as error:
+                raise BackupError(
+                    "Autonomous runtime checkpoint changed before backup commit"
+                ) from error
+            if not checkpoint_unchanged:
+                raise BackupError(
+                    "Autonomous runtime checkpoint changed before backup commit"
+                )
         os.replace(stage, target)
         _fsync_directory(target.parent)
         return target
@@ -1150,7 +1702,10 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
     if expected_manifest_digest != actual_manifest_digest:
         raise BackupIntegrityError("Backup manifest digest does not match")
 
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != BACKUP_SCHEMA_VERSION:
+    if not isinstance(manifest, dict):
+        raise BackupCompatibilityError("Unsupported backup schema version")
+    backup_schema_version = manifest.get("schema_version")
+    if backup_schema_version not in _SUPPORTED_BACKUP_SCHEMA_VERSIONS:
         raise BackupCompatibilityError("Unsupported backup schema version")
     if manifest.get("journal_schema_version") != JournalStore.SCHEMA_VERSION:
         raise BackupCompatibilityError("Unsupported backed-up journal schema version")
@@ -1201,6 +1756,29 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
             object_digest = path.name.lower()
             if item["sha256"] != f"sha256:{object_digest}":
                 raise BackupIntegrityError("Content-addressed artifact object identity mismatch")
+
+    runtime_checkpoint_present = (
+        _RUNTIME_CHECKPOINT_EVIDENCE_PATH in expected_paths
+    )
+    if backup_schema_version == 1:
+        if (
+            runtime_checkpoint_present
+            or "runtime_checkpoint_evidence" in manifest
+        ):
+            raise BackupIntegrityError(
+                "Backup schema v1 cannot carry autonomous runtime checkpoint evidence"
+            )
+    else:
+        expected_runtime_checkpoint_claim = (
+            "QUARANTINED" if runtime_checkpoint_present else "ABSENT"
+        )
+        if (
+            manifest.get("runtime_checkpoint_evidence")
+            != expected_runtime_checkpoint_claim
+        ):
+            raise BackupIntegrityError(
+                "Runtime checkpoint evidence claim does not match backup inventory"
+            )
 
     checkpoint_present = "state/checkpoint.json" in expected_paths
     learning_evidence_present = "state/learning-evidence.jsonl" in expected_paths
@@ -1311,6 +1889,14 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
             owner_scope=owner_scope,
         )
         source_owner = owner_chain[-1] if owner_chain else None
+        runtime_checkpoint_entry = next(
+            (
+                item
+                for item in manifest["files"]
+                if item["path"] == _RUNTIME_CHECKPOINT_EVIDENCE_PATH
+            ),
+            None,
+        )
         marker = {
             "schema_version": 2,
             "status": "RECONCILIATION_REQUIRED",
@@ -1319,6 +1905,19 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
             "backup_manifest_sha256": (backup / MANIFEST_DIGEST_NAME)
             .read_text(encoding="ascii")
             .strip(),
+            "runtime_checkpoint_evidence": (
+                manifest.get("runtime_checkpoint_evidence")
+                if manifest.get("schema_version") == BACKUP_SCHEMA_VERSION
+                else "UNAVAILABLE_LEGACY_BACKUP"
+            ),
+            "runtime_checkpoint_reconstitution_required": (
+                runtime_checkpoint_entry is not None
+            ),
+            "runtime_checkpoint_evidence_sha256": (
+                runtime_checkpoint_entry["sha256"]
+                if runtime_checkpoint_entry is not None
+                else None
+            ),
             "source_owner_scope": owner_scope,
             "source_owner_id": (
                 source_owner.owner_id if source_owner is not None else None
@@ -1327,6 +1926,7 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
                 source_owner.epoch if source_owner is not None else None
             ),
         }
+        marker = _append_restore_provenance(stage, marker)
         _write_bytes_durable(stage / RESTORE_MARKER_NAME, _canonical_json(marker))
         _fsync_directory_tree(stage)
         os.replace(stage, destination)
@@ -1356,6 +1956,15 @@ def complete_restore_reconciliation(
 
     root = Path(destination_root)
     marker = _read_restore_marker(root)
+    if marker["runtime_checkpoint_reconstitution_required"] is True:
+        # Portable checkpoint bytes are evidence only.  Their source-local
+        # signing key is deliberately absent after restore, and this module
+        # does not mint replacement runtime authority.  Keep the global restore
+        # gate closed until a canonical composition explicitly reconstitutes
+        # and durably binds fresh checkpoint authority to the restored JournalStore.
+        raise BackupError(
+            "Restore completion requires fresh runtime checkpoint authority reconstitution"
+        )
     if marker["status"] == "RECONCILIATION_COMPLETE":
         if restore_requires_reconciliation(root):
             raise BackupIntegrityError(
@@ -1500,6 +2109,8 @@ def restore_requires_reconciliation(destination_root: str | Path) -> bool:
     try:
         marker = _read_restore_marker(root)
     except BackupIntegrityError:
+        return True
+    if marker["runtime_checkpoint_reconstitution_required"] is True:
         return True
     if marker["status"] != "RECONCILIATION_COMPLETE":
         return True

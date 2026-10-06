@@ -633,6 +633,8 @@ class RoutingState:
     champion_artifact_hash: str | None
     authority_scope_id: str | None
     existing_position_policy: str | None
+    obligation_snapshot_digest: str | None
+    management_policy_digest: str | None
 
 
 class PromotionConflict(RuntimeError):
@@ -768,6 +770,8 @@ class ChampionRegistry:
             champion_artifact_hash=row["champion_artifact_hash"],
             authority_scope_id=row["authority_scope_id"],
             existing_position_policy=row["existing_position_policy"],
+            obligation_snapshot_digest=row["obligation_snapshot_digest"],
+            management_policy_digest=row["management_policy_digest"],
         )
 
     def _current_obligation_snapshot(
@@ -934,6 +938,8 @@ class ChampionRegistry:
                 champion_artifact_hash=history["artifact_hash"],
                 authority_scope_id=history["authority_scope_id"],
                 existing_position_policy=history["existing_position_policy"],
+                obligation_snapshot_digest=history["obligation_snapshot_digest"],
+                management_policy_digest=history["management_policy_digest"],
             )
 
         if current_generation != expected_generation:
@@ -1052,6 +1058,12 @@ class ChampionRegistry:
                         authority_scope_id=latest["authority_scope_id"],
                         existing_position_policy=latest[
                             "existing_position_policy"
+                        ],
+                        obligation_snapshot_digest=latest[
+                            "obligation_snapshot_digest"
+                        ],
+                        management_policy_digest=latest[
+                            "management_policy_digest"
                         ],
                     )
                 raise PromotionConflict(
@@ -1201,6 +1213,12 @@ class ChampionRegistry:
                         authority_scope_id=latest["authority_scope_id"],
                         existing_position_policy=latest[
                             "existing_position_policy"
+                        ],
+                        obligation_snapshot_digest=latest[
+                            "obligation_snapshot_digest"
+                        ],
+                        management_policy_digest=latest[
+                            "management_policy_digest"
                         ],
                     )
                 raise PromotionConflict(

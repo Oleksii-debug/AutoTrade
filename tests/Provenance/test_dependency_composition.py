@@ -5,6 +5,8 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from tools.check_dependency_composition import (
+    _ci_runtime_blockers,
+    _dotnet_blockers,
     _dotnet_dependency_lock_blockers,
     _python_blockers,
     _rights_blockers,
@@ -249,6 +251,7 @@ project = "not-a-table"
             for blocker in self.report.blockers
             if blocker.startswith("DOTNET_PROJECT_LOCK_MISSING:")
             or blocker.startswith("DOTNET_RESTORE_NOT_LOCKED:")
+            or blocker.startswith("DOTNET_LOCKED_RESTORE_PROJECT_MISSING:")
             or blocker in {
                 "DOTNET_LOCKED_RESTORE_WORKFLOW_MISSING",
                 "DOTNET_LOCKED_RESTORE_COMMAND_MISSING",
@@ -284,12 +287,49 @@ project = "not-a-table"
             )
 
             (project.parent / "packages.lock.json").write_text(
-                "{}\n",
+                json.dumps(
+                    {
+                        "version": 1,
+                        "dependencies": {
+                            "net10.0": {
+                                "ReleaseApp": {"type": "Project"}
+                            }
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
                 encoding="utf-8",
             )
             self.assertEqual(
                 _dotnet_dependency_lock_blockers(root, [project]),
                 [],
+            )
+
+            unrestored = root / "src" / "Unrestored" / "Unrestored.csproj"
+            unrestored.parent.mkdir(parents=True)
+            unrestored.write_text("<Project />\n", encoding="utf-8")
+            (unrestored.parent / "packages.lock.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "dependencies": {
+                            "net10.0": {
+                                "ReleaseApp": {"type": "Project"}
+                            }
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project, unrestored]),
+                [
+                    "DOTNET_LOCKED_RESTORE_PROJECT_MISSING:"
+                    "src/Unrestored/Unrestored.csproj"
+                ],
             )
 
             workflow.write_text(
@@ -307,6 +347,216 @@ project = "not-a-table"
                 ],
             )
 
+            workflow.write_text(
+                'paths:\n'
+                '  - "src/**/packages.lock.json"\n'
+                "steps:\n"
+                "  - run: dotnet restore src/ReleaseApp/ReleaseApp.csproj "
+                "-p:Fake=RestoreLockedMode=true\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project]),
+                [
+                    "DOTNET_RESTORE_NOT_LOCKED:"
+                    ".github/workflows/dotnet-foundation.yml:1"
+                ],
+            )
+
+            workflow.write_text(
+                'paths:\n'
+                '  - "src/**/packages.lock.json"\n'
+                "steps:\n"
+                "  - run: dotnet restore src/ReleaseApp/ReleaseApp.csproj "
+                "-p:RestoreLockedMode=true\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project]),
+                [],
+            )
+
+            workflow.write_text(
+                'paths:\n'
+                '  - "src/**/packages.lock.json"\n'
+                "steps:\n"
+                "  - run: |\n"
+                "      dotnet restore src/ReleaseApp/ReleaseApp.csproj --locked-mode\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project]),
+                [
+                    "DOTNET_RESTORE_COMMAND_UNSCOPED:"
+                    ".github/workflows/dotnet-foundation.yml:5",
+                    "DOTNET_LOCKED_RESTORE_COMMAND_MISSING",
+                ],
+            )
+
+
+            workflow.write_text(
+                'paths:\n'
+                '  - "src/**/packages.lock.json"\n'
+                "steps:\n"
+                "  - run: dotnet restore src/ReleaseApp/ReleaseApp.csproj --locked-mode\n"
+                "  - run: >\n"
+                "      dotnet\n"
+                "      restore src/ReleaseApp/ReleaseApp.csproj\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project]),
+                [
+                    "DOTNET_RESTORE_COMMAND_UNSCOPED:"
+                    ".github/workflows/dotnet-foundation.yml:6"
+                ],
+            )
+
+
+            workflow.write_text(
+                'paths:\n'
+                '  - "src/**/packages.lock.json"\n'
+                "steps:\n"
+                "  - run: dotnet restore src/ReleaseApp/ReleaseApp.csproj "
+                "--locked-mode && dotnet restore src/ReleaseApp/ReleaseApp.csproj\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project]),
+                [
+                    "DOTNET_RESTORE_COMMAND_INVALID:"
+                    ".github/workflows/dotnet-foundation.yml:1",
+                    "DOTNET_LOCKED_RESTORE_PROJECT_MISSING:"
+                    "src/ReleaseApp/ReleaseApp.csproj",
+                ],
+            )
+
+
+            workflow.write_text(
+                'paths:\n'
+                '  - "src/**/packages.lock.json"\n'
+                "steps:\n"
+                "  - run: dotnet restore src/ReleaseApp/ReleaseApp.csproj "
+                "--locked-mode --force-evaluate\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project]),
+                [
+                    "DOTNET_RESTORE_NOT_LOCKED:"
+                    ".github/workflows/dotnet-foundation.yml:1"
+                ],
+            )
+
+
+            workflow.write_text(
+                'paths:\n'
+                '  - "src/**/packages.lock.json"\n'
+                "steps:\n"
+                "  - run: dotnet restore src/ReleaseApp/ReleaseApp.csproj "
+                "--locked-mode --lock-file-path artifacts/other.lock.json\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project]),
+                [
+                    "DOTNET_RESTORE_NOT_LOCKED:"
+                    ".github/workflows/dotnet-foundation.yml:1"
+                ],
+            )
+
+
+            workflow.write_text(
+                'paths:\n'
+                '  - "src/**/packages.lock.json"\n'
+                "steps:\n"
+                "  - run: dotnet restore src/Missing/Missing.csproj --locked-mode\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project]),
+                [
+                    "DOTNET_RESTORE_PROJECT_NOT_FOUND:"
+                    ".github/workflows/dotnet-foundation.yml:1:"
+                    "src/Missing/Missing.csproj",
+                    "DOTNET_LOCKED_RESTORE_PROJECT_MISSING:"
+                    "src/ReleaseApp/ReleaseApp.csproj",
+                ],
+            )
+
+
+    def test_dotnet_restore_target_helper_is_imported_in_both_execution_modes(self):
+        root = Path(__file__).resolve().parents[2]
+        for relative in (
+            "tools/check_dependency_composition.py",
+            "tools/build_provenance_manifest.py",
+        ):
+            source = (root / relative).read_text(encoding="utf-8")
+            self.assertEqual(
+                source.count("dotnet_restore_project_target,"),
+                2,
+                relative,
+            )
+
+
+    def test_restore_environment_authority_is_rejected_in_flow_and_runtime_export(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "src" / "ReleaseApp" / "ReleaseApp.csproj"
+            project.parent.mkdir(parents=True)
+            project.write_text("<Project />\n", encoding="utf-8")
+            (project.parent / "packages.lock.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "dependencies": {
+                            "net10.0": {
+                                "ReleaseApp": {"type": "Project"}
+                            }
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
+            workflow.parent.mkdir(parents=True)
+
+            workflow.write_text(
+                'paths:\n'
+                '  - "src/**/packages.lock.json"\n'
+                "env: { RestoreForceEvaluate: true }\n"
+                "steps:\n"
+                "  - run: dotnet restore src/ReleaseApp/ReleaseApp.csproj --locked-mode\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project]),
+                [
+                    "DOTNET_RESTORE_ENVIRONMENT_AUTHORITY_UNSUPPORTED:"
+                    ".github/workflows/dotnet-foundation.yml:"
+                    "3:RestoreForceEvaluate"
+                ],
+            )
+
+            workflow.write_text(
+                'paths:\n'
+                '  - "src/**/packages.lock.json"\n'
+                "steps:\n"
+                '  - run: echo "NuGetLockFilePath=artifacts/other.lock.json" >> "$GITHUB_ENV"\n'
+                "  - run: dotnet restore src/ReleaseApp/ReleaseApp.csproj --locked-mode\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project]),
+                [
+                    "DOTNET_RESTORE_ENVIRONMENT_AUTHORITY_UNSUPPORTED:"
+                    ".github/workflows/dotnet-foundation.yml:"
+                    "4:NuGetLockFilePath"
+                ],
+            )
+
     def test_nuget_lock_changes_must_trigger_dotnet_workflow(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -314,7 +564,18 @@ project = "not-a-table"
             project.parent.mkdir(parents=True)
             project.write_text("<Project />\n", encoding="utf-8")
             (project.parent / "packages.lock.json").write_text(
-                "{}\n",
+                json.dumps(
+                    {
+                        "version": 1,
+                        "dependencies": {
+                            "net10.0": {
+                                "ReleaseApp": {"type": "Project"}
+                            }
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
                 encoding="utf-8",
             )
             workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
@@ -337,6 +598,21 @@ project = "not-a-table"
                 for blocker in self.report.blockers
             )
         )
+
+    def test_omitted_dotnet_roll_forward_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "global.json").write_text(
+                json.dumps({"sdk": {"version": "10.0.100"}}),
+                encoding="utf-8",
+            )
+            blockers, references, version = _dotnet_blockers(root)
+            self.assertEqual(version, "10.0.100")
+            self.assertEqual(references, [])
+            self.assertIn(
+                "DOTNET_ROLL_FORWARD_NOT_DISABLED:None",
+                blockers,
+            )
 
     def test_dotnet_ci_installs_the_same_exact_sdk(self):
         root = Path(__file__).resolve().parents[2]
@@ -366,6 +642,28 @@ project = "not-a-table"
             if item.startswith("NON_EXACT_CI_PYTHON_VERSION:")
         }
         self.assertEqual(blockers, set())
+
+    def test_expression_valued_python_runtime_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            workflows = root / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            workflow = workflows / "expression.yml"
+            workflow.write_text(
+                "steps:\n"
+                "  - uses: actions/setup-python@v5\n"
+                "    with:\n"
+                "      python-version: ${{ matrix.python-version }}\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _ci_runtime_blockers(root),
+                [
+                    "UNRESOLVED_CI_PYTHON_VERSION:"
+                    ".github/workflows/expression.yml:"
+                    "${{ matrix.python-version }}"
+                ],
+            )
 
     def test_unresolved_first_party_rights_remain_fail_closed(self):
         unresolved = {

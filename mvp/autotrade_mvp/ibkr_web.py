@@ -476,6 +476,16 @@ def _install_ibkr_brokerage_session_observation_authority():
             raise IbkrWebAdapterError(
                 "brokerage session environment does not match order authority"
             )
+        if not connected:
+            raise IbkrWebAdapterError("brokerage session is disconnected")
+        if not authenticated:
+            raise IbkrWebAdapterError("brokerage session is not authenticated")
+        if not established:
+            raise IbkrWebAdapterError("brokerage session is not established")
+        if competing:
+            raise IbkrWebAdapterError(
+                "another competing brokerage session is active"
+            )
         return evidence_ref, response_sha256
 
     return from_observation, require
@@ -826,6 +836,11 @@ def _prepare_normalized_order_impl(
     at: datetime,
     maximum_session_age_seconds: int,
     _require_session_authority,
+    _capability_admits,
+    _intent_create,
+    _validate_client_order_id,
+    _order_types,
+    _decimal_text_value,
 ) -> IbkrNormalizedOrder:
     """Build normalized fields but deliberately stop before provider serialization.
 
@@ -848,7 +863,7 @@ def _prepare_normalized_order_impl(
         conid=raw_contract.conid,
         conidex=raw_contract.conidex,
     )
-    sealed_intent = IbkrWebOrderIntent.create(
+    sealed_intent = _intent_create(
         instrument_version=intent.instrument_version,
         account_id=intent.account_id,
         contract=sealed_contract,
@@ -864,7 +879,7 @@ def _prepare_normalized_order_impl(
         manual_indicator=intent.manual_indicator,
         ext_operator=intent.ext_operator,
     )
-    coid = validate_coid(client_order_id)
+    coid = _validate_client_order_id(client_order_id)
     point = _instant(at, name="at")
     if (
         type(maximum_session_age_seconds) is not int
@@ -919,8 +934,7 @@ def _prepare_normalized_order_impl(
         account_id=sealed_intent.account_id,
         environment=capability_environment,
     )
-    IbkrBrokerageSessionStatus.require_trade_ready(session)
-    if not CapabilitySnapshot.admits(
+    if not _capability_admits(
         capability,
         at=point,
         order_type=sealed_intent.order_type,
@@ -931,7 +945,7 @@ def _prepare_normalized_order_impl(
 
     fields: dict[str, object] = {
         "acctId": sealed_intent.account_id,
-        "orderType": _ORDER_TYPES[sealed_intent.order_type],
+        "orderType": _order_types[sealed_intent.order_type],
         "side": sealed_intent.side,
         "tif": sealed_intent.time_in_force,
         "cOID": coid,
@@ -948,12 +962,16 @@ def _prepare_normalized_order_impl(
     return IbkrNormalizedOrder(
         endpoint=f"/iserver/account/{sealed_intent.account_id}/orders",
         fields=fields,
-        exact_quantity_text=_decimal_text(sealed_intent.quantity),
+        exact_quantity_text=_decimal_text_value(sealed_intent.quantity),
         exact_limit_price_text=(
-            None if sealed_intent.limit_price is None else _decimal_text(sealed_intent.limit_price)
+            None
+            if sealed_intent.limit_price is None
+            else _decimal_text_value(sealed_intent.limit_price)
         ),
         exact_stop_price_text=(
-            None if sealed_intent.stop_price is None else _decimal_text(sealed_intent.stop_price)
+            None
+            if sealed_intent.stop_price is None
+            else _decimal_text_value(sealed_intent.stop_price)
         ),
         capability_snapshot_id=capability.snapshot_id,
         documentation_refs=tuple(IBKR_WEB_DOCS.values()),
@@ -963,8 +981,13 @@ def _prepare_normalized_order_impl(
 def _bind_prepare_normalized_order(
     implementation,
     require_session_authority,
+    capability_admits,
+    intent_create,
+    validate_client_order_id,
+    order_types,
+    decimal_text_value,
 ):
-    """Keep the financial session-evidence guard outside mutable module lookup."""
+    """Keep financial admission guards outside mutable module lookup."""
 
     def prepare_normalized_order(
         intent: IbkrWebOrderIntent,
@@ -983,6 +1006,11 @@ def _bind_prepare_normalized_order(
             at=at,
             maximum_session_age_seconds=maximum_session_age_seconds,
             _require_session_authority=require_session_authority,
+            _capability_admits=capability_admits,
+            _intent_create=intent_create,
+            _validate_client_order_id=validate_client_order_id,
+            _order_types=order_types,
+            _decimal_text_value=decimal_text_value,
         )
 
     return prepare_normalized_order
@@ -991,6 +1019,11 @@ def _bind_prepare_normalized_order(
 prepare_normalized_order = _bind_prepare_normalized_order(
     _prepare_normalized_order_impl,
     _require_ibkr_brokerage_session_observation,
+    CapabilitySnapshot.admits,
+    IbkrWebOrderIntent.create,
+    validate_coid,
+    _ORDER_TYPES,
+    _decimal_text,
 )
 del _bind_prepare_normalized_order
 del _prepare_normalized_order_impl

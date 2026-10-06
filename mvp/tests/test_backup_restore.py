@@ -448,6 +448,48 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertFalse(any(root.glob(".autotrade-backup-*")))
 
+    def test_runtime_checkpoint_journal_backing_replacement_aborts_backup(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_autonomous_sources(root)
+            target = root / "backup"
+            journal = state / "journal.sqlite3"
+            replacement = root / "replacement-journal.sqlite3"
+            with closing(sqlite3.connect(journal)) as source_db:
+                with closing(sqlite3.connect(replacement)) as replacement_db:
+                    source_db.backup(replacement_db)
+                    replacement_db.commit()
+
+            original_backup_sqlite = backup_module._backup_sqlite
+            injected = False
+
+            def replace_backing_then_snapshot(source, destination):
+                nonlocal injected
+                if not injected:
+                    injected = True
+                    replacement.replace(source)
+                    for suffix in ("-wal", "-shm"):
+                        try:
+                            Path(str(source) + suffix).unlink()
+                        except FileNotFoundError:
+                            pass
+                return original_backup_sqlite(source, destination)
+
+            with patch.object(
+                backup_module,
+                "_backup_sqlite",
+                side_effect=replace_backing_then_snapshot,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "journal generation changed across snapshot",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
     def test_runtime_checkpoint_advance_during_sqlite_snapshot_aborts_backup(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

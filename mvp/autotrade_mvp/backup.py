@@ -23,6 +23,7 @@ from .diagnostics import build_diagnostic_snapshot
 from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import require_current_reconciliation_checkpoint
 from .recovery import HostState, OwnerFence, RecoveryController
+from .store_identity import require_database_identity
 from .simulation_runtime_checkpoint import (
     AutonomousRuntimeCheckpointError,
     checkpoint_path as autonomous_runtime_checkpoint_path,
@@ -1188,6 +1189,16 @@ def create_backup(
         journal_digest, journal_size, journal_schema = _backup_sqlite(
             journal_source, journal_target
         )
+        if runtime_checkpoint_source_store_identity is not None:
+            try:
+                require_database_identity(
+                    journal_source,
+                    runtime_checkpoint_source_store_identity,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as error:
+                raise BackupError(
+                    "Autonomous runtime checkpoint journal generation changed across snapshot"
+                ) from error
         entries.append(
             _entry(
                 "state/journal.sqlite3",
@@ -1335,6 +1346,16 @@ def create_backup(
             raise BackupError(
                 "Autonomous runtime checkpoint inventory changed before backup commit"
             )
+        if runtime_checkpoint_source_store_identity is not None:
+            try:
+                require_database_identity(
+                    journal_source,
+                    runtime_checkpoint_source_store_identity,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as error:
+                raise BackupError(
+                    "Autonomous runtime checkpoint journal generation changed before backup commit"
+                ) from error
         if runtime_checkpoint_present_at_cut:
             try:
                 checkpoint_unchanged = (

@@ -194,6 +194,63 @@ def _nuget_purl(name: str, version: str) -> str:
     return f"pkg:nuget/{name}@{version}"
 
 
+def _validate_autotrade_sbom_subject(sbom, *, source_sha: str) -> None:
+    """Bind the SPDX application subject to the exact source composition."""
+
+    if type(sbom) is not dict:
+        raise ReleaseScopeMappingError("SBOM must be object")
+    packages = sbom.get("packages")
+    relationships = sbom.get("relationships")
+    if type(packages) is not list:
+        raise ReleaseScopeMappingError("SBOM packages must be list")
+    if type(relationships) is not list:
+        raise ReleaseScopeMappingError("SBOM relationships must be list")
+
+    applications = [
+        item
+        for item in packages
+        if type(item) is dict and item.get("name") == "AutoTrade"
+    ]
+    if len(applications) != 1:
+        raise ReleaseScopeMappingError(
+            "SBOM requires exactly one AutoTrade application package"
+        )
+    application = applications[0]
+    if (
+        application.get("SPDXID") != "SPDXRef-Package-AutoTrade"
+        or application.get("versionInfo") != source_sha
+        or application.get("licenseConcluded") != "NOASSERTION"
+        or application.get("primaryPackagePurpose") != "APPLICATION"
+    ):
+        raise ReleaseScopeMappingError(
+            "SBOM AutoTrade application identity differs from composition"
+        )
+    refs = application.get("externalRefs", [])
+    if type(refs) is not list or any(
+        type(ref) is dict and ref.get("referenceType") == "purl"
+        for ref in refs
+    ):
+        raise ReleaseScopeMappingError(
+            "SBOM AutoTrade application must not use an external package purl"
+        )
+
+    describes = [
+        relation
+        for relation in relationships
+        if (
+            type(relation) is dict
+            and relation.get("spdxElementId") == "SPDXRef-DOCUMENT"
+            and relation.get("relationshipType") == "DESCRIBES"
+            and relation.get("relatedSpdxElement")
+            == "SPDXRef-Package-AutoTrade"
+        )
+    ]
+    if len(describes) != 1:
+        raise ReleaseScopeMappingError(
+            "SBOM must describe the exact AutoTrade application package"
+        )
+
+
 def normalize_spdx_packages(sbom) -> dict[str, dict[str, object]]:
     if (
         type(sbom) is not dict
@@ -205,6 +262,7 @@ def normalize_spdx_packages(sbom) -> dict[str, dict[str, object]]:
     if type(packages) is not list:
         raise ReleaseScopeMappingError("SBOM packages must be list")
     by_purl = {}
+    seen_spdx_ids = set()
     for index, package in enumerate(packages):
         if type(package) is not dict:
             raise ReleaseScopeMappingError(f"SBOM package[{index}] must be object")
@@ -213,6 +271,9 @@ def normalize_spdx_packages(sbom) -> dict[str, dict[str, object]]:
         )
         if SPDX_ID.fullmatch(spdx_id) is None:
             raise ReleaseScopeMappingError("SBOM package SPDXID invalid")
+        if spdx_id in seen_spdx_ids:
+            raise ReleaseScopeMappingError("SBOM package SPDXID is duplicated")
+        seen_spdx_ids.add(spdx_id)
         name = _text(package.get("name"), name=f"SBOM package[{index}].name")
         version = _text(
             package.get("versionInfo"), name=f"SBOM package[{index}].versionInfo"
@@ -295,6 +356,10 @@ def build_mapping(
     composition = normalize_composition(composition)
     if "sha256:" + sha256(sbom_raw).hexdigest() != composition["sbom_sha256"]:
         raise ReleaseScopeMappingError("SBOM bytes do not match composition")
+    _validate_autotrade_sbom_subject(
+        sbom,
+        source_sha=composition["source_sha"],
+    )
     sbom_packages = normalize_spdx_packages(sbom)
 
     rights = {}

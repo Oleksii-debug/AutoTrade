@@ -17,6 +17,12 @@ CONTENT_HEX = sha512(b"nupkg").hexdigest()
 
 def _sbom(*, extra=False, wrong_hash=False):
     packages = [{
+        "SPDXID": "SPDXRef-Package-AutoTrade",
+        "name": "AutoTrade",
+        "versionInfo": SOURCE_SHA,
+        "licenseConcluded": "NOASSERTION",
+        "primaryPackagePurpose": "APPLICATION",
+    }, {
         "SPDXID": "SPDXRef-WebView2",
         "name": "Microsoft.Web.WebView2",
         "versionInfo": "1.0.4258.31",
@@ -36,6 +42,7 @@ def _sbom(*, extra=False, wrong_hash=False):
             "SPDXID": "SPDXRef-Unknown",
             "name": "Unknown",
             "versionInfo": "1.0",
+            "licenseConcluded": "NOASSERTION",
             "externalRefs": [{
                 "referenceType": "purl",
                 "referenceLocator": "pkg:nuget/Unknown@1.0",
@@ -49,6 +56,11 @@ def _sbom(*, extra=False, wrong_hash=False):
         "spdxVersion": "SPDX-2.3",
         "SPDXID": "SPDXRef-DOCUMENT",
         "packages": packages,
+        "relationships": [{
+            "spdxElementId": "SPDXRef-DOCUMENT",
+            "relationshipType": "DESCRIBES",
+            "relatedSpdxElement": "SPDXRef-Package-AutoTrade",
+        }],
     }
     raw = (
         json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
@@ -219,6 +231,61 @@ class ReleaseScopeMappingTests(unittest.TestCase):
         ):
             self._build(extra=True)
 
+
+
+    def test_sbom_application_source_must_match_composition(self):
+        document, _ = _sbom()
+        document["packages"][0]["versionInfo"] = "f" * 40
+        raw = (
+            json.dumps(document, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError,
+            "application identity differs from composition",
+        ):
+            self._build(sbom_override=(document, raw))
+
+    def test_sbom_requires_autotrade_application_package(self):
+        document, _ = _sbom()
+        document["packages"] = [
+            item for item in document["packages"]
+            if item["name"] != "AutoTrade"
+        ]
+        raw = (
+            json.dumps(document, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError,
+            "exactly one AutoTrade application",
+        ):
+            self._build(sbom_override=(document, raw))
+
+    def test_sbom_requires_document_describes_application(self):
+        document, _ = _sbom()
+        document["relationships"] = []
+        raw = (
+            json.dumps(document, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError,
+            "describe the exact AutoTrade application",
+        ):
+            self._build(sbom_override=(document, raw))
+
+    def test_sbom_duplicate_spdx_identity_fails(self):
+        document, _ = _sbom()
+        document["packages"][1]["SPDXID"] = "SPDXRef-Package-AutoTrade"
+        raw = (
+            json.dumps(document, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError, "SPDXID is duplicated"
+        ):
+            self._build(sbom_override=(document, raw))
 
     def test_locked_package_license_mismatch_fails(self):
         document, raw = _sbom()

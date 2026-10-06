@@ -1469,6 +1469,34 @@ def unknown_submissions_from_dispatch(
         }:
             raise ValueError("submission recovery history has invalid causal shape")
 
+        event_instants: list[str] = []
+        for event_type, event in zip(event_types, events):
+            canonical_fields = []
+            for field_name in ("occurred_at", "observed_at", "committed_at"):
+                raw_timestamp = _text(
+                    event.get(field_name),
+                    name=f"{event_type}.{field_name}",
+                )
+                canonical_timestamp = _instant(
+                    raw_timestamp,
+                    name=f"{event_type}.{field_name}",
+                )
+                if raw_timestamp != canonical_timestamp:
+                    raise ValueError(
+                        "submission recovery history timestamp is not canonical UTC"
+                    )
+                canonical_fields.append(canonical_timestamp)
+            if len(set(canonical_fields)) != 1:
+                raise ValueError(
+                    "submission recovery event timestamp authorities disagree"
+                )
+            event_instants.append(canonical_fields[0])
+        if any(
+            earlier > later
+            for earlier, later in zip(event_instants, event_instants[1:])
+        ):
+            raise ValueError("submission recovery history chronology is not monotonic")
+
         # The caller-supplied aggregate map is a locator only. Modern dispatch
         # rows carry the logical attempt identity in SubmissionPrepared and must
         # agree exactly with the requested identity. Historical rows without

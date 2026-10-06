@@ -56,6 +56,14 @@ class _HostileDateTime(datetime):
         raise AssertionError("hostile datetime.astimezone must not execute")
 
 
+class _HostileInt(int):
+    def __lt__(self, other):
+        raise AssertionError("hostile int comparison must not execute")
+
+    def __le__(self, other):
+        raise AssertionError("hostile int comparison must not execute")
+
+
 def causal_evidence(
     *,
     evidence_id="base-input",
@@ -312,6 +320,32 @@ class AblationTests(unittest.TestCase):
                 cost=1,
                 elapsed=10,
                 components=("wire-story-group-7", "wire-story-group-7"),
+            )
+
+    def test_deadline_integer_subclasses_are_rejected_before_comparison(self):
+        with self.assertRaisesRegex(TypeError, "exact built-in integers"):
+            AblationOutcome(
+                case_id="hostile-int",
+                input_fingerprint=FINGERPRINT_A,
+                variant="FULL",
+                utility=Decimal("1"),
+                cost=Decimal("0"),
+                elapsed_ms=_HostileInt(1),
+                deadline_ms=100,
+                components=("base",),
+                input_cutoff_utc=CUT,
+                decision_utc=CUT,
+                outcome_available_utc=CUT + timedelta(hours=1),
+                input_evidence=(causal_evidence(),),
+            )
+
+    def test_minimum_pairs_integer_subclass_is_rejected_before_comparison(self):
+        with self.assertRaisesRegex(ValueError, "minimum_pairs"):
+            evaluate_incremental_value(
+                "agent",
+                [pair("hostile-minimum-a", "1"), pair("hostile-minimum-b", "1")],
+                minimum_pairs=_HostileInt(2),
+                required_lower_bound=Decimal("0"),
             )
 
     def test_causal_timestamp_subclass_is_rejected_before_virtual_methods(self):

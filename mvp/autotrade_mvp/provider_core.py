@@ -1578,8 +1578,51 @@ def _install_provider_submission_observation_authority(binding_projection):
             )
 
         # Financial/provider-route extensions are sealed by submission_scope_hash.
-        # Keep the prepared-request subset mandatory and independently cross-check
-        # every extension whose identity is also available at this neutral boundary.
+        # Accept only the canonical base write shape or the complete financial-route
+        # shape; partial/unknown authority axes fail closed.
+        provider_extension_keys = canonical_frozenset(("provider_environment",))
+        financial_extension_keys = canonical_frozenset(
+            ("provider_id", "account_id", "environment", "capability_snapshot_id")
+        )
+        route_extension_keys = canonical_frozenset(
+            (
+                "provider_route_qualification_id",
+                "provider_route_capability_snapshot_id",
+                "provider_route_decision_journal_sequence_cut",
+                "provider_route_provider_environment",
+                "provider_route_adapter_code_sha",
+                "provider_route_packaged_artifact_digest",
+                "provider_route_protocol_id",
+                "provider_route_protocol_version",
+                "provider_route_entity_policy_id",
+                "provider_route_entity_id",
+            )
+        )
+        extension_keys = scope_keys.difference(required_keys)
+        allowed_extension_keys = (
+            provider_extension_keys
+            | financial_extension_keys
+            | route_extension_keys
+        )
+        if not extension_keys.issubset(allowed_extension_keys):
+            raise error_type("durable submission scope has unknown authority axes")
+        route_shape_present = bool(
+            extension_keys.intersection(
+                financial_extension_keys | route_extension_keys
+            )
+        )
+        if route_shape_present:
+            required_route_shape = (
+                required_keys
+                | provider_extension_keys
+                | financial_extension_keys
+                | route_extension_keys
+            )
+            if scope_keys != required_route_shape:
+                raise error_type(
+                    "durable financial route submission scope is incomplete"
+                )
+
         financial_scope = {
             "provider_id": provider,
             "account_id": binding["account_id"],

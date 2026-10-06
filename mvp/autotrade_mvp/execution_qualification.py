@@ -36,6 +36,7 @@ from .execution_realism import (
     SimulatedExecution,
     SimulatedOrder,
     _detached_dataclass_input,
+    _execution_price_grid_matches_instrument,
     _instant,
     simulate_execution,
 )
@@ -333,6 +334,18 @@ def validate_execution_qualification(
         failures.append("instrument_asset_class")
     if model.price_projection != authoritative_projection:
         failures.append("price_projection_authority")
+    try:
+        price_grid_matches = (
+            model.price_grid is not None
+            and _execution_price_grid_matches_instrument(
+                model.price_grid,
+                detached_instrument,
+            )
+        )
+    except (ExecutionRealismError, TypeError, ValueError):
+        price_grid_matches = False
+    if not price_grid_matches:
+        failures.append("price_grid_authority")
     if qualification.asset_class != normalized_asset:
         failures.append("asset_class")
     if qualification.data_fidelity != model.data_fidelity:

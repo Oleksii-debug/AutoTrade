@@ -28,6 +28,7 @@ from .execution_realism import (
     _decimal,
     _detached_dataclass_input,
     _instant,
+    _require_market_projection_authority,
 )
 
 
@@ -67,10 +68,12 @@ def _oracle_market_price_bound(
         raise ExecutionOracleError(
             "MARKET execution requires authoritative price projection policy"
         )
-    if projection.instrument_version != order.instrument_version:
+    try:
+        projection = _require_market_projection_authority(order, model)
+    except (ExecutionRealismError, TypeError) as error:
         raise ExecutionOracleError(
-            "price projection instrument_version must match order instrument_version"
-        )
+            "MARKET execution price-grid authority is invalid"
+        ) from error
     try:
         reference_is_on_grid = is_exact_decimal_multiple(
             base_price,

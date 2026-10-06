@@ -10,7 +10,11 @@ from uuid import NAMESPACE_URL, uuid5
 
 from autotrade_research.artifacts import ArtifactStore
 from mvp.autotrade_mvp.execution_oracle import ExecutionOracleError
-from mvp.autotrade_mvp.instruments import InstrumentVersion
+from mvp.autotrade_mvp.instruments import (
+    InstrumentRegistry,
+    InstrumentVersion,
+    TradingCalendar,
+)
 from mvp.autotrade_mvp.execution_qualification import (
     ExecutionModelQualification,
     ExecutionQualificationError,
@@ -19,6 +23,7 @@ from mvp.autotrade_mvp.execution_qualification import (
 )
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
+    ExecutionPriceGrid,
     ExecutionPriceProjectionPolicy,
     LiquidityObservation,
     SimulatedOrder,
@@ -91,6 +96,11 @@ def instrument(*, price_tick="0.01", metadata_evidence=None):
 
 
 def model(**overrides):
+    selected_instrument = instrument()
+    registry = InstrumentRegistry(
+        calendars=(TradingCalendar.continuous_24_7(),),
+        versions=(selected_instrument,),
+    )
     values = dict(
         model_version="exec-realism-v1",
         calibration_sha256=CALIBRATION,
@@ -104,7 +114,13 @@ def model(**overrides):
         impact_bps_at_max_participation="10",
         bar_half_spread_bps="0",
         scenario_cost_multiplier="1",
-        price_projection=ExecutionPriceProjectionPolicy.from_instrument(instrument()),
+        price_projection=ExecutionPriceProjectionPolicy.from_instrument(
+            selected_instrument
+        ),
+        price_grid=ExecutionPriceGrid.from_registry(
+            registry,
+            INSTRUMENT_REF,
+        ),
     )
     values.update(overrides)
     return ExecutionModel.create(**values)

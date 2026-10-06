@@ -8,7 +8,7 @@ exact Decimal-compatible values; binary floats are rejected.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
@@ -155,6 +155,265 @@ class ExecutionPriceProjectionPolicy:
         )
 
 
+def _instrument_price_source_evidence_binding(instrument) -> str:
+    """Bind the complete immutable metadata-evidence identity behind one price grid."""
+
+    from .instruments import InstrumentVersion, _detached_instrument_version
+
+    if type(instrument) is not InstrumentVersion:
+        raise TypeError("instrument must be exact InstrumentVersion")
+    detached = _detached_instrument_version(instrument)
+    if not detached.metadata_evidence:
+        raise ExecutionRealismError(
+            "canonical instrument price grid requires metadata evidence"
+        )
+    payload: list[dict[str, str]] = []
+    for evidence in detached.metadata_evidence:
+        if any(
+            type(key) is not str or type(value) is not str
+            for key, value in evidence.items()
+        ):
+            raise TypeError(
+                "instrument metadata evidence must contain exact text identity"
+            )
+        payload.append({key: evidence[key] for key in sorted(evidence)})
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True, init=False)
+class ExecutionPriceGrid:
+    """Immutable MARKET price-grid authority issued by InstrumentRegistry."""
+
+    instrument_version: str
+    price_quantum: Decimal
+    projection_policy_id: str
+    projection_policy_version: str
+    instrument_metadata_binding: str
+    source_evidence_binding: str
+    _authority_token: object = field(repr=False, compare=False)
+    _issued_fingerprint: str = field(repr=False, compare=False)
+
+    def __init__(self, *args, **kwargs) -> None:
+        raise TypeError(
+            "ExecutionPriceGrid must be issued by the canonical InstrumentRegistry"
+        )
+
+    @classmethod
+    def from_registry(
+        cls,
+        registry,
+        instrument_version: str,
+    ) -> "ExecutionPriceGrid":
+        return _issue_execution_price_grid(registry, instrument_version)
+
+    @property
+    def fingerprint(self) -> str:
+        return _execution_price_grid_fingerprint(self)
+
+
+def _execution_price_grid_authority_operations():
+    authority_token = object()
+    public_fields = (
+        "instrument_version",
+        "price_quantum",
+        "projection_policy_id",
+        "projection_policy_version",
+        "instrument_metadata_binding",
+        "source_evidence_binding",
+    )
+    expected_state_fields = frozenset(
+        public_fields + ("_authority_token", "_issued_fingerprint")
+    )
+
+    def normalize(
+        *,
+        instrument_version,
+        price_quantum,
+        projection_policy_id,
+        projection_policy_version,
+        instrument_metadata_binding,
+        source_evidence_binding,
+    ) -> dict[str, object]:
+        policy_id = _text(
+            projection_policy_id,
+            name="price grid projection_policy_id",
+        )
+        policy_version = _text(
+            projection_policy_version,
+            name="price grid projection_policy_version",
+        )
+        if (
+            policy_id != _PRICE_PROJECTION_POLICY_ID
+            or policy_version != _PRICE_PROJECTION_POLICY_VERSION
+        ):
+            raise ExecutionRealismError(
+                "unsupported execution price projection policy"
+            )
+        return {
+            "instrument_version": _text(
+                instrument_version,
+                name="price grid instrument_version",
+            ),
+            "price_quantum": _positive(
+                price_quantum,
+                name="price grid price_quantum",
+            ),
+            "projection_policy_id": policy_id,
+            "projection_policy_version": policy_version,
+            "instrument_metadata_binding": _digest(
+                instrument_metadata_binding,
+                name="price grid instrument_metadata_binding",
+            ),
+            "source_evidence_binding": _digest(
+                source_evidence_binding,
+                name="price grid source_evidence_binding",
+            ),
+        }
+
+    def fingerprint_values(values: dict[str, object]) -> str:
+        payload = {
+            "instrument_version": values["instrument_version"],
+            "price_quantum": _decimal_text(values["price_quantum"]),
+            "projection_policy_id": values["projection_policy_id"],
+            "projection_policy_version": values["projection_policy_version"],
+            "instrument_metadata_binding": values["instrument_metadata_binding"],
+            "source_evidence_binding": values["source_evidence_binding"],
+            "rounding": {"BUY": "CEILING", "SELL": "FLOOR"},
+        }
+        return sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def build(values: dict[str, object]) -> ExecutionPriceGrid:
+        normalized = normalize(**values)
+        result = object.__new__(ExecutionPriceGrid)
+        for name in public_fields:
+            object.__setattr__(result, name, normalized[name])
+        object.__setattr__(result, "_authority_token", authority_token)
+        object.__setattr__(
+            result,
+            "_issued_fingerprint",
+            fingerprint_values(normalized),
+        )
+        return result
+
+    def issue(registry, instrument_version: str) -> ExecutionPriceGrid:
+        from .instruments import InstrumentRegistry, InstrumentVersion
+
+        if type(registry) is not InstrumentRegistry:
+            raise TypeError("registry must be exact InstrumentRegistry")
+        instrument = registry.exact(instrument_version)
+        if type(instrument) is not InstrumentVersion:
+            raise TypeError("registry returned non-canonical InstrumentVersion")
+        return build(
+            {
+                "instrument_version": (
+                    f"{instrument.instrument_id}@{instrument.version}"
+                ),
+                "price_quantum": instrument.price_tick,
+                "projection_policy_id": _PRICE_PROJECTION_POLICY_ID,
+                "projection_policy_version": _PRICE_PROJECTION_POLICY_VERSION,
+                "instrument_metadata_binding": (
+                    instrument.metadata_evidence_binding()
+                ),
+                "source_evidence_binding": (
+                    _instrument_price_source_evidence_binding(instrument)
+                ),
+            }
+        )
+
+    def detach(value) -> ExecutionPriceGrid:
+        if type(value) is not ExecutionPriceGrid:
+            raise TypeError("price_grid must be exact ExecutionPriceGrid")
+        state = object.__getattribute__(value, "__dict__")
+        if (
+            type(state) is not dict
+            or any(type(name) is not str for name in state)
+            or set(state) != expected_state_fields
+        ):
+            raise TypeError("price_grid has non-canonical state")
+        if state["_authority_token"] is not authority_token:
+            raise ExecutionRealismError(
+                "price grid was not issued by the canonical InstrumentRegistry"
+            )
+        values = {name: state[name] for name in public_fields}
+        normalized = normalize(**values)
+        expected_fingerprint = fingerprint_values(normalized)
+        if (
+            type(state["_issued_fingerprint"]) is not str
+            or state["_issued_fingerprint"] != expected_fingerprint
+        ):
+            raise ExecutionRealismError(
+                "price grid authority content changed after issuance"
+            )
+        return build(normalized)
+
+    def fingerprint(value) -> str:
+        detached = detach(value)
+        return object.__getattribute__(detached, "_issued_fingerprint")
+
+    def matches_instrument(value, instrument) -> bool:
+        from .instruments import InstrumentVersion, _detached_instrument_version
+
+        detached_grid = detach(value)
+        if type(instrument) is not InstrumentVersion:
+            raise TypeError("instrument must be exact InstrumentVersion")
+        detached_instrument = _detached_instrument_version(instrument)
+        expected_version = (
+            f"{detached_instrument.instrument_id}@{detached_instrument.version}"
+        )
+        return (
+            detached_grid.instrument_version == expected_version
+            and detached_grid.price_quantum == detached_instrument.price_tick
+            and detached_grid.instrument_metadata_binding
+            == _digest(
+                detached_instrument.metadata_evidence_binding(),
+                name="instrument metadata binding",
+            )
+            and detached_grid.source_evidence_binding
+            == _instrument_price_source_evidence_binding(detached_instrument)
+            and detached_grid.projection_policy_id
+            == _PRICE_PROJECTION_POLICY_ID
+            and detached_grid.projection_policy_version
+            == _PRICE_PROJECTION_POLICY_VERSION
+        )
+
+    return issue, detach, fingerprint, matches_instrument
+
+
+(
+    _issue_execution_price_grid,
+    _detach_execution_price_grid,
+    _execution_price_grid_fingerprint,
+    _execution_price_grid_matches_instrument,
+) = _execution_price_grid_authority_operations()
+
+
+def _projection_grid_consistent(
+    projection: ExecutionPriceProjectionPolicy,
+    grid: ExecutionPriceGrid,
+) -> bool:
+    return (
+        projection.instrument_version == grid.instrument_version
+        and projection.price_quantum == grid.price_quantum
+        and projection.policy_id == grid.projection_policy_id
+        and projection.policy_version == grid.projection_policy_version
+        and projection.instrument_metadata_binding
+        == grid.instrument_metadata_binding
+    )
+
+
 @dataclass(frozen=True)
 class ExecutionModel:
     model_version: str
@@ -170,6 +429,7 @@ class ExecutionModel:
     bar_half_spread_bps: Decimal
     scenario_cost_multiplier: Decimal
     price_projection: ExecutionPriceProjectionPolicy | None = None
+    price_grid: ExecutionPriceGrid | None = None
 
     def __post_init__(self) -> None:
         if type(self.latency_ms) is not int or self.latency_ms < 0:
@@ -229,6 +489,17 @@ class ExecutionModel:
                 name="price_projection",
             )
             object.__setattr__(self, "price_projection", projection)
+        if self.price_grid is not None:
+            grid = _detach_execution_price_grid(self.price_grid)
+            object.__setattr__(self, "price_grid", grid)
+        if self.price_projection is not None and self.price_grid is not None:
+            if not _projection_grid_consistent(
+                self.price_projection,
+                self.price_grid,
+            ):
+                raise ExecutionRealismError(
+                    "price projection and canonical price grid authority mismatch"
+                )
 
     @classmethod
     def create(
@@ -247,6 +518,7 @@ class ExecutionModel:
         bar_half_spread_bps=0,
         scenario_cost_multiplier=1,
         price_projection: ExecutionPriceProjectionPolicy | None = None,
+        price_grid: ExecutionPriceGrid | None = None,
     ) -> "ExecutionModel":
         if type(latency_ms) is not int or latency_ms < 0:
             raise ExecutionRealismError("latency_ms must be a non-negative integer")
@@ -290,6 +562,7 @@ class ExecutionModel:
             ),
             scenario_cost_multiplier=multiplier,
             price_projection=price_projection,
+            price_grid=price_grid,
         )
 
     @property
@@ -321,6 +594,11 @@ class ExecutionModel:
                     "price_quantum": _decimal_text(self.price_projection.price_quantum),
                     "instrument_metadata_binding": self.price_projection.instrument_metadata_binding,
                 }
+            ),
+            "price_grid_fingerprint": (
+                None
+                if self.price_grid is None
+                else self.price_grid.fingerprint
             ),
         }
         encoded = json.dumps(
@@ -673,7 +951,20 @@ def _require_market_projection_authority(
         raise ExecutionRealismError(
             "MARKET execution requires authoritative price projection policy"
         )
-    if projection.instrument_version != order.instrument_version:
+    grid = model.price_grid
+    if grid is None:
+        raise ExecutionRealismError(
+            "MARKET execution requires canonical InstrumentRegistry price grid"
+        )
+    grid = _detach_execution_price_grid(grid)
+    if not _projection_grid_consistent(projection, grid):
+        raise ExecutionRealismError(
+            "price projection and canonical price grid authority mismatch"
+        )
+    if (
+        projection.instrument_version != order.instrument_version
+        or grid.instrument_version != order.instrument_version
+    ):
         raise ExecutionRealismError(
             "price projection instrument_version must match order instrument_version"
         )

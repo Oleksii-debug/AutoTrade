@@ -705,6 +705,61 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             with self.subTest(helper=helper.__name__):
                 self.assertIsNone(helper.__kwdefaults__)
 
+    def test_submission_consumer_rejects_post_mint_prepared_digest_retarget(self):
+        prepared = prepared_futures_request(
+            "kraken-futures-post-mint-digest-retarget",
+            provider_environment="LIVE",
+        )
+        object.__setattr__(
+            prepared,
+            "body_sha256",
+            "sha256:" + "0" * 64,
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "prepared request authority changed",
+        ):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=prepared,
+                observation=None,
+                transport_ambiguous=True,
+            )
+
+    def test_submission_consumer_rejects_exact_unissued_prepared_clone(self):
+        issued = prepared_futures_request(
+            "kraken-futures-exact-unissued-clone",
+            provider_environment="LIVE",
+        )
+        forged = object.__new__(KrakenFuturesPreparedRequest)
+        for field_name in (
+            "endpoint",
+            "body",
+            "account_id",
+            "environment",
+            "provider_environment",
+            "capability_snapshot_id",
+            "instrument_version",
+            "body_sha256",
+            "_factory_token",
+        ):
+            object.__setattr__(
+                forged,
+                field_name,
+                object.__getattribute__(issued, field_name),
+            )
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "prepared request authority changed",
+        ):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=forged,
+                observation=None,
+                transport_ambiguous=True,
+            )
+
     def test_submission_consumer_rejects_prepared_subclass_before_virtual_callback(self):
         callbacks = []
 
@@ -743,7 +798,7 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         object.__setattr__(prepared, "provider_environment", "DEMO")
         with self.assertRaisesRegex(
             ProviderCoreError,
-            "provider environment does not match runtime environment",
+            "prepared request authority changed",
         ):
             parse_submission_response(
                 attempt_id=attempt,

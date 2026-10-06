@@ -1297,6 +1297,7 @@ def _install_signed_http_request_integrity():
             raise ProviderTransportScopeError(
                 "signed request changed after construction"
             )
+        return method, url, headers, body, timeout_seconds
 
     return register, require
 
@@ -1559,6 +1560,7 @@ def _install_authenticated_read_http_request_integrity():
             raise ProviderTransportScopeError(
                 "authenticated-read request changed after construction"
             )
+        return method, url, headers, body, timeout_seconds
 
     return register, require
 
@@ -1650,119 +1652,144 @@ class UrllibJsonWireClient:
         except (TypeError, ValueError) as error:
             raise ProviderTransportError("invalid or oversized provider HTTP response") from error
 
-    def send(
-        self,
-        request: SignedHttpRequest | AuthenticatedReadHttpRequest,
-    ) -> bytes | TradingWireResponse | AuthenticatedReadWireResponse:
-        is_authenticated_read = type(request) is AuthenticatedReadHttpRequest
-        is_signed_write = type(request) is SignedHttpRequest
-        if not is_authenticated_read and not is_signed_write:
-            raise TypeError(
-                "request must be exact SignedHttpRequest or exact AuthenticatedReadHttpRequest"
-            )
-        if is_authenticated_read:
-            _require_authenticated_read_http_request(request)
-            data = request.body or None
-            method = request.method
-        else:
-            _require_signed_http_request(request)
-            data = request.body or None
-            method = request.method
-        outbound = Request(
-            request.url,
-            data=data,
-            headers=dict(request.headers),
-            method=method,
-        )
-        # Capture one exact validated budget before any response-body read.
-        # Mutating the client during I/O cannot widen this send's read envelope.
-        response_budget = self._response_budget()
-        http_status: int | None = None
-        http_error_status: int | None = None
-        http_error_invalid_status = False
-        http_error_read_failed = False
-        transport_unavailable = False
-        try:
-            with self._opener.open(
-                outbound,
-                timeout=request.timeout_seconds,
-            ) as response:
-                http_status = int(response.status)
-                raw = self._bounded_body(
-                    response.read(response_budget + 1),
-                    max_bytes=response_budget,
-                )
-        except HTTPError as error:
-            # An HTTPError retains its request URL and sometimes provider
-            # headers, including signed read-query/credential material.
-            # Read at most one bounded body here, but NEVER raise or construct
-            # typed responses while the secret-bearing exception is active:
-            # implicit __context__/explicit __cause__ would expose it later.
-            try:
-                observed_status = error.code
-                if type(observed_status) is int and 100 <= observed_status <= 599:
-                    http_error_status = observed_status
-                else:
-                    http_error_invalid_status = True
-            except Exception:
-                http_error_invalid_status = True
-            if http_error_status is not None and not 300 <= http_error_status < 400:
-                try:
-                    raw = error.read(response_budget + 1)
-                except Exception:
-                    http_error_read_failed = True
-        except URLError:
-            # urllib's transport exception can retain request metadata too.
-            # The guarded caller already handles uncertainty after SEND.
-            transport_unavailable = True
+    def _install_send_authority():
+        canonical_type = type
+        canonical_int = int
+        canonical_bytes = bytes
+        signed_request_type = SignedHttpRequest
+        authenticated_read_request_type = AuthenticatedReadHttpRequest
+        require_signed_request = _require_signed_http_request
+        require_authenticated_read_request = _require_authenticated_read_http_request
+        request_constructor = Request
+        mapping_copy = dict
+        type_error = TypeError
+        base_exception = Exception
+        provider_transport_error = ProviderTransportError
+        http_error_type = HTTPError
+        url_error_type = URLError
+        authenticated_response_type = AuthenticatedReadWireResponse
+        trading_response_type = TradingWireResponse
 
-        # Only primitive, detached status/bytes/flags cross the exception
-        # boundary. New failures are generated OUTSIDE urllib exception scope,
-        # so their public context chain cannot contain the signed HTTPError.
-        if transport_unavailable:
-            raise ProviderTransportError("provider HTTP transport response unavailable")
-        if http_error_invalid_status:
-            raise ProviderTransportError("provider HTTP error status invalid")
-        if http_error_status is not None:
-            if 300 <= http_error_status < 400:
-                raise ProviderTransportError("provider redirect is prohibited")
-            if http_error_read_failed:
-                raise ProviderTransportError("provider HTTP error body unavailable")
-            raw = self._bounded_body(raw, max_bytes=response_budget)
-            if is_authenticated_read:
-                return AuthenticatedReadWireResponse(
+        def send(
+            self,
+            request: SignedHttpRequest | AuthenticatedReadHttpRequest,
+        ) -> bytes | TradingWireResponse | AuthenticatedReadWireResponse:
+            request_type = canonical_type(request)
+            if request_type is authenticated_read_request_type:
+                method, url, headers, body, timeout_seconds = (
+                    require_authenticated_read_request(request)
+                )
+                is_authenticated_read = True
+            elif request_type is signed_request_type:
+                method, url, headers, body, timeout_seconds = require_signed_request(
+                    request
+                )
+                is_authenticated_read = False
+            else:
+                raise type_error(
+                    "request must be exact SignedHttpRequest or exact AuthenticatedReadHttpRequest"
+                )
+            data = body or None
+            outbound = request_constructor(
+                url,
+                data=data,
+                headers=mapping_copy(headers),
+                method=method,
+            )
+            # Capture one exact validated budget before any response-body read.
+            # Mutating the client during I/O cannot widen this send's read envelope.
+            response_budget = self._response_budget()
+            http_status: int | None = None
+            http_error_status: int | None = None
+            http_error_invalid_status = False
+            http_error_read_failed = False
+            transport_unavailable = False
+            try:
+                with self._opener.open(
+                    outbound,
+                    timeout=timeout_seconds,
+                ) as response:
+                    http_status = canonical_int(response.status)
+                    raw = self._bounded_body(
+                        response.read(response_budget + 1),
+                        max_bytes=response_budget,
+                    )
+            except http_error_type as error:
+                # An HTTPError retains its request URL and sometimes provider
+                # headers, including signed read-query/credential material.
+                # Read at most one bounded body here, but NEVER raise or construct
+                # typed responses while the secret-bearing exception is active:
+                # implicit __context__/explicit __cause__ would expose it later.
+                try:
+                    observed_status = error.code
+                    if canonical_type(observed_status) is canonical_int and 100 <= observed_status <= 599:
+                        http_error_status = observed_status
+                    else:
+                        http_error_invalid_status = True
+                except base_exception:
+                    http_error_invalid_status = True
+                if http_error_status is not None and not 300 <= http_error_status < 400:
+                    try:
+                        raw = error.read(response_budget + 1)
+                    except base_exception:
+                        http_error_read_failed = True
+            except url_error_type:
+                # urllib's transport exception can retain request metadata too.
+                # The guarded caller already handles uncertainty after SEND.
+                transport_unavailable = True
+
+            # Only primitive, detached status/bytes/flags cross the exception
+            # boundary. New failures are generated OUTSIDE urllib exception scope,
+            # so their public context chain cannot contain the signed HTTPError.
+            if transport_unavailable:
+                raise provider_transport_error("provider HTTP transport response unavailable")
+            if http_error_invalid_status:
+                raise provider_transport_error("provider HTTP error status invalid")
+            if http_error_status is not None:
+                if 300 <= http_error_status < 400:
+                    raise provider_transport_error("provider redirect is prohibited")
+                if http_error_read_failed:
+                    raise provider_transport_error("provider HTTP error body unavailable")
+                raw = self._bounded_body(raw, max_bytes=response_budget)
+                if is_authenticated_read:
+                    return authenticated_response_type(
+                        http_status=http_error_status,
+                        body=raw,
+                    )
+                return trading_response_type(
                     http_status=http_error_status,
                     body=raw,
                 )
-            return TradingWireResponse(
-                http_status=http_error_status,
-                body=raw,
-            )
-        if type(raw) is not bytes:
-            raise ProviderTransportError(
-                "provider returned a non-byte response"
-            )
-        if is_authenticated_read and not raw:
-            raise ProviderTransportError(
-                "authenticated-read provider returned an empty response"
-            )
-        if is_authenticated_read:
-            if http_status is None:
-                raise ProviderTransportError(
-                    "authenticated-read HTTP status is unavailable"
+            if canonical_type(raw) is not canonical_bytes:
+                raise provider_transport_error(
+                    "provider returned a non-byte response"
                 )
-            return AuthenticatedReadWireResponse(
+            if is_authenticated_read and not raw:
+                raise provider_transport_error(
+                    "authenticated-read provider returned an empty response"
+                )
+            if is_authenticated_read:
+                if http_status is None:
+                    raise provider_transport_error(
+                        "authenticated-read HTTP status is unavailable"
+                    )
+                return authenticated_response_type(
+                    http_status=http_status,
+                    body=raw,
+                )
+            if http_status is None:
+                raise provider_transport_error(
+                    "trading HTTP status is unavailable"
+                )
+            return trading_response_type(
                 http_status=http_status,
                 body=raw,
             )
-        if http_status is None:
-            raise ProviderTransportError(
-                "trading HTTP status is unavailable"
-            )
-        return TradingWireResponse(
-            http_status=http_status,
-            body=raw,
-        )
+
+        return send
+
+    send = _install_send_authority()
+    del _install_send_authority
 
 
 def _trading_response_evidence(

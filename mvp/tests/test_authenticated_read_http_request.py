@@ -2,6 +2,7 @@ import unittest
 from io import BytesIO
 from types import MappingProxyType
 
+from mvp.autotrade_mvp import provider_transport as provider_transport_module
 from mvp.autotrade_mvp.provider_transport import (
     AuthenticatedReadHttpRequest,
     AuthenticatedReadWireResponse,
@@ -498,6 +499,119 @@ class AuthenticatedReadHttpRequestTests(unittest.TestCase):
                 timeout_seconds=HostileInt(5),
                 method="GET",
             )
+
+
+    def test_wire_client_retains_authenticated_read_verifier_after_module_rebinding(self):
+        class Opener:
+            def __init__(self):
+                self.calls = 0
+
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                raise AssertionError("wire must not be reached")
+
+        request = AuthenticatedReadHttpRequest(
+            url="https://localhost/iserver/accounts",
+            headers={"Accept": "application/json"},
+            timeout_seconds=5,
+            method="GET",
+            body=b"",
+        )
+        object.__setattr__(
+            request,
+            "url",
+            "https://attacker.invalid/iserver/accounts",
+        )
+        client = UrllibJsonWireClient(max_response_bytes=1024)
+        opener = Opener()
+        client._opener = opener
+        hostile_callbacks = {"count": 0}
+
+        def hostile(*_args, **_kwargs):
+            hostile_callbacks["count"] += 1
+            raise AssertionError("rebound wire authority executed")
+
+        original_type = provider_transport_module.AuthenticatedReadHttpRequest
+        original_require = provider_transport_module._require_authenticated_read_http_request
+        original_request = provider_transport_module.Request
+        try:
+            provider_transport_module.AuthenticatedReadHttpRequest = object
+            provider_transport_module._require_authenticated_read_http_request = hostile
+            provider_transport_module.Request = hostile
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "changed after construction",
+            ):
+                client.send(request)
+        finally:
+            provider_transport_module.AuthenticatedReadHttpRequest = original_type
+            provider_transport_module._require_authenticated_read_http_request = original_require
+            provider_transport_module.Request = original_request
+
+        self.assertEqual(hostile_callbacks["count"], 0)
+        self.assertEqual(opener.calls, 0)
+
+    def test_wire_client_retains_request_constructor_after_module_rebinding(self):
+        class Response:
+            status = 200
+
+            def __init__(self):
+                self.body = BytesIO(b'{"accounts":["DU123"]}')
+
+            def read(self, size=-1):
+                return self.body.read(size)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class Opener:
+            def __init__(self):
+                self.calls = 0
+
+            def open(self, request, *, timeout):
+                self.calls += 1
+                self.request = request
+                self.timeout = timeout
+                return Response()
+
+        request = AuthenticatedReadHttpRequest(
+            url="https://localhost/iserver/accounts",
+            headers={"Accept": "application/json"},
+            timeout_seconds=5,
+            method="GET",
+            body=b"",
+        )
+        client = UrllibJsonWireClient(max_response_bytes=1024)
+        opener = Opener()
+        client._opener = opener
+        hostile_callbacks = {"count": 0}
+
+        def hostile(*_args, **_kwargs):
+            hostile_callbacks["count"] += 1
+            raise AssertionError("rebound wire dependency executed")
+
+        original_type = provider_transport_module.AuthenticatedReadHttpRequest
+        original_require = provider_transport_module._require_authenticated_read_http_request
+        original_request = provider_transport_module.Request
+        try:
+            provider_transport_module.AuthenticatedReadHttpRequest = object
+            provider_transport_module._require_authenticated_read_http_request = hostile
+            provider_transport_module.Request = hostile
+            response = client.send(request)
+        finally:
+            provider_transport_module.AuthenticatedReadHttpRequest = original_type
+            provider_transport_module._require_authenticated_read_http_request = original_require
+            provider_transport_module.Request = original_request
+
+        self.assertIs(type(response), AuthenticatedReadWireResponse)
+        self.assertEqual(response.http_status, 200)
+        self.assertEqual(response.body, b'{"accounts":["DU123"]}')
+        self.assertEqual(hostile_callbacks["count"], 0)
+        self.assertEqual(opener.calls, 1)
+        self.assertEqual(opener.timeout, 5)
 
 
 if __name__ == "__main__":

@@ -50,6 +50,24 @@ def _digest(value: str, *, name: str) -> str:
     return text
 
 
+def _authority_text(value: str, *, name: str) -> str:
+    """Normalize authority-bearing text without caller-overridable dispatch."""
+
+    if type(value) is not str:
+        raise TypeError(f"{name} must use exact built-in str")
+    normalized = str.strip(value)
+    if not normalized:
+        raise ValueError(f"{name} is required")
+    return normalized
+
+
+def _authority_digest(value: str, *, name: str) -> str:
+    text = _authority_text(value, name=name)
+    if _SHA256.fullmatch(text) is None:
+        raise ValueError(f"{name} must be canonical sha256:<64 lowercase hex>")
+    return text
+
+
 def _canonical_json(value) -> str:
     return json.dumps(
         value,
@@ -336,8 +354,8 @@ def _parse_utc_text(value: str, *, name: str) -> datetime:
 
 
 def _proposal_document(proposal: DeterministicProposal) -> dict[str, object]:
-    if not isinstance(proposal, DeterministicProposal):
-        raise TypeError("proposal must be DeterministicProposal")
+    if type(proposal) is not DeterministicProposal:
+        raise TypeError("proposal must be exact DeterministicProposal")
     return {
         "symbol": proposal.symbol,
         "action": proposal.action,
@@ -411,8 +429,8 @@ class RegisteredStrategyRunReceipt:
     proposal: DeterministicProposal
 
     def __post_init__(self) -> None:
-        if not isinstance(self.strategy_snapshot, str) or not self.strategy_snapshot:
-            raise ValueError("strategy_snapshot is required")
+        if type(self.strategy_snapshot) is not str or not self.strategy_snapshot:
+            raise TypeError("strategy_snapshot must use exact built-in str")
         strategy = ReturnThresholdBaseline.restore(self.strategy_snapshot)
         if strategy.snapshot() != self.strategy_snapshot:
             raise ValueError("strategy_snapshot must use canonical snapshot bytes")
@@ -420,16 +438,17 @@ class RegisteredStrategyRunReceipt:
             raise ValueError("registered run requires a registered strategy descriptor")
         if strategy._observations_by_id or any(strategy._history.values()):
             raise ValueError("registered run strategy snapshot must be pristine")
-        instrument = _text(self.instrument_version, name="instrument_version")
-        symbol = _text(self.symbol, name="symbol")
+        instrument = _authority_text(
+            self.instrument_version,
+            name="instrument_version",
+        )
+        symbol = _authority_text(self.symbol, name="symbol")
         decision = _time(self.decision_time, name="decision_time")
-        if isinstance(self.observations, (str, bytes)) or not isinstance(
-            self.observations, tuple
-        ):
-            raise ValueError("registered run observations must be a tuple")
-        observations = tuple(self.observations)
+        if type(self.observations) is not tuple:
+            raise TypeError("registered run observations must use exact built-in tuple")
+        observations = self.observations
         for observation in observations:
-            if not isinstance(observation, CausalObservation):
+            if type(observation) is not CausalObservation:
                 raise TypeError(
                     "registered run observations must contain CausalObservation values"
                 )
@@ -440,8 +459,10 @@ class RegisteredStrategyRunReceipt:
         event_ids = tuple(item.event_id for item in observations)
         if len(set(event_ids)) != len(event_ids):
             raise ValueError("registered run observations contain duplicate event_id")
-        if not isinstance(self.proposal, DeterministicProposal):
-            raise TypeError("registered run proposal must be DeterministicProposal")
+        if type(self.proposal) is not DeterministicProposal:
+            raise TypeError(
+                "registered run proposal must be exact DeterministicProposal"
+            )
         proposal = self.proposal
         descriptor = strategy.descriptor
         if proposal.symbol != symbol or proposal.decision_time != decision:
@@ -551,10 +572,10 @@ def verify_registered_strategy_run(
 ) -> str:
     """Replay one receipt from pristine state and return its verified digest."""
 
-    if not isinstance(proposal, DeterministicProposal):
-        raise TypeError("proposal must be DeterministicProposal")
-    if not isinstance(receipt, RegisteredStrategyRunReceipt):
-        raise TypeError("receipt must be RegisteredStrategyRunReceipt")
+    if type(proposal) is not DeterministicProposal:
+        raise TypeError("proposal must be exact DeterministicProposal")
+    if type(receipt) is not RegisteredStrategyRunReceipt:
+        raise TypeError("receipt must be exact RegisteredStrategyRunReceipt")
     if receipt.proposal != proposal:
         raise ValueError(
             "registered run receipt proposal does not match supplied proposal"
@@ -681,7 +702,7 @@ class StrategyEconomicsBinding:
             object.__setattr__(
                 self,
                 "registered_run_receipt_sha256",
-                _digest(
+                _authority_digest(
                     self.registered_run_receipt_sha256,
                     name="registered_run_receipt_sha256",
                 ),
@@ -834,12 +855,19 @@ class EconomicsBoundProposal:
     registered_run_receipt: RegisteredStrategyRunReceipt | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.gross_proposal, DeterministicProposal):
-            raise TypeError("gross_proposal must be DeterministicProposal")
-        if not isinstance(self.economics, StrategyEconomicsBinding):
-            raise TypeError("economics must be StrategyEconomicsBinding")
-        instrument = _text(self.instrument_version, name="instrument_version")
+        if type(self.gross_proposal) is not DeterministicProposal:
+            raise TypeError("gross_proposal must be exact DeterministicProposal")
+        if type(self.economics) is not StrategyEconomicsBinding:
+            raise TypeError("economics must be exact StrategyEconomicsBinding")
+        instrument = _authority_text(
+            self.instrument_version,
+            name="instrument_version",
+        )
         receipt = self.registered_run_receipt
+        if receipt is not None and type(receipt) is not RegisteredStrategyRunReceipt:
+            raise TypeError(
+                "registered_run_receipt must be exact RegisteredStrategyRunReceipt"
+            )
         action = _text(self.action, name="action").upper()
         if action not in {"BUY", "SELL", "HOLD"}:
             raise ValueError("unsupported economics-bound proposal action")
@@ -947,11 +975,18 @@ def bind_strategy_economics(
 ) -> EconomicsBoundProposal:
     """Bind frozen decision-time economics without expanding the gross signal."""
 
-    if not isinstance(proposal, DeterministicProposal):
-        raise TypeError("proposal must be DeterministicProposal")
-    if not isinstance(economics, StrategyEconomicsBinding):
-        raise TypeError("economics must be StrategyEconomicsBinding")
-    instrument = _text(instrument_version, name="instrument_version")
+    if type(proposal) is not DeterministicProposal:
+        raise TypeError("proposal must be exact DeterministicProposal")
+    if type(economics) is not StrategyEconomicsBinding:
+        raise TypeError("economics must be exact StrategyEconomicsBinding")
+    if (
+        registered_run_receipt is not None
+        and type(registered_run_receipt) is not RegisteredStrategyRunReceipt
+    ):
+        raise TypeError(
+            "registered_run_receipt must be exact RegisteredStrategyRunReceipt"
+        )
+    instrument = _authority_text(instrument_version, name="instrument_version")
     if (
         proposal.information_cutoff is None
         or proposal.horizon_seconds is None
@@ -1475,8 +1510,8 @@ def run_registered_baseline(
 ) -> tuple[DeterministicProposal, RegisteredStrategyRunReceipt]:
     """Run a registered strategy from pristine state and mint replay evidence."""
 
-    if not isinstance(strategy, ReturnThresholdBaseline):
-        raise TypeError("strategy must be ReturnThresholdBaseline")
+    if type(strategy) is not ReturnThresholdBaseline:
+        raise TypeError("strategy must be exact ReturnThresholdBaseline")
     if strategy.descriptor is None:
         raise ValueError("registered runner requires a registered strategy descriptor")
     if strategy._observations_by_id or any(strategy._history.values()):

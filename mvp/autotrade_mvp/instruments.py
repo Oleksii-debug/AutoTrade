@@ -46,10 +46,10 @@ def _text(value: str, field: str) -> str:
 
 
 def _decimal(value: Decimal | str | int, field: str, *, positive: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
+    if type(value) not in (Decimal, str, int):
         raise InstrumentRegistryError(f"{field} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, ValueError, TypeError) as error:
         raise InstrumentRegistryError(f"{field} must be a finite decimal") from error
     if not result.is_finite():
@@ -348,8 +348,9 @@ class InstrumentVersion:
     metadata_evidence: tuple[Mapping[str, object], ...] = ()
 
     def __post_init__(self) -> None:
+        raw_instrument_id = _text(self.instrument_id, "instrument_id")
         try:
-            canonical_instrument_id = str(UUID(self.instrument_id))
+            canonical_instrument_id = str(UUID(raw_instrument_id))
         except (ValueError, TypeError, AttributeError) as error:
             raise InstrumentRegistryError("instrument_id must be a UUID") from error
         object.__setattr__(self, "instrument_id", canonical_instrument_id)

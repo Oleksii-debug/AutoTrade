@@ -79,9 +79,9 @@ def public_session_reference(token: str) -> str:
     """
 
     if (
-        not isinstance(token, str)
+        type(token) is not str
         or not token
-        or token != token.strip()
+        or token != str.strip(token)
     ):
         raise ValueError("session token is invalid")
     material = ("autotrade-ui-session-v1\0" + token).encode("utf-8")
@@ -95,19 +95,19 @@ class HostPrincipal:
     session: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.actor, str) or not self.actor.strip():
+        if type(self.actor) is not str or not str.strip(self.actor):
             raise ValueError("principal actor is required")
         if (
-            not isinstance(self.token, str)
+            type(self.token) is not str
             or not self.token
-            or self.token != self.token.strip()
+            or self.token != str.strip(self.token)
         ):
             raise ValueError("principal bearer token is required")
-        if not isinstance(self.session, str) or not self.session.strip():
+        if type(self.session) is not str or not str.strip(self.session):
             raise ValueError("principal session reference is required")
         if self.session != public_session_reference(self.token):
             raise ValueError("principal session reference does not match bearer token")
-        object.__setattr__(self, "actor", self.actor.strip())
+        object.__setattr__(self, "actor", str.strip(self.actor))
 
 
 @dataclass(frozen=True)
@@ -148,10 +148,10 @@ def header_principal_resolver(
     authorization = headers.get("authorization")
     prefix = "AutoTrade-Session "
     if (
-        not isinstance(actor, str)
-        or not actor.strip()
-        or not isinstance(authorization, str)
-        or not authorization.startswith(prefix)
+        type(actor) is not str
+        or not str.strip(actor)
+        or type(authorization) is not str
+        or not str.startswith(authorization, prefix)
     ):
         raise PermissionError("Authenticated host session is required")
     token = authorization[len(prefix) :]
@@ -200,10 +200,12 @@ def _error(status: int, code: str) -> TransportResponse:
 def _headers(values: Mapping[str, str]) -> Mapping[str, str]:
     normalized: dict[str, str] = {}
     for key, value in values.items():
-        name = str(key).strip().lower()
+        if type(key) is not str or type(value) is not str:
+            raise ValueError("Request headers must contain exact text")
+        name = str.lower(str.strip(key))
         if not name or name in normalized:
             raise ValueError("Duplicate or invalid request header")
-        normalized[name] = str(value).strip()
+        normalized[name] = str.strip(value)
     return MappingProxyType(normalized)
 
 

@@ -1058,6 +1058,103 @@ class HostNetworkTests(unittest.TestCase):
             self.assertNotIn("paper-account-1", json.dumps(payload))
 
 
+    def test_header_and_principal_text_reject_subclasses_before_callbacks(self):
+        callbacks = []
+
+        class HostileText(str):
+            def __str__(self):
+                callbacks.append("str")
+                raise AssertionError("hostile text __str__ callback must not run")
+
+            def __bool__(self):
+                callbacks.append("bool")
+                raise AssertionError("hostile text truthiness callback must not run")
+
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("hostile text strip callback must not run")
+
+            def startswith(self, *args, **kwargs):
+                callbacks.append("startswith")
+                raise AssertionError("hostile text startswith callback must not run")
+
+            def encode(self, *args, **kwargs):
+                callbacks.append("encode")
+                raise AssertionError("hostile text encode callback must not run")
+
+            def __eq__(self, other):
+                callbacks.append("eq")
+                raise AssertionError("hostile text equality callback must not run")
+
+            def __hash__(self):
+                callbacks.append("hash")
+                raise AssertionError("hostile text hash callback must not run")
+
+        valid_token = self.owner.token
+        valid_session = public_session_reference(valid_token)
+
+        with self.assertRaises(ValueError):
+            public_session_reference(HostileText(valid_token))
+        self.assertEqual(callbacks, [])
+
+        for field, value in (
+            ("actor", HostileText("owner")),
+            ("token", HostileText(valid_token)),
+            ("session", HostileText(valid_session)),
+        ):
+            with self.subTest(principal_field=field):
+                callbacks.clear()
+                values = {
+                    "actor": "owner",
+                    "token": valid_token,
+                    "session": valid_session,
+                }
+                values[field] = value
+                with self.assertRaises(ValueError):
+                    HostPrincipal(**values)
+                self.assertEqual(callbacks, [])
+
+        valid_authorization = "AutoTrade-Session " + valid_token
+        for headers in (
+            {
+                "x-autotrade-actor": HostileText("owner"),
+                "authorization": valid_authorization,
+            },
+            {
+                "x-autotrade-actor": "owner",
+                "authorization": HostileText(valid_authorization),
+            },
+        ):
+            callbacks.clear()
+            with self.assertRaises(PermissionError):
+                header_principal_resolver(headers, self.origin)
+            self.assertEqual(callbacks, [])
+
+        callbacks.clear()
+        response = self.app.dispatch(
+            method="GET",
+            target="/api/v1/health",
+            headers={"X-Probe": HostileText("value")},
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.body(response), {"error": "INVALID_REQUEST"})
+        self.assertEqual(callbacks, [])
+
+        class HostileHeaderMap(dict):
+            def items(self):
+                return [(HostileText("X-Probe"), "value")]
+
+        callbacks.clear()
+        response = self.app.dispatch(
+            method="GET",
+            target="/api/v1/health",
+            headers=HostileHeaderMap(),
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.body(response), {"error": "INVALID_REQUEST"})
+        self.assertEqual(callbacks, [])
+
+
     def test_host_id_configuration_rejects_str_subclass_without_strip_callback(self):
         callbacks = []
 

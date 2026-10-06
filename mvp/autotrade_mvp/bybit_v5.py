@@ -65,6 +65,7 @@ _TIME_IN_FORCE = {
 }
 
 _AMBIGUOUS_RESPONSE_CODES = frozenset({429, 10000, 10014, 10016})
+_DEFINITIVE_REJECTION_CODES = frozenset({10001})
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9_-]{1,36}$")
 _REST_BASE_BY_ENVIRONMENT: Mapping[str, str] = {
     "MAINNET": "https://api.bybit.com",
@@ -983,6 +984,7 @@ def _install_submission_response_parser(
     client_id_pattern = _CLIENT_ID
     rest_bases = MappingProxyType(dict(_REST_BASE_BY_ENVIRONMENT))
     ambiguous_codes = frozenset(_AMBIGUOUS_RESPONSE_CODES)
+    definitive_rejection_codes = frozenset(_DEFINITIVE_REJECTION_CODES)
 
     def authority_changed():
         raise error_type("Bybit submission response parser authority changed")
@@ -1202,7 +1204,11 @@ def _install_submission_response_parser(
                 "retry_disposition": "NEVER",
             }
 
-        outcome = "UNKNOWN" if code in ambiguous_codes else "REJECTED"
+        outcome = (
+            "REJECTED"
+            if code in definitive_rejection_codes
+            else "UNKNOWN"
+        )
         return {
             "attempt_id": aid,
             "outcome": outcome,

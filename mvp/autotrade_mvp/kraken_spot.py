@@ -24,7 +24,7 @@ from .provider_core import (
     ProviderResponseObservation,
     ProviderSubmissionObservation,
     Surface,
-    submission_observation_projection,
+    provider_submission_observation_projection,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
@@ -662,7 +662,7 @@ def _submission_evidence(
     prepared_request: KrakenSpotPreparedRequest,
     source_uri: str,
 ) -> dict[str, str]:
-    projection = submission_observation_projection(observation)
+    projection = provider_submission_observation_projection(observation)
     source = _validate_submission_scope(
         prepared_request,
         source_uri=source_uri,
@@ -749,7 +749,7 @@ def parse_spot_submission_response(
             "retry_disposition": "RECONCILE_FIRST",
         }
 
-    projection = submission_observation_projection(observation)
+    projection = provider_submission_observation_projection(observation)
     if projection["attempt_id"] != aid:
         raise KrakenSpotAdapterError("submission observation attempt_id mismatch")
     evidence = [

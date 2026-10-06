@@ -2453,8 +2453,8 @@ class IbkrWebAdapterTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(
-            IbkrWebAdapterError,
-            "observation.provider_id must be canonical provider text",
+            ProviderCoreError,
+            "authenticated-read binding changed after preparation",
         ):
             parse_web_api_trades(
                 observation,
@@ -2473,8 +2473,8 @@ class IbkrWebAdapterTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(
-            IbkrWebAdapterError,
-            "observation.evidence_ref must be canonical provider text",
+            ProviderCoreError,
+            "provider response changed after exact-byte observation",
         ):
             parse_web_api_trades(
                 observation,

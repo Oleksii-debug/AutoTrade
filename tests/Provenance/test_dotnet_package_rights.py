@@ -67,6 +67,7 @@ def _write_rights_workflow(root: Path, projects: list[Path]) -> None:
     ]
     for project in projects:
         relative = project.relative_to(root).as_posix()
+        lines.append(f"      - run: dotnet restore {relative} --locked-mode")
         lines.append(
             "      - run: python tools/dotnet_package_rights.py "
             "--verify-restored "
@@ -157,6 +158,57 @@ class DotnetPackageRightsTests(unittest.TestCase):
             self.assertIn(
                 "DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_MISSING:"
                 "src/App/App.csproj",
+                package_rights_blockers(root),
+            )
+
+    def test_rights_verifier_must_follow_exact_locked_restore(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "env:\n"
+                "  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages\n"
+                "jobs:\n"
+                "  verify:\n"
+                "    steps:\n"
+                "      - run: python tools/dotnet_package_rights.py "
+                "--verify-restored "
+                '--packages-root "${{ env.NUGET_PACKAGES }}" '
+                "--project src/App/App.csproj\n"
+                "      - run: dotnet restore src/App/App.csproj --locked-mode\n",
+                encoding="utf-8",
+            )
+            self.assertIn(
+                "DOTNET_PACKAGE_RIGHTS_VERIFY_ORDER_INVALID:src/App/App.csproj",
+                package_rights_blockers(root),
+            )
+
+    def test_second_restore_after_rights_verification_is_blocked(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "env:\n"
+                "  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages\n"
+                "jobs:\n"
+                "  verify:\n"
+                "    steps:\n"
+                "      - run: dotnet restore src/App/App.csproj --locked-mode\n"
+                "      - run: python tools/dotnet_package_rights.py "
+                "--verify-restored "
+                '--packages-root "${{ env.NUGET_PACKAGES }}" '
+                "--project src/App/App.csproj\n"
+                "      - run: dotnet restore src/App/App.csproj --locked-mode\n",
+                encoding="utf-8",
+            )
+            self.assertIn(
+                "DOTNET_PACKAGE_RIGHTS_VERIFY_ORDER_INVALID:src/App/App.csproj",
                 package_rights_blockers(root),
             )
 

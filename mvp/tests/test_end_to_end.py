@@ -310,6 +310,52 @@ class VerticalSliceTests(unittest.TestCase):
             )
 
 
+    def test_resume_rejects_foreign_evidence_before_repairing_latest_evidence(self):
+        with TemporaryDirectory() as directory:
+            run_multi_episode(
+                [[100, 101, 102, 103], [100, 100, 100]],
+                directory,
+            )
+            root = Path(directory)
+            evidence_path = root / "learning-evidence.jsonl"
+            rows = evidence_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(rows), 2)
+            foreign = json.loads(rows[0])
+            foreign["evidence_id"] = "evidence-foreign-before-repair"
+            evidence_path.write_text(
+                rows[0] + "\n" + json.dumps(foreign) + "\n",
+                encoding="utf-8",
+            )
+
+            checkpoint_before = (root / "checkpoint.json").read_bytes()
+            evidence_before = evidence_path.read_bytes()
+            journal_before = (root / "journal.sqlite3").read_bytes()
+            intents_before = {
+                path.name: path.read_bytes()
+                for path in (root / "order-intents").glob("*.json")
+            }
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Learning evidence conflicts with checkpoint before replay repair",
+            ):
+                run_vertical_slice(
+                    [103, 102, 101, 100],
+                    directory,
+                )
+
+            self.assertEqual((root / "checkpoint.json").read_bytes(), checkpoint_before)
+            self.assertEqual(evidence_path.read_bytes(), evidence_before)
+            self.assertEqual((root / "journal.sqlite3").read_bytes(), journal_before)
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in (root / "order-intents").glob("*.json")
+                },
+                intents_before,
+            )
+
+
     def test_resume_rejects_historical_evidence_gap_before_new_financial_work(self):
         with TemporaryDirectory() as directory:
             run_multi_episode(

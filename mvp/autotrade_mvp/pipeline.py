@@ -592,11 +592,37 @@ def _repair_interrupted_replay(
     expected_ids = set(ids)
 
     evidence_path = root / "learning-evidence.jsonl"
-    missing_evidence = {
-        evidence_id
-        for evidence_id in ids
-        if _find_evidence(evidence_path, evidence_id) is None
-    }
+    existing_evidence_ids: set[str] = set()
+    if evidence_path.is_file():
+        try:
+            for line in evidence_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                recorded = json.loads(line)
+                evidence_id = (
+                    recorded.get("evidence_id")
+                    if type(recorded) is dict
+                    else None
+                )
+                if (
+                    type(evidence_id) is not str
+                    or not evidence_id
+                    or evidence_id in existing_evidence_ids
+                ):
+                    raise ValueError(
+                        "Corrupt learning evidence before replay repair"
+                    )
+                expected_record = records.get(evidence_id)
+                if type(expected_record) is not dict or recorded != expected_record:
+                    raise ValueError(
+                        "Learning evidence conflicts with checkpoint before replay repair"
+                    )
+                existing_evidence_ids.add(evidence_id)
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+            raise ValueError(
+                "Corrupt learning evidence before replay repair"
+            ) from error
+    missing_evidence = expected_ids - existing_evidence_ids
     if missing_evidence - {latest_id}:
         raise ValueError("Historical learning evidence is incomplete before latest episode")
 

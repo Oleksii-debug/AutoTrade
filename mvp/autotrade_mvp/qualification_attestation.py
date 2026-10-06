@@ -1432,6 +1432,17 @@ def verify_qualification_attestation(
         raise QualificationTrustError(
             "attestation is outside trust root validity"
         )
+
+    # Freeze the exact policy/root identities that authorized the signature
+    # before evidence I/O callbacks can mutate caller-retained frozen objects.
+    verified_policy_id = expected_policy_id
+    verified_policy_version = expected_policy_version
+    verified_root_id = root.root_id
+    if verified_root_id != attestation.trust_root_id:
+        raise QualificationTrustError(
+            "attestation trust root identity changed during verification"
+        )
+
     _verify_rsa_pkcs1v15_sha256(
         payload=attestation.canonical_bytes(),
         signature=signature,
@@ -1445,9 +1456,9 @@ def verify_qualification_attestation(
     return AcceptedQualificationAttestation(
         attestation_id=str(attestation.attestation_id),
         attestation_digest=str(attestation.content_digest),
-        policy_id=str(policy.policy_id),
-        policy_version=str(policy.policy_version),
-        trust_root_id=str(root.root_id),
+        policy_id=verified_policy_id,
+        policy_version=verified_policy_version,
+        trust_root_id=verified_root_id,
         result=str(attestation.result),
         source_sha=str(attestation.source_sha),
         domain=str(attestation.domain),

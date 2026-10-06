@@ -935,6 +935,58 @@ class AlpacaAdapterTests(unittest.TestCase):
                         )
                 rebound.assert_not_called()
 
+    def test_submission_consumer_rejects_rebound_transitive_authorities(self):
+        intent_id = "alpaca-transitive-authority-rebound"
+        client_id = stable_client_order_id(
+            "ALPACA",
+            intent_id,
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "id": str(uuid4()),
+                "client_order_id": client_id,
+            },
+            intent_id=intent_id,
+        )
+        with patch(
+            "mvp.autotrade_mvp.alpaca.uuid5",
+            side_effect=AssertionError("rebound uuid5 executed"),
+        ) as rebound_uuid5:
+            with self.assertRaisesRegex(
+                AlpacaAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
+                )
+        rebound_uuid5.assert_not_called()
+
+        with patch("mvp.autotrade_mvp.alpaca._CLIENT_ID", object()):
+            with self.assertRaisesRegex(
+                AlpacaAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
+                )
+
+        with patch("mvp.autotrade_mvp.alpaca.NAMESPACE_URL", object()):
+            with self.assertRaisesRegex(
+                AlpacaAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
+                )
+
     def test_submission_consumer_rejects_prepared_subclass_before_virtual_callback(self):
         callbacks = []
 

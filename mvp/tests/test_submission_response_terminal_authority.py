@@ -174,8 +174,8 @@ class SubmissionResponseTerminalAuthorityTests(unittest.TestCase):
             object.__setattr__(binding, "terminal_state", "UNKNOWN")
 
             with self.assertRaisesRegex(
-                ProviderCoreError,
-                "authority is unavailable",
+                ValueError,
+                "submission response binding authority is unavailable",
             ):
                 self._observe(binding, request_hash)
 

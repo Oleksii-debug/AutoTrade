@@ -130,9 +130,65 @@ def _require_current_trusted_chronology_cut_with_horizon(
 
     if type(claimed_instants) is not tuple:
         raise TypeError("claimed_instants must be exact tuple")
-    durable = _original_require_current_trusted_chronology_cut(**kwargs)
-    _require_post_verification_currentness(durable, kwargs=kwargs)
-    _original_require_chronology_horizon(durable, *claimed_instants)
+
+    # Signed-evidence verification is an external callback boundary. Capture the
+    # exact verifier/currentness/horizon callables and their code objects before
+    # crossing it so callback-time module/global mutation cannot replace the
+    # post-verification authority checks that make this cut current.
+    current_verifier = _original_require_current_trusted_chronology_cut
+    current_verifier_code = getattr(current_verifier, "__code__", None)
+    post_verifier = _require_post_verification_currentness
+    post_verifier_code = getattr(post_verifier, "__code__", None)
+    horizon_verifier = _original_require_chronology_horizon
+    horizon_verifier_code = getattr(horizon_verifier, "__code__", None)
+
+    durable = current_verifier(**kwargs)
+
+    if (
+        _original_require_current_trusted_chronology_cut is not current_verifier
+        or _require_post_verification_currentness is not post_verifier
+        or _original_require_chronology_horizon is not horizon_verifier
+        or (
+            current_verifier_code is not None
+            and getattr(current_verifier, "__code__", None)
+            is not current_verifier_code
+        )
+        or (
+            post_verifier_code is not None
+            and getattr(post_verifier, "__code__", None)
+            is not post_verifier_code
+        )
+        or (
+            horizon_verifier_code is not None
+            and getattr(horizon_verifier, "__code__", None)
+            is not horizon_verifier_code
+        )
+    ):
+        raise PermissionError(
+            "trusted chronology verification authority changed during verification"
+        )
+
+    post_verifier(durable, kwargs=kwargs)
+
+    if (
+        _require_post_verification_currentness is not post_verifier
+        or _original_require_chronology_horizon is not horizon_verifier
+        or (
+            post_verifier_code is not None
+            and getattr(post_verifier, "__code__", None)
+            is not post_verifier_code
+        )
+        or (
+            horizon_verifier_code is not None
+            and getattr(horizon_verifier, "__code__", None)
+            is not horizon_verifier_code
+        )
+    ):
+        raise PermissionError(
+            "trusted chronology verification authority changed during verification"
+        )
+
+    horizon_verifier(durable, *claimed_instants)
     return durable
 
 

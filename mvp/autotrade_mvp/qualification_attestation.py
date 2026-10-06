@@ -1062,6 +1062,12 @@ def parse_signed_qualification_attestation(
 
 @dataclass(frozen=True)
 class AcceptedQualificationAttestation:
+    """Immutable canonical signed-attestation snapshot returned by the verifier.
+
+    Downstream terminal consumers must use this snapshot, never the original
+    caller-owned receipt/attestation graph after verification.
+    """
+
     attestation_id: str
     attestation_digest: str
     policy_id: str
@@ -1077,6 +1083,17 @@ class AcceptedQualificationAttestation:
     requirement_id: str
     release_artifact_id: str | None
     release_artifact_sha256: str | None
+    requirement_ids: tuple[str, ...] = ()
+    evidence_refs: tuple[EvidenceArtifactRef, ...] = ()
+    producer_id: str = ""
+    verifier_id: str = ""
+    runner_id: str = ""
+    harness_version: str = ""
+    started_at: str = ""
+    completed_at: str = ""
+    signed_at: str = ""
+    unresolved_limits: tuple[str, ...] = ()
+    verification_method: str = _RSA_METHOD
 
 
 def _verify_rsa_pkcs1v15_sha256(
@@ -1340,22 +1357,52 @@ def verify_qualification_attestation(
     for ref in attestation.evidence_refs:
         _resolve_evidence(evidence_reader, ref)
 
+    # Materialize a detached exact snapshot. Consumers must not retain the
+    # caller-owned attestation graph as a source of signed semantics.
     return AcceptedQualificationAttestation(
-        attestation_id=attestation.attestation_id,
-        attestation_digest=attestation.content_digest,
-        policy_id=policy.policy_id,
-        policy_version=policy.policy_version,
-        trust_root_id=root.root_id,
-        result=attestation.result,
-        source_sha=attestation.source_sha,
-        domain=attestation.domain,
-        gate=attestation.gate,
-        package_id=attestation.package_id,
-        protocol_id=attestation.protocol_id,
-        protocol_version=attestation.protocol_version,
-        requirement_id=expected_requirement_id,
-        release_artifact_id=attestation.release_artifact_id,
-        release_artifact_sha256=attestation.release_artifact_sha256,
+        attestation_id=str(attestation.attestation_id),
+        attestation_digest=str(attestation.content_digest),
+        policy_id=str(policy.policy_id),
+        policy_version=str(policy.policy_version),
+        trust_root_id=str(root.root_id),
+        result=str(attestation.result),
+        source_sha=str(attestation.source_sha),
+        domain=str(attestation.domain),
+        gate=str(attestation.gate),
+        package_id=str(attestation.package_id),
+        protocol_id=str(attestation.protocol_id),
+        protocol_version=str(attestation.protocol_version),
+        requirement_id=str(expected_requirement_id),
+        release_artifact_id=(
+            None
+            if attestation.release_artifact_id is None
+            else str(attestation.release_artifact_id)
+        ),
+        release_artifact_sha256=(
+            None
+            if attestation.release_artifact_sha256 is None
+            else str(attestation.release_artifact_sha256)
+        ),
+        requirement_ids=tuple(str(item) for item in attestation.requirement_ids),
+        evidence_refs=tuple(
+            EvidenceArtifactRef(
+                artifact_id=str(item.artifact_id),
+                sha256=str(item.sha256),
+                media_type=str(item.media_type),
+                evidence_kind=str(item.evidence_kind),
+                source_sha=str(item.source_sha),
+            )
+            for item in attestation.evidence_refs
+        ),
+        producer_id=str(attestation.producer_id),
+        verifier_id=str(attestation.verifier_id),
+        runner_id=str(attestation.runner_id),
+        harness_version=str(attestation.harness_version),
+        started_at=str(attestation.started_at),
+        completed_at=str(attestation.completed_at),
+        signed_at=str(attestation.signed_at),
+        unresolved_limits=tuple(str(item) for item in attestation.unresolved_limits),
+        verification_method=str(attestation.verification_method),
     )
 
 

@@ -20,6 +20,11 @@ from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .capabilities import CapabilityError, CapabilitySnapshot
+from .instruments import (
+    InstrumentRegistry,
+    InstrumentRegistryError,
+    InstrumentVersion,
+)
 from .provider_core import (
     ProviderCoreError,
     ProviderResponseObservation,
@@ -39,6 +44,7 @@ BYBIT_DOCUMENTED_ENDPOINTS: Mapping[str, str] = {
     "POSITIONS": "/v5/position/list",
     "WALLET": "/v5/account/wallet-balance",
     "ACTIVITIES": "/v5/account/transaction-log",
+    "OPTION_DELIVERIES": "/v5/asset/delivery-record",
 }
 
 _CATEGORY_BY_FAMILY = {
@@ -897,6 +903,485 @@ def parse_executions(
         by_execution[execution_id] = fill
 
     return tuple(by_execution.values())
+
+
+BYBIT_OPTION_DELIVERY_PARSER_IDENTITY = "BYBIT_OPTION_DELIVERY_V5_JSON_V1"
+BYBIT_OPTION_DELIVERY_PARSER_VERSION = "1.2.0"
+BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST = (
+    "sha256:"
+    + sha256(
+        json.dumps(
+            {
+                "parser_identity": BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
+                "parser_version": BYBIT_OPTION_DELIVERY_PARSER_VERSION,
+                "source_type": "ProviderResponseObservation",
+                "scope": {
+                    "provider_id": "BYBIT",
+                    "surface": "ACTIVITIES",
+                    "endpoint": "/v5/asset/delivery-record",
+                    "permission_scope": "ACCOUNT.READ",
+                    "category": "option",
+                    "symbol": "EXPLICIT_QUERY_SYMBOL",
+                    "time_window": "EXPLICIT_START_OR_END",
+                },
+                "query_fields": [
+                    "category",
+                    "symbol",
+                    "startTime",
+                    "endTime",
+                    "expDate",
+                    "limit",
+                    "cursor",
+                ],
+                "row_fields": {
+                    "required": [
+                        "symbol",
+                        "side",
+                        "deliveryTime",
+                        "strike",
+                        "fee",
+                        "position",
+                        "deliveryPrice",
+                        "deliveryRpl",
+                    ],
+                    "optional": ["entryPrice"],
+                },
+                "cursor_rule": "OPAQUE_CANONICAL_PROVIDER_TEXT",
+                "instrument_binding": (
+                    "CANONICAL_INSTRUMENT_REGISTRY_EXACT_VERSION_PROVIDER_SYMBOL"
+                ),
+                "economic_numbers": "BOUNDED_CANONICAL_DECIMAL_TEXT",
+                "lifecycle_classification": "NONE",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+)
+_BYBIT_OPTION_DELIVERY_DECIMAL_RE = re.compile(
+    r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$"
+)
+_BYBIT_OPTION_DELIVERY_CURSOR_RE = re.compile(
+    r"^(?:[A-Za-z0-9._~-]|%[0-9A-F]{2})+$"
+)
+_BYBIT_OPTION_DELIVERY_MAX_RANGE_MS = 30 * 24 * 60 * 60 * 1000
+_BYBIT_OPTION_DELIVERY_QUERY_FIELDS = frozenset(
+    {"category", "symbol", "startTime", "endTime", "expDate", "limit", "cursor"}
+)
+
+
+def _bybit_option_delivery_query_integer(value: object, *, name: str) -> int:
+    if (
+        type(value) is not str
+        or not value
+        or len(value) > 20
+        or not value.isascii()
+        or not value.isdigit()
+    ):
+        raise ProviderCoreError(
+            f"Bybit option delivery query {name} must be canonical integer text"
+        )
+    parsed = int(value, 10)
+    if str(parsed) != value:
+        raise ProviderCoreError(
+            f"Bybit option delivery query {name} must be canonical integer text"
+        )
+    return parsed
+
+
+
+def _bybit_option_delivery_expiry_text(value: object, *, name: str) -> str:
+    if (
+        type(value) is not str
+        or re.fullmatch(r"[0-3][0-9][A-Z]{3}[0-9]{2}", value) is None
+    ):
+        raise ProviderCoreError(
+            f"Bybit option delivery query {name} is non-canonical"
+        )
+    day = int(value[:2], 10)
+    month = value[2:5]
+    year = 2000 + int(value[5:], 10)
+    month_days = {
+        "JAN": 31,
+        "FEB": 29 if (
+            year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+        ) else 28,
+        "MAR": 31,
+        "APR": 30,
+        "MAY": 31,
+        "JUN": 30,
+        "JUL": 31,
+        "AUG": 31,
+        "SEP": 30,
+        "OCT": 31,
+        "NOV": 30,
+        "DEC": 31,
+    }
+    if day < 1 or day > month_days.get(month, 0):
+        raise ProviderCoreError(
+            f"Bybit option delivery query {name} is a non-existent calendar date"
+        )
+    return value
+
+
+def _bybit_option_delivery_decimal_text(
+    value: object,
+    *,
+    name: str,
+) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or len(value) > 160
+        or _BYBIT_OPTION_DELIVERY_DECIMAL_RE.fullmatch(value) is None
+    ):
+        raise ProviderCoreError(
+            f"{name} must be canonical provider decimal text"
+        )
+    return value
+
+
+@dataclass(frozen=True)
+class BybitOptionDeliveryRecord:
+    """One raw documented option-delivery row, without lifecycle classification."""
+
+    delivery_time_ms: int
+    symbol: str
+    side: str
+    position: str
+    entry_price: str | None
+    delivery_price: str
+    strike: str
+    fee: str
+    delivery_rpl: str
+
+
+@dataclass(frozen=True)
+class BybitOptionDeliveryPage:
+    """One exact provider page plus immutable authenticated-read scope."""
+
+    records: tuple[BybitOptionDeliveryRecord, ...]
+    next_page_cursor: str
+    provider_id: str
+    account_id: str
+    entity_id: str
+    environment: str
+    capability_snapshot_id: str
+    instrument_version: str
+    provider_symbol: str
+    surface: Surface
+    endpoint: str
+    permission_scope: str
+    query_digest: str
+    parser_identity: str
+    parser_version: str
+    parser_contract_digest: str
+    evidence_ref: str
+    response_sha256: str
+    observed_at: str
+
+
+def parse_option_delivery_page(
+    observation: ProviderResponseObservation,
+    *,
+    instrument_registry: InstrumentRegistry,
+) -> BybitOptionDeliveryPage:
+    """Parse exact Bybit option delivery rows without minting lifecycle economics.
+
+    Bybit's delivery endpoint does not expose an EXERCISE/ASSIGNMENT/EXPIRY
+    discriminator. This parser therefore preserves only documented provider
+    facts and must not be treated as OptionLifecycleObservation authority.
+    """
+
+    if type(observation) is not ProviderResponseObservation:
+        raise TypeError(
+            "observation must be exact ProviderResponseObservation"
+        )
+    observation.require_scope(
+        provider_id="BYBIT",
+        surface=Surface.ACTIVITIES,
+        endpoint=BYBIT_DOCUMENTED_ENDPOINTS["OPTION_DELIVERIES"],
+    )
+    binding = observation.query_binding
+    query = binding.query
+    if (
+        binding.permission_scope != "ACCOUNT.READ"
+        or type(query.get("category")) is not str
+        or query.get("category") != "option"
+    ):
+        raise ProviderCoreError(
+            "Bybit option delivery evidence requires ACCOUNT.READ category=option"
+        )
+    unsupported_query = set(query) - _BYBIT_OPTION_DELIVERY_QUERY_FIELDS
+    if unsupported_query:
+        raise ProviderCoreError(
+            "Bybit option delivery evidence contains unsupported query fields"
+        )
+
+    requested_symbol = query.get("symbol")
+    if requested_symbol is None:
+        raise ProviderCoreError(
+            "Bybit option delivery query symbol is required for bounded delivery evidence"
+        )
+    if (
+        type(requested_symbol) is not str
+        or not requested_symbol
+        or len(requested_symbol) > 160
+        or re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", requested_symbol) is None
+    ):
+        raise ProviderCoreError(
+            "Bybit option delivery query symbol is non-canonical"
+        )
+    if type(instrument_registry) is not InstrumentRegistry:
+        raise TypeError("instrument_registry must be exact InstrumentRegistry")
+    try:
+        instrument = InstrumentRegistry.exact(
+            instrument_registry,
+            binding.instrument_version,
+        )
+    except InstrumentRegistryError as error:
+        raise ProviderCoreError(
+            "Bybit option delivery instrument_version is not present in canonical registry"
+        ) from error
+    if type(instrument) is not InstrumentVersion:
+        raise ProviderCoreError(
+            "Bybit option delivery registry returned non-canonical instrument"
+        )
+    if (
+        instrument.provider_id != "BYBIT"
+        or instrument.venue_id != "OPTIONS"
+        or instrument.asset_class != "OPTION"
+        or instrument.provider_symbol != requested_symbol
+    ):
+        raise ProviderCoreError(
+            "Bybit option delivery symbol does not match canonical instrument_version"
+        )
+
+    start_ms = (
+        _bybit_option_delivery_query_integer(query["startTime"], name="startTime")
+        if "startTime" in query
+        else None
+    )
+    end_ms = (
+        _bybit_option_delivery_query_integer(query["endTime"], name="endTime")
+        if "endTime" in query
+        else None
+    )
+    if start_ms is None and end_ms is None:
+        raise ProviderCoreError(
+            "Bybit option delivery query must include explicit startTime or endTime"
+        )
+    if start_ms is not None and end_ms is not None:
+        if end_ms < start_ms or end_ms - start_ms > _BYBIT_OPTION_DELIVERY_MAX_RANGE_MS:
+            raise ProviderCoreError(
+                "Bybit option delivery query time range is non-canonical"
+            )
+    effective_start_ms = (
+        start_ms
+        if start_ms is not None
+        else (
+            end_ms - _BYBIT_OPTION_DELIVERY_MAX_RANGE_MS
+            if end_ms is not None
+            else None
+        )
+    )
+    effective_end_ms = (
+        end_ms
+        if end_ms is not None
+        else (
+            start_ms + _BYBIT_OPTION_DELIVERY_MAX_RANGE_MS
+            if start_ms is not None
+            else None
+        )
+    )
+    requested_limit = query.get("limit")
+    if requested_limit is not None:
+        requested_limit = _bybit_option_delivery_query_integer(
+            requested_limit,
+            name="limit",
+        )
+        if not 1 <= requested_limit <= 50:
+            raise ProviderCoreError(
+                "Bybit option delivery query limit must be between 1 and 50"
+            )
+
+    requested_cursor = query.get("cursor")
+    if requested_cursor is not None and (
+        type(requested_cursor) is not str
+        or not requested_cursor
+        or _BYBIT_OPTION_DELIVERY_CURSOR_RE.fullmatch(requested_cursor) is None
+    ):
+        raise ProviderCoreError(
+            "Bybit option delivery query cursor is non-canonical"
+        )
+
+    requested_exp_date = query.get("expDate")
+    if requested_exp_date is not None:
+        requested_exp_date = _bybit_option_delivery_expiry_text(
+            requested_exp_date,
+            name="expDate",
+        )
+
+    envelope = _mapping(observation.payload, name="response")
+    ret_code = envelope.get("retCode")
+    if type(ret_code) is not int or ret_code != 0:
+        raise ProviderCoreError(
+            "Bybit option delivery response requires exact integer retCode=0"
+        )
+    result = _mapping(envelope.get("result"), name="result")
+    if result.get("category") != "option":
+        raise ProviderCoreError(
+            "Bybit option delivery result category must be option"
+        )
+    rows = result.get("list")
+    if not isinstance(rows, (list, tuple)):
+        raise ProviderCoreError(
+            "Bybit option delivery result.list must be an array"
+        )
+    if requested_limit is not None and len(rows) > requested_limit:
+        raise ProviderCoreError(
+            "Bybit option delivery response exceeds requested limit"
+        )
+
+    next_cursor = result.get("nextPageCursor")
+    if type(next_cursor) is not str:
+        raise ProviderCoreError(
+            "Bybit option delivery nextPageCursor must be text"
+        )
+    if (
+        next_cursor
+        and _BYBIT_OPTION_DELIVERY_CURSOR_RE.fullmatch(next_cursor) is None
+    ):
+        raise ProviderCoreError(
+            "Bybit option delivery nextPageCursor is non-canonical"
+        )
+
+    required_row_fields = frozenset(
+        {
+            "symbol",
+            "side",
+            "deliveryTime",
+            "strike",
+            "fee",
+            "position",
+            "deliveryPrice",
+            "deliveryRpl",
+        }
+    )
+    optional_row_fields = frozenset({"entryPrice"})
+    records: list[BybitOptionDeliveryRecord] = []
+    for index, value in enumerate(rows):
+        row = _mapping(value, name=f"result.list[{index}]")
+        row_fields = frozenset(row)
+        if (
+            not required_row_fields.issubset(row_fields)
+            or row_fields - required_row_fields - optional_row_fields
+        ):
+            raise ProviderCoreError(
+                f"result.list[{index}] fields do not match the qualified delivery schema"
+            )
+        symbol = row.get("symbol")
+        if (
+            type(symbol) is not str
+            or not symbol
+            or symbol != symbol.strip()
+            or len(symbol) > 160
+            or re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", symbol) is None
+        ):
+            raise ProviderCoreError(
+                "Bybit option delivery symbol is non-canonical"
+            )
+        side = row.get("side")
+        if side not in {"Buy", "Sell"}:
+            raise ProviderCoreError(
+                "Bybit option delivery side must be Buy or Sell"
+            )
+        delivery_time_value = row.get("deliveryTime")
+        if (
+            type(delivery_time_value) is not int
+            or delivery_time_value < 0
+        ):
+            raise ProviderCoreError(
+                f"result.list[{index}].deliveryTime must be an exact non-negative integer"
+            )
+        delivery_time_ms = delivery_time_value
+        if symbol != requested_symbol:
+            raise ProviderCoreError(
+                "Bybit option delivery row violates bound instrument symbol"
+            )
+        if (
+            effective_start_ms is not None
+            and delivery_time_ms < effective_start_ms
+        ) or (
+            effective_end_ms is not None
+            and delivery_time_ms > effective_end_ms
+        ):
+            raise ProviderCoreError(
+                "Bybit option delivery row violates requested time range"
+            )
+        if requested_exp_date is not None:
+            symbol_parts = symbol.split("-")
+            if len(symbol_parts) < 4 or symbol_parts[1] != requested_exp_date:
+                raise ProviderCoreError(
+                    "Bybit option delivery row violates requested expiry filter"
+                )
+        if "entryPrice" in row:
+            entry_price = _bybit_option_delivery_decimal_text(
+                row["entryPrice"],
+                name=f"result.list[{index}].entryPrice",
+            )
+        else:
+            entry_price = None
+        records.append(
+            BybitOptionDeliveryRecord(
+                delivery_time_ms=delivery_time_ms,
+                symbol=symbol,
+                side=side,
+                position=_bybit_option_delivery_decimal_text(
+                    row.get("position"),
+                    name=f"result.list[{index}].position",
+                ),
+                entry_price=entry_price,
+                delivery_price=_bybit_option_delivery_decimal_text(
+                    row.get("deliveryPrice"),
+                    name=f"result.list[{index}].deliveryPrice",
+                ),
+                strike=_bybit_option_delivery_decimal_text(
+                    row.get("strike"),
+                    name=f"result.list[{index}].strike",
+                ),
+                fee=_bybit_option_delivery_decimal_text(
+                    row.get("fee"),
+                    name=f"result.list[{index}].fee",
+                ),
+                delivery_rpl=_bybit_option_delivery_decimal_text(
+                    row.get("deliveryRpl"),
+                    name=f"result.list[{index}].deliveryRpl",
+                ),
+            )
+        )
+
+    return BybitOptionDeliveryPage(
+        records=tuple(records),
+        next_page_cursor=next_cursor,
+        provider_id=binding.provider_id,
+        account_id=binding.account_id,
+        entity_id=binding.entity_id,
+        environment=binding.environment,
+        capability_snapshot_id=binding.capability_snapshot_id,
+        instrument_version=binding.instrument_version,
+        provider_symbol=requested_symbol,
+        surface=binding.surface,
+        endpoint=binding.endpoint,
+        permission_scope=binding.permission_scope,
+        query_digest=binding.query_digest,
+        parser_identity=BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
+        parser_version=BYBIT_OPTION_DELIVERY_PARSER_VERSION,
+        parser_contract_digest=BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
+        evidence_ref=observation.evidence_ref,
+        response_sha256=observation.response_sha256,
+        observed_at=observation.observed_at,
+    )
 
 
 def coverage_evidence(

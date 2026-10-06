@@ -36,22 +36,30 @@ class AuthenticatedReadHttpRequestTests(unittest.TestCase):
                 body=b"",
             )
 
-    def test_get_still_requires_signed_query_and_no_body(self):
-        with self.assertRaisesRegex(
-            ProviderTransportScopeError,
-            "authenticated GET requires an exact signed query and no body",
-        ):
-            AuthenticatedReadHttpRequest(
-                url="https://api.example.test/read",
-                headers={"X-API-KEY": "synthetic"},
-                timeout_seconds=5,
-                method="GET",
-                body=b"",
-            )
+    def test_get_allows_queryless_session_read_but_still_rejects_body(self):
+        queryless = AuthenticatedReadHttpRequest(
+            url="https://localhost/iserver/accounts",
+            headers={"Accept": "application/json"},
+            timeout_seconds=5,
+            method="GET",
+            body=b"",
+        )
+        self.assertEqual(queryless.method, "GET")
+        self.assertEqual(queryless.body, b"")
+        self.assertEqual(queryless.url, "https://localhost/iserver/accounts")
+
+        signed = AuthenticatedReadHttpRequest(
+            url="https://api.example.test/read?signature=synthetic",
+            headers={"X-API-KEY": "synthetic"},
+            timeout_seconds=5,
+            method="GET",
+            body=b"",
+        )
+        self.assertEqual(signed.method, "GET")
 
         with self.assertRaisesRegex(
             ProviderTransportScopeError,
-            "authenticated GET requires an exact signed query and no body",
+            "authenticated GET requires no body",
         ):
             AuthenticatedReadHttpRequest(
                 url="https://api.example.test/read?signature=synthetic",

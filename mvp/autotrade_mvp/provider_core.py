@@ -599,7 +599,7 @@ def _install_authenticated_provider_read_authority():
         endpoint: str,
         account_id: str | None = None,
         environment: str | None = None,
-    ) -> None:
+    ) -> Mapping[str, object]:
         projection = provider_response_observation_projection(value)
         if canonical_type(surface) is not Surface:
             raise TypeError("surface must be exact Surface")

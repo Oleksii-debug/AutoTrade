@@ -684,39 +684,6 @@
     }
     return String(value);
   }
-  function text(id, value, fallback = "Unavailable") {
-    const element = byId(id);
-    if (!element) return;
-    const rendered = value === null || value === undefined || value === ""
-      ? fallback
-      : String(value);
-    if (element.textContent !== rendered) {
-      element.textContent = rendered;
-    }
-  }
-
-  function stableProjectionValue(value) {
-    if (Array.isArray(value)) {
-      return value.map((item) => stableProjectionValue(item));
-    }
-    if (value && typeof value === "object") {
-      const ordered = {};
-      for (const key of Object.keys(value).sort()) {
-        ordered[key] = stableProjectionValue(value[key]);
-      }
-      return ordered;
-    }
-    return value;
-  }
-
-  function projectionText(value) {
-    if (value === null) return "null";
-    if (value && typeof value === "object") {
-      return JSON.stringify(stableProjectionValue(value));
-    }
-    return String(value);
-  }
-
   function renderCommandValidationDetails(fieldErrors, stateName) {
     const list = byId("command-validation-list");
     if (!list) return;
@@ -921,6 +888,8 @@
 function appendProjectionRow(body, label, value) {
     const row = document.createElement("tr");
     row.dataset.filterableRow = "true";
+    row.dataset.tableHostOrder = String(filterableRows(body).length);
+    row.dataset.selectionKey = "projection:" + label;
     const header = document.createElement("th");
     header.scope = "row";
     header.textContent = label;
@@ -928,6 +897,7 @@ function appendProjectionRow(body, label, value) {
     cell.textContent = value;
     row.append(header, cell);
     body.appendChild(row);
+    return row;
   }
 
   function renderProjection(bodyId, record, emptyMessage, {preserveSelection = true} = {}) {
@@ -1310,37 +1280,6 @@ function appendProjectionRow(body, label, value) {
     queuePoliteAnnouncement(message);
   }
 
-  async async function jsonFetch(url, options = {}) {
-    const response = await fetch(url, {
-      credentials: "same-origin",
-      cache: "no-store",
-      headers: {
-        "Accept": "application/json",
-        ...(options.body ? {"Content-Type": "application/json"} : {}),
-        ...(options.headers || {})
-      },
-      ...options
-    });
-    if (!response.ok) {
-      let errorBody = null;
-      try {
-        const contentType = response.headers.get("Content-Type") || "";
-        if (contentType.includes("application/json")) {
-          errorBody = await response.json();
-        }
-      } catch {
-        errorBody = null;
-      }
-      const error = new Error(`Host request failed with status ${response.status}`);
-      error.status = response.status;
-      if (errorBody && typeof errorBody === "object" && !Array.isArray(errorBody)) {
-        if (typeof errorBody.error === "string") error.code = errorBody.error;
-        if (errorBody.retryable === true) error.retryable = true;
-      }
-      throw error;
-    }
-    return response.json();
-  }
   function invalidateSnapshotAuthority() {
     state.snapshotReady = false;
     state.sessionIdentity = null;
@@ -1408,6 +1347,7 @@ function appendProjectionRow(body, label, value) {
 function renderOperation(operation) {
     const body = byId("operations-body");
     if (!body) return;
+    const bookmark = captureTableSelection(body);
 
     let row = [...body.querySelectorAll("tr")].find(
       (item) => item.dataset.operationId === operation.operationId);
@@ -1429,6 +1369,8 @@ function renderOperation(operation) {
     }
 
     row.dataset.filterableRow = "true";
+    row.dataset.selectionKey = "operation:" + operation.operationId;
+    row.dataset.selectionExact = "true";
     row.children[0].textContent = operation.operationId;
     row.children[1].textContent = operation.phase;
     row.children[2].textContent = operation.updatedAt;
@@ -1436,6 +1378,8 @@ function renderOperation(operation) {
       ? operation.remainingUncertainty.join(", ")
       : "None reported";
     reapplyTableFilter("operations-body");
+    revealBookmarkedTablePage(body, bookmark);
+    restoreTableSelection(body, bookmark);
   }
 
   async function refreshOperation(operationId) {
@@ -1539,19 +1483,6 @@ function renderOperation(operation) {
     restoreTableSelection(body, bookmark);
   }
 
-  function resetOperationsForScope(message =
-      "No host operations loaded for this account/environment session.") {
-    const body = byId("operations-body");
-    if (!body) return;
-    body.replaceChildren();
-    const row = document.createElement("tr");
-    const cell = document.createElement("td");
-    cell.colSpan = 4;
-    cell.textContent = message;
-    row.appendChild(cell);
-    body.appendChild(row);
-    reapplyTableFilter("operations-body");
-  }
   function resetNotificationsForScope(
     emptyMessage = "No material notifications recorded in this account/environment session."
   ) {

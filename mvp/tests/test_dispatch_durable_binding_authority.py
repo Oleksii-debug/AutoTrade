@@ -2963,6 +2963,106 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             self.assertEqual(transport_calls, 0)
 
 
+    def test_binding_loader_rejects_rebound_journal_call_before_callback(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            callbacks = 0
+            original = dispatch_module._journal_store_call
+
+            def forged_journal_call(*_args, **_kwargs):
+                nonlocal callbacks
+                callbacks += 1
+                raise AssertionError("rebound journal call executed")
+
+            try:
+                dispatch_module._journal_store_call = forged_journal_call
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "submission response binding authority is unavailable",
+                ):
+                    load_submission_response_binding(
+                        JournalStore(path),
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id="binding-type-a1",
+                    )
+            finally:
+                dispatch_module._journal_store_call = original
+
+            self.assertEqual(callbacks, 0)
+            restored = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-type-a1",
+            )
+            self.assertEqual(restored.attempt_id, "binding-type-a1")
+
+    def test_binding_loader_rejects_constructor_and_hash_authority_rebinding_before_callbacks(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+
+            original_post_init = SubmissionResponseBinding.__post_init__
+            post_init_callbacks = 0
+
+            def forged_post_init(_self):
+                nonlocal post_init_callbacks
+                post_init_callbacks += 1
+
+            try:
+                SubmissionResponseBinding.__post_init__ = forged_post_init
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "submission response binding authority is unavailable",
+                ):
+                    load_submission_response_binding(
+                        JournalStore(path),
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id="binding-type-a1",
+                    )
+            finally:
+                SubmissionResponseBinding.__post_init__ = original_post_init
+            self.assertEqual(post_init_callbacks, 0)
+
+            original_canonical_json = dispatch_module.canonical_json
+            json_callbacks = 0
+
+            def forged_canonical_json(_value):
+                nonlocal json_callbacks
+                json_callbacks += 1
+                raise AssertionError("rebound canonical_json executed")
+
+            try:
+                dispatch_module.canonical_json = forged_canonical_json
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "submission response binding authority is unavailable",
+                ):
+                    load_submission_response_binding(
+                        JournalStore(path),
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id="binding-type-a1",
+                    )
+            finally:
+                dispatch_module.canonical_json = original_canonical_json
+            self.assertEqual(json_callbacks, 0)
+
+            restored = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-type-a1",
+            )
+            self.assertEqual(restored.attempt_id, "binding-type-a1")
+
     def test_response_binding_constructor_rejects_polymorphic_authority_inputs(self):
         from mvp.autotrade_mvp import dispatch as dispatch_module
 

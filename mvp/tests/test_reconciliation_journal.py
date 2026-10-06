@@ -27,24 +27,26 @@ from mvp.autotrade_mvp.reconciliation_journal import (
 )
 
 
-def snapshot(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER"):
+def snapshot(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER", provider_environment=None):
     return SnapshotConsistencyEvidence(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         mode="ATOMIC",
         query_started_at="2026-09-24T17:00:00Z",
         query_completed_at="2026-09-24T19:00:00Z",
     )
 
 
-def fill(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER"):
+def fill(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER", provider_environment=None):
     return ProviderFillEvidence.create(
                side="BUY",
                evidence_refs=("test:normalized-fill",),
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         provider_execution_id="e1",
         client_order_id="c1",
         instrument="ABC",
@@ -55,11 +57,18 @@ def fill(*, provider_id="TEST_PROVIDER", account_id="test-account", environment=
     )
 
 
-def availability(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER"):
+def availability(
+    *,
+    provider_id="TEST_PROVIDER",
+    account_id="test-account",
+    environment="PAPER",
+    provider_environment=None,
+):
     return ResourceAvailabilityEvidence(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         snapshot_id="snapshot-capacity-1",
         query_started_at="2026-09-24T17:00:00Z",
         query_completed_at="2026-09-24T19:00:00Z",
@@ -92,12 +101,14 @@ def reconciliation(**overrides):
     provider_id = values["provider_id"]
     account_id = values["account_id"]
     environment = values["environment"]
+    provider_environment = values.get("provider_environment")
     if "provider_fills" not in overrides:
         values["provider_fills"] = [
             fill(
                 provider_id=provider_id,
                 account_id=account_id,
                 environment=environment,
+                provider_environment=provider_environment,
             )
         ]
     if "snapshot_consistency" not in overrides:
@@ -105,6 +116,7 @@ def reconciliation(**overrides):
             provider_id=provider_id,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         )
     if "provider_activity_provider_id" not in overrides:
         values["provider_activity_provider_id"] = provider_id
@@ -128,6 +140,78 @@ class ReconciliationJournalTests(unittest.TestCase):
             environment="PAPER",
         )
         self.assertNotEqual(left, right)
+
+    def test_bybit_checkpoint_identity_separates_testnet_and_demo(self):
+        testnet = reconciliation(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        demo = reconciliation(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        self.assertNotEqual(
+            _reconciliation_aggregate_id(
+                reconciliation_id="same",
+                provider_id=testnet.provider_id,
+                account_id=testnet.account_id,
+                environment=testnet.environment,
+                provider_environment=testnet.provider_environment,
+            ),
+            _reconciliation_aggregate_id(
+                reconciliation_id="same",
+                provider_id=demo.provider_id,
+                account_id=demo.account_id,
+                environment=demo.environment,
+                provider_environment=demo.provider_environment,
+            ),
+        )
+
+    def test_bybit_checkpoint_payload_persists_provider_environment(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            result = reconciliation(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-testnet",
+                result=result,
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            self.assertEqual(
+                checkpoint["payload"]["provider_environment"],
+                "TESTNET",
+            )
+            self.assertIsNotNone(
+                load_latest_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id="bybit-testnet",
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                )
+            )
+            self.assertIsNone(
+                load_latest_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id="bybit-testnet",
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                )
+            )
 
     def test_unexpected_fill_checkpoint_binds_exact_normalized_provider_evidence(self):
         with TemporaryDirectory() as directory:
@@ -433,6 +517,151 @@ class ReconciliationJournalTests(unittest.TestCase):
                 max_age_seconds="60",
             )
             self.assertEqual(evidence["availability"], {"CASH:USD": "850"})
+
+    def test_bybit_option_lifecycle_freshness_is_provider_environment_scoped(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-testnet-before-lifecycle",
+                result=reconciliation(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    resource_availability=availability(
+                        provider_id="BYBIT",
+                        account_id="bybit-account",
+                        environment="PAPER",
+                        provider_environment="TESTNET",
+                    ),
+                ),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            demo_payload = {
+                "provider_id": "BYBIT",
+                "account_id": "bybit-account",
+                "environment": "PAPER",
+                "provider_environment": "DEMO",
+                "external_event_id": "demo-exercise",
+                "event_kind": "EXERCISE",
+            }
+            store.append_event(
+                {
+                    "event_id": "bybit-demo-option-lifecycle",
+                    "event_type": "OptionLifecycleApplied",
+                    "aggregate_type": "option_lifecycle",
+                    "aggregate_id": "bybit-demo-option-lifecycle-scope",
+                    "aggregate_version": "1",
+                    "payload": demo_payload,
+                    "payload_hash": payload_digest(demo_payload),
+                    "committed_at": "2026-09-24T19:00:10Z",
+                }
+            )
+            evidence = load_account_resource_availability_evidence(
+                store,
+                checkpoint_event_id=checkpoint["event_id"],
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                resources=("CASH:USD",),
+                now="2026-09-24T19:00:30Z",
+                max_age_seconds="60",
+            )
+            self.assertEqual(evidence["availability"], {"CASH:USD": "850"})
+
+            testnet_payload = {
+                **demo_payload,
+                "provider_environment": "TESTNET",
+                "external_event_id": "testnet-exercise",
+            }
+            store.append_event(
+                {
+                    "event_id": "bybit-testnet-option-lifecycle",
+                    "event_type": "OptionLifecycleApplied",
+                    "aggregate_type": "option_lifecycle",
+                    "aggregate_id": "bybit-testnet-option-lifecycle-scope",
+                    "aggregate_version": "1",
+                    "payload": testnet_payload,
+                    "payload_hash": payload_digest(testnet_payload),
+                    "committed_at": "2026-09-24T19:00:11Z",
+                }
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "predates option lifecycle financial truth",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                )
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-testnet-before-legacy-lifecycle",
+                result=reconciliation(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    resource_availability=availability(
+                        provider_id="BYBIT",
+                        account_id="bybit-account",
+                        environment="PAPER",
+                        provider_environment="TESTNET",
+                    ),
+                ),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            legacy_payload = {
+                "provider_id": "BYBIT",
+                "account_id": "bybit-account",
+                "environment": "PAPER",
+                "external_event_id": "legacy-exercise",
+                "event_kind": "EXERCISE",
+            }
+            store.append_event(
+                {
+                    "event_id": "bybit-legacy-option-lifecycle",
+                    "event_type": "OptionLifecycleApplied",
+                    "aggregate_type": "option_lifecycle",
+                    "aggregate_id": "bybit-legacy-option-lifecycle-scope",
+                    "aggregate_version": "1",
+                    "payload": legacy_payload,
+                    "payload_hash": payload_digest(legacy_payload),
+                    "committed_at": "2026-09-24T19:00:10Z",
+                }
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "BYBIT option lifecycle financial truth lacks provider_environment",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                )
 
     def test_option_lifecycle_fact_invalidates_cash_availability(self):
         with TemporaryDirectory() as directory:

@@ -142,31 +142,90 @@ def _scoped_identity(kind: str, *parts: str) -> str:
     return f"{normalized_kind}:{digest}"
 
 
+def _provider_environment(
+    *,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    provider = _text(provider_id, name="provider_id").upper()
+    runtime = _environment(environment)
+    if provider == "BYBIT" and provider_environment is None:
+        raise AccountingConflict(
+            "BYBIT durable economic authority requires explicit provider_environment"
+        )
+    normalized = (
+        runtime
+        if provider_environment is None
+        else _text(provider_environment, name="provider_environment").upper()
+    )
+    if provider == "BYBIT" and normalized not in {"MAINNET", "TESTNET", "DEMO"}:
+        raise AccountingConflict(
+            "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+        )
+    if provider == "BYBIT":
+        expected_runtime = "LIVE" if normalized == "MAINNET" else "PAPER"
+        if runtime != expected_runtime:
+            raise AccountingConflict(
+                "BYBIT provider_environment does not match runtime environment"
+            )
+    return normalized
+
+
+def _provider_environment_payload(
+    *,
+    provider_environment: str,
+    environment: str,
+) -> str | None:
+    return (
+        provider_environment
+        if provider_environment != environment
+        else None
+    )
+
+
 def _activity_identity(
     *,
     provider_id: str,
     account_id: str,
     environment: str,
     activity_id: str,
+    provider_environment: str | None = None,
 ) -> str:
     provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")
     scope = _environment(environment)
-    activity = _text(activity_id, name="activity_id")
-    return _scoped_identity(
-        "provider-activity",
-        provider,
-        account,
-        scope,
-        activity,
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
     )
+    parts = [provider, account, scope]
+    if provider_scope != scope:
+        parts.append(provider_scope)
+    parts.append(_text(activity_id, name="activity_id"))
+    return _scoped_identity("provider-activity", *parts)
 
 
-def _book_id(*, provider_id: str, account_id: str, environment: str) -> str:
+def _book_id(
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    provider_environment: str | None = None,
+) -> str:
     provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")
     scope = _environment(environment)
-    return _scoped_identity("economic-book", provider, account, scope)
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
+    )
+    parts = [provider, account, scope]
+    if provider_scope != scope:
+        parts.append(provider_scope)
+    return _scoped_identity("economic-book", *parts)
 
 
 def _transaction_payload(transaction: JournalTransaction) -> dict[str, Any]:
@@ -251,15 +310,30 @@ def _economic_batch_digest(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
     transactions: Iterable[JournalTransaction],
 ) -> str:
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    scope = _environment(environment)
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
+    )
     material = {
         "schema_version": "1.0.0",
-        "provider_id": _text(provider_id, name="provider_id").upper(),
-        "account_id": _text(account_id, name="account_id"),
-        "environment": _environment(environment),
+        "provider_id": provider,
+        "account_id": account,
+        "environment": scope,
         "transactions": [_transaction_payload(item) for item in transactions],
     }
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=provider_scope,
+        environment=scope,
+    )
+    if provider_scope_payload is not None:
+        material["provider_environment"] = provider_scope_payload
     return payload_digest(material)
 
 
@@ -371,13 +445,23 @@ def _provider_fill_binding_aggregate_id(
     account_id: str,
     environment: str,
     provider_execution_id: str,
+    provider_environment: str | None = None,
 ) -> str:
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    runtime = _environment(environment)
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=runtime,
+        provider_environment=provider_environment,
+    )
+    parts = [provider, account, runtime]
+    if provider_scope != runtime:
+        parts.append(provider_scope)
+    parts.append(_text(provider_execution_id, name="provider_execution_id"))
     return _scoped_identity(
         "provider-fill-financial-binding",
-        _text(provider_id, name="provider_id").upper(),
-        _text(account_id, name="account_id"),
-        _environment(environment),
-        _text(provider_execution_id, name="provider_execution_id"),
+        *parts,
     )
 
 
@@ -402,7 +486,7 @@ def _projected_fill_binding_payload(
 def _provider_fill_binding_payload(
     provider_fill: ProviderFillEvidence,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "provider_id": provider_fill.provider_id,
         "account_id": provider_fill.account_id,
         "environment": provider_fill.environment,
@@ -419,6 +503,13 @@ def _provider_fill_binding_payload(
         "position_effect": getattr(provider_fill, "position_effect", None),
         "evidence_refs": list(provider_fill.evidence_refs),
     }
+    provider_scope = _provider_environment_payload(
+        provider_environment=provider_fill.provider_environment,
+        environment=provider_fill.environment,
+    )
+    if provider_scope is not None:
+        payload["provider_environment"] = provider_scope
+    return payload
 
 
 def _require_plain_financial_json(
@@ -482,6 +573,9 @@ _PROVIDER_FILL_BINDING_FIELDS = frozenset({
     "position_effect",
     "evidence_refs",
 })
+_PROVIDER_FILL_BINDING_FIELDS_WITH_PROVIDER_ENVIRONMENT = (
+    _PROVIDER_FILL_BINDING_FIELDS | {"provider_environment"}
+)
 
 
 def _projected_fill_from_binding_payload(
@@ -518,7 +612,14 @@ def _provider_fill_from_binding_payload(
     *,
     name: str,
 ) -> ProviderFillEvidence:
-    if type(payload) is not dict or set(payload) != _PROVIDER_FILL_BINDING_FIELDS:
+    if (
+        type(payload) is not dict
+        or set(payload)
+        not in {
+            _PROVIDER_FILL_BINDING_FIELDS,
+            _PROVIDER_FILL_BINDING_FIELDS_WITH_PROVIDER_ENVIRONMENT,
+        }
+    ):
         raise AccountingConflict(f"{name} shape is invalid")
     raw = dict(payload)
     refs = raw["evidence_refs"]
@@ -529,6 +630,7 @@ def _provider_fill_from_binding_payload(
             provider_id=raw["provider_id"],
             account_id=raw["account_id"],
             environment=raw["environment"],
+            provider_environment=raw.get("provider_environment"),
             provider_execution_id=raw["provider_execution_id"],
             client_order_id=raw["client_order_id"],
             instrument=raw["instrument"],
@@ -576,11 +678,16 @@ def _prepare_provider_fill_binding(
         )
     if plan.intent_id != projected_fill.intent_id:
         raise AccountingConflict("provider fill binding intent identity changed")
+    if provider_fill.provider_environment != economic_book.provider_environment:
+        raise AccountingConflict(
+            "provider fill binding provider_environment does not match economic book"
+        )
 
     aggregate_id = _provider_fill_binding_aggregate_id(
         provider_id=economic_book.provider_id,
         account_id=economic_book.account_id,
         environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
         provider_execution_id=provider_fill.provider_execution_id,
     )
     usage = {
@@ -611,6 +718,12 @@ def _prepare_provider_fill_binding(
         ),
         "derived_usage": usage,
     }
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=economic_book.provider_environment,
+        environment=economic_book.environment,
+    )
+    if provider_scope_payload is not None:
+        request["provider_environment"] = provider_scope_payload
     events = _economic_store_load_events(economic_book,
         _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
         aggregate_id,
@@ -629,6 +742,10 @@ def _prepare_provider_fill_binding(
             payload.get("provider_id") != economic_book.provider_id
             or payload.get("account_id") != economic_book.account_id
             or payload.get("environment") != economic_book.environment
+            or payload.get(
+                "provider_environment",
+                economic_book.environment,
+            ) != economic_book.provider_environment
             or payload.get("provider_execution_id") != plan.provider_execution_id
         ):
             raise AccountingConflict(
@@ -680,20 +797,21 @@ def _prepare_provider_fill_binding(
                 "provider fill financial binding reservation cut is invalid"
             )
         stored_plan_digest = stored_request.get("plan_digest")
-        expected_plan_digest = payload_digest(
-            {
-                "schema_version": "1.1.0",
-                "provider_id": economic_book.provider_id,
-                "account_id": economic_book.account_id,
-                "environment": economic_book.environment,
-                "reservation_id": plan.reservation_id,
-                "intent_id": plan.intent_id,
-                "provider_execution_id": plan.provider_execution_id,
-                "reservation_cut_digest": stored_cut,
-                "transaction": canonical_transaction(plan.transaction),
-                "derived_usage": usage,
-            }
-        )
+        expected_plan_material = {
+            "schema_version": "1.1.0",
+            "provider_id": economic_book.provider_id,
+            "account_id": economic_book.account_id,
+            "environment": economic_book.environment,
+            "reservation_id": plan.reservation_id,
+            "intent_id": plan.intent_id,
+            "provider_execution_id": plan.provider_execution_id,
+            "reservation_cut_digest": stored_cut,
+            "transaction": canonical_transaction(plan.transaction),
+            "derived_usage": usage,
+        }
+        if provider_scope_payload is not None:
+            expected_plan_material["provider_environment"] = provider_scope_payload
+        expected_plan_digest = payload_digest(expected_plan_material)
         if stored_plan_digest != expected_plan_digest:
             raise AccountingConflict(
                 "provider fill financial binding plan digest is invalid"
@@ -727,6 +845,8 @@ def _prepare_provider_fill_binding(
         "request_digest": request_digest,
         "request": request,
     }
+    if provider_scope_payload is not None:
+        payload["provider_environment"] = provider_scope_payload
     envelope = {
         "event_id": event_id,
         "event_type": _PROVIDER_FILL_BINDING_EVENT_TYPE,
@@ -850,13 +970,23 @@ def _provider_fill_correction_binding_aggregate_id(
     account_id: str,
     environment: str,
     provider_execution_id: str,
+    provider_environment: str | None = None,
 ) -> str:
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    runtime = _environment(environment)
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=runtime,
+        provider_environment=provider_environment,
+    )
+    parts = [provider, account, runtime]
+    if provider_scope != runtime:
+        parts.append(provider_scope)
+    parts.append(_text(provider_execution_id, name="provider_execution_id"))
     return _scoped_identity(
         "provider-fill-reservation-correction-binding",
-        _text(provider_id, name="provider_id").upper(),
-        _text(account_id, name="account_id"),
-        _environment(environment),
-        _text(provider_execution_id, name="provider_execution_id"),
+        *parts,
     )
 
 
@@ -924,11 +1054,20 @@ def _prepare_provider_fill_correction_binding(
         raise AccountingConflict("correction provider execution identity changed")
     if corrected_projected_fill.provider_execution_id != execution_id:
         raise AccountingConflict("corrected projection execution identity changed")
+    for label, evidence in (
+        ("original", original_provider_fill),
+        ("corrected", corrected_provider_fill),
+    ):
+        if evidence.provider_environment != economic_book.provider_environment:
+            raise AccountingConflict(
+                f"{label} provider fill provider_environment does not match economic book"
+            )
 
     initial_aggregate_id = _provider_fill_binding_aggregate_id(
         provider_id=economic_book.provider_id,
         account_id=economic_book.account_id,
         environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
         provider_execution_id=execution_id,
     )
     initial_events = _economic_store_load_events(economic_book,
@@ -964,6 +1103,10 @@ def _prepare_provider_fill_correction_binding(
         initial_request.get("provider_id") != economic_book.provider_id
         or initial_request.get("account_id") != economic_book.account_id
         or initial_request.get("environment") != economic_book.environment
+        or initial_request.get(
+            "provider_environment",
+            economic_book.environment,
+        ) != economic_book.provider_environment
         or initial_request.get("provider_execution_id") != execution_id
         or initial_request.get("reservation_id") != rid
         or initial_request.get("intent_id") != corrected_projected_fill.intent_id
@@ -989,6 +1132,8 @@ def _prepare_provider_fill_correction_binding(
         or initial_provider_evidence.provider_id != economic_book.provider_id
         or initial_provider_evidence.account_id != economic_book.account_id
         or initial_provider_evidence.environment != economic_book.environment
+        or initial_provider_evidence.provider_environment
+        != economic_book.provider_environment
         or initial_provider_evidence.provider_execution_id != execution_id
         or initial_provider_evidence.client_order_id
         != initial_projected_evidence.client_order_id
@@ -1064,8 +1209,14 @@ def _prepare_provider_fill_correction_binding(
     expected_order_key = (
         f"provider:{economic_book.provider_id}:execution:{execution_id}"
     )
+    provider_domain = (
+        ""
+        if economic_book.provider_environment == economic_book.environment
+        else f"provider-environment:{economic_book.provider_environment}:"
+    )
     expected_cause_event_id = (
         f"provider:{economic_book.provider_id}:environment:{economic_book.environment}:"
+        f"{provider_domain}"
         f"account:{economic_book.account_id}:execution:{execution_id}"
     )
     if (
@@ -1084,6 +1235,7 @@ def _prepare_provider_fill_correction_binding(
         provider_id=economic_book.provider_id,
         account_id=economic_book.account_id,
         environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
         provider_execution_id=execution_id,
     )
     events = _economic_store_load_events(economic_book,
@@ -1122,6 +1274,10 @@ def _prepare_provider_fill_correction_binding(
             payload.get("provider_id") != economic_book.provider_id
             or payload.get("account_id") != economic_book.account_id
             or payload.get("environment") != economic_book.environment
+            or payload.get(
+                "provider_environment",
+                economic_book.environment,
+            ) != economic_book.provider_environment
             or payload.get("provider_execution_id") != execution_id
         ):
             raise AccountingConflict(
@@ -1272,6 +1428,8 @@ def _prepare_provider_fill_correction_binding(
             or historical_provider.provider_id != economic_book.provider_id
             or historical_provider.account_id != economic_book.account_id
             or historical_provider.environment != economic_book.environment
+            or historical_provider.provider_environment
+            != economic_book.provider_environment
             or historical_provider.provider_execution_id != execution_id
             or historical_provider.client_order_id
             != historical_projected.client_order_id
@@ -1485,6 +1643,12 @@ def _prepare_provider_fill_correction_binding(
         "resulting_conservative_usage": _usage_payload(resulting_usage),
         "additional_usage": _usage_payload(additional_usage),
     }
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=economic_book.provider_environment,
+        environment=economic_book.environment,
+    )
+    if provider_scope_payload is not None:
+        request["provider_environment"] = provider_scope_payload
     request_digest = payload_digest(request)
     next_version = len(events) + 1
     event_id = str(
@@ -1505,6 +1669,8 @@ def _prepare_provider_fill_correction_binding(
         "request_digest": request_digest,
         "request": request,
     }
+    if provider_scope_payload is not None:
+        payload["provider_environment"] = provider_scope_payload
     envelope = {
         "event_id": event_id,
         "event_type": _PROVIDER_FILL_CORRECTION_BINDING_EVENT_TYPE,
@@ -1545,6 +1711,7 @@ class ProviderEconomicCut:
     provider_id: str
     account_id: str
     environment: str
+    provider_environment: str
     book_id: str
     aggregate_version: int
     journal_sequence: int
@@ -1569,6 +1736,7 @@ class ProviderEconomicCut:
             "provider_id",
             "account_id",
             "environment",
+            "provider_environment",
             "book_id",
             "event_id",
             "payload_hash",
@@ -1621,6 +1789,7 @@ def _provider_economic_cut_seal_digest(value: ProviderEconomicCut) -> str:
             "provider_id": value.provider_id,
             "account_id": value.account_id,
             "environment": value.environment,
+            "provider_environment": value.provider_environment,
             "book_id": value.book_id,
             "aggregate_version": value.aggregate_version,
             "journal_sequence": value.journal_sequence,
@@ -1714,6 +1883,7 @@ def reverify_provider_economic_cut(
         cut.provider_id != book.provider_id
         or cut.account_id != book.account_id
         or cut.environment != book.environment
+        or cut.provider_environment != book.provider_environment
         or cut.book_id != book.book_id
     ):
         raise AccountingConflict(
@@ -1749,6 +1919,7 @@ class _DurableProviderEconomicBookAuthority:
     provider_id: str
     account_id: str
     environment: str
+    provider_environment: str
     book_id: str
     projection_digest: str
 
@@ -1836,6 +2007,7 @@ def _install_durable_provider_economic_book_authority():
             state.get("provider_id") != authority.provider_id
             or state.get("account_id") != authority.account_id
             or state.get("environment") != authority.environment
+            or state.get("provider_environment") != authority.provider_environment
             or state.get("book_id") != authority.book_id
         ):
             raise AccountingConflict(
@@ -1868,6 +2040,7 @@ def _install_durable_provider_economic_book_authority():
             provider_id=authority.provider_id,
             account_id=authority.account_id,
             environment=authority.environment,
+            provider_environment=authority.provider_environment,
             book_id=authority.book_id,
             projection_digest=authority.projection_digest,
         )
@@ -1895,6 +2068,7 @@ def _install_durable_provider_economic_book_authority():
         provider_id: str,
         account_id: str,
         environment: str,
+        provider_environment: str | None = None,
     ) -> None:
         if type(value) is not DurableProviderEconomicBook:
             raise TypeError("economic_book must be exact DurableProviderEconomicBook")
@@ -1921,6 +2095,12 @@ def _install_durable_provider_economic_book_authority():
             environment=environment,
             account_id=account_id,
         )
+        provider_environment_value = _provider_environment(
+            provider_id=object.__getattribute__(value, "provider_id"),
+            environment=object.__getattribute__(value, "environment"),
+            provider_environment=provider_environment,
+        )
+        object.__setattr__(value, "provider_environment", provider_environment_value)
         object.__setattr__(
             value,
             "book_id",
@@ -1928,6 +2108,7 @@ def _install_durable_provider_economic_book_authority():
                 provider_id=object.__getattribute__(value, "provider_id"),
                 account_id=object.__getattribute__(value, "account_id"),
                 environment=object.__getattribute__(value, "environment"),
+                provider_environment=provider_environment_value,
             ),
         )
         state = object.__getattribute__(value, "__dict__")
@@ -1940,6 +2121,7 @@ def _install_durable_provider_economic_book_authority():
                 provider_id=state["provider_id"],
                 account_id=state["account_id"],
                 environment=state["environment"],
+                provider_environment=state["provider_environment"],
                 book_id=state["book_id"],
                 projection_digest=_economic_projection_digest(state["_book"]),
             ),
@@ -2047,7 +2229,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
     _SINGLE_EVENT = "EconomicTransactionBooked"
     _ACTOR = "provider-economic-accounting"
     _AUTHORITY_STATE_NAMES = frozenset(
-        {"store", "provider_id", "account_id", "environment", "book_id", "_book"}
+        {"store", "provider_id", "account_id", "environment", "provider_environment", "book_id", "_book"}
     )
 
     def __getattribute__(self, name: str):
@@ -2094,6 +2276,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         provider_id: str,
         account_id: str,
         environment: str,
+        provider_environment: str | None = None,
     ):
         _initialize_durable_provider_economic_book(
             self,
@@ -2101,6 +2284,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=provider_id,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         )
 
     def _events(self) -> list[dict[str, Any]]:
@@ -2142,6 +2326,8 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 payload.get("provider_id") != authority.provider_id
                 or payload.get("account_id") != authority.account_id
                 or payload.get("environment") != authority.environment
+                or payload.get("provider_environment", authority.environment)
+                != authority.provider_environment
             ):
                 raise AccountingConflict(
                     "economic durable event scope does not match provider book"
@@ -2165,6 +2351,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 provider_id=authority.provider_id,
                 account_id=authority.account_id,
                 environment=authority.environment,
+                provider_environment=authority.provider_environment,
                 transactions=transactions,
             )
             if payload.get("batch_digest") != batch_digest:
@@ -2234,10 +2421,11 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         previously frozen historical cut must supply that cut's recorded
         visibility_journal_sequence explicitly.
 
-        Current main does not yet retain exact provider_environment in this
-        durable book.  BYBIT PAPER/LIVE therefore remains too ambiguous for
-        terminal provider-cost evidence and is rejected here until the shared
-        provider-domain migration lands.
+        The durable book identity, event scope and batch digest retain exact
+        provider_environment when it differs from the runtime environment.
+        Historical cuts therefore remain isolated across BYBIT MAINNET,
+        TESTNET and DEMO while preserving legacy identity for providers whose
+        provider environment is identical to the runtime environment.
         """
 
         if type(aggregate_version) is not int or aggregate_version <= 0:
@@ -2281,16 +2469,14 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=self.provider_id,
             account_id=self.account_id,
             environment=self.environment,
+            provider_environment=self.provider_environment,
         )
         if self.book_id != expected_book_id:
             raise AccountingConflict(
                 "historical economic cut book identity does not match owner scope"
             )
-        if self.provider_id == "BYBIT" and self.environment in {"PAPER", "LIVE"}:
-            raise AccountingConflict(
-                "BYBIT historical economic cut requires exact provider_environment "
-                "before terminal provider-cost evidence"
-            )
+        # Provider environment is part of the durable book identity, so
+        # historical cuts are unambiguous across BYBIT TESTNET/DEMO/MAINNET.
         if type(self.store) is not JournalStore:
             raise AccountingConflict(
                 "historical economic cut requires exact canonical JournalStore"
@@ -2394,6 +2580,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             "provider_id": self.provider_id,
             "account_id": self.account_id,
             "environment": self.environment,
+            "provider_environment": self.provider_environment,
             "book_id": self.book_id,
             "aggregate_version": aggregate_version,
             "journal_sequence": journal_sequence,
@@ -2409,6 +2596,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=self.provider_id,
             account_id=self.account_id,
             environment=self.environment,
+            provider_environment=self.provider_environment,
             book_id=self.book_id,
             aggregate_version=aggregate_version,
             journal_sequence=journal_sequence,
@@ -2460,6 +2648,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=authority.provider_id,
             account_id=authority.account_id,
             environment=authority.environment,
+            provider_environment=authority.provider_environment,
             transactions=batch,
         )
         request = {
@@ -2467,6 +2656,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             "provider_id": authority.provider_id,
             "account_id": authority.account_id,
             "environment": authority.environment,
+            "provider_environment": authority.provider_environment,
             "batch_digest": batch_digest,
             "transactions": transaction_payloads,
         }
@@ -2544,6 +2734,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             "provider_id": authority.provider_id,
             "account_id": authority.account_id,
             "environment": authority.environment,
+            "provider_environment": authority.provider_environment,
             "batch_digest": batch_digest,
             "previous_book_digest": previous_digest,
             "resulting_book_digest": resulting_digest,
@@ -2760,6 +2951,10 @@ def commit_economic_batch_with_reservation_consumption(
             binding_request.get("provider_id") != economic_book.provider_id
             or binding_request.get("account_id") != economic_book.account_id
             or binding_request.get("environment") != economic_book.environment
+            or binding_request.get(
+                "provider_environment",
+                economic_book.environment,
+            ) != economic_book.provider_environment
             or binding_request.get("reservation_id") != _text(
                 reservation_id, name="reservation_id"
             )
@@ -2784,6 +2979,8 @@ def commit_economic_batch_with_reservation_consumption(
             settlement_book.scope.provider_id != economic_book.provider_id
             or settlement_book.scope.account_id != economic_book.account_id
             or settlement_book.scope.environment != economic_book.environment
+            or settlement_book.scope.provider_environment
+            != economic_book.provider_environment
         ):
             raise ValueError(
                 "settlement book must share provider/account/environment scope"
@@ -3341,6 +3538,8 @@ def commit_economic_correction_with_settlement_replacement(
         settlement_book.scope.provider_id != economic_book.provider_id
         or settlement_book.scope.account_id != economic_book.account_id
         or settlement_book.scope.environment != economic_book.environment
+        or settlement_book.scope.provider_environment
+        != economic_book.provider_environment
     ):
         raise ValueError(
             "settlement book must share provider/account/environment scope"
@@ -3379,6 +3578,10 @@ def commit_economic_correction_with_settlement_replacement(
             binding_request.get("provider_id") != economic_book.provider_id
             or binding_request.get("account_id") != economic_book.account_id
             or binding_request.get("environment") != economic_book.environment
+            or binding_request.get(
+                "provider_environment",
+                economic_book.environment,
+            ) != economic_book.provider_environment
             or binding_request.get("reservation_id") != rid
         ):
             raise AccountingConflict(
@@ -4042,6 +4245,10 @@ def commit_provider_fill_bust_with_economic_reversal(
             binding_request.get("provider_id") != economic_book.provider_id
             or binding_request.get("account_id") != economic_book.account_id
             or binding_request.get("environment") != economic_book.environment
+            or binding_request.get(
+                "provider_environment",
+                economic_book.environment,
+            ) != economic_book.provider_environment
             or binding_request.get("provider_execution_id")
             != projected_fill.provider_execution_id
             or binding_request.get("reservation_id") != rid
@@ -4401,6 +4608,10 @@ def commit_provider_fill_bust_with_economic_reversal(
                 and payload.get("provider_id") == economic_book.provider_id
                 and payload.get("account_id") == economic_book.account_id
                 and payload.get("environment") == economic_book.environment
+                and payload.get(
+                    "provider_environment",
+                    economic_book.environment,
+                ) == economic_book.provider_environment
                 and payload.get("batch_digest") == economic_plan.batch_digest
                 and payload.get("transactions")
                 == [
@@ -4757,6 +4968,7 @@ def _snapshot_external_cash_activity(
         "provider_id",
         "account_id",
         "environment",
+        "provider_environment",
         "activity_id",
         "activity_type",
         "origin",
@@ -4774,6 +4986,7 @@ def _snapshot_external_cash_activity(
         "provider_id",
         "account_id",
         "environment",
+        "provider_environment",
         "activity_id",
         "activity_type",
         "origin",
@@ -4799,6 +5012,7 @@ def _snapshot_external_cash_activity(
         provider_id=state["provider_id"],
         account_id=state["account_id"],
         environment=state["environment"],
+        provider_environment=state["provider_environment"],
         activity_id=state["activity_id"],
         activity_type=state["activity_type"],
         origin=state["origin"],
@@ -4816,6 +5030,7 @@ def _snapshot_external_cash_activity(
             "provider_id",
             "account_id",
             "environment",
+            "provider_environment",
             "activity_id",
             "activity_type",
             "origin",
@@ -4832,6 +5047,7 @@ def _snapshot_external_cash_activity(
         snapshot.provider_id,
         snapshot.account_id,
         snapshot.environment,
+        snapshot.provider_environment,
         snapshot.activity_id,
         snapshot.activity_type,
         snapshot.origin,
@@ -4898,6 +5114,11 @@ def book_external_provider_cash_activity(
     provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")
     scope = _environment(environment)
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=activity.provider_environment,
+    )
     if activity.provider_id != provider:
         raise ValueError("provider activity evidence provider_id mismatch")
     if activity.account_id != account:
@@ -4946,17 +5167,23 @@ def book_external_provider_cash_activity(
     if observed < occurred:
         raise ValueError("observed_at must not precede provider activity occurred_at")
     observed_text = observed.isoformat().replace("+00:00", "Z")
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=provider_scope,
+        environment=scope,
+    )
 
     identity = _activity_identity(
         provider_id=provider,
         account_id=account,
         environment=scope,
+        provider_environment=provider_scope,
         activity_id=activity.activity_id,
     )
     book_id = _book_id(
         provider_id=provider,
         account_id=account,
         environment=scope,
+        provider_environment=provider_scope,
     )
     cause_event_id = f"provider-activity:{identity}"
     transaction_id = str(
@@ -4990,6 +5217,10 @@ def book_external_provider_cash_activity(
         },
         "amount": amount_text,
     }
+    if provider_scope_payload is not None:
+        request["provider_environment"] = provider_scope_payload
+        request["activity"]["provider_environment"] = provider_scope_payload
+
     result = {
         "provider_id": provider,
         "account_id": account,
@@ -4999,6 +5230,8 @@ def book_external_provider_cash_activity(
         "amount": amount_text,
         "currency": activity.currency,
     }
+    if provider_scope_payload is not None:
+        result["provider_environment"] = provider_scope_payload
 
     imported_event_id = str(
         uuid5(
@@ -5078,6 +5311,7 @@ def book_external_provider_cash_activity(
             or economic_payload.get("provider_id") != provider
             or economic_payload.get("account_id") != account
             or economic_payload.get("environment") != scope
+            or economic_payload.get("provider_environment", scope) != provider_scope
             or economic_payload.get("source_activity_identity") != identity
             or economic_payload.get("transaction")
             != _transaction_payload(transaction)
@@ -5156,6 +5390,8 @@ def book_external_provider_cash_activity(
         "observed_at": observed_text,
         "transaction": _transaction_payload(transaction),
     }
+    if provider_scope_payload is not None:
+        economic_payload["provider_environment"] = provider_scope_payload
     economic_envelope = {
         "event_id": economic_event_id,
         "event_type": "EconomicTransactionBooked",
@@ -5213,6 +5449,7 @@ def load_provider_account_economic_book(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> EconomicBook:
     """Rebuild canonical economics from the one durable provider/account journal."""
 
@@ -5221,5 +5458,6 @@ def load_provider_account_economic_book(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     return EconomicBook(durable.transactions)

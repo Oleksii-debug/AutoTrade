@@ -82,6 +82,84 @@ def resource_availability(**overrides):
 
 
 class ReconciliationTests(unittest.TestCase):
+    def test_bybit_provider_evidence_requires_explicit_provider_environment(self):
+        with self.assertRaisesRegex(ValueError, "BYBIT provider evidence requires explicit provider_environment"):
+            ProviderFillEvidence.create(
+                provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+                provider_execution_id="bx1", client_order_id="bc1", instrument="BTCUSDT",
+                quantity="1", price="100", fee_currency="USDT",
+                trade_time="2026-09-24T18:00:00Z",
+            )
+        with self.assertRaisesRegex(ValueError, "BYBIT provider evidence requires explicit provider_environment"):
+            SnapshotConsistencyEvidence(
+                provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+                mode="ATOMIC", query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+            )
+
+    def test_bybit_provider_environment_mismatch_is_rejected_at_reconciliation_boundary(self):
+        bybit_fill = ProviderFillEvidence.create(
+            provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+            provider_environment="TESTNET", provider_execution_id="bx1",
+            client_order_id="bc1", instrument="BTCUSDT", quantity="1", price="100",
+            fee_currency="USDT", trade_time="2026-09-24T18:00:00Z",
+        )
+        snapshot = SnapshotConsistencyEvidence(
+            provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+            provider_environment="TESTNET", mode="ATOMIC",
+            query_started_at="2026-09-24T17:00:00Z", query_completed_at="2026-09-24T19:00:00Z",
+        )
+        with self.assertRaisesRegex(ValueError, "provider fill evidence provider_environment mismatch"):
+            reconcile_account(
+                provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+                provider_environment="DEMO",
+                local_cash={"USDT": "100"}, provider_cash={"USDT": "100"},
+                local_positions={"BTCUSDT": "1"}, provider_positions={"BTCUSDT": "1"},
+                local_execution_ids=["bx1"], provider_fills=[bybit_fill],
+                snapshot_consistency=snapshot,
+                coverage_start="2026-09-24T17:00:00Z", coverage_end="2026-09-24T19:00:00Z",
+                pagination_complete=True,
+            )
+
+    def test_bybit_activity_coverage_cannot_cross_provider_environment(self):
+        bybit_fill = ProviderFillEvidence.create(
+            provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+            provider_environment="TESTNET", provider_execution_id="bx1",
+            client_order_id="bc1", instrument="BTCUSDT", quantity="1", price="100",
+            fee_currency="USDT", trade_time="2026-09-24T18:00:00Z",
+        )
+        snapshot = SnapshotConsistencyEvidence(
+            provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+            provider_environment="TESTNET", mode="ATOMIC",
+            query_started_at="2026-09-24T17:00:00Z",
+            query_completed_at="2026-09-24T19:00:00Z",
+        )
+        demo_activity_coverage = CoverageSurfaceEvidence(
+            provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+            provider_environment="DEMO", surface="ACTIVITIES",
+            coverage_start="2026-09-24T17:00:00Z",
+            coverage_end="2026-09-24T19:00:00Z",
+            pagination_complete=True,
+            consistency_horizon_satisfied=True,
+            provider_semantics_exclude_execution=True,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "provider activity coverage scope mismatch"
+        ):
+            reconcile_account(
+                provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+                provider_environment="TESTNET",
+                local_cash={"USDT": "100"}, provider_cash={"USDT": "100"},
+                local_positions={"BTCUSDT": "1"}, provider_positions={"BTCUSDT": "1"},
+                local_execution_ids=["bx1"], provider_fills=[bybit_fill],
+                snapshot_consistency=snapshot,
+                coverage_start="2026-09-24T17:00:00Z",
+                coverage_end="2026-09-24T19:00:00Z",
+                pagination_complete=True,
+                require_activity_reconciliation=True,
+                activity_coverage=demo_activity_coverage,
+            )
+
     def base(self, **overrides):
         values = dict(
             provider_id="TEST_PROVIDER",
@@ -245,6 +323,49 @@ class ReconciliationTests(unittest.TestCase):
         object.__setattr__(injected, "unreviewed_state", "must-not-enter-authority")
         with self.assertRaisesRegex(TypeError, "unexpected state fields"):
             self.base(provider_fills=[injected])
+
+    def test_provider_environment_snapshot_normalization_fails_closed(self):
+        mutated_fill = fill()
+        object.__setattr__(mutated_fill, "provider_environment", "paper")
+        with self.assertRaisesRegex(
+            ValueError,
+            "provider fill evidence changed from canonical normalized state",
+        ):
+            self.base(provider_fills=[mutated_fill])
+
+        mutated_order = ProviderWorkingOrderEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            provider_order_id="provider-working-scope",
+            client_order_id="client-working-scope",
+            instrument="ABC",
+            remaining_quantity="1",
+        )
+        object.__setattr__(mutated_order, "provider_environment", "paper")
+        with self.assertRaisesRegex(
+            ValueError,
+            "provider working-order evidence changed from canonical normalized state",
+        ):
+            self.base(provider_working_orders=[mutated_order])
+
+        mutated_activity = ProviderActivityEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            activity_id="activity-scope",
+            activity_type="DEPOSIT",
+            origin="EXTERNAL",
+            occurred_at="2026-09-24T18:00:00Z",
+            currency="USD",
+            signed_amount="1",
+        )
+        object.__setattr__(mutated_activity, "provider_environment", "paper")
+        with self.assertRaisesRegex(
+            ValueError,
+            "provider activity evidence changed from canonical normalized state",
+        ):
+            self.base(provider_activities=[mutated_activity])
 
     def test_incomplete_provider_fill_cannot_match_complete_or_resolve_unknown(self):
         unknown = UnknownSubmission.create(

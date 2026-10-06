@@ -146,8 +146,8 @@ def _snapshot_payload(snapshot: ReservationSnapshot) -> dict[str, object]:
 def reservation_snapshot_digest(snapshot: ReservationSnapshot) -> str:
     """Return the reservation authority's canonical identity for one state cut."""
 
-    if not isinstance(snapshot, ReservationSnapshot):
-        raise TypeError("snapshot must be ReservationSnapshot")
+    if type(snapshot) is not ReservationSnapshot:
+        raise TypeError("snapshot must be exact ReservationSnapshot")
     return payload_digest(_snapshot_payload(snapshot))
 
 
@@ -156,7 +156,7 @@ def _now() -> str:
 
 
 def _environment(value: str) -> str:
-    normalized = value.strip().upper() if isinstance(value, str) else ""
+    normalized = str.upper(_text(value, name="environment")) if isinstance(value, str) else ""
     if normalized not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
         raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
     return normalized

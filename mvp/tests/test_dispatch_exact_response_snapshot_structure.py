@@ -312,5 +312,100 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
             self.assertNotIn("response_text", events[-1]["payload"])
 
 
+    def test_unchanged_snapshot_authority_preserves_definitive_sent(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            outbound = 0
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return ExactJsonTransportResponse(
+                    b'{"accepted":true,"orderId":"stable-1"}',
+                    http_status=200,
+                )
+
+            result = self._dispatch(
+                dispatcher,
+                "snapshot-authority-positive-sent",
+                transport,
+            )
+
+            self.assertEqual(outbound, 1)
+            self.assertEqual(result.status, "SENT")
+            self.assertEqual(result.reason, "sent_confirmed")
+            self.assertEqual(
+                result.response,
+                {"accepted": True, "orderId": "stable-1"},
+            )
+            events = self._events(
+                path,
+                dispatcher,
+                "snapshot-authority-positive-sent",
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionSent",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["response_encoding"],
+                "utf-8-json",
+            )
+
+    def test_unchanged_snapshot_authority_preserves_opaque_unknown(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            outbound = 0
+            raw = b"\xff\x00opaque-ack"
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return ExactJsonTransportResponse(
+                    raw,
+                    http_status=502,
+                    requires_reconciliation=True,
+                    ambiguity_reason="provider_ack_opaque",
+                )
+
+            result = self._dispatch(
+                dispatcher,
+                "snapshot-authority-positive-opaque",
+                transport,
+            )
+
+            self.assertEqual(outbound, 1)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "provider_ack_opaque")
+            events = self._events(
+                path,
+                dispatcher,
+                "snapshot-authority-positive-opaque",
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            terminal = events[-1]["payload"]
+            self.assertEqual(terminal["response_encoding"], "hex")
+            self.assertEqual(terminal["response_text"], raw.hex())
+            self.assertEqual(
+                terminal["retry_disposition"],
+                "RECONCILE_FIRST",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

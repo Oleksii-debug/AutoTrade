@@ -13,6 +13,7 @@ from mvp.autotrade_mvp.corporate_action_accounting import (
     corporate_action_reconciliation_inputs,
 )
 from mvp.autotrade_mvp.corporate_action_evidence import (
+    CorporateActionEvidenceConflict,
     CorporateActionEvidenceError,
     CorporateActionObservation,
     DurableCorporateActionEvidenceStore,
@@ -50,6 +51,7 @@ def sealed_action(
     observed_offset=2,
     effective_offset=1,
     corrects=None,
+    pay_at=None,
 ):
     binding = prepare_authenticated_read_query(
         capability=simulation_read_capability(),
@@ -73,6 +75,12 @@ def sealed_action(
     }
     if corrects is not None:
         payload["corrects_external_event_id"] = corrects
+    if pay_at is not None:
+        payload["pay_at"] = (
+            pay_at.isoformat().replace("+00:00", "Z")
+            if isinstance(pay_at, datetime)
+            else pay_at
+        )
     if kind == "CASH_DIVIDEND":
         payload.update({"per_share": per_share, "currency": "USDT"})
     else:
@@ -819,6 +827,114 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
             self.assertFalse(retry.inserted)
             self.assertEqual(len(economics.transactions), 2)
 
+
+    def test_same_provider_fact_new_receipt_is_durable_idempotent(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            durable_evidence = evidence_store(store)
+            first = resolve_action(sealed_action(observed_offset=2))
+            later = resolve_action(sealed_action(observed_offset=6))
+
+            retained = durable_evidence.record(first)
+            replay = durable_evidence.record(later)
+
+            self.assertTrue(retained.inserted)
+            self.assertFalse(replay.inserted)
+            self.assertEqual(first.provider_fact_digest, later.provider_fact_digest)
+            self.assertNotEqual(first.provenance_digest, later.provenance_digest)
+            self.assertEqual(replay.provenance_digest, first.provenance_digest)
+
+            local_ids, provider_activities = corporate_action_reconciliation_inputs(
+                durable_evidence,
+                provider_actions=(later,),
+            )
+            self.assertEqual(
+                local_ids,
+                tuple(activity.activity_id for activity in provider_activities),
+            )
+
+    def test_same_provider_fact_new_receipt_does_not_duplicate_economics(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            first = resolve_action(sealed_action(observed_offset=2))
+            later = resolve_action(sealed_action(observed_offset=6))
+
+            initial = commit_authoritative_corporate_action(
+                store=store,
+                evidence_store=evidence_store(store),
+                economic_book=economic_book(store),
+                corporate_book=pure_book(),
+                accepted=first,
+            )
+            self.assertTrue(initial.inserted)
+
+            reopened = JournalStore(path)
+            economics = economic_book(reopened)
+            retry = commit_authoritative_corporate_action(
+                store=reopened,
+                evidence_store=evidence_store(reopened),
+                economic_book=economics,
+                corporate_book=pure_book(),
+                accepted=later,
+            )
+
+            self.assertFalse(retry.inserted)
+            self.assertEqual(retry.transaction_ids, initial.transaction_ids)
+            self.assertEqual(len(economics.transactions), 2)
+
+    def test_same_revision_changed_economics_is_not_receipt_idempotency(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            durable_evidence = evidence_store(store)
+            first = resolve_action(sealed_action(revision="1", per_share="1.25"))
+            changed = resolve_action(
+                sealed_action(
+                    revision="1",
+                    per_share="2.00",
+                    observed_offset=6,
+                )
+            )
+            durable_evidence.record(first)
+
+            self.assertNotEqual(
+                first.provider_fact_digest,
+                changed.provider_fact_digest,
+            )
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict,
+                "changed provider fact",
+            ):
+                durable_evidence.record(changed)
+
+    def test_same_revision_changed_lifecycle_is_not_receipt_idempotency(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            durable_evidence = evidence_store(store)
+            first = resolve_action(
+                sealed_action(
+                    revision="1",
+                    pay_at=READ_NOW + timedelta(days=1),
+                )
+            )
+            changed = resolve_action(
+                sealed_action(
+                    revision="1",
+                    observed_offset=6,
+                    pay_at=READ_NOW + timedelta(days=2),
+                )
+            )
+            durable_evidence.record(first)
+
+            self.assertNotEqual(
+                first.provider_fact_digest,
+                changed.provider_fact_digest,
+            )
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict,
+                "changed provider fact",
+            ):
+                durable_evidence.record(changed)
 
     def test_reconciliation_projection_matches_exact_retained_provider_revision(self):
         with TemporaryDirectory() as directory:

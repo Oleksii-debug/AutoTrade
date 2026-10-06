@@ -3,6 +3,7 @@ from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from mvp.autotrade_mvp.bybit_v5 import (
@@ -28,6 +29,7 @@ from mvp.autotrade_mvp.dispatch import (
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
+    ProviderSubmissionObservation,
     Surface,
     observe_authenticated_json_response,
     observe_submission_json_response,
@@ -780,6 +782,116 @@ class BybitV5AdapterTests(unittest.TestCase):
                     prepared_request=prepared,
                     observation=invalid,
                 )
+
+    def test_submission_consumer_rejects_unregistered_exact_clone(self):
+        attempt, prepared, _observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-clone",
+                    "orderLinkId": "__CLIENT__",
+                },
+            }
+        )
+        forged = object.__new__(ProviderSubmissionObservation)
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "provider submission observation authority is unavailable",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=forged,
+            )
+
+    def test_submission_consumer_rejects_subclass_before_virtual_callback(self):
+        attempt, prepared, _observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-subclass",
+                    "orderLinkId": "__CLIENT__",
+                },
+            }
+        )
+
+        class HostileObservation(ProviderSubmissionObservation):
+            def __getattribute__(self, _name):
+                raise AssertionError(
+                    "virtual callback executed before authority verification"
+                )
+
+        forged = object.__new__(HostileObservation)
+        with self.assertRaisesRegex(
+            TypeError,
+            "durable ProviderSubmissionObservation",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=forged,
+            )
+
+    def test_submission_consumer_does_not_call_rebindable_require_scope(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "orderId": "provider-no-virtual-scope",
+                    "orderLinkId": "__CLIENT__",
+                },
+                "time": 1790280000123,
+            }
+        )
+        with patch.object(
+            ProviderSubmissionObservation,
+            "require_scope",
+            side_effect=AssertionError(
+                "rebindable require_scope callback must not execute"
+            ),
+        ):
+            result = parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+        self.assertEqual(result["outcome"], "ACKNOWLEDGED")
+        self.assertEqual(
+            result["provider_order_id"],
+            "provider-no-virtual-scope",
+        )
+
+    def test_submission_consumer_rejects_post_mint_payload_retargeting(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-original",
+                    "orderLinkId": "__CLIENT__",
+                },
+            }
+        )
+        object.__setattr__(
+            observation,
+            "payload",
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-forged",
+                    "orderLinkId": "__CLIENT__",
+                },
+            },
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "provider submission observation authority is unavailable",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
 
     def test_ambiguous_bybit_codes_require_reconciliation(self):
         for code in (429, 10000, 10014, 10016):

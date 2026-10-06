@@ -2521,6 +2521,31 @@ _DIRECT_AUTHENTICATED_READ_NETWORK_POLICY_IDENTITY = "sha256:" + sha256(
 ).hexdigest()
 
 
+_BYBIT_DIRECT_AUTHENTICATED_READ_POLICY_SNAPSHOT = MappingProxyType(
+    {
+        provider_environment: (
+            policy.provider_id,
+            policy.environment,
+            policy.base_url,
+            tuple(sorted(policy.allowed_hosts)),
+            policy.timeout_seconds,
+        )
+        for provider_environment, policy in BYBIT_V5_ENDPOINT_POLICIES.items()
+    }
+)
+_BYBIT_DIRECT_AUTHENTICATED_READ_RULE_SNAPSHOT = MappingProxyType(
+    {
+        endpoint: (
+            rule.surface.value,
+            rule.permission_scope,
+            rule.data_entitlement,
+            tuple(sorted(rule.success_statuses)),
+        )
+        for endpoint, rule in BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS.items()
+    }
+)
+
+
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
 class DirectAuthenticatedReadExecutionReceipt:
     """Sealed proof of one exact direct authenticated HTTP response.
@@ -2595,8 +2620,25 @@ def _canonical_bybit_authenticated_read_query(
     _sorted=sorted,
     _type=type,
     _str=str,
+    _rule_type=AuthenticatedReadEndpointRule,
+    _rule_snapshot=_BYBIT_DIRECT_AUTHENTICATED_READ_RULE_SNAPSHOT,
 ) -> str:
-    _rule(query_binding)
+    rule = _rule(query_binding)
+    expected_rule = _rule_snapshot.get(query_binding.endpoint)
+    if (
+        _type(rule) is not _rule_type
+        or expected_rule is None
+        or (
+            rule.surface.value,
+            rule.permission_scope,
+            rule.data_entitlement,
+            tuple(_sorted(rule.success_statuses)),
+        )
+        != expected_rule
+    ):
+        raise ProviderTransportError(
+            "Bybit authenticated-read endpoint rule authority changed"
+        )
     query: dict[str, str] = {}
     for raw_key, raw_value in query_binding.query.items():
         key = _canonical_text_fn(raw_key, name="query parameter")
@@ -2631,6 +2673,7 @@ def _validated_bybit_authenticated_read_wire_semantics_digest(
     _require_request=_require_authenticated_read_http_request,
     _query_text=_canonical_bybit_authenticated_read_query,
     _policies=BYBIT_V5_ENDPOINT_POLICIES,
+    _policy_snapshot=_BYBIT_DIRECT_AUTHENTICATED_READ_POLICY_SNAPSHOT,
     _policy_type=ProviderEndpointPolicy,
     _urlsplit=urlsplit,
     _dict=dict,
@@ -2655,9 +2698,21 @@ def _validated_bybit_authenticated_read_wire_semantics_digest(
             "Bybit direct authenticated-read requires BYBIT query authority"
         )
     policy = _policies.get(query_binding.provider_environment)
-    if _type(policy) is not _policy_type:
+    expected_policy = _policy_snapshot.get(query_binding.provider_environment)
+    if (
+        _type(policy) is not _policy_type
+        or expected_policy is None
+        or (
+            policy.provider_id,
+            policy.environment,
+            policy.base_url,
+            tuple(_sorted(policy.allowed_hosts)),
+            policy.timeout_seconds,
+        )
+        != expected_policy
+    ):
         raise ProviderTransportError(
-            "Bybit direct authenticated-read provider environment is unsupported"
+            "Bybit direct authenticated-read provider policy authority changed"
         )
     expected_url = policy.absolute_url(query_binding.endpoint) + "?" + _query_text(
         query_binding
@@ -5990,8 +6045,40 @@ class BybitV5AuthenticatedReadSigner:
                 "recv_window_ms must be an integer from 1 through 60000"
             )
 
-        exact_query = _canonical_bybit_authenticated_read_query(query_binding)
+        query: dict[str, str] = {}
+        for raw_key, raw_value in query_binding.query.items():
+            key = _canonical_text(raw_key, name="query parameter")
+            if type(raw_value) is not str or raw_value != raw_value.strip():
+                raise ProviderTransportScopeError(
+                    "Bybit authenticated-read query values must be canonical strings"
+                )
+            if key in query:
+                raise ProviderTransportScopeError(
+                    "Bybit authenticated-read query keys must be unique"
+                )
+            query[key] = raw_value
+        if not query:
+            raise ProviderTransportScopeError(
+                "Bybit authenticated-read query must not be empty"
+            )
+
         credential = BybitV5Credential.parse(credential_plaintext)
+        if query_binding.endpoint == _BYBIT_OPTION_DELIVERY_ENDPOINT:
+            # Bybit returns nextPageCursor as an already percent-encoded opaque
+            # token and instructs callers to feed that exact token back. Encoding
+            # '%' again would turn %3A/%2C into %253A/%252C and change both the
+            # signed bytes and pagination meaning. Other fields retain the
+            # existing urlencode contract; the cursor validator above limits the
+            # raw token to RFC3986 unreserved bytes plus canonical %XX escapes.
+            exact_parts = []
+            for key, value in sorted(query.items()):
+                if key == "cursor":
+                    exact_parts.append("cursor=" + value)
+                else:
+                    exact_parts.append(urlencode(((key, value),)))
+            exact_query = "&".join(exact_parts)
+        else:
+            exact_query = urlencode(sorted(query.items()))
         signing_material = (
             str(timestamp_ms)
             + credential.api_key
@@ -6236,6 +6323,7 @@ class BybitV5AuthenticatedReadTransport:
 def _install_bybit_direct_authenticated_read_executor(
     transport_type,
     query_type,
+    response_type,
     rule_resolver,
     require_query,
     require_direct_client,
@@ -6244,8 +6332,12 @@ def _install_bybit_direct_authenticated_read_executor(
     receipt_snapshot,
     signer,
     observer,
+    require_current_capability,
+    canonical_sha256,
 ):
     canonical_type = type
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
     transport_error = ProviderTransportError
     scope_error = ProviderTransportScopeError
 
@@ -6262,61 +6354,108 @@ def _install_bybit_direct_authenticated_read_executor(
                 "query_binding must be exact AuthenticatedReadQueryBinding"
             )
         require_query(query_binding)
+
+        policy = object_getattribute(self, "policy")
+        provider_environment = object_getattribute(self, "provider_environment")
+        account_id = object_getattribute(self, "account_id")
+        capability_snapshot_id = object_getattribute(self, "capability_snapshot_id")
+        capability_registry = object_getattribute(self, "capability_registry")
+        secret_resolver = object_getattribute(self, "secret_resolver")
+        credential_handle = object_getattribute(self, "credential_handle")
+        session_token = object_getattribute(self, "session_token")
+        origin = object_getattribute(self, "origin")
+        execution_identity = object_getattribute(self, "execution_identity")
+        clock_millis = object_getattribute(self, "clock_millis")
+        clock_utc = object_getattribute(self, "clock_utc")
+        quota_gate = object_getattribute(self, "quota_gate")
+        wire_client = object_getattribute(self, "wire_client")
+        recv_window_ms = object_getattribute(self, "recv_window_ms")
+
+        def require_transport_unchanged() -> None:
+            if (
+                object_getattribute(self, "policy") is not policy
+                or object_getattribute(self, "provider_environment")
+                != provider_environment
+                or object_getattribute(self, "account_id") != account_id
+                or object_getattribute(self, "capability_snapshot_id")
+                != capability_snapshot_id
+                or object_getattribute(self, "capability_registry")
+                is not capability_registry
+                or object_getattribute(self, "secret_resolver") is not secret_resolver
+                or object_getattribute(self, "credential_handle") is not credential_handle
+                or object_getattribute(self, "session_token") != session_token
+                or object_getattribute(self, "origin") != origin
+                or object_getattribute(self, "execution_identity") != execution_identity
+                or object_getattribute(self, "clock_millis") is not clock_millis
+                or object_getattribute(self, "clock_utc") is not clock_utc
+                or object_getattribute(self, "quota_gate") is not quota_gate
+                or object_getattribute(self, "wire_client") is not wire_client
+                or object_getattribute(self, "recv_window_ms") != recv_window_ms
+            ):
+                raise transport_error(
+                    "Bybit direct authenticated-read transport authority changed"
+                )
+
         if (
             query_binding.provider_id != "BYBIT"
-            or query_binding.account_id != self.account_id
-            or query_binding.environment != self.policy.environment
-            or query_binding.provider_environment != self.provider_environment
-            or query_binding.capability_snapshot_id != self.capability_snapshot_id
+            or query_binding.account_id != account_id
+            or query_binding.environment != policy.environment
+            or query_binding.provider_environment != provider_environment
+            or query_binding.capability_snapshot_id != capability_snapshot_id
         ):
             raise scope_error(
                 "Bybit authenticated-read query scope mismatch"
             )
         rule = rule_resolver(query_binding)
 
-        # Production-origin execution requires the exact canonical direct client.
         # Reject injected/replaced clients before quota waits or credential access.
-        require_direct_client(self.wire_client)
+        require_direct_client(wire_client)
+        require_transport_unchanged()
 
-        if self.quota_gate is not None:
-            self.quota_gate(
+        if quota_gate is not None:
+            quota_gate(
                 "BYBIT",
-                self.account_id,
-                self.policy.environment,
+                account_id,
+                policy.environment,
                 "AUTHENTICATED_READ",
             )
+        require_transport_unchanged()
 
-        self._require_current_capability(query_binding, rule)
+        require_current_capability(self, query_binding, rule)
+        require_transport_unchanged()
 
-        with self.secret_resolver.lease_for_execution(
-            self.session_token,
-            origin=self.origin,
-            handle=self.credential_handle,
-            execution_identity=self.execution_identity,
-            account_id=self.account_id,
+        with secret_resolver.lease_for_execution(
+            session_token,
+            origin=origin,
+            handle=credential_handle,
+            execution_identity=execution_identity,
+            account_id=account_id,
             provider="BYBIT",
-            environment=self.policy.environment,
+            environment=policy.environment,
             purpose="READ",
-            provider_environment=self.provider_environment,
+            provider_environment=provider_environment,
         ) as credential_plaintext:
             try:
                 signed = signer(
-                    policy=self.policy,
+                    policy=policy,
                     query_binding=query_binding,
                     credential_plaintext=credential_plaintext,
-                    timestamp_ms=self.clock_millis(),
-                    recv_window_ms=self.recv_window_ms,
+                    timestamp_ms=clock_millis(),
+                    recv_window_ms=recv_window_ms,
                 )
             finally:
                 credential_plaintext = None
 
-            self._require_current_capability(query_binding, rule)
+            require_transport_unchanged()
+            require_current_capability(self, query_binding, rule)
+            require_transport_unchanged()
             wire_response = direct_send(
-                self.wire_client,
+                wire_client,
                 signed,
                 query_binding,
             )
-            if canonical_type(wire_response) is not AuthenticatedReadWireResponse:
+            require_transport_unchanged()
+            if canonical_type(wire_response) is not response_type:
                 raise transport_error(
                     "Bybit direct authenticated-read wire must preserve HTTP status"
                 )
@@ -6331,16 +6470,18 @@ def _install_bybit_direct_authenticated_read_executor(
                 receipt_values["query_digest"] != query_binding.query_digest
                 or receipt_values["http_status"] != wire_response.http_status
                 or receipt_values["response_sha256"]
-                != "sha256:" + sha256(wire_response.body).hexdigest()
+                != "sha256:" + canonical_sha256(wire_response.body).hexdigest()
             ):
                 raise transport_error(
                     "Bybit direct authenticated-read receipt differs from exact wire result"
                 )
+            observed_at = clock_utc()
+            require_transport_unchanged()
             observation = observer(
                 query_binding=query_binding,
                 http_status=wire_response.http_status,
                 response_bytes=wire_response.body,
-                observed_at=self.clock_utc(),
+                observed_at=observed_at,
             )
             if (
                 observation.query_binding is not query_binding
@@ -6359,6 +6500,7 @@ BybitV5AuthenticatedReadTransport.execute_direct = (
     _install_bybit_direct_authenticated_read_executor(
         BybitV5AuthenticatedReadTransport,
         AuthenticatedReadQueryBinding,
+        AuthenticatedReadWireResponse,
         _bybit_authenticated_read_rule,
         _require_authenticated_read_query_binding_authority,
         require_direct_trading_write_client,
@@ -6367,6 +6509,8 @@ BybitV5AuthenticatedReadTransport.execute_direct = (
         direct_authenticated_read_execution_receipt_snapshot,
         BybitV5AuthenticatedReadSigner.sign,
         observe_authenticated_json_response,
+        BybitV5AuthenticatedReadTransport._require_current_capability,
+        sha256,
     )
 )
 del _install_bybit_direct_authenticated_read_executor

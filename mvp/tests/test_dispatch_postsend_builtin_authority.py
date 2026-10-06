@@ -1254,5 +1254,56 @@ class PostSendBuiltinAuthorityTests(unittest.TestCase):
             self.assertEqual(event_types, ["SubmissionPrepared"])
 
 
+    def test_post_send_journal_kwdefaults_mutation_is_restored_and_unknown(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            operation = JournalStore.append_event
+            original_kwdefaults = operation.__kwdefaults__
+            self.assertIsInstance(original_kwdefaults, dict)
+            baseline = dict(original_kwdefaults)
+            outbound = 0
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                original_kwdefaults["expected_journal_sequence"] = 7
+                return response
+
+            try:
+                first = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-journal-kwdefaults-a1",
+                    transport=transport,
+                )
+                self.assertIs(operation.__kwdefaults__, original_kwdefaults)
+                self.assertEqual(operation.__kwdefaults__, baseline)
+            finally:
+                operation.__kwdefaults__ = original_kwdefaults
+                original_kwdefaults.clear()
+                original_kwdefaults.update(baseline)
+
+            self.assertEqual(outbound, 1)
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(
+                first.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-journal-kwdefaults-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

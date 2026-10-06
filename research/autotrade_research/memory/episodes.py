@@ -17,8 +17,11 @@ from uuid import UUID, uuid4
 
 
 def _time(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise ValueError(f"{name} must be timezone-aware")
+    if type(value) is not datetime:
+        raise TypeError(f"{name} must be an exact built-in datetime")
+    tz = object.__getattribute__(value, "tzinfo")
+    if type(tz) is not timezone:
+        raise ValueError(f"{name} must use a built-in fixed-offset timezone")
     return value.astimezone(timezone.utc)
 
 
@@ -27,15 +30,76 @@ def _iso(value: datetime) -> str:
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str):
-        raise TypeError(f"{name} must be text")
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact built-in text")
     if not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
 
 def _identifier(value: str | None = None) -> str:
-    return str(UUID(value)) if value is not None else str(uuid4())
+    if value is None:
+        return str(uuid4())
+    if type(value) is not str:
+        raise TypeError("identifier must be exact built-in text")
+    return str(UUID(value))
+
+
+def _permission_scope(
+    granted_permissions: set[str],
+) -> tuple[set[str], tuple[str, ...]]:
+    """Detach one exact built-in permission scope before authority-bearing reads."""
+
+    if type(granted_permissions) is not set:
+        raise TypeError("granted_permissions must be an exact built-in set")
+    normalized: set[str] = set()
+    for permission in granted_permissions:
+        if type(permission) is not str:
+            raise TypeError("granted_permission must be exact built-in text")
+        canonical = _text(permission, name="granted_permission")
+        if canonical != permission:
+            raise ValueError("granted_permissions must contain canonical text")
+        normalized.add(canonical)
+    return normalized, tuple(sorted(normalized))
+
+
+def _snapshot_json_value(value: Any, *, path: str = "$") -> Any:
+    """Detach caller-owned JSON-like evidence before authority-bearing reuse."""
+
+    if type(value) is dict:
+        detached: dict[str, Any] = {}
+        try:
+            items = tuple(value.items())
+        except RuntimeError as error:
+            raise ValueError(f"mutable evidence changed while snapshotting: {path}") from error
+        for key, item in items:
+            if type(key) is not str:
+                raise TypeError(f"evidence object keys must be exact built-in text: {path}")
+            detached[key] = _snapshot_json_value(item, path=f"{path}.{key}")
+        return detached
+    if type(value) is list:
+        try:
+            items = tuple(value)
+        except RuntimeError as error:
+            raise ValueError(f"mutable evidence changed while snapshotting: {path}") from error
+        return [
+            _snapshot_json_value(item, path=f"{path}[{index}]")
+            for index, item in enumerate(items)
+        ]
+    if type(value) is tuple:
+        return tuple(
+            _snapshot_json_value(item, path=f"{path}[{index}]")
+            for index, item in enumerate(value)
+        )
+    if value is None or type(value) in {str, int, bool}:
+        return value
+    if type(value) is float:
+        raise TypeError(
+            f"binary float is not permitted in immutable experience evidence: {path}"
+        )
+    raise TypeError(
+        f"unsupported executable or non-JSON evidence value at {path}"
+    )
 
 
 def _reject_binary_float(value: Any, *, path: str = "$") -> None:
@@ -684,7 +748,10 @@ class ExperienceMemory:
         cutoff = _time(information_cutoff, name="information_cutoff")
         if cutoff > decision:
             raise ValueError("information cutoff cannot be after decision time")
-        if not isinstance(payload, dict) or not payload:
+        if type(payload) is not dict:
+            raise TypeError("episode payload must be an exact built-in object")
+        payload = _snapshot_json_value(payload, path="episode_payload")
+        if not payload:
             raise ValueError("episode payload must be a non-empty object")
         required = {"evidence_refs", "intended_action", "actual_execution", "outcome", "costs"}
         missing = sorted(required - set(payload))
@@ -779,7 +846,10 @@ class ExperienceMemory:
             if available_at is not None
             else None
         )
-        if not isinstance(payload, dict) or not payload:
+        if type(payload) is not dict:
+            raise TypeError("correction payload must be an exact built-in object")
+        payload = _snapshot_json_value(payload, path="correction_payload")
+        if not payload:
             raise ValueError("correction payload must be non-empty")
         if "supersedes_fields" not in payload or not isinstance(payload["supersedes_fields"], list):
             raise ValueError("correction must declare supersedes_fields")
@@ -988,16 +1058,11 @@ class ExperienceMemory:
         include_tombstoned: bool = False,
     ) -> tuple[dict[str, Any], ...]:
         cutoff = _time(information_cutoff, name="information_cutoff")
-        if not isinstance(granted_permissions, set):
-            raise TypeError("granted_permissions must be a set")
+        normalized_permissions, _permission_identity = _permission_scope(
+            granted_permissions
+        )
         if type(include_tombstoned) is not bool:
             raise TypeError("include_tombstoned must be boolean")
-        normalized_permissions: set[str] = set()
-        for permission in granted_permissions:
-            normalized = _text(permission, name="granted_permission")
-            if normalized != permission:
-                raise ValueError("granted_permissions must contain canonical text")
-            normalized_permissions.add(normalized)
         normalized_task = None if task is None else _text(task, name="task")
         normalized_regime = None if regime is None else _text(regime, name="regime")
         normalized_family = (
@@ -1102,16 +1167,11 @@ class ExperienceMemory:
         """Read one immutable source episode without bypassing retrieval authority."""
         identifier = _identifier(episode_id)
         cutoff = _time(information_cutoff, name="information_cutoff")
-        if not isinstance(granted_permissions, set):
-            raise TypeError("granted_permissions must be a set")
+        normalized_permissions, _permission_identity = _permission_scope(
+            granted_permissions
+        )
         if type(include_tombstoned) is not bool:
             raise TypeError("include_tombstoned must be boolean")
-        normalized_permissions: set[str] = set()
-        for permission in granted_permissions:
-            normalized = _text(permission, name="granted_permission")
-            if normalized != permission:
-                raise ValueError("granted_permissions must contain canonical text")
-            normalized_permissions.add(normalized)
 
         with self._connect() as con:
             self._verified_writer_chronology(con)
@@ -1174,19 +1234,16 @@ class ExperienceMemory:
     ) -> CoveragePopulationSnapshot:
         """Freeze the complete canonical population and its exact query identity."""
 
+        normalized_permissions, permissions = _permission_scope(
+            granted_permissions
+        )
         rows = self.coverage_population(
             causal_cutoff=causal_cutoff,
-            granted_permissions=granted_permissions,
+            granted_permissions=normalized_permissions,
             task=task,
             instrument_family=instrument_family,
         )
         cutoff = _iso(causal_cutoff)
-        permissions = tuple(
-            sorted(
-                _text(value, name="granted_permission")
-                for value in granted_permissions
-            )
-        )
         normalized_task = None if task is None else _text(task, name="task")
         normalized_family = (
             None
@@ -1230,14 +1287,9 @@ class ExperienceMemory:
         """
 
         cutoff = _time(causal_cutoff, name="causal_cutoff")
-        if not isinstance(granted_permissions, set):
-            raise TypeError("granted_permissions must be a set")
-        normalized_permissions: set[str] = set()
-        for permission in granted_permissions:
-            normalized = _text(permission, name="granted_permission")
-            if normalized != permission:
-                raise ValueError("granted_permissions must contain canonical text")
-            normalized_permissions.add(normalized)
+        normalized_permissions, _permission_identity = _permission_scope(
+            granted_permissions
+        )
         if not normalized_permissions:
             raise ValueError("granted_permissions must not be empty")
         normalized_task = None if task is None else _text(task, name="task")

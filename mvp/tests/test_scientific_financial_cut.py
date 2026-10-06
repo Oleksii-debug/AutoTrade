@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-import pytest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
 
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reconciliation import (
@@ -89,109 +91,123 @@ def _capture(store, **overrides):
     return capture_current_scientific_financial_cut(store, **values)
 
 
-def test_rejects_polymorphic_text_before_financial_authority_dispatch(tmp_path):
-    HostileText.calls = 0
-    store = JournalStore(tmp_path / "journal.db")
-    with pytest.raises(TypeError, match="exact built-in text"):
-        _capture(store, provider_id=HostileText("TEST_PROVIDER"))
-    assert HostileText.calls == 0
+class ScientificFinancialCutTests(unittest.TestCase):
+    def test_rejects_polymorphic_text_before_financial_authority_dispatch(self):
+        HostileText.calls = 0
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.db")
+            with self.assertRaisesRegex(TypeError, "exact built-in text"):
+                _capture(store, provider_id=HostileText("TEST_PROVIDER"))
+        self.assertEqual(HostileText.calls, 0)
 
+    def test_rejects_non_journal_store_before_constructing_cut(self):
+        with self.assertRaises(TypeError):
+            _capture(object())
 
-def test_rejects_non_journal_store_before_constructing_cut():
-    with pytest.raises(TypeError):
-        _capture(object())
+    def test_missing_current_reconciliation_is_unavailable_not_financial_pass(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.db")
+            with self.assertRaisesRegex(FinancialCutUnavailable, "unavailable"):
+                _capture(store)
 
+    def test_profile_binding_requires_canonical_sha256_before_store_dispatch(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.db")
+            with self.assertRaisesRegex(ValueError, "canonical SHA-256"):
+                _capture(store, gate_profile_digest="not-a-digest")
 
-def test_missing_current_reconciliation_is_unavailable_not_financial_pass(tmp_path):
-    store = JournalStore(tmp_path / "journal.db")
-    with pytest.raises(FinancialCutUnavailable, match="unavailable"):
-        _capture(store)
-
-
-def test_profile_binding_requires_canonical_sha256_before_store_dispatch(tmp_path):
-    store = JournalStore(tmp_path / "journal.db")
-    with pytest.raises(ValueError, match="canonical SHA-256"):
-        _capture(store, gate_profile_digest="not-a-digest")
-
-
-def test_cut_identity_contains_digests_only_not_mutable_financial_state():
-    cut = ScientificFinancialCut(
-        scientific_protocol_id="protocol-1",
-        gate_profile_digest=_SHA,
-        provider_id="TEST_PROVIDER",
-        account_id="test-account",
-        environment="PAPER",
-        reconciliation_event_id="checkpoint-1",
-        journal_sequence=3,
-        journal_population_digest=_SHA,
-        reconciliation_checkpoint_digest=_SHA,
-        cut_digest=_SHA,
-    )
-    assert cut.journal_sequence == 3
-    assert not hasattr(cut, "journal_state")
-
-
-def test_bool_is_not_accepted_as_journal_sequence():
-    with pytest.raises(ValueError, match="non-negative integer"):
-        ScientificFinancialCut(
+    def test_cut_identity_contains_digests_only_not_mutable_financial_state(self):
+        cut = ScientificFinancialCut(
             scientific_protocol_id="protocol-1",
             gate_profile_digest=_SHA,
             provider_id="TEST_PROVIDER",
             account_id="test-account",
             environment="PAPER",
             reconciliation_event_id="checkpoint-1",
-            journal_sequence=True,
+            journal_sequence=3,
             journal_population_digest=_SHA,
             reconciliation_checkpoint_digest=_SHA,
             cut_digest=_SHA,
         )
+        self.assertEqual(cut.journal_sequence, 3)
+        self.assertFalse(hasattr(cut, "journal_state"))
+
+    def test_bool_is_not_accepted_as_journal_sequence(self):
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            ScientificFinancialCut(
+                scientific_protocol_id="protocol-1",
+                gate_profile_digest=_SHA,
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                reconciliation_event_id="checkpoint-1",
+                journal_sequence=True,
+                journal_population_digest=_SHA,
+                reconciliation_checkpoint_digest=_SHA,
+                cut_digest=_SHA,
+            )
+
+    def test_exact_journal_population_cut_rejects_superseded_provider_truth(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.db")
+            first_checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="science-cut-a",
+                result=_reconciliation(),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            first = _capture(
+                store,
+                reconciliation_event_id=first_checkpoint["event_id"],
+            )
+            repeated = _capture(
+                store,
+                reconciliation_event_id=first_checkpoint["event_id"],
+            )
+
+            self.assertEqual(first, repeated)
+            self.assertEqual(
+                first.journal_sequence,
+                first_checkpoint["journal_sequence"],
+            )
+            self.assertTrue(first.journal_population_digest.startswith("sha256:"))
+            self.assertTrue(
+                first.reconciliation_checkpoint_digest.startswith("sha256:")
+            )
+            self.assertTrue(first.cut_digest.startswith("sha256:"))
+
+            second_checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="science-cut-b",
+                result=_reconciliation(provider_cash="901"),
+                observed_at="2026-09-24T19:01:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            with self.assertRaisesRegex(FinancialCutConflict, "not authoritative"):
+                _capture(
+                    store,
+                    reconciliation_event_id=first_checkpoint["event_id"],
+                )
+
+            second = _capture(
+                store,
+                reconciliation_event_id=second_checkpoint["event_id"],
+            )
+            self.assertGreater(second.journal_sequence, first.journal_sequence)
+            self.assertNotEqual(
+                second.journal_population_digest,
+                first.journal_population_digest,
+            )
+            self.assertNotEqual(
+                second.reconciliation_checkpoint_digest,
+                first.reconciliation_checkpoint_digest,
+            )
+            self.assertNotEqual(second.cut_digest, first.cut_digest)
 
 
-def test_exact_journal_population_cut_rejects_superseded_provider_truth(tmp_path):
-    store = JournalStore(tmp_path / "journal.db")
-    first_checkpoint = record_reconciliation_checkpoint(
-        store,
-        reconciliation_id="science-cut-a",
-        result=_reconciliation(),
-        observed_at="2026-09-24T19:00:00Z",
-        host_id="test-host",
-        owner_epoch="epoch-1",
-    )
-    first = _capture(
-        store,
-        reconciliation_event_id=first_checkpoint["event_id"],
-    )
-    repeated = _capture(
-        store,
-        reconciliation_event_id=first_checkpoint["event_id"],
-    )
-
-    assert first == repeated
-    assert first.journal_sequence == first_checkpoint["journal_sequence"]
-    assert first.journal_population_digest.startswith("sha256:")
-    assert first.reconciliation_checkpoint_digest.startswith("sha256:")
-    assert first.cut_digest.startswith("sha256:")
-
-    second_checkpoint = record_reconciliation_checkpoint(
-        store,
-        reconciliation_id="science-cut-b",
-        result=_reconciliation(provider_cash="901"),
-        observed_at="2026-09-24T19:01:00Z",
-        host_id="test-host",
-        owner_epoch="epoch-1",
-    )
-
-    with pytest.raises(FinancialCutConflict, match="not authoritative"):
-        _capture(
-            store,
-            reconciliation_event_id=first_checkpoint["event_id"],
-        )
-
-    second = _capture(
-        store,
-        reconciliation_event_id=second_checkpoint["event_id"],
-    )
-    assert second.journal_sequence > first.journal_sequence
-    assert second.journal_population_digest != first.journal_population_digest
-    assert second.reconciliation_checkpoint_digest != first.reconciliation_checkpoint_digest
-    assert second.cut_digest != first.cut_digest
+if __name__ == "__main__":
+    unittest.main()

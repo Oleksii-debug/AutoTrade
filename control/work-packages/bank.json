@@ -189,8 +189,8 @@
         "Exclusive mutation key: REUSE / neutral-first-party",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Three neutral research primitives migrated from Autosport into AutoTrade with focused local 6/6 migration tests; Windows CI, full characterization and release rights qualification remain open."
+      "proposed_status": "DONE",
+      "status_note": "DONE on main as the neutral production primitive prerequisite for Section 3. Strict JSON, ResourceLock and durable publication have one neutral runtime authority under autotrade_runtime with research compatibility aliases. Historical exact-head #843 and merged #1022 each passed baseline, research-primitives and full Verify AutoTrade; current main additionally contains 13 durable-publication hardening tests, 22 ResourceLock race/Windows path-fence tests, bounded JSON size/depth/node/integer semantics, exact built-in str/bytes ingress, and the 2026-10-06 float-domain repair rejecting lossy nonzero underflow and unbounded significand/exponent lexemes. Canonical float repair commits: a2dbfa41702837163fde3dec6cdf7b1b92a3b290 and 54e8eed276296ae8f4d27e62453d06e9c97e4aa6."
     },
     {
       "id": "WP-05",
@@ -282,8 +282,8 @@
         "Exclusive mutation key: ARTIFACT / immutable-store",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Content-addressed artifact store implemented under research/autotrade_research/artifacts/store.py using the migrated durable publication and resource-lock primitives. It verifies SHA-256 and size, enforces explicit storage/export rights, rejects immutable identity conflicts, audits missing/corrupt/unreferenced objects and removes only unreferenced objects/staging leftovers under a store lock. Focused tests cover idempotent publication, corruption, rights-aware export, orphan recovery and denied storage. Remaining WP-06 work: crash-injection qualification at every publication boundary, manifest schema/version contract, lawful dataset/model integration, Windows exact-head evidence and production integration."
+      "proposed_status": "DONE",
+      "status_note": "DONE on main as Section 3 sealed ArtifactStore / neutral installed runtime. The selected sealed-reader source #1098 passed baseline, research-primitives and full dual-OS Verify on exact head 55d97774e8c3225374f1fff9cdb0c62f7ee157eb. Neutral materialization #1313 is a direct ancestor of current main and establishes autotrade_runtime.artifacts as the single canonical store identity with research aliases, exact-source 30-file staging and isolated python -I -S publish/authenticated-read/audit tests. Current main carries stronger root-authority generation pinning and hostile ingress tests. The current corpus includes 55 ArtifactStore tests plus crash-atomic manifest/publication, retained recovery, generation-bound read and 18 trusted-reader falsifiers. Acceptance is covered explicitly by restart_after_manifest_commit_exposes_only_verified_complete_artifact and recovery_removes_only_unreferenced_objects. #1313 GitHub artifact/WP-04 suites passed on Ubuntu/Windows before unrelated update-producer failures. Historical #1573 is fully absorbed: all 38 paths exist on main, 33 byte-identical and 5 replaced by stronger versions."
     },
     {
       "id": "WP-07",

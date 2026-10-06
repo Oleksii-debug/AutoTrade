@@ -6,6 +6,8 @@ from typing import Any
 
 _JSON_WHITESPACE_BYTES = b" \t\r\n"
 _JSON_INTEGER_MAX_DIGITS = 640
+_JSON_FLOAT_MAX_SIGNIFICAND_DIGITS = 640
+_JSON_FLOAT_MAX_EXPONENT_DIGITS = 6
 _JSON_MAX_NESTING_DEPTH = 128
 _JSON_MAX_DOCUMENT_CHARS = 1_000_000
 _JSON_MAX_DECODED_NODES = 100_000
@@ -51,6 +53,35 @@ def _parse_bounded_json_integer(value: str) -> int:
     for character in digits:
         parsed = (parsed * 10) + (ord(character) - ord("0"))
     return -parsed if negative else parsed
+
+
+def _parse_bounded_json_float(value: str) -> float:
+    """Parse a JSON float without silently collapsing nonzero input to zero."""
+
+    mantissa, separator, exponent = value.lower().partition("e")
+    significand_digits = [character for character in mantissa if character.isdigit()]
+    if len(significand_digits) > _JSON_FLOAT_MAX_SIGNIFICAND_DIGITS:
+        raise InvalidJsonDomainError(
+            "JSON floating-point significand exceeds "
+            f"{_JSON_FLOAT_MAX_SIGNIFICAND_DIGITS} digits"
+        )
+
+    if separator:
+        exponent_digits = exponent.lstrip("+-")
+        if len(exponent_digits) > _JSON_FLOAT_MAX_EXPONENT_DIGITS:
+            raise InvalidJsonDomainError(
+                "JSON floating-point exponent exceeds "
+                f"{_JSON_FLOAT_MAX_EXPONENT_DIGITS} digits"
+            )
+
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise InvalidJsonDomainError("non-finite JSON number")
+    if parsed == 0.0 and any(character != "0" for character in significand_digits):
+        raise InvalidJsonDomainError(
+            "nonzero JSON number underflows the supported floating-point domain"
+        )
+    return parsed
 
 
 def _validate_json_nesting_before_decode(text: str) -> None:
@@ -141,8 +172,8 @@ def _validate_strict_json_value(root: object) -> None:
 
 def strict_json_loads(text: str) -> Any:
     """Decode one JSON value and reject ambiguous/non-canonical decoded domains."""
-    if not isinstance(text, str):
-        raise TypeError("text must be str; decode bytes explicitly at the boundary")
+    if type(text) is not str:
+        raise TypeError("text must be exact str; decode bytes explicitly at the boundary")
     if len(text) > _JSON_MAX_DOCUMENT_CHARS:
         raise InvalidJsonDomainError(
             f"JSON document exceeds {_JSON_MAX_DOCUMENT_CHARS} characters"
@@ -153,6 +184,7 @@ def strict_json_loads(text: str) -> Any:
         object_pairs_hook=_unique_json_object,
         parse_constant=_reject_nonstandard_json_constant,
         parse_int=_parse_bounded_json_integer,
+        parse_float=_parse_bounded_json_float,
     )
     _validate_strict_json_value(raw)
     return raw
@@ -160,4 +192,6 @@ def strict_json_loads(text: str) -> Any:
 
 def jsonl_bytes_are_blank(payload: bytes) -> bool:
     """Return true only for whitespace bytes permitted by the JSON grammar."""
+    if type(payload) is not bytes:
+        raise TypeError("payload must be exact bytes")
     return not payload.strip(_JSON_WHITESPACE_BYTES)

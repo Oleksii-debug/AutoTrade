@@ -1076,6 +1076,45 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertEqual(list(root.glob("journal.sqlite3*")), [])
 
 
+    def test_resume_rejects_incoherent_strategy_evidence_before_tail_repair(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            checkpoint_path = root / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            evidence_id = checkpoint["evidence_ids"][0]
+            evidence = checkpoint["evidence_records"][evidence_id]
+            self.assertEqual(evidence["decision"], "BUY")
+            evidence["decision_reason"] = "averages_equal"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            (root / "learning-evidence.jsonl").unlink()
+            for journal_path in root.glob("journal.sqlite3*"):
+                journal_path.unlink()
+
+            checkpoint_before = checkpoint_path.read_bytes()
+            intents_before = {
+                path.name: path.read_bytes()
+                for path in (root / "order-intents").glob("*.json")
+            }
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Corrupt checkpoint replay evidence semantics",
+            ):
+                run_vertical_slice([103, 102, 101, 100], directory)
+
+            self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in (root / "order-intents").glob("*.json")
+                },
+                intents_before,
+            )
+            self.assertFalse((root / "learning-evidence.jsonl").exists())
+            self.assertEqual(list(root.glob("journal.sqlite3*")), [])
+
     def test_resume_revalidates_bound_risk_outcome_before_tail_repair(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

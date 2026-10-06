@@ -11,6 +11,7 @@ from mvp.autotrade_mvp.corporate_action_accounting import (
     commit_authoritative_corporate_action,
 )
 from mvp.autotrade_mvp.corporate_action_evidence import (
+    CorporateActionEvidenceError,
     CorporateActionObservation,
     DurableCorporateActionEvidenceStore,
     resolve_authoritative_corporate_action,

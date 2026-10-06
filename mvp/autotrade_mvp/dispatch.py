@@ -2512,7 +2512,16 @@ class GuardedDispatcher:
                 ) from error
             barrier_passed = True
 
+        # Seal the response classification surface before invoking provider
+        # code.  A transport callback is external to dispatcher authority and
+        # may mutate module globals after the irreversible Sending commit.
+        # Classification must therefore use the exact type/builtins selected
+        # before transport and reject a rebound response class without running
+        # its metaclass hooks.
+        exact_response_type = ExactJsonTransportResponse
         exact_response_snapshot = _snapshot_exact_transport_response
+        response_type_builtin = type
+        response_isinstance_builtin = isinstance
 
         try:
             response = transport_send(client_order_id, request_frozen, final_guard)
@@ -2744,14 +2753,17 @@ class GuardedDispatcher:
         terminal_requires_reconciliation = False
         terminal_reason = "sent_confirmed"
         try:
-            if type(response) is ExactJsonTransportResponse:
+            if (
+                ExactJsonTransportResponse is not exact_response_type
+                or _snapshot_exact_transport_response is not exact_response_snapshot
+            ):
+                raise ValueError(
+                    "exact transport response authority changed after send"
+                )
+            if response_type_builtin(response) is exact_response_type:
                 # Revalidate raw exact state now. Frozen dataclass construction
                 # is not sufficient authority because object.__setattr__ can
                 # alter fields after __post_init__ and before transport returns.
-                if _snapshot_exact_transport_response is not exact_response_snapshot:
-                    raise ValueError(
-                        "exact transport response authority changed after send"
-                    )
                 (
                     response_text,
                     response_encoding,
@@ -2776,7 +2788,7 @@ class GuardedDispatcher:
                     )
                     sent_payload["reason"] = terminal_reason
                     sent_payload["retry_disposition"] = "RECONCILE_FIRST"
-            elif isinstance(response, ExactJsonTransportResponse):
+            elif response_isinstance_builtin(response, exact_response_type):
                 # Caller-polymorphic post-SEND response getters are not evidence.
                 # A durable UNKNOWN retains the no-blind-retry property.
                 raise TypeError("exact provider response subtype is forbidden")

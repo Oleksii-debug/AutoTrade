@@ -130,7 +130,7 @@ internal static class ProviderAuthenticatedReadDurabilityBoundaryContractTests
             "Observed durability from another journal must fail closed");
 
         Dictionary<string, string> oversized = new(StringComparer.Ordinal);
-        for (int i = 0; i < 257; i++)
+        for (int i = 0; i < 65; i++)
         {
             oversized["k" + i.ToString(System.Globalization.CultureInfo.InvariantCulture)] = "v";
         }
@@ -141,7 +141,7 @@ internal static class ProviderAuthenticatedReadDurabilityBoundaryContractTests
                     subject,
                     started.AddMilliseconds(300)),
                 oversized),
-            "Prepared query resource bound must reject more than 256 items");
+            "Prepared query resource bound must reject more than 64 items");
     }
 
     private static void Check(bool condition, string message)

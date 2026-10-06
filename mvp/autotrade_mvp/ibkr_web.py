@@ -53,6 +53,14 @@ def _text(value: str, *, name: str) -> str:
     return value.strip()
 
 
+def _provider_text(value: object, *, name: str) -> str:
+    """Admit only inert JSON string values at provider-response boundaries."""
+
+    if type(value) is not str:
+        raise IbkrWebAdapterError(f"{name} must be provider text")
+    return _text(value, name=name)
+
+
 def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise IbkrWebAdapterError(f"{name} must use exact decimal input")
@@ -568,15 +576,17 @@ class IbkrSubmissionOutcome:
 
 
 def _single_submission_item(payload: object) -> Mapping[str, object]:
-    if isinstance(payload, Mapping):
+    if type(payload) is dict:
         return payload
-    if isinstance(payload, (list, tuple)):
-        if len(payload) != 1 or not isinstance(payload[0], Mapping):
+    if type(payload) in {list, tuple}:
+        if len(payload) != 1 or type(payload[0]) is not dict:
             raise IbkrWebAdapterError(
                 "single-order adapter requires exactly one provider response object"
             )
         return payload[0]
-    raise TypeError("submission response must be an object or one-item sequence")
+    raise TypeError(
+        "submission response must be an exact object or one-item sequence"
+    )
 
 
 def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
@@ -603,9 +613,9 @@ def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
     if has_order:
         return IbkrSubmissionOutcome(
             status="ACKNOWLEDGED",
-            provider_order_id=_text(str(item["order_id"]), name="order_id"),
-            provider_order_status=_text(
-                str(item.get("order_status", "")),
+            provider_order_id=_provider_text(item["order_id"], name="order_id"),
+            provider_order_status=_provider_text(
+                item.get("order_status", ""),
                 name="order_status",
             ),
         )
@@ -614,11 +624,15 @@ def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
         raw_messages = item["message"]
         if isinstance(raw_messages, (str, bytes)) or not isinstance(raw_messages, (list, tuple)):
             raise IbkrWebAdapterError("reply message must be a sequence of strings")
-        messages = tuple(_text(str(value), name="reply message") for value in raw_messages)
+        messages = tuple(
+            _provider_text(value, name="reply message") for value in raw_messages
+        )
         raw_ids = item.get("messageIds", ())
         if isinstance(raw_ids, (str, bytes)) or not isinstance(raw_ids, (list, tuple)):
             raise IbkrWebAdapterError("messageIds must be a sequence when present")
-        message_ids = tuple(_text(str(value), name="messageId") for value in raw_ids)
+        message_ids = tuple(
+            _provider_text(value, name="messageId") for value in raw_ids
+        )
         suppressed = item.get("isSuppressed")
         if suppressed is not None and type(suppressed) is not bool:
             raise IbkrWebAdapterError("isSuppressed must be boolean when present")
@@ -631,7 +645,7 @@ def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
 
     return IbkrSubmissionOutcome(
         status="REJECTED",
-        rejection_reason=_text(str(item["error"]), name="error"),
+        rejection_reason=_provider_text(item["error"], name="error"),
     )
 
 
@@ -735,18 +749,22 @@ def record_order_submission_result(
     until reconciliation establishes whether the cOID appeared at the provider.
     """
 
-    if not isinstance(normalized, IbkrNormalizedOrder):
-        raise TypeError("normalized must be IbkrNormalizedOrder")
+    if type(normalized) is not IbkrNormalizedOrder:
+        raise TypeError("normalized must be exact IbkrNormalizedOrder")
     attempt = _text(attempt_id, name="attempt_id")
     account = _text(account_id, name="account_id")
     environment_value = _text(environment, name="environment").upper()
     point = _instant(observed_at, name="observed_at")
-    request_account = _text(str(normalized.fields.get("acctId", "")), name="acctId")
+    request_account = _provider_text(
+        normalized.fields.get("acctId", ""), name="acctId"
+    )
     if request_account != account:
         raise IbkrWebAdapterError(
             "recorded account does not match normalized guarded order"
         )
-    coid = validate_coid(str(normalized.fields.get("cOID", "")))
+    coid = validate_coid(
+        _provider_text(normalized.fields.get("cOID", ""), name="cOID")
+    )
 
     if transport_ambiguous:
         if response_body is not None:
@@ -768,13 +786,13 @@ def record_order_submission_result(
         raise IbkrWebAdapterError(
             "non-ambiguous submission requires authoritative provider response bytes"
         )
-    if isinstance(response_body, bytes):
+    if type(response_body) is bytes:
         try:
             text_body = response_body.decode("utf-8")
         except UnicodeDecodeError as error:
             raise IbkrWebAdapterError("provider response must be UTF-8") from error
         raw = response_body
-    elif isinstance(response_body, str) and response_body:
+    elif type(response_body) is str and response_body:
         text_body = response_body
         raw = response_body.encode("utf-8")
     else:
@@ -854,8 +872,8 @@ def prepare_reply_confirmation(
     that produced the reply id and must still cross GuardedDispatcher.
     """
 
-    if not isinstance(recorded, IbkrRecordedSubmission):
-        raise TypeError("recorded must be IbkrRecordedSubmission")
+    if type(recorded) is not IbkrRecordedSubmission:
+        raise TypeError("recorded must be exact IbkrRecordedSubmission")
     if type(explicit_authorization) is not bool:
         raise TypeError("explicit_authorization must be boolean")
     if recorded.outcome != "REPLY_REQUIRED":

@@ -1,10 +1,10 @@
 {
   "schema_version": "1.0.0",
   "baseline_date": "2026-09-22",
-  "evidence_as_of": "2026-10-06T14:18:24Z",
+  "evidence_as_of": "2026-10-06T15:13:07Z",
   "overall_status": "IMPLEMENTATION_IN_PROGRESS_SIMULATED_VERTICAL_SLICE_AVAILABLE",
   "gates": {
-    "engineering_baseline": "RECONCILED_00_16_WITH_GENERATED_BANK_AND_EXPORT_VALIDATION",
+    "engineering_baseline": "SECTION0_CANONICAL_CONVERGENCE_MERGED_TREE_VERIFIED",
     "repository_bootstrap": "TRANSFER_BASELINE_COMPLETE",
     "reusable_code_migration": "IN_PROGRESS_CROSS_PLATFORM_CI_EXECUTED_ON_PR_HEADS",
     "financial_runtime": "IN_PROGRESS_DOUBLE_ENTRY_ACCOUNTING_RESERVATIONS_AND_SIMULATED_RECONCILIATION",
@@ -40,6 +40,7 @@
     "PR head 4f5ed15d1afff0c20bc2e71672e152d78bef899e completed both repository verification and the Windows/Ubuntu baseline matrix successfully. This is useful cross-platform evidence but is not an exact-head qualification of the latest main commit.",
     "Canonical contract generation/codegen, release dependency locks, provider qualification, Windows packaging, NVDA qualification, recovery release evidence and bounded-real qualification remain open.",
     "The repository control mode is PARALLEL_ISOLATED_WORKTREES. The Git-backed registry primitive exists, but the deployed authenticated claim service and protected publication path remain unqualified.",
-    "Section 1 / WP-01 canonical contracts completed on main via PR #1440, merge commit 57f1064fbdf0e13ecdf563da6f0ebdbf3ab0131a. Contract v6.0.0 includes JSON Schema/OpenAPI, Python/C#/TypeScript cross-language conformance (51 common-scalar cases, 13 DatasetManifest semantic cases, 201 closed-object shape cases across 48 definitions), major-version breaking-change enforcement, exact-numeric package 0.0.2, canonical Host Sequence contract/runtime alignment, MarketEvent adapter-build provenance, and CI evidence bound to exact source SHA, versions, tested commands and unresolved limits. This closes WP-01 only; provider, PAPER/LIVE, economic-edge, release and Windows/NVDA qualification remain separate gates."
+    "Section 1 / WP-01 canonical contracts completed on main via PR #1440, merge commit 57f1064fbdf0e13ecdf563da6f0ebdbf3ab0131a. Contract v6.0.0 includes JSON Schema/OpenAPI, Python/C#/TypeScript cross-language conformance (51 common-scalar cases, 13 DatasetManifest semantic cases, 201 closed-object shape cases across 48 definitions), major-version breaking-change enforcement, exact-numeric package 0.0.2, canonical Host Sequence contract/runtime alignment, MarketEvent adapter-build provenance, and CI evidence bound to exact source SHA, versions, tested commands and unresolved limits. This closes WP-01 only; provider, PAPER/LIVE, economic-edge, release and Windows/NVDA qualification remain separate gates.",
+    "Section 0 canonical convergence is closed on main via PR #2148. Accepted head 9ccd9bc6f6042e5362f50d4d6d003828b85da3ab merged as e13c8fd099aca5998f2fc10b43bcb81aa5fb2539; post-merge main tree exactly equals candidate tree 7ce853b2bba07d29291a6305eeb552e92086a283. Three-way non-loss proof retained 428 Section-0-only paths, retained newer-main authority on 29 true overlaps, introduced zero base-path deletions/object-type changes/symlinks/gitlinks/case-colliding paths, and preserved the hardened reconvergence guard with exact-head OWNER trust-root approval. Phase-1 #2177 had zero unique paths and was closed as superseded. Hosted exact-head Actions remained queued without runner assignment and are not represented as PASS. External GitHub branch/ruleset enforcement tracked by #642/#543 remains a separate control-plane deployment boundary and does not change the merged canonical source tree."
   ]
 }

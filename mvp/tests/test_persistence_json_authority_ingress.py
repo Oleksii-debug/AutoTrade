@@ -401,6 +401,76 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
 
             self.assertEqual(len(store.pending_outbox()), 1)
 
+    def test_delivered_ack_retry_revalidates_requested_journal_cut(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            store.append_event(
+                _event("evt-delivered-cut-1"),
+                outbox_topic="fills",
+            )
+            pending = store.pending_outbox()[0]
+            self.assertTrue(
+                store.mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=pending["envelope_hash"],
+                    expected_journal_sequence=1,
+                )
+            )
+
+            later = _event("evt-delivered-cut-2")
+            later["aggregate_version"] = "2"
+            later["payload"] = {"kind": "fill", "quantity": "2"}
+            later["payload_hash"] = payload_digest(later["payload"])
+            store.append_event(later)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "journal sequence changed after whole-store validation",
+            ):
+                store.mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=pending["envelope_hash"],
+                    expected_journal_sequence=1,
+                )
+
+    def test_delivered_ack_retry_rejects_corrupt_delivery_marker(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(
+                _event("evt-delivered-marker"),
+                outbox_topic="fills",
+            )
+            pending = store.pending_outbox()[0]
+            self.assertTrue(
+                store.mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=pending["envelope_hash"],
+                )
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE outbox SET delivered_at = ? WHERE outbox_id = ?",
+                    (
+                        sqlite3.Binary(b"2026-10-06T13:00:00+00:00"),
+                        pending["outbox_id"],
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox delivered_at must be canonical non-empty text",
+            ):
+                store.mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=pending["envelope_hash"],
+                )
+
     def test_outbox_reads_and_ack_reject_blob_payload_authority(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

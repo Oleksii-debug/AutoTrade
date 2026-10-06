@@ -2407,10 +2407,6 @@ class JournalStore:
                         "outbox payload does not match authoritative journal event envelope"
                     )
 
-                if row["delivered_at"] is not None:
-                    connection.commit()
-                    return False
-
                 journal_sequence_cut = (
                     self._journal_sequence_value(connection)
                     if self.SCHEMA_VERSION >= 6
@@ -2429,6 +2425,15 @@ class JournalStore:
                         raise ValueError(
                             "whole-store state changed after bootstrap validation"
                         )
+
+                delivered_at = row["delivered_at"]
+                if delivered_at is not None:
+                    _require_canonical_durable_text(
+                        delivered_at,
+                        name="outbox delivered_at",
+                    )
+                    connection.commit()
+                    return False
 
                 updated = connection.execute(
                     """

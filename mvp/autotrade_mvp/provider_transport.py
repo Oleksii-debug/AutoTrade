@@ -602,7 +602,8 @@ def _validate_bybit_option_delivery_query(
             "Bybit option delivery query contains unsupported fields: "
             + ",".join(sorted(unsupported))
         )
-    if query.get("category") != "option":
+    category = query.get("category")
+    if type(category) is not str or category != "option":
         raise ProviderTransportScopeError(
             "Bybit option delivery query requires category=option"
         )

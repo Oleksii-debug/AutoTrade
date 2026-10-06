@@ -545,6 +545,9 @@ _BYBIT_OPTION_DELIVERY_ENDPOINT = "/v5/asset/delivery-record"
 _BYBIT_OPTION_DELIVERY_QUERY_FIELDS = frozenset(
     {"category", "symbol", "startTime", "endTime", "expDate", "limit", "cursor"}
 )
+_BYBIT_OPTION_DELIVERY_CURSOR_RE = re.compile(
+    r"^(?:[A-Za-z0-9._~-]|%[0-9A-F]{2})+$"
+)
 _BYBIT_OPTION_DELIVERY_MONTHS = frozenset(
     {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"}
 )
@@ -668,12 +671,10 @@ def _validate_bybit_option_delivery_query(
     if cursor is not None:
         if (
             type(cursor) is not str
-            or not cursor
-            or cursor != cursor.strip()
-            or any(character.isspace() for character in cursor)
+            or _BYBIT_OPTION_DELIVERY_CURSOR_RE.fullmatch(cursor) is None
         ):
             raise ProviderTransportScopeError(
-                "Bybit option delivery cursor must be canonical opaque text"
+                "Bybit option delivery cursor must be canonical opaque percent-encoded text"
             )
 
 
@@ -3972,7 +3973,22 @@ class BybitV5AuthenticatedReadSigner:
             )
 
         credential = BybitV5Credential.parse(credential_plaintext)
-        exact_query = urlencode(sorted(query.items()))
+        if query_binding.endpoint == _BYBIT_OPTION_DELIVERY_ENDPOINT:
+            # Bybit returns nextPageCursor as an already percent-encoded opaque
+            # token and instructs callers to feed that exact token back. Encoding
+            # '%' again would turn %3A/%2C into %253A/%252C and change both the
+            # signed bytes and pagination meaning. Other fields retain the
+            # existing urlencode contract; the cursor validator above limits the
+            # raw token to RFC3986 unreserved bytes plus canonical %XX escapes.
+            exact_parts = []
+            for key, value in sorted(query.items()):
+                if key == "cursor":
+                    exact_parts.append("cursor=" + value)
+                else:
+                    exact_parts.append(urlencode(((key, value),)))
+            exact_query = "&".join(exact_parts)
+        else:
+            exact_query = urlencode(sorted(query.items()))
         signing_material = (
             str(timestamp_ms)
             + credential.api_key

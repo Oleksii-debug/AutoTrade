@@ -329,6 +329,92 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "limit must be between 1 and 1000"):
                 store.pending_outbox(limit=_HostileInt(1))
 
+    def test_outbox_reads_and_ack_reject_blob_payload_authority(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(
+                _event("evt-outbox-blob-payload"),
+                outbox_topic="fills",
+            )
+            pending = store.pending_outbox()
+            self.assertEqual(len(pending), 1)
+            outbox_id = pending[0]["outbox_id"]
+            envelope_hash = pending[0]["envelope_hash"]
+
+            connection = sqlite3.connect(path)
+            try:
+                raw_payload = connection.execute(
+                    "SELECT payload_json FROM outbox WHERE outbox_id = ?",
+                    (outbox_id,),
+                ).fetchone()[0]
+                connection.execute(
+                    "UPDATE outbox SET payload_json = ? WHERE outbox_id = ?",
+                    (sqlite3.Binary(raw_payload.encode("utf-8")), outbox_id),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox payload authority is not exact text",
+            ):
+                store.pending_outbox()
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox payload authority is not exact text",
+            ):
+                store.mark_outbox_delivered(
+                    outbox_id,
+                    expected_envelope_hash=envelope_hash,
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox payload authority is not exact text",
+            ):
+                store.outbox_delivery_state(
+                    "evt-outbox-blob-payload",
+                    topic="fills",
+                )
+
+    def test_outbox_reads_and_ack_reject_blob_topic_authority(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(
+                _event("evt-outbox-blob-topic"),
+                outbox_topic="fills",
+            )
+            pending = store.pending_outbox()
+            self.assertEqual(len(pending), 1)
+            outbox_id = pending[0]["outbox_id"]
+            envelope_hash = pending[0]["envelope_hash"]
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE outbox SET topic = ? WHERE outbox_id = ?",
+                    (sqlite3.Binary(b"fills"), outbox_id),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox topic must be canonical non-empty text",
+            ):
+                store.pending_outbox()
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox topic must be canonical non-empty text",
+            ):
+                store.mark_outbox_delivered(
+                    outbox_id,
+                    expected_envelope_hash=envelope_hash,
+                )
+
     def test_command_text_subclasses_cannot_dispatch_strip_or_upper(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

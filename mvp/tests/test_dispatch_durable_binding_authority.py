@@ -2102,6 +2102,9 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             "uuid5",
             "NAMESPACE_URL",
             "sha256",
+            "_DispatchAuthorityChanged",
+            "DispatchBlocked",
+            "DispatchOutcome",
         )
         for surface in surfaces:
             with self.subTest(surface=surface), TemporaryDirectory() as directory:
@@ -2207,6 +2210,83 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                         "SubmissionSending",
                         "SubmissionUnknown",
                     ],
+                )
+
+    def test_post_send_exception_class_rebinding_cannot_escape_unknown(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        for surface in ("_DispatchAuthorityChanged", "DispatchBlocked"):
+            with self.subTest(surface=surface), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+                original = getattr(dispatch_module, surface)
+                hostile_checks = 0
+                wire_calls = 0
+
+                class HostileMeta(type):
+                    def __instancecheck__(cls, _instance):
+                        nonlocal hostile_checks
+                        hostile_checks += 1
+                        raise AssertionError(
+                            f"rebound {surface} instance check executed"
+                        )
+
+                    def __subclasscheck__(cls, _subclass):
+                        nonlocal hostile_checks
+                        hostile_checks += 1
+                        raise AssertionError(
+                            f"rebound {surface} subclass check executed"
+                        )
+
+                class HostileException(Exception, metaclass=HostileMeta):
+                    pass
+
+                def transport(_client_order_id, _request, guard):
+                    nonlocal wire_calls
+                    guard()
+                    wire_calls += 1
+                    setattr(dispatch_module, surface, HostileException)
+                    raise RuntimeError("transport failed after helper retarget")
+
+                attempt_id = f"post-send-exception-class-{surface}"
+                try:
+                    result = dispatcher.dispatch(
+                        attempt_id=attempt_id,
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=lambda *_args: (True, "allowed"),
+                        transport_send=transport,
+                        submission_scope={"endpoint": "/orders"},
+                    )
+                    self.assertIs(getattr(dispatch_module, surface), original)
+                finally:
+                    setattr(dispatch_module, surface, original)
+
+                self.assertEqual(wire_calls, 1)
+                self.assertEqual(hostile_checks, 0)
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertEqual(
+                    result.reason,
+                    "dispatcher_authority_changed_after_send_barrier",
+                )
+                self.assertEqual(
+                    [
+                        event["event_type"]
+                        for event in JournalStore.load_events(
+                            store,
+                            "submission_attempt",
+                            dispatcher._aggregate_id(attempt_id),
+                        )
+                    ],
+                    ["SubmissionPrepared", "SubmissionSending"],
                 )
 
     def test_exact_response_post_construction_tamper_is_revalidated_without_callbacks(self):

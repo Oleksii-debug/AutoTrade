@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
+import mvp.autotrade_mvp.bybit_v5 as bybit_v5_module
 from mvp.autotrade_mvp.bybit_v5 import (
     build_order_payload,
     prepare_order_submission,
@@ -803,6 +804,52 @@ class BybitV5AdapterTests(unittest.TestCase):
                 prepared_request=prepared,
                 observation=forged,
             )
+
+    def test_submission_consumer_ignores_rebound_projection_alias_for_forgery(self):
+        attempt, prepared, _observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-alias-forgery",
+                    "orderLinkId": "__CLIENT__",
+                },
+            }
+        )
+        forged = object.__new__(ProviderSubmissionObservation)
+        with patch.object(
+            bybit_v5_module,
+            "provider_submission_observation_projection",
+            return_value={
+                "attempt_id": attempt,
+                "provider_id": "BYBIT",
+                "endpoint": prepared.endpoint,
+                "request_sha256": prepared.body_sha256,
+                "capability_snapshot_ids": prepared.capability_snapshot_ids,
+                "instrument_versions": prepared.instrument_versions,
+                "account_id": prepared.account_id,
+                "environment": prepared.environment,
+                "client_order_id": prepared.body["orderLinkId"],
+                "evidence_ref": "provider-write:sha256:" + "0" * 64,
+                "response_sha256": "sha256:" + "0" * 64,
+                "sent_at": "2026-09-24T20:00:00Z",
+                "payload": {
+                    "retCode": 0,
+                    "result": {
+                        "orderId": "forged",
+                        "orderLinkId": prepared.body["orderLinkId"],
+                    },
+                },
+            },
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "provider submission observation authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=forged,
+                )
 
     def test_submission_consumer_rejects_subclass_before_virtual_callback(self):
         attempt, prepared, _observation = self._durable_write_observation(

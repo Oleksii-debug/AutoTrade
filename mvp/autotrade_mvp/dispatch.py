@@ -2589,10 +2589,14 @@ class GuardedDispatcher:
             )
         decoder_json_loads_kwdefault_missing = object()
         decoder_json_decoder = decoder_json_namespace_get("JSONDecoder")
+        decoder_json_decoder_namespace = vars(decoder_json_decoder)
+        decoder_json_decoder_namespace_get = (
+            decoder_json_decoder_namespace.get
+        )
         decoder_json_decoder_methods = snapshot_tuple(
             (
                 method_name,
-                snapshot_getattr(decoder_json_decoder, method_name, None),
+                decoder_json_decoder_namespace_get(method_name),
             )
             for method_name in ("__init__", "decode", "raw_decode")
         )
@@ -2778,11 +2782,7 @@ class GuardedDispatcher:
                 changed = True
             for method_name, expected_method in decoder_json_decoder_methods:
                 if (
-                    snapshot_getattr(
-                        decoder_json_decoder,
-                        method_name,
-                        None,
-                    )
+                    decoder_json_decoder_namespace_get(method_name)
                     is not expected_method
                 ):
                     snapshot_setattr(

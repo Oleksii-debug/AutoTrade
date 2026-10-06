@@ -22,7 +22,7 @@ from mvp.autotrade_mvp.accounting import AccountingConflict
 from mvp.autotrade_mvp.exact_decimal import (
     ExactDecimalError,
     canonical_decimal_text,
-    parse_canonical_decimal_text,
+    parse_bounded_exact_decimal,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
@@ -139,7 +139,21 @@ def _recapture_exact_cut(
     return current
 
 
-def _canonical_decimal_map(value: object, *, name: str) -> dict[str, str]:
+def _canonical_decimal_map(
+    value: object,
+    *,
+    name: str,
+    omit_zero: bool = False,
+) -> dict[str, str]:
+    """Normalize authenticated local Decimal presentation without changing value.
+
+    Reconciliation persists str(Decimal), so harmless scale such as 900.0 may
+    remain in the checkpoint. The checkpoint digest authenticates those original
+    bytes; this helper only converts them to one exact comparison representation.
+    """
+
+    if type(omit_zero) is not bool:
+        raise TypeError("omit_zero must be an exact boolean")
     if type(value) is not dict:
         raise ScientificFinancialOwnerConflict(f"{name} must be an exact dictionary")
     result: dict[str, str] = {}
@@ -150,35 +164,27 @@ def _canonical_decimal_map(value: object, *, name: str) -> dict[str, str]:
             )
         if type(raw) is not str:
             raise ScientificFinancialOwnerConflict(
-                f"{name} values must use canonical decimal text"
+                f"{name} values must use exact decimal text"
             )
         try:
-            amount = parse_canonical_decimal_text(raw)
+            amount = parse_bounded_exact_decimal(raw)
             canonical = canonical_decimal_text(amount)
         except (ExactDecimalError, TypeError, ValueError) as error:
             raise ScientificFinancialOwnerConflict(
                 f"{name} contains invalid exact decimal evidence"
             ) from error
-        if canonical != raw:
-            raise ScientificFinancialOwnerConflict(
-                f"{name} contains non-canonical decimal evidence"
-            )
+        if omit_zero and amount == 0:
+            continue
         result[key] = canonical
     return result
 
 
 def _require_zero_differences(payload: Mapping[str, object], field: str) -> None:
     differences = _canonical_decimal_map(payload.get(field), name=field)
-    for amount in differences.values():
-        try:
-            if parse_canonical_decimal_text(amount) != 0:
-                raise ScientificFinancialOwnerConflict(
-                    f"reconciliation {field} is non-zero"
-                )
-        except (ExactDecimalError, TypeError, ValueError) as error:
-            raise ScientificFinancialOwnerConflict(
-                f"reconciliation {field} is invalid"
-            ) from error
+    if any(amount != "0" for amount in differences.values()):
+        raise ScientificFinancialOwnerConflict(
+            f"reconciliation {field} is non-zero"
+        )
 
 
 def _book_scope_balances(
@@ -272,10 +278,12 @@ def _require_clean_reconciliation(
     provider_cash = _canonical_decimal_map(
         payload.get("provider_cash"),
         name="provider_cash",
+        omit_zero=True,
     )
     provider_positions = _canonical_decimal_map(
         payload.get("provider_positions"),
         name="provider_positions",
+        omit_zero=True,
     )
     local_cash, local_positions, _, _ = _book_scope_balances(book)
     if local_cash != provider_cash:

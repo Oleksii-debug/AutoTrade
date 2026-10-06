@@ -744,7 +744,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
             )
 
 
-    def test_paper_cancel_rejection_requires_scoped_immutable_evidence(self):
+    def test_paper_cancel_rejection_rejects_injected_artifact_evidence(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             artifacts = ArtifactStore(f"{directory}/artifacts")
@@ -772,9 +772,10 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 "command_id": "cancel-paper-1",
                 "reason_code": "ALREADY_FILLED",
             }
+
             with self.assertRaisesRegex(
                 OrderProjectionConflict,
-                "requires immutable evidence",
+                "requires sealed provider-origin authority",
             ):
                 book.reject_cancel(
                     event_key="reject-without-evidence",
@@ -784,34 +785,38 @@ class DurableOrderProjectionTests(unittest.TestCase):
                     committed_at=T2,
                 )
 
-            ref = provider_evidence(
+            injected_ref = provider_evidence(
                 artifacts,
                 operation="REJECT_CANCEL",
                 request=request,
                 observed_at=T2,
             )
-            rejected = book.reject_cancel(
-                event_key="reject-with-evidence",
-                client_order_id="paper-reject",
-                command_id="cancel-paper-1",
-                reason_code="ALREADY_FILLED",
-                committed_at=T2,
-                evidence_refs=[ref],
-            )
-            self.assertFalse(rejected.snapshot.cancel_requested)
-            self.assertFalse(rejected.snapshot.cancel_confirmed)
-            self.assertEqual(rejected.snapshot.state, "PENDING")
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "requires sealed provider-origin authority",
+            ):
+                book.reject_cancel(
+                    event_key="reject-with-injected-evidence",
+                    client_order_id="paper-reject",
+                    command_id="cancel-paper-1",
+                    reason_code="ALREADY_FILLED",
+                    committed_at=T2,
+                    evidence_refs=[injected_ref],
+                )
 
+            self.assertTrue(
+                book.order("paper-reject").snapshot().cancel_requested
+            )
             restarted = durable(
                 store,
                 environment="PAPER",
                 evidence_artifact_store=artifacts,
             )
-            self.assertFalse(
+            self.assertTrue(
                 restarted.order("paper-reject").snapshot().cancel_requested
             )
 
-    def test_paper_provider_fact_requires_immutable_evidence(self):
+    def test_paper_provider_fact_requires_sealed_provider_origin(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             book = durable(store, environment="PAPER")
@@ -825,27 +830,27 @@ class DurableOrderProjectionTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 OrderProjectionConflict,
-                "requires immutable evidence",
+                "requires sealed provider-origin authority",
             ):
                 book.acknowledge(
-                    event_key="ack-without-evidence",
+                    event_key="ack-without-origin",
                     client_order_id="paper-1",
                     provider_order_id="provider-1",
                     committed_at=T1,
                 )
 
-    def test_paper_provider_evidence_must_resolve_in_artifact_store(self):
+    def test_simulation_provider_evidence_must_resolve_in_artifact_store(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             artifacts = ArtifactStore(f"{directory}/artifacts")
             book = durable(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 evidence_artifact_store=artifacts,
             )
             book.create_order(
-                event_key="create-paper",
-                client_order_id="paper-1",
+                event_key="create-simulation",
+                client_order_id="simulation-1",
                 instrument="ABC",
                 side="BUY",
                 requested_quantity="1",
@@ -864,31 +869,31 @@ class DurableOrderProjectionTests(unittest.TestCase):
             ):
                 book.acknowledge(
                     event_key="ack-forged",
-                    client_order_id="paper-1",
+                    client_order_id="simulation-1",
                     provider_order_id="provider-1",
                     committed_at=T1,
                     evidence_refs=[forged],
                 )
 
-    def test_provider_evidence_scope_and_request_are_bound(self):
+    def test_simulation_provider_evidence_scope_and_request_are_bound(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             artifacts = ArtifactStore(f"{directory}/artifacts")
             book = durable(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 evidence_artifact_store=artifacts,
             )
             book.create_order(
-                event_key="create-paper",
-                client_order_id="paper-1",
+                event_key="create-simulation",
+                client_order_id="simulation-1",
                 instrument="ABC",
                 side="BUY",
                 requested_quantity="1",
                 committed_at=T0,
             )
             request = {
-                "client_order_id": "paper-1",
+                "client_order_id": "simulation-1",
                 "provider_order_id": "provider-1",
                 "status": "ACCEPTED",
                 "attempt_id": None,
@@ -899,6 +904,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 request=request,
                 observed_at=T1,
                 account_id="acct-other",
+                environment="SIMULATION",
             )
             with self.assertRaisesRegex(
                 OrderProjectionConflict,
@@ -906,31 +912,31 @@ class DurableOrderProjectionTests(unittest.TestCase):
             ):
                 book.acknowledge(
                     event_key="ack-wrong-scope",
-                    client_order_id="paper-1",
+                    client_order_id="simulation-1",
                     provider_order_id="provider-1",
                     committed_at=T1,
                     evidence_refs=[wrong_scope],
                 )
 
-    def test_verified_ack_and_fill_evidence_survive_restart(self):
+    def test_simulation_verified_ack_and_fill_evidence_survive_restart(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             artifacts = ArtifactStore(f"{directory}/artifacts")
             book = durable(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 evidence_artifact_store=artifacts,
             )
             book.create_order(
-                event_key="create-paper",
-                client_order_id="paper-1",
+                event_key="create-simulation",
+                client_order_id="simulation-1",
                 instrument="ABC",
                 side="BUY",
                 requested_quantity="2",
                 committed_at=T0,
             )
             ack_request = {
-                "client_order_id": "paper-1",
+                "client_order_id": "simulation-1",
                 "provider_order_id": "provider-1",
                 "status": "ACCEPTED",
                 "attempt_id": None,
@@ -940,10 +946,11 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 operation="ACKNOWLEDGE",
                 request=ack_request,
                 observed_at=T1,
+                environment="SIMULATION",
             )
             ack = book.acknowledge(
                 event_key="ack-evidenced",
-                client_order_id="paper-1",
+                client_order_id="simulation-1",
                 provider_order_id="provider-1",
                 committed_at=T1,
                 evidence_refs=[ack_ref],
@@ -951,7 +958,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
             self.assertEqual(ack.snapshot.state, "WORKING")
 
             fill_request = {
-                "client_order_id": "paper-1",
+                "client_order_id": "simulation-1",
                 "fill_id": "fill-1",
                 "provider_execution_id": "execution-1",
                 "quantity": "2",
@@ -963,10 +970,11 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 operation="RECORD_FILL",
                 request=fill_request,
                 observed_at=T2,
+                environment="SIMULATION",
             )
             fill = book.record_fill(
                 event_key="fill-evidenced",
-                client_order_id="paper-1",
+                client_order_id="simulation-1",
                 fill_id="fill-1",
                 provider_execution_id="execution-1",
                 quantity="2",
@@ -985,34 +993,34 @@ class DurableOrderProjectionTests(unittest.TestCase):
 
             restarted = durable(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 evidence_artifact_store=artifacts,
             )
-            self.assertEqual(restarted.order("paper-1").state, "FILLED")
+            self.assertEqual(restarted.order("simulation-1").state, "FILLED")
             self.assertEqual(
-                restarted.order("paper-1").filled_quantity,
+                restarted.order("simulation-1").filled_quantity,
                 Decimal("2"),
             )
 
-    def test_evidence_identity_participates_in_idempotency(self):
+    def test_simulation_evidence_identity_participates_in_idempotency(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             artifacts = ArtifactStore(f"{directory}/artifacts")
             book = durable(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 evidence_artifact_store=artifacts,
             )
             book.create_order(
-                event_key="create-paper",
-                client_order_id="paper-1",
+                event_key="create-simulation",
+                client_order_id="simulation-1",
                 instrument="ABC",
                 side="BUY",
                 requested_quantity="1",
                 committed_at=T0,
             )
             request = {
-                "client_order_id": "paper-1",
+                "client_order_id": "simulation-1",
                 "provider_order_id": "provider-1",
                 "status": "ACCEPTED",
                 "attempt_id": None,
@@ -1022,17 +1030,18 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 operation="ACKNOWLEDGE",
                 request=request,
                 observed_at=T1,
+                environment="SIMULATION",
             )
             first = book.acknowledge(
                 event_key="ack-stable",
-                client_order_id="paper-1",
+                client_order_id="simulation-1",
                 provider_order_id="provider-1",
                 committed_at=T1,
                 evidence_refs=[first_ref],
             )
             retry = book.acknowledge(
                 event_key="ack-stable",
-                client_order_id="paper-1",
+                client_order_id="simulation-1",
                 provider_order_id="provider-1",
                 committed_at=T1,
                 evidence_refs=[first_ref],
@@ -1045,6 +1054,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 operation="ACKNOWLEDGE",
                 request=request,
                 observed_at=T1,
+                environment="SIMULATION",
             )
             with self.assertRaisesRegex(
                 OrderProjectionConflict,
@@ -1052,7 +1062,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
             ):
                 book.acknowledge(
                     event_key="ack-stable",
-                    client_order_id="paper-1",
+                    client_order_id="simulation-1",
                     provider_order_id="provider-1",
                     committed_at=T1,
                     evidence_refs=[second_ref],
@@ -1080,7 +1090,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
             restarted = durable(store, environment="PAPER")
             self.assertEqual(restarted.order("paper-unknown").state, "UNKNOWN")
 
-    def test_local_command_cannot_claim_provider_evidence(self):
+    def test_paper_local_provider_fact_rejects_injected_artifact_evidence(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             artifacts = ArtifactStore(f"{directory}/artifacts")
@@ -1098,7 +1108,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 committed_at=T0,
             )
             request = {"client_order_id": "paper-1"}
-            ref = provider_evidence(
+            injected_ref = provider_evidence(
                 artifacts,
                 operation="CONFIRM_CANCEL",
                 request=request,
@@ -1106,21 +1116,24 @@ class DurableOrderProjectionTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 OrderProjectionConflict,
-                "requires immutable evidence",
+                "requires sealed provider-origin authority",
             ):
                 book.confirm_cancel(
-                    event_key="cancel-without-evidence",
+                    event_key="cancel-without-origin",
                     client_order_id="paper-1",
                     committed_at=T1,
                 )
-            confirmed = book.confirm_cancel(
-                event_key="cancel-with-evidence",
-                client_order_id="paper-1",
-                committed_at=T1,
-                evidence_refs=[ref],
-            )
-            self.assertTrue(confirmed.snapshot.cancel_confirmed)
-
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "requires sealed provider-origin authority",
+            ):
+                book.confirm_cancel(
+                    event_key="cancel-with-injected-evidence",
+                    client_order_id="paper-1",
+                    committed_at=T1,
+                    evidence_refs=[injected_ref],
+                )
+            self.assertFalse(book.order("paper-1").snapshot().cancel_confirmed)
 
     def test_exact_wp18_sent_sync_stays_unknown_until_provider_semantics_are_evidenced(self):
         with TemporaryDirectory() as directory:
@@ -1215,34 +1228,33 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 "status": "ACCEPTED",
                 "attempt_id": attempt_id,
             }
-            ack_ref = provider_evidence(
+            injected_ref = provider_evidence(
                 artifacts,
                 operation="ACKNOWLEDGE",
                 request=ack_request,
                 observed_at=T2,
             )
-            normalized = book.acknowledge(
-                event_key="normalized-provider-ack",
-                client_order_id=client_order_id,
-                provider_order_id="provider-raw-1",
-                status="ACCEPTED",
-                attempt_id=attempt_id,
-                committed_at=T2,
-                evidence_refs=[ack_ref],
-            )
-            self.assertEqual(normalized.snapshot.state, "WORKING")
-            self.assertEqual(normalized.snapshot.filled_quantity, Decimal("0"))
-            self.assertEqual(
-                normalized.snapshot.provider_order_id,
-                "provider-raw-1",
-            )
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "requires sealed provider-origin authority",
+            ):
+                book.acknowledge(
+                    event_key="injected-provider-ack",
+                    client_order_id=client_order_id,
+                    provider_order_id="provider-raw-1",
+                    status="ACCEPTED",
+                    attempt_id=attempt_id,
+                    committed_at=T2,
+                    evidence_refs=[injected_ref],
+                )
+            self.assertEqual(book.order(client_order_id).state, "UNKNOWN")
 
-            # Replaying the WP-18 journal must be idempotent and must neither
-            # resend nor roll a later provider-normalized ACK back to UNKNOWN.
+            # Replaying the WP-18 journal is idempotent and never turns
+            # transport truth or injected storage bytes into ACK authority.
             replayed = book.sync_submission_attempt(attempt_id=attempt_id)
             self.assertEqual(len(replayed), 2)
             self.assertTrue(all(not item.inserted for item in replayed))
-            self.assertEqual(book.order(client_order_id).state, "WORKING")
+            self.assertEqual(book.order(client_order_id).state, "UNKNOWN")
             self.assertEqual(outbound, 1)
 
 

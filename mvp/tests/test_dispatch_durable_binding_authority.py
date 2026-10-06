@@ -1065,6 +1065,123 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             self.assertEqual(authority_calls, [])
             self.assertEqual(transport_calls, [])
 
+    def test_final_guard_rejects_dispatcher_authority_retargeting_before_wire(self):
+        cases = (
+            ("environment", "PAPER"),
+            ("account_id", "other-account"),
+            ("scope_key", "retargeted-scope"),
+            ("owner_token", "other-owner"),
+            ("owner_epoch", 2),
+            ("prepared_lease_seconds", 3600),
+        )
+        for field_name, replacement in cases:
+            with self.subTest(field_name=field_name), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                    owner_epoch=1,
+                    prepared_lease_seconds=60,
+                )
+                original = getattr(dispatcher, field_name)
+                wire_calls = 0
+
+                def transport(_client_order_id, _request, guard):
+                    nonlocal wire_calls
+                    setattr(dispatcher, field_name, replacement)
+                    guard()
+                    wire_calls += 1
+                    return ExactJsonTransportResponse(b'{"accepted":true}')
+
+                try:
+                    with self.assertRaisesRegex(
+                        PermissionError,
+                        "dispatcher authority state changed",
+                    ):
+                        dispatcher.dispatch(
+                            attempt_id="dispatcher-retarget-a1",
+                            intent_id="intent-1",
+                            intent_hash="sha256:" + "1" * 64,
+                            provider="provider",
+                            request={"side": "BUY"},
+                            now="2026-10-06T14:00:00Z",
+                            authority_check=lambda *_args: (True, "allowed"),
+                            transport_send=transport,
+                            submission_scope={"endpoint": "/orders"},
+                        )
+                finally:
+                    setattr(dispatcher, field_name, original)
+
+                self.assertEqual(wire_calls, 0)
+                events = JournalStore.load_events(
+                    store,
+                    "submission_attempt",
+                    dispatcher._aggregate_id("dispatcher-retarget-a1"),
+                )
+                self.assertEqual(
+                    [event["event_type"] for event in events],
+                    ["SubmissionPrepared"],
+                )
+
+    def test_final_authority_callback_cannot_retarget_sender_state(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+                owner_epoch=1,
+            )
+            authority_calls = 0
+            wire_calls = 0
+
+            def authority(_intent_hash, _now):
+                nonlocal authority_calls
+                authority_calls += 1
+                if authority_calls == 2:
+                    dispatcher.owner_epoch = 2
+                return True, "allowed"
+
+            def transport(_client_order_id, _request, guard):
+                nonlocal wire_calls
+                guard()
+                wire_calls += 1
+                return ExactJsonTransportResponse(b'{"accepted":true}')
+
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "dispatcher authority state changed",
+                ):
+                    dispatcher.dispatch(
+                        attempt_id="final-authority-retarget-a1",
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=authority,
+                        transport_send=transport,
+                        submission_scope={"endpoint": "/orders"},
+                    )
+            finally:
+                dispatcher.owner_epoch = 1
+
+            self.assertEqual(authority_calls, 2)
+            self.assertEqual(wire_calls, 0)
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("final-authority-retarget-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared"],
+            )
+
     def test_runtime_redispatch_rejects_submission_scope_retargeting(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

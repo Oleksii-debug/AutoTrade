@@ -195,15 +195,24 @@ class SubmissionResponseBinding:
             (self.client_order_id, "client_order_id"),
             (self.account_id, "account_id"),
         ):
-            if not isinstance(value, str) or not value.strip():
+            if type(value) is not str or not value.strip():
                 raise ValueError(f"{name} is required")
-        if re.fullmatch(r"sha256:[0-9a-f]{64}", self.request_hash) is None:
+        if (
+            type(self.request_hash) is not str
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", self.request_hash) is None
+        ):
             raise ValueError("request_hash must be a canonical SHA-256 digest")
-        if re.fullmatch(r"sha256:[0-9a-f]{64}", self.submission_scope_hash) is None:
+        if (
+            type(self.submission_scope_hash) is not str
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", self.submission_scope_hash) is None
+        ):
             raise ValueError(
                 "submission_scope_hash must be a canonical SHA-256 digest"
             )
-        if re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None:
+        if (
+            type(self.response_sha256) is not str
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None
+        ):
             raise ValueError("response_sha256 must be a canonical SHA-256 digest")
         if type(self.response_bytes) is not bytes or not self.response_bytes:
             raise ValueError("response_bytes must be non-empty bytes")
@@ -219,13 +228,15 @@ class SubmissionResponseBinding:
             or self.http_status > 599
         ):
             raise ValueError("durable provider HTTP status must be an integer 100..599")
+        if type(self.environment) is not str:
+            raise ValueError("invalid durable submission environment")
         environment = self.environment.upper()
         if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("invalid durable submission environment")
         object.__setattr__(self, "environment", environment)
-        if not isinstance(self.submission_scope, Mapping):
-            raise TypeError("submission_scope must be a mapping")
-        canonical_scope = json.loads(canonical_json(dict(self.submission_scope)))
+        if type(self.submission_scope) is not dict:
+            raise TypeError("submission_scope must be an exact dict")
+        canonical_scope = json.loads(canonical_json(dict.copy(self.submission_scope)))
         expected_scope_hash = (
             "sha256:"
             + sha256(canonical_json(canonical_scope).encode("utf-8")).hexdigest()
@@ -462,6 +473,10 @@ def load_submission_response_binding(
         ("SubmissionSending", sending),
         ("terminal", sent),
     ):
+        if event.get("aggregate_type") != "submission_attempt":
+            raise ValueError(
+                f"durable {event_name} aggregate_type mismatches submission authority"
+            )
         if event.get("aggregate_id") != aggregate_id:
             raise ValueError(
                 f"durable {event_name} aggregate_id mismatches selected submission identity"

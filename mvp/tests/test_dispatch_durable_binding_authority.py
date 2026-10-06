@@ -148,7 +148,7 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 account_id=projected["account_id"],
                 prepared_at=projected["prepared_at"],
                 sent_at=projected["sent_at"],
-                submission_scope=projected["submission_scope"],
+                submission_scope=dict(projected["submission_scope"]),
                 submission_scope_hash=projected["submission_scope_hash"],
                 response_bytes=projected["response_bytes"],
                 response_sha256=projected["response_sha256"],
@@ -640,6 +640,93 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             self.assertEqual(authority_calls, 0)
             self.assertEqual(transport_calls, 0)
 
+
+    def test_response_binding_constructor_rejects_polymorphic_authority_inputs(self):
+        class TrapText(str):
+            callbacks = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("caller-controlled strip executed")
+
+            def upper(self):
+                type(self).callbacks += 1
+                raise AssertionError("caller-controlled upper executed")
+
+            def encode(self, *args, **kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("caller-controlled encode executed")
+
+        scope = {}
+        response = b"{}"
+        kwargs = {
+            "attempt_id": "attempt-constructor",
+            "aggregate_id": "aggregate-constructor",
+            "provider": "BYBIT",
+            "request_hash": "sha256:" + "1" * 64,
+            "client_order_id": "client-constructor",
+            "environment": "SIMULATION",
+            "account_id": "acct-constructor",
+            "prepared_at": "2026-10-06T14:00:00Z",
+            "sent_at": "2026-10-06T14:00:01Z",
+            "submission_scope": scope,
+            "submission_scope_hash": "sha256:"
+            + sha256(canonical_json(scope).encode("utf-8")).hexdigest(),
+            "response_bytes": response,
+            "response_sha256": "sha256:" + sha256(response).hexdigest(),
+            "_factory_token": dispatch_module._SUBMISSION_RESPONSE_BINDING_TOKEN,
+        }
+        for field in (
+            "attempt_id",
+            "aggregate_id",
+            "provider",
+            "request_hash",
+            "client_order_id",
+            "environment",
+            "account_id",
+            "submission_scope_hash",
+            "response_sha256",
+        ):
+            TrapText.callbacks = 0
+            forged = dict(kwargs)
+            forged[field] = TrapText(forged[field])
+            with self.subTest(field=field):
+                with self.assertRaises((TypeError, ValueError)):
+                    SubmissionResponseBinding(**forged)
+                self.assertEqual(TrapText.callbacks, 0)
+
+    def test_response_binding_constructor_rejects_mapping_subclass_before_callbacks(self):
+        class TrapDict(dict):
+            callbacks = 0
+
+            def items(self):
+                type(self).callbacks += 1
+                raise AssertionError("caller-controlled items executed")
+
+            def __iter__(self):
+                type(self).callbacks += 1
+                raise AssertionError("caller-controlled iteration executed")
+
+        response = b"{}"
+        scope = TrapDict()
+        with self.assertRaisesRegex(TypeError, "submission_scope must be an exact dict"):
+            SubmissionResponseBinding(
+                attempt_id="attempt-constructor",
+                aggregate_id="aggregate-constructor",
+                provider="BYBIT",
+                request_hash="sha256:" + "1" * 64,
+                client_order_id="client-constructor",
+                environment="SIMULATION",
+                account_id="acct-constructor",
+                prepared_at="2026-10-06T14:00:00Z",
+                sent_at="2026-10-06T14:00:01Z",
+                submission_scope=scope,
+                submission_scope_hash="sha256:" + sha256(b"{}").hexdigest(),
+                response_bytes=response,
+                response_sha256="sha256:" + sha256(response).hexdigest(),
+                _factory_token=dispatch_module._SUBMISSION_RESPONSE_BINDING_TOKEN,
+            )
+        self.assertEqual(TrapDict.callbacks, 0)
 
 if __name__ == "__main__":
     unittest.main()

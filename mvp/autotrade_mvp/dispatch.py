@@ -420,6 +420,7 @@ def load_submission_response_binding(
         raise ValueError("durable submission aggregate identity mismatch")
     durable_text: dict[str, str] = {}
     for field_name in (
+        "attempt_id",
         "provider",
         "request_hash",
         "client_order_id",
@@ -433,8 +434,44 @@ def load_submission_response_binding(
             )
         durable_text[field_name] = field_value
 
+    expected_environment = environment.strip().upper()
+    expected_account_id = account_id.strip()
+    if durable_text["attempt_id"] != attempt_id:
+        raise ValueError(
+            "durable SubmissionPrepared attempt_id mismatches selected submission identity"
+        )
+    if durable_text["environment"] != expected_environment:
+        raise ValueError(
+            "durable SubmissionPrepared environment mismatches selected submission identity"
+        )
+    if durable_text["account_id"] != expected_account_id:
+        raise ValueError(
+            "durable SubmissionPrepared account_id mismatches selected submission identity"
+        )
+
+    for event_name, event in (("SubmissionSending", sending), ("terminal", sent)):
+        event_payload = event.get("payload")
+        if type(event_payload) is not dict:
+            raise ValueError(f"durable {event_name} payload is invalid")
+        event_client_order_id = event_payload.get("client_order_id")
+        if (
+            type(event_client_order_id) is not str
+            or event_client_order_id != durable_text["client_order_id"]
+        ):
+            raise ValueError(
+                f"durable {event_name} client_order_id mismatches SubmissionPrepared"
+            )
+        event_environment = event.get("environment")
+        if (
+            type(event_environment) is not str
+            or event_environment != expected_environment
+        ):
+            raise ValueError(
+                f"durable {event_name} environment mismatches selected submission identity"
+            )
+
     return SubmissionResponseBinding(
-        attempt_id=attempt_id,
+        attempt_id=durable_text["attempt_id"],
         aggregate_id=aggregate_id,
         provider=durable_text["provider"],
         request_hash=durable_text["request_hash"],

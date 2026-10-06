@@ -226,13 +226,22 @@ class SubmissionResponseBinding:
         ):
             if type(value) is not str or not value.strip():
                 raise ValueError(f"{name} is required")
-        if re.fullmatch(r"sha256:[0-9a-f]{64}", self.request_hash) is None:
+        if (
+            type(self.request_hash) is not str
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", self.request_hash) is None
+        ):
             raise ValueError("request_hash must be a canonical SHA-256 digest")
-        if re.fullmatch(r"sha256:[0-9a-f]{64}", self.submission_scope_hash) is None:
+        if (
+            type(self.submission_scope_hash) is not str
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", self.submission_scope_hash) is None
+        ):
             raise ValueError(
                 "submission_scope_hash must be a canonical SHA-256 digest"
             )
-        if re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None:
+        if (
+            type(self.response_sha256) is not str
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None
+        ):
             raise ValueError("response_sha256 must be a canonical SHA-256 digest")
         try:
             require_provider_response_bytes(
@@ -286,13 +295,15 @@ class SubmissionResponseBinding:
             or self.http_status > 599
         ):
             raise ValueError("durable provider HTTP status must be an integer 100..599")
+        if type(self.environment) is not str:
+            raise ValueError("invalid durable submission environment")
         environment = self.environment.upper()
         if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("invalid durable submission environment")
         object.__setattr__(self, "environment", environment)
-        if not isinstance(self.submission_scope, Mapping):
-            raise TypeError("submission_scope must be a mapping")
-        canonical_scope = json.loads(canonical_json(dict(self.submission_scope)))
+        if type(self.submission_scope) is not dict:
+            raise TypeError("submission_scope must be an exact dict")
+        canonical_scope = json.loads(canonical_json(dict.copy(self.submission_scope)))
         expected_scope_hash = (
             "sha256:"
             + sha256(canonical_json(canonical_scope).encode("utf-8")).hexdigest()
@@ -308,6 +319,8 @@ class SubmissionResponseBinding:
             (self.prepared_at, "prepared_at"),
             (self.sent_at, "sent_at"),
         ):
+            if type(value) is not str:
+                raise ValueError(f"{name} must be canonical UTC text")
             point = _instant(value)
             canonical = point.isoformat().replace("+00:00", "Z")
             if canonical != value:

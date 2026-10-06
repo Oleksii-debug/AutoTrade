@@ -35,6 +35,7 @@ from mvp.autotrade_mvp.provider_core import (
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
 )
+from mvp.autotrade_mvp.provider_route_reads import QualifiedProviderResponseObservation
 
 
 OPTION_ID = "11111111-1111-1111-1111-111111111111"
@@ -281,6 +282,182 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         self._evidence[source.evidence_ref] = source
         return source.evidence_ref
+
+    def test_unissued_qualified_provider_response_cannot_cross_lifecycle_boundary(self):
+        forged = object.__new__(QualifiedProviderResponseObservation)
+        self._evidence["forged-qualified"] = forged
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "qualified provider lifecycle evidence authority is unavailable",
+        ):
+            self.authority._observation_from_evidence("forged-qualified")
+        self.assertEqual(self.authority._events(), [])
+        self.assertEqual(self.book.transactions, ())
+
+    def test_delivery_parser_identity_is_not_accepted_as_lifecycle_authority(self):
+        neutral_ref = self.evidence(external_event_id="delivery-parser-refusal")
+        neutral_source = self._evidence[neutral_ref]
+        forged = object.__new__(QualifiedProviderResponseObservation)
+        object.__setattr__(forged, "observation", neutral_source)
+        object.__setattr__(forged, "query_binding", neutral_source.query_binding)
+        self._evidence["qualified-delivery"] = forged
+
+        with (
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "evidence_ref",
+                new_callable=property,
+                return_value="qualified-delivery",
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "parser_identity",
+                new_callable=property,
+                return_value="BYBIT_OPTION_DELIVERY_V5_JSON_V1",
+            ),
+        ):
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "qualified provider lifecycle evidence parser identity is unsupported",
+            ):
+                self.authority._observation_from_evidence("qualified-delivery")
+        self.assertEqual(self.authority._events(), [])
+        self.assertEqual(self.book.transactions, ())
+
+    def test_qualified_lifecycle_parser_identity_is_admitted_only_as_the_canonical_lifecycle_contract(self):
+        neutral_ref = self.evidence(external_event_id="qualified-lifecycle-ref")
+        neutral_source = self._evidence[neutral_ref]
+        forged = object.__new__(QualifiedProviderResponseObservation)
+        object.__setattr__(forged, "observation", neutral_source)
+        object.__setattr__(forged, "query_binding", neutral_source.query_binding)
+        self._evidence["qualified-lifecycle"] = forged
+
+        with (
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "evidence_ref",
+                new_callable=property,
+                return_value="qualified-lifecycle",
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "parser_identity",
+                new_callable=property,
+                return_value="autotrade.option-lifecycle.sealed-json",
+            ),
+        ):
+            observation, provider_evidence, qualified = (
+                self.authority._observation_from_evidence("qualified-lifecycle")
+            )
+
+        self.assertEqual(observation.provider_id, "BYBIT")
+        self.assertIs(provider_evidence, neutral_source)
+        self.assertIs(qualified, forged)
+        self.assertEqual(observation.raw_evidence_digest, neutral_source.response_sha256)
+
+    def test_qualified_lifecycle_apply_persists_full_provider_q_provenance(self):
+        self.seed_option_position("1")
+        neutral_ref = self.evidence(
+            external_event_id="qualified-lifecycle-apply",
+            provider_revision="qualified-r1",
+        )
+        neutral_source = self._evidence[neutral_ref]
+
+        class QualifiedBinding:
+            query_digest = "sha256:" + "a" * 64
+            provider_environment = "TESTNET"
+            authority_journal_sequence_cut = 17
+            adapter_code_sha = "b" * 40
+            packaged_artifact_digest = "sha256:" + "c" * 64
+
+        forged = object.__new__(QualifiedProviderResponseObservation)
+        object.__setattr__(forged, "observation", neutral_source)
+        object.__setattr__(forged, "query_binding", QualifiedBinding())
+        self._evidence["qualified-lifecycle-apply"] = forged
+
+        patches = (
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "evidence_ref",
+                new_callable=property,
+                return_value="qualified-lifecycle-apply",
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "parser_identity",
+                new_callable=property,
+                return_value="autotrade.option-lifecycle.sealed-json",
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "qualification_id",
+                new_callable=property,
+                return_value="provider-qualification:sha256:" + "d" * 64,
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "route_semantics_digest",
+                new_callable=property,
+                return_value="sha256:" + "e" * 64,
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "endpoint_rule_digest",
+                new_callable=property,
+                return_value="sha256:" + "f" * 64,
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "qualified_route_rule_digest",
+                new_callable=property,
+                return_value="sha256:" + "0" * 64,
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "data_entitlement",
+                new_callable=property,
+                return_value="ACCOUNT",
+            ),
+        )
+        for item in patches:
+            item.start()
+        try:
+            result = self.authority.apply("qualified-lifecycle-apply")
+            retry = self.authority.apply("qualified-lifecycle-apply")
+        finally:
+            for item in reversed(patches):
+                item.stop()
+
+        self.assertTrue(result.inserted)
+        self.assertFalse(retry.inserted)
+        event = self.store.load_events(
+            "option_lifecycle",
+            self.authority.aggregate_id,
+        )[0]["payload"]
+        evidence = event["provider_evidence"]
+        self.assertEqual(
+            event["provider_evidence_ref"],
+            "qualified-lifecycle-apply",
+        )
+        self.assertEqual(evidence["evidence_ref"], "qualified-lifecycle-apply")
+        self.assertEqual(
+            evidence["qualification_id"],
+            "provider-qualification:sha256:" + "d" * 64,
+        )
+        self.assertEqual(evidence["route_semantics_digest"], "sha256:" + "e" * 64)
+        self.assertEqual(evidence["endpoint_rule_digest"], "sha256:" + "f" * 64)
+        self.assertEqual(
+            evidence["qualified_route_rule_digest"],
+            "sha256:" + "0" * 64,
+        )
+        self.assertEqual(evidence["data_entitlement"], "ACCOUNT")
+        self.assertEqual(evidence["provider_environment"], "TESTNET")
+        self.assertEqual(evidence["authority_journal_sequence_cut"], 17)
+        self.assertEqual(evidence["adapter_code_sha"], "b" * 40)
+        self.assertEqual(
+            evidence["packaged_artifact_digest"],
+            "sha256:" + "c" * 64,
+        )
 
     def test_lifecycle_financial_decimals_reject_subclasses_before_virtual_dispatch(self):
         class HostileDecimal(Decimal):

@@ -574,6 +574,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         *,
         provider_environment="MAINNET",
         submission_scope_provider_environment=None,
+        submission_scope_capability_snapshot_id=None,
         http_status=200,
         intent_id="bybit-write-intent",
         attempt_id=None,
@@ -653,7 +654,11 @@ class BybitV5AdapterTests(unittest.TestCase):
                         if submission_scope_provider_environment is not None
                         else provider_environment
                     ),
-                    "capability_snapshot_id": prepared.capability_snapshot_id,
+                    "capability_snapshot_id": (
+                        submission_scope_capability_snapshot_id
+                        if submission_scope_capability_snapshot_id is not None
+                        else prepared.capability_snapshot_id
+                    ),
                     "endpoint": prepared.endpoint,
                     "prepared_request_sha256": prepared.body_sha256,
                     "capability_snapshot_ids": list(
@@ -661,7 +666,9 @@ class BybitV5AdapterTests(unittest.TestCase):
                     ),
                     "instrument_versions": list(prepared.instrument_versions),
                     "provider_route_capability_snapshot_id": (
-                        prepared.capability_snapshot_id
+                        submission_scope_capability_snapshot_id
+                        if submission_scope_capability_snapshot_id is not None
+                        else prepared.capability_snapshot_id
                     ),
                     "provider_route_provider_environment": provider_environment,
                 },
@@ -808,6 +815,25 @@ class BybitV5AdapterTests(unittest.TestCase):
                 attempt_id=attempt,
                 prepared_request=prepared,
                 observation=observation,
+            )
+
+    def test_submission_observation_rejects_route_capability_retarget(self):
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "capability scope does not match prepared request",
+        ):
+            self._durable_write_observation(
+                {
+                    "retCode": 0,
+                    "retMsg": "OK",
+                    "result": {
+                        "orderId": "provider-capability-retarget",
+                        "orderLinkId": "__CLIENT__",
+                    },
+                },
+                provider_environment="TESTNET",
+                submission_scope_capability_snapshot_id="other-capability",
+                intent_id="bybit-route-capability-retarget",
             )
 
     def test_submission_response_rejects_missing_http_status_sent_binding(self):

@@ -154,7 +154,7 @@ class ProviderRouteReadTests(unittest.TestCase):
         )
         self.assertEqual(
             parser_contract_digest,
-            "sha256:bd75053cbb903b0f38bd1532fc86d7adfcc9c83894eee2ec7150a7d6103114ec",
+            "sha256:d52b03d2b8eee559754c38763c31f425cd928f559a121426426773fcc1d360a2",
         )
         self.assertTrue(parser_key.startswith("READ_PARSER:"))
         self.assertNotEqual(parser_key, rule_key)

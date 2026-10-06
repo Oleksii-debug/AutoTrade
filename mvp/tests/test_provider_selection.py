@@ -82,11 +82,18 @@ def candidate(*, provider_environment="TESTNET", package_digest=PACKAGE_DIGEST):
     )
 
 
-def accepted_spot_q(*, ordinal=40, unsupported=(), include_read_rule=True):
+def accepted_spot_q(
+    *,
+    ordinal=40,
+    unsupported=(),
+    include_read_rule=True,
+    product_family="SPOT",
+    extra_route_semantics=None,
+):
     protocol = _protocol()
     raw_ref = _raw_ref(100 + ordinal)
     payload = _campaign_payload(raw_ref=raw_ref)
-    payload["product_family"] = "SPOT"
+    payload["product_family"] = product_family
     payload["unsupported_features"] = sorted(unsupported)
     if include_read_rule:
         claim_key, claim_digest = qualified_read_route_semantic_claim(
@@ -96,7 +103,9 @@ def accepted_spot_q(*, ordinal=40, unsupported=(), include_read_rule=True):
             permission_scope="ACCOUNT.READ",
         )
         payload["route_semantics"][claim_key] = claim_digest
-        payload["route_semantics"] = dict(sorted(payload["route_semantics"].items()))
+    if extra_route_semantics is not None:
+        payload["route_semantics"].update(extra_route_semantics)
+    payload["route_semantics"] = dict(sorted(payload["route_semantics"].items()))
     campaign_raw = canonical_json(payload).encode("utf-8")
     campaign_ref = EvidenceArtifactRef(
         artifact_id=_artifact_id(ordinal),

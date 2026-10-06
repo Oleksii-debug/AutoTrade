@@ -376,6 +376,30 @@ def _normalized_license_text(path: Path) -> str:
     return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")).strip() + "\n"
 
 
+def _package_regular_file(
+    package_dir: Path,
+    candidate: Path,
+    *,
+    label: str,
+) -> Path:
+    """Require one non-symlink regular file inside the exact restored package dir."""
+
+    if candidate.is_symlink():
+        raise ValueError(f"restored NuGet package {label} must not be a symlink")
+    try:
+        resolved = candidate.resolve(strict=True)
+        package_resolved = package_dir.resolve(strict=True)
+    except OSError as error:
+        raise ValueError(
+            f"restored NuGet package {label} is unavailable"
+        ) from error
+    if not resolved.is_file() or resolved.parent != package_resolved:
+        raise ValueError(
+            f"restored NuGet package {label} is outside the exact package directory"
+        )
+    return resolved
+
+
 def verify_restored_package_rights(
     packages_root: Path,
     *,
@@ -442,27 +466,51 @@ def verify_restored_package_rights(
             raise ValueError(
                 f"restored NuGet package lacks one nupkg payload: {package_name}@{package_version}"
             )
-        restored_hash = sha_files[0].read_text(encoding="ascii").strip()
+        sha_path = _package_regular_file(
+            package_dir,
+            sha_files[0],
+            label="SHA-512 authority",
+        )
+        nupkg_path = _package_regular_file(
+            package_dir,
+            nupkg_files[0],
+            label="nupkg payload",
+        )
+        restored_hash = sha_path.read_text(encoding="ascii").strip()
         if restored_hash != artifact["content_hash_sha512_base64"]:
             raise ValueError(
                 f"restored NuGet package content hash mismatch: {package_name}@{package_version}"
             )
         actual_nupkg_hash = base64.b64encode(
-            sha512(nupkg_files[0].read_bytes()).digest()
+            sha512(nupkg_path.read_bytes()).digest()
         ).decode("ascii")
         if actual_nupkg_hash != artifact["content_hash_sha512_base64"]:
             raise ValueError(
                 f"restored NuGet package payload hash mismatch: {package_name}@{package_version}"
             )
-        license_path = package_dir / record["license_file"]
-        notice_path = package_dir / record["notice_file"]
-        if not license_path.is_file():
+        license_candidate = package_dir / record["license_file"]
+        notice_candidate = package_dir / record["notice_file"]
+        if not license_candidate.is_file():
             raise ValueError(
                 f"restored NuGet package license is missing: {artifact['name']}@{artifact['version']}"
             )
-        if not notice_path.is_file() or not notice_path.read_bytes():
+        if not notice_candidate.is_file():
             raise ValueError(
                 f"restored NuGet package notice is missing: {artifact['name']}@{artifact['version']}"
+            )
+        license_path = _package_regular_file(
+            package_dir,
+            license_candidate,
+            label="license",
+        )
+        notice_path = _package_regular_file(
+            package_dir,
+            notice_candidate,
+            label="notice",
+        )
+        if not notice_path.read_bytes():
+            raise ValueError(
+                f"restored NuGet package notice is empty: {artifact['name']}@{artifact['version']}"
             )
         expected = _normalized_license_text(root / record["expected_license_text_path"])
         actual = _normalized_license_text(license_path)
@@ -475,8 +523,13 @@ def verify_restored_package_rights(
             raise ValueError(
                 f"restored NuGet package lacks one nuspec: {artifact['name']}@{artifact['version']}"
             )
+        nuspec_path = _package_regular_file(
+            package_dir,
+            nuspecs[0],
+            label="nuspec",
+        )
         try:
-            tree = ET.parse(nuspecs[0])
+            tree = ET.parse(nuspec_path)
         except (OSError, ET.ParseError) as error:
             raise ValueError("restored NuGet nuspec is invalid") from error
         metadata_nodes = [

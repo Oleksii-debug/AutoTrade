@@ -1041,6 +1041,41 @@ class DurableOrderProjectionTests(unittest.TestCase):
             self.assertTrue(confirmed.snapshot.cancel_confirmed)
 
 
+    def test_live_oms_remains_strong_owner_when_caller_drops_selected_authorities(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+
+            store_ref = weakref.ref(store)
+            artifacts_ref = weakref.ref(artifacts)
+
+            # The registry itself is weak, but the live OMS must remain the
+            # strong lifetime owner of the exact selected authorities.
+            del store
+            del artifacts
+            gc.collect()
+
+            self.assertIsNotNone(store_ref())
+            self.assertIsNotNone(artifacts_ref())
+            self.assertIs(book.store, store_ref())
+            self.assertIs(book.evidence_artifact_store, artifacts_ref())
+
+            created = book.create_order(
+                event_key="create-live-owner",
+                client_order_id="paper-live-owner",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            self.assertTrue(created.inserted)
+            self.assertEqual(created.snapshot.client_order_id, "paper-live-owner")
+
     def test_binding_registry_releases_selected_authorities_when_oms_is_collected(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

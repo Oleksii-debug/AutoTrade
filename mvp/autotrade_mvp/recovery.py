@@ -240,7 +240,9 @@ class RecoveryController:
 
         if self._owner_store is None:
             return ()
-        events = self._owner_store.load_events(
+        store = self._journal_store_authority()
+        events = JournalStore.load_events(
+            store,
             self._OWNER_AGGREGATE_TYPE,
             self._owner_scope,
         )
@@ -303,7 +305,9 @@ class RecoveryController:
                 f"{self._owner_scope!r}/{owner.epoch}/{owner.owner_id!r}",
             )
         )
-        self._owner_store.append_event(
+        store = self._journal_store_authority()
+        JournalStore.append_event(
+            store,
             {
                 "event_id": event_id,
                 "event_type": self._OWNER_EVENT_TYPE,
@@ -547,8 +551,10 @@ class RecoveryController:
             environment,
             account_id,
         )
-        events = self._owner_store.load_events_by_aggregate_type(
-            "submission_attempt"
+        store = self._journal_store_authority()
+        events = JournalStore.load_events_by_aggregate_type(
+            store,
+            "submission_attempt",
         )
         grouped: dict[str, list[dict[str, object]]] = {}
         for event in events:
@@ -686,8 +692,9 @@ class RecoveryController:
                 "Reconciliation cannot establish readiness without durable journal"
             )
 
+        store = self._journal_store_authority()
         checkpoint = load_reconciliation_checkpoint_for_readiness(
-            self._owner_store,
+            store,
             reconciliation_id=reconciliation_id,
             provider_id=provider_id,
             account_id=account_id,

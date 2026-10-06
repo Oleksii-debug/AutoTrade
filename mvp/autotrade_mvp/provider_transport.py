@@ -1710,20 +1710,20 @@ def _direct_trading_write_request_digest(request: SignedHttpRequest) -> str:
     method, url, headers, body, timeout_seconds = _require_signed_http_request(request)
     material = {
         "method": method,
-        "url_sha256": "sha256:" + sha256(url.encode("utf-8")).hexdigest(),
+        "url_sha256": "sha256:" + _sha256(url.encode("utf-8")).hexdigest(),
         "headers_sha256": "sha256:"
-        + sha256(
-            json.dumps(
-                dict(sorted(dict(headers).items())),
+        + _sha256(
+            _json_dumps(
+                _dict(_sorted(_dict(headers).items())),
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest(),
-        "body_sha256": "sha256:" + sha256(body).hexdigest(),
+        "body_sha256": "sha256:" + _sha256(body).hexdigest(),
         "timeout_seconds": timeout_seconds,
     }
-    return "sha256:" + sha256(
-        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + _sha256(
+        _json_dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
 
 
@@ -1941,6 +1941,7 @@ def _install_direct_trading_write_execution_authority():
     canonical_vars = vars
     canonical_len = len
     canonical_object = object
+    canonical_zip = zip
     object_getattribute = canonical_object.__getattribute__
     weakref = weakref_ref
 
@@ -2556,6 +2557,10 @@ def direct_authenticated_read_network_policy_identity() -> str:
 def _direct_authenticated_read_request_digest(
     request: AuthenticatedReadHttpRequest,
     _require_request=_require_authenticated_read_http_request,
+    _sha256=sha256,
+    _json_dumps=json.dumps,
+    _dict=dict,
+    _sorted=sorted,
 ) -> str:
     try:
         method, url, headers, body, timeout_seconds = _require_request(request)
@@ -2577,20 +2582,26 @@ def _direct_authenticated_read_request_digest(
         "body_sha256": "sha256:" + sha256(body).hexdigest(),
         "timeout_seconds": timeout_seconds,
     }
-    return "sha256:" + sha256(
-        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + _sha256(
+        _json_dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
 
 
 def _canonical_bybit_authenticated_read_query(
     query_binding: AuthenticatedReadQueryBinding,
     _rule=_bybit_authenticated_read_rule,
+    _canonical_text_fn=_canonical_text,
+    _option_endpoint=_BYBIT_OPTION_DELIVERY_ENDPOINT,
+    _urlencode=urlencode,
+    _sorted=sorted,
+    _type=type,
+    _str=str,
 ) -> str:
     _rule(query_binding)
     query: dict[str, str] = {}
     for raw_key, raw_value in query_binding.query.items():
-        key = _canonical_text(raw_key, name="query parameter")
-        if type(raw_value) is not str or raw_value != raw_value.strip():
+        key = _canonical_text_fn(raw_key, name="query parameter")
+        if _type(raw_value) is not _str or raw_value != raw_value.strip():
             raise ProviderTransportScopeError(
                 "Bybit authenticated-read query values must be canonical strings"
             )
@@ -2603,15 +2614,15 @@ def _canonical_bybit_authenticated_read_query(
         raise ProviderTransportScopeError(
             "Bybit authenticated-read query must not be empty"
         )
-    if query_binding.endpoint == _BYBIT_OPTION_DELIVERY_ENDPOINT:
+    if query_binding.endpoint == _option_endpoint:
         parts: list[str] = []
-        for key, value in sorted(query.items()):
+        for key, value in _sorted(query.items()):
             if key == "cursor":
                 parts.append("cursor=" + value)
             else:
-                parts.append(urlencode(((key, value),)))
+                parts.append(_urlencode(((key, value),)))
         return "&".join(parts)
-    return urlencode(sorted(query.items()))
+    return _urlencode(_sorted(query.items()))
 
 
 def _validated_bybit_authenticated_read_wire_semantics_digest(
@@ -2620,6 +2631,18 @@ def _validated_bybit_authenticated_read_wire_semantics_digest(
     _require_query=_require_authenticated_read_query_binding_authority,
     _require_request=_require_authenticated_read_http_request,
     _query_text=_canonical_bybit_authenticated_read_query,
+    _policies=BYBIT_V5_ENDPOINT_POLICIES,
+    _policy_type=ProviderEndpointPolicy,
+    _urlsplit=urlsplit,
+    _dict=dict,
+    _set=set,
+    _type=type,
+    _str=str,
+    _int=int,
+    _fullmatch=re.fullmatch,
+    _sha256=sha256,
+    _json_dumps=json.dumps,
+    _sorted=sorted,
 ) -> str:
     try:
         _require_query(query_binding)
@@ -2632,15 +2655,15 @@ def _validated_bybit_authenticated_read_wire_semantics_digest(
         raise ProviderTransportError(
             "Bybit direct authenticated-read requires BYBIT query authority"
         )
-    policy = BYBIT_V5_ENDPOINT_POLICIES.get(query_binding.provider_environment)
-    if type(policy) is not ProviderEndpointPolicy:
+    policy = _policies.get(query_binding.provider_environment)
+    if _type(policy) is not _policy_type:
         raise ProviderTransportError(
             "Bybit direct authenticated-read provider environment is unsupported"
         )
     expected_url = policy.absolute_url(query_binding.endpoint) + "?" + _query_text(
         query_binding
     )
-    header_values = dict(headers)
+    header_values = _dict(headers)
     expected_headers = {
         "Accept",
         "X-BAPI-API-KEY",
@@ -2657,17 +2680,17 @@ def _validated_bybit_authenticated_read_wire_semantics_digest(
         or url != expected_url
         or body != b""
         or timeout_seconds != policy.timeout_seconds
-        or set(header_values) != expected_headers
+        or _set(header_values) != expected_headers
         or header_values.get("Accept") != "application/json"
-        or type(api_key) is not str
+        or _type(api_key) is not _str
         or not api_key
-        or type(timestamp) is not str
+        or _type(timestamp) is not _str
         or not timestamp.isdigit()
-        or type(recv_window) is not str
+        or _type(recv_window) is not _str
         or not recv_window.isdigit()
-        or not 1 <= int(recv_window) <= 60000
-        or type(signature) is not str
-        or re.fullmatch(r"[0-9a-f]{64}", signature) is None
+        or not 1 <= _int(recv_window) <= 60000
+        or _type(signature) is not _str
+        or _fullmatch(r"[0-9a-f]{64}", signature) is None
     ):
         raise ProviderTransportError(
             "Bybit transmitted authenticated-read request differs from canonical semantics"
@@ -2683,10 +2706,10 @@ def _validated_bybit_authenticated_read_wire_semantics_digest(
         "surface": query_binding.surface.value,
         "permission_scope": query_binding.permission_scope,
         "endpoint": query_binding.endpoint,
-        "query": dict(sorted(dict(query_binding.query).items())),
+        "query": _dict(_sorted(_dict(query_binding.query).items())),
         "query_digest": query_binding.query_digest,
         "method": method,
-        "host": urlsplit(policy.base_url).hostname,
+        "host": _urlsplit(policy.base_url).hostname,
         "timeout_seconds": timeout_seconds,
     }
     return "sha256:" + sha256(
@@ -2699,6 +2722,7 @@ def _install_direct_authenticated_read_execution_authority(
     send_impl,
     request_digest,
     semantics_digest,
+    require_query,
 ):
     receipts: dict[
         int,
@@ -2743,9 +2767,18 @@ def _install_direct_authenticated_read_execution_authority(
             raise transport_error(
                 "canonical direct authenticated-read network authority is unavailable"
             ) from error
+        require_query(query_binding)
+        query_digest = object_getattribute(query_binding, "query_digest")
         semantics_sha256 = semantics_digest(request, query_binding)
         request_sha256 = request_digest(request)
         response = send_impl(client, request)
+        # The provider call is an unbounded concurrency window. Revalidate the
+        # closure-owned query authority before its identity can enter a receipt.
+        require_query(query_binding)
+        if object_getattribute(query_binding, "query_digest") != query_digest:
+            raise transport_error(
+                "authenticated-read query authority changed during direct wire execution"
+            )
         if canonical_type(response) is not response_type:
             raise transport_error(
                 "direct authenticated-read wire must return exact status/body response"
@@ -2757,13 +2790,13 @@ def _install_direct_authenticated_read_execution_authority(
         values = (
             transport_identity,
             network_policy_identity,
-            query_binding.query_digest,
+            query_digest,
             request_sha256,
             semantics_sha256,
             status,
             response_sha256,
         )
-        for field_name, field_value in zip(
+        for field_name, field_value in canonical_zip(
             (
                 "transport_identity",
                 "network_policy_identity",
@@ -2832,6 +2865,7 @@ def _install_direct_authenticated_read_execution_authority(
     UrllibJsonWireClient.send,
     _direct_authenticated_read_request_digest,
     _validated_bybit_authenticated_read_wire_semantics_digest,
+    _require_authenticated_read_query_binding_authority,
 )
 del _install_direct_authenticated_read_execution_authority
 

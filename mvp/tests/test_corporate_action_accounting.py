@@ -9,6 +9,7 @@ from unittest.mock import patch
 from mvp.autotrade_mvp.accounting import AccountingConflict, book_equity_fill
 from mvp.autotrade_mvp.corporate_action_accounting import (
     commit_authoritative_corporate_action,
+    corporate_action_reconciliation_inputs,
 )
 from mvp.autotrade_mvp.corporate_action_evidence import (
     CorporateActionEvidenceError,
@@ -20,6 +21,11 @@ from mvp.autotrade_mvp.corporate_actions import CorporateActionBook, EquityState
 from mvp.autotrade_mvp.instruments import InstrumentRegistry
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
+from mvp.autotrade_mvp.reconciliation import (
+    CoverageSurfaceEvidence,
+    SnapshotConsistencyEvidence,
+    reconcile_account,
+)
 from mvp.autotrade_mvp.provider_core import (
     Surface,
     observe_authenticated_json_response,
@@ -812,6 +818,137 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
             self.assertFalse(retry.inserted)
             self.assertEqual(len(economics.transactions), 2)
 
+
+    def test_reconciliation_projection_matches_exact_retained_provider_revision(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            durable_evidence = evidence_store(store)
+            accepted = resolve_action(sealed_action())
+            retained = durable_evidence.record(accepted)
+            self.assertTrue(retained.inserted)
+
+            local_ids, provider_activities = corporate_action_reconciliation_inputs(
+                durable_evidence,
+                provider_actions=(accepted,),
+            )
+
+            self.assertEqual(len(local_ids), 1)
+            self.assertEqual(
+                tuple(activity.activity_id for activity in provider_activities),
+                local_ids,
+            )
+            self.assertEqual(
+                provider_activities[0].activity_type,
+                "CORPORATE_ACTION:CASH_DIVIDEND",
+            )
+            self.assertEqual(
+                provider_activities[0].instrument,
+                INSTRUMENT_ID,
+            )
+            self.assertEqual(provider_activities[0].currency, "USDT")
+
+    def test_revised_provider_action_becomes_existing_reconciliation_mismatch(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            durable_evidence = evidence_store(store)
+            retained_action = resolve_action(sealed_action(revision="1"))
+            durable_evidence.record(retained_action)
+
+            revised_action = resolve_action(
+                sealed_action(
+                    external_event_id="corp-1",
+                    revision="2",
+                    per_share="2.00",
+                    observed_offset=4,
+                )
+            )
+            local_ids, provider_activities = corporate_action_reconciliation_inputs(
+                durable_evidence,
+                provider_actions=(revised_action,),
+            )
+            self.assertEqual(len(local_ids), 1)
+            self.assertEqual(len(provider_activities), 1)
+            self.assertNotEqual(local_ids[0], provider_activities[0].activity_id)
+
+            coverage_start = (
+                READ_NOW - timedelta(minutes=1)
+            ).isoformat().replace("+00:00", "Z")
+            coverage_end = (
+                READ_NOW + timedelta(minutes=10)
+            ).isoformat().replace("+00:00", "Z")
+            result = reconcile_account(
+                provider_id="BINANCE",
+                account_id="acct-1",
+                environment="SIMULATION",
+                local_cash={},
+                provider_cash={},
+                local_positions={},
+                provider_positions={},
+                local_execution_ids=(),
+                provider_fills=(),
+                snapshot_consistency=SnapshotConsistencyEvidence(
+                    provider_id="BINANCE",
+                    account_id="acct-1",
+                    environment="SIMULATION",
+                    mode="ATOMIC",
+                    query_started_at=READ_NOW.isoformat().replace(
+                        "+00:00", "Z"
+                    ),
+                    query_completed_at=(
+                        READ_NOW + timedelta(seconds=5)
+                    ).isoformat().replace("+00:00", "Z"),
+                ),
+                coverage_start=coverage_start,
+                coverage_end=coverage_end,
+                pagination_complete=True,
+                local_provider_activity_ids=local_ids,
+                provider_activities=provider_activities,
+                provider_activity_provider_id="BINANCE",
+                provider_activity_account_id="acct-1",
+                activity_coverage=CoverageSurfaceEvidence(
+                    provider_id="BINANCE",
+                    account_id="acct-1",
+                    environment="SIMULATION",
+                    surface="ACTIVITIES",
+                    coverage_start=coverage_start,
+                    coverage_end=coverage_end,
+                    pagination_complete=True,
+                    consistency_horizon_satisfied=True,
+                    provider_semantics_exclude_execution=True,
+                ),
+                require_activity_reconciliation=True,
+            )
+
+            self.assertFalse(result.complete)
+            self.assertEqual(
+                result.missing_local_provider_activity_ids,
+                local_ids,
+            )
+            self.assertEqual(
+                result.unexpected_provider_activity_ids,
+                (provider_activities[0].activity_id,),
+            )
+            self.assertIn("ACCOUNT", result.blocking_resources)
+            self.assertIn(
+                f"INSTRUMENT:{INSTRUMENT_ID}",
+                result.blocking_resources,
+            )
+
+    def test_reconciliation_projection_rejects_forged_action_before_activity_ingress(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            durable_evidence = evidence_store(store)
+            accepted = resolve_action(sealed_action())
+            forged = type(accepted)(**accepted.__dict__)
+
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceError,
+                "lacks canonical resolver issuance authority",
+            ):
+                corporate_action_reconciliation_inputs(
+                    durable_evidence,
+                    provider_actions=(forged,),
+                )
 
 
 

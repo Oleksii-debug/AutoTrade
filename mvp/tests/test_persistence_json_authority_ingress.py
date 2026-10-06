@@ -230,6 +230,45 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
             self.assertEqual(store.current_journal_sequence(), 0)
             self.assertIsNone(store.get_event("evt-noncanonical"))
 
+    def test_append_event_rejects_noncanonical_outbox_route_before_write(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            candidate = _event("evt-outbox-route")
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox_topic must be canonical non-empty text",
+            ):
+                store.append_event(candidate, outbox_topic=" fills ")
+            self.assertEqual(
+                store.whole_store_state_counts(),
+                {
+                    "events": 0,
+                    "outbox": 0,
+                    "command_dedupe": 0,
+                    "projection_checkpoints": 0,
+                    "global_projection_checkpoints": 0,
+                },
+            )
+
+    def test_commit_command_rejects_executable_outbox_topic_before_write(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox_topic must be canonical non-empty text",
+            ):
+                store.commit_command(
+                    command_id="cmd-hostile-topic",
+                    actor="operator",
+                    environment="PAPER",
+                    idempotency_key="key-hostile-topic",
+                    request={"action": "ORDER.SUBMIT"},
+                    result={"status": "ACCEPTED"},
+                    state_version=1,
+                    events=[(_event("evt-hostile-topic"), _HostileText("fills"))],
+                )
+            self.assertEqual(store.current_journal_sequence(), 0)
+
     def test_commit_command_rejects_noncanonical_event_text_before_command_write(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

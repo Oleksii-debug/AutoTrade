@@ -453,8 +453,10 @@ def build_order_payload(
                 raise ProviderCoreError(
                     "position_idx conflicts with verified account position mode"
                 )
-    elif position_idx is not None:
-        raise ProviderCoreError("position_idx is only supported for derivative orders")
+    elif position_side is not None or position_idx is not None:
+        raise ProviderCoreError(
+            "position_side and position_idx are only supported for derivative orders"
+        )
 
     payload: dict[str, Any] = {
         "category": category,
@@ -993,9 +995,15 @@ def _install_bybit_prepared_submission_authority(
                 raise error_type("price must be exact str, Decimal or int")
         if canonical_type(reduce_only) is not bool_type:
             raise error_type("reduce_only must be exact bool")
-        if position_side is not None and canonical_type(position_side) is not str_type:
+        if (
+            position_side is not None
+            and canonical_type(position_side) is not str_type
+        ):
             raise error_type("position_side must be exact str or None")
-        if position_idx is not None and canonical_type(position_idx) is not int_type:
+        if (
+            position_idx is not None
+            and canonical_type(position_idx) is not int_type
+        ):
             raise error_type("position_idx must be exact int or None")
 
         prepared = builder(

@@ -373,6 +373,24 @@ class BybitV5AdapterTests(unittest.TestCase):
                 account_id="bybit-account",
             )
 
+    def test_spot_payload_rejects_ignored_derivative_leg_controls(self):
+        base = {
+            "product_family": "SPOT",
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "order_type": "MARKET",
+            "quantity": "0.01",
+            "client_order_id": "spot-no-derivative-leg",
+            "time_in_force": "IOC",
+        }
+        for name, value in (("position_side", "LONG"), ("position_idx", 1)):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "only supported for derivative orders",
+                ):
+                    build_order_payload(**base, **{name: value})
+
     def test_hedge_mode_target_leg_drives_open_and_reduce_only_index(self):
         capability = write_capability(position_mode="HEDGE")
         cases = (
@@ -1091,7 +1109,10 @@ class BybitV5AdapterTests(unittest.TestCase):
                     prepare_order_submission(**arguments)
                 self.assertEqual(callbacks, [])
 
-        with self.assertRaisesRegex(ProviderCoreError, "reduce_only must be exact bool"):
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "reduce_only must be exact bool",
+        ):
             prepare_order_submission(**base, reduce_only=1)
         with self.assertRaisesRegex(
             ProviderCoreError,

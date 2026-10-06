@@ -29,6 +29,12 @@ from .persistence import JournalStore, payload_digest
 
 
 MONEY_QUANTUM = Decimal("0.00000001")
+_CHECKPOINT_SCHEMA_VERSION = 2
+_RUN_CONFIGURATION_SCHEMA_VERSION = 1
+_STRATEGY_ID = "MOVING_AVERAGE"
+_STRATEGY_VERSION = 1
+_STRATEGY_FAST = 2
+_STRATEGY_SLOW = 3
 
 
 def _exact_decimal(value: Decimal | str | int, *, name: str) -> Decimal:
@@ -204,6 +210,98 @@ def _atomic_json(path: Path, payload: object) -> None:
     os.replace(temporary, path)
 
 
+def _run_configuration(
+    *,
+    symbol: str,
+    initial_cash: Decimal,
+    order_quantity: Decimal,
+    max_abs_position: Decimal,
+    max_notional: Decimal,
+    fee_rate: Decimal,
+) -> dict[str, object]:
+    return {
+        "schema_version": _RUN_CONFIGURATION_SCHEMA_VERSION,
+        "checkpoint_schema_version": _CHECKPOINT_SCHEMA_VERSION,
+        "symbol": symbol,
+        "initial_cash": str(initial_cash),
+        "order_quantity": str(order_quantity),
+        "max_abs_position": str(max_abs_position),
+        "max_notional": str(max_notional),
+        "fee_rate": str(fee_rate),
+        "money_quantum": str(MONEY_QUANTUM),
+        "strategy": {
+            "id": _STRATEGY_ID,
+            "version": _STRATEGY_VERSION,
+            "fast": _STRATEGY_FAST,
+            "slow": _STRATEGY_SLOW,
+        },
+    }
+
+
+def _configuration_digest(configuration: dict[str, object]) -> str:
+    return _stable_hash(configuration)
+
+
+def _has_durable_run_state(root: Path) -> bool:
+    if (
+        (root / "checkpoint.json").exists()
+        or (root / "learning-evidence.jsonl").exists()
+        or (root / "journal.sqlite3").exists()
+    ):
+        return True
+    intents = root / "order-intents"
+    return intents.is_dir() and any(intents.glob("*.json"))
+
+
+def _require_run_configuration(
+    root: Path,
+    expected: dict[str, object],
+) -> str:
+    path = root / "run-configuration.json"
+    expected_digest = _configuration_digest(expected)
+    if not path.exists():
+        if _has_durable_run_state(root):
+            raise ValueError(
+                "Legacy durable run state lacks configuration identity; "
+                "explicit migration or a new state directory is required"
+            )
+        _atomic_json(
+            path,
+            {
+                "schema_version": _RUN_CONFIGURATION_SCHEMA_VERSION,
+                "configuration_digest": expected_digest,
+                "configuration": expected,
+            },
+        )
+        return expected_digest
+
+    try:
+        envelope = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("Corrupt run configuration") from error
+    if type(envelope) is not dict:
+        raise ValueError("Corrupt run configuration")
+    if type(envelope.get("schema_version")) is not int or (
+        envelope["schema_version"] != _RUN_CONFIGURATION_SCHEMA_VERSION
+    ):
+        raise ValueError("Unsupported or corrupt run configuration schema")
+    configuration = envelope.get("configuration")
+    stored_digest = envelope.get("configuration_digest")
+    if type(configuration) is not dict or type(stored_digest) is not str:
+        raise ValueError("Corrupt run configuration")
+    if len(stored_digest) != 64 or any(
+        character not in "0123456789abcdef" for character in stored_digest
+    ):
+        raise ValueError("Corrupt run configuration digest")
+    if _configuration_digest(configuration) != stored_digest:
+        raise ValueError("Corrupt run configuration digest")
+    if stored_digest != expected_digest:
+        raise ValueError(
+            "Run configuration is incompatible with existing durable state"
+        )
+    return stored_digest
+
+
 @dataclass(frozen=True)
 class Decision:
     side: str
@@ -325,7 +423,11 @@ class RunResult:
 
 
 class MovingAverageStrategy:
-    def __init__(self, fast: int = 2, slow: int = 3):
+    def __init__(
+        self,
+        fast: int = _STRATEGY_FAST,
+        slow: int = _STRATEGY_SLOW,
+    ):
         if fast < 1 or slow <= fast:
             raise ValueError("Require 1 <= fast < slow")
         self.fast, self.slow = fast, slow
@@ -482,8 +584,16 @@ def _read_state(path: Path, initial_cash: Decimal) -> tuple[dict, bool]:
         raise ValueError("Corrupt checkpoint JSON") from error
     if not isinstance(data, dict):
         raise ValueError("Corrupt checkpoint structure")
-    if data.get("schema_version") != 1:
+    schema_version = data.get("schema_version")
+    if schema_version == 1:
+        raise ValueError(
+            "Legacy checkpoint lacks configuration identity; "
+            "explicit migration or a new state directory is required"
+        )
+    if type(schema_version) is not int or schema_version != _CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("Unsupported or corrupt checkpoint schema")
+    if type(data.get("configuration_digest")) is not str:
+        raise ValueError("Corrupt checkpoint configuration identity")
     if not isinstance(data.get("postings"), list) or not isinstance(data.get("fills"), dict):
         raise ValueError("Corrupt checkpoint ledger or fills")
     if not isinstance(data.get("evidence_ids"), list):
@@ -724,13 +834,38 @@ def run_vertical_slice(
     root = Path(state_dir)
     checkpoint_path = root / "checkpoint.json"
     evidence_path = root / "learning-evidence.jsonl"
+    configuration = _run_configuration(
+        symbol=symbol,
+        initial_cash=starting_cash,
+        order_quantity=quantity,
+        max_abs_position=position_limit,
+        max_notional=notional_limit,
+        fee_rate=rate,
+    )
+    configuration_digest = _require_run_configuration(root, configuration)
     state, resumed = handle_restart_recovery(state_dir, starting_cash)
     if resumed:
+        checkpoint_configuration_digest = _checkpoint_text(
+            state.get("configuration_digest"),
+            name="configuration digest",
+        )
+        if checkpoint_configuration_digest != configuration_digest:
+            raise ValueError(
+                "Checkpoint configuration identity does not match run configuration"
+            )
         stored_symbol = _checkpoint_text(
             state.get("symbol"), name="run symbol"
         )
         if stored_symbol != symbol:
             raise ValueError("Checkpoint belongs to another symbol")
+        stored_initial_cash = _checkpoint_decimal(
+            state.get("initial_cash"),
+            name="initial_cash",
+        )
+        if stored_initial_cash != starting_cash:
+            raise ValueError(
+                "Checkpoint initial cash conflicts with run configuration"
+            )
     evidence_ids, evidence_records = _restore_evidence_graph(
         state,
         evidence_path,
@@ -846,7 +981,8 @@ def run_vertical_slice(
     evidence_ids.add(evidence["evidence_id"])
     evidence_records[evidence_id] = evidence
     checkpoint = {
-        "schema_version": 1,
+        "schema_version": _CHECKPOINT_SCHEMA_VERSION,
+        "configuration_digest": configuration_digest,
         "symbol": symbol,
         "initial_cash": str(ledger.initial_cash),
         "postings": ledger.postings,

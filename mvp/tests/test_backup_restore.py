@@ -778,18 +778,160 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertIsNone(marker["runtime_checkpoint_evidence_sha256"])
             self.assertTrue(restore_requires_reconciliation(restored))
 
-    def test_legacy_restore_marker_without_checkpoint_fields_can_complete_safely(self):
+    def test_copied_restored_journal_cannot_replay_restore_authority(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            restored, controller, marker, checkpoint_id = self._restored_with_owner(root)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            copied = root / "copied-restored"
+            shutil.copytree(restored, copied)
+
+            self.assertTrue(restore_requires_reconciliation(copied))
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "backing generation differs from durable provenance",
+            ):
+                complete_restore_reconciliation(
+                    copied,
+                    controller=None,
+                    reconciliation_checkpoint_event_id="unused",
+                    fencing_evidence=(),
+                    completed_at="2026-09-25T08:00:03Z",
+                )
+            self.assertFalse(
+                (copied / "RESTORE_RECONCILIATION_COMPLETE.json").exists()
+            )
+
+    def test_restore_gate_validation_never_initializes_journal_store(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+
+            with patch.object(
+                backup_module,
+                "JournalStore",
+                side_effect=AssertionError(
+                    "restore gate validation must remain read-only"
+                ),
+            ):
+                self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_restore_provenance_reader_rejects_chain_version_gap(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            journal = restored / "state" / "journal.sqlite3"
+            connection = sqlite3.connect(str(journal))
+            try:
+                connection.execute(
+                    """
+                    UPDATE events
+                    SET aggregate_version = 2
+                    WHERE aggregate_type = ?
+                      AND aggregate_id = ?
+                    """,
+                    ("backup_restore", "restore-authority"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            self.assertTrue(restore_requires_reconciliation(restored))
+            self.assertFalse(
+                (restored / "RESTORE_RECONCILIATION_COMPLETE.json").exists()
+            )
+
+    def test_restore_validation_never_recreates_missing_journal(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            journal = restored / "state" / "journal.sqlite3"
+            self.assertTrue(journal.is_file())
+            journal.unlink()
+
+            self.assertTrue(restore_requires_reconciliation(restored))
+            self.assertFalse(journal.exists())
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "journal is missing or unsafe",
+            ):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=None,
+                    reconciliation_checkpoint_event_id="unused",
+                    fencing_evidence=(),
+                    completed_at="2026-09-25T08:00:03Z",
+                )
+            self.assertFalse(journal.exists())
+            self.assertFalse(
+                (restored / "RESTORE_RECONCILIATION_COMPLETE.json").exists()
+            )
+
+    def test_restore_persists_journal_bound_provenance_before_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            marker = json.loads(
+                (
+                    restored / "RESTORE_RECONCILIATION_REQUIRED.json"
+                ).read_text(encoding="utf-8")
+            )
+            store = JournalStore(restored / "state" / "journal.sqlite3")
+            events = store.load_events("backup_restore", "restore-authority")
+
+            self.assertEqual(len(events), 1)
+            event = events[0]
+            self.assertEqual(event["event_type"], "BackupRestoreStaged")
+            self.assertEqual(event["committed_at"], marker["restored_at"])
+            self.assertEqual(
+                event["payload"]["backup_manifest_sha256"],
+                marker["backup_manifest_sha256"],
+            )
+            self.assertEqual(
+                event["payload"]["runtime_checkpoint_evidence"],
+                marker["runtime_checkpoint_evidence"],
+            )
+            self.assertEqual(
+                event["payload"]["runtime_checkpoint_reconstitution_required"],
+                marker["runtime_checkpoint_reconstitution_required"],
+            )
+            self.assertEqual(
+                event["payload"]["runtime_checkpoint_evidence_sha256"],
+                marker["runtime_checkpoint_evidence_sha256"],
+            )
+            self.assertEqual(
+                event["payload"]["source_owner_scope"],
+                marker["source_owner_scope"],
+            )
+            self.assertEqual(
+                event["payload"]["restored_journal_backing_identity"],
+                marker["restored_journal_backing_identity"],
+            )
+            self.assertTrue(
+                marker["restored_journal_backing_identity"].startswith("sha256:")
+            )
+
+    def test_restore_marker_cannot_override_journal_bound_manifest_identity(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
             marker_path = restored / "RESTORE_RECONCILIATION_REQUIRED.json"
-            legacy_marker = json.loads(marker_path.read_text(encoding="utf-8"))
-            legacy_marker.pop("runtime_checkpoint_evidence")
-            legacy_marker.pop("runtime_checkpoint_reconstitution_required")
-            legacy_marker.pop("runtime_checkpoint_evidence_sha256")
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker["backup_manifest_sha256"] = "sha256:" + ("0" * 64)
             marker_path.write_text(
                 json.dumps(
-                    legacy_marker,
+                    marker,
                     sort_keys=True,
                     separators=(",", ":"),
                     ensure_ascii=False,
@@ -800,35 +942,57 @@ class BackupRestoreTests(unittest.TestCase):
             )
 
             self.assertTrue(restore_requires_reconciliation(restored))
-            fence = _publish_sender_fence_evidence(
-                restored,
-                backup_manifest_sha256=marker["backup_manifest_sha256"],
-                old_owner_id="source-owner",
-                old_owner_epoch=1,
-                new_owner_id="restored-owner",
-                new_owner_epoch=2,
-                fenced_at=_after_restore(marker, 1),
-            )
-            complete_restore_reconciliation(
-                restored,
-                controller=controller,
-                reconciliation_checkpoint_event_id=checkpoint_id,
-                fencing_evidence=(fence,),
-                completed_at=_after_restore(marker, 2),
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "conflicts with durable journal provenance",
+            ):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=None,
+                    reconciliation_checkpoint_event_id="unused",
+                    fencing_evidence=(),
+                    completed_at=marker["restored_at"],
+                )
+            self.assertFalse(
+                (restored / "RESTORE_RECONCILIATION_COMPLETE.json").exists()
             )
 
-            completed_marker = json.loads(marker_path.read_text(encoding="utf-8"))
-            self.assertEqual(
-                completed_marker["runtime_checkpoint_evidence"],
-                "UNAVAILABLE_LEGACY_BACKUP",
+    def test_journal_bound_restore_marker_cannot_downgrade_to_legacy(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            restored, controller, marker, checkpoint_id = self._restored_with_owner(root)
+            marker_path = restored / "RESTORE_RECONCILIATION_REQUIRED.json"
+            downgraded = json.loads(marker_path.read_text(encoding="utf-8"))
+            downgraded.pop("runtime_checkpoint_evidence")
+            downgraded.pop("runtime_checkpoint_reconstitution_required")
+            downgraded.pop("runtime_checkpoint_evidence_sha256")
+            marker_path.write_text(
+                json.dumps(
+                    downgraded,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                + "\n",
+                encoding="utf-8",
             )
+
+            self.assertTrue(restore_requires_reconciliation(restored))
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "cannot downgrade journal-bound restore provenance",
+            ):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation_checkpoint_event_id=checkpoint_id,
+                    fencing_evidence=(),
+                    completed_at=_after_restore(marker, 2),
+                )
             self.assertFalse(
-                completed_marker["runtime_checkpoint_reconstitution_required"]
+                (restored / "RESTORE_RECONCILIATION_COMPLETE.json").exists()
             )
-            self.assertIsNone(
-                completed_marker["runtime_checkpoint_evidence_sha256"]
-            )
-            self.assertFalse(restore_requires_reconciliation(restored))
 
     def test_legacy_marker_downgrade_cannot_hide_quarantined_checkpoint_evidence(self):
         with TemporaryDirectory() as directory:
@@ -868,6 +1032,50 @@ class BackupRestoreTests(unittest.TestCase):
                     fencing_evidence=(),
                     completed_at="2026-09-25T08:00:03Z",
                 )
+
+    def test_checkpoint_evidence_deletion_cannot_downgrade_journal_bound_restore(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_autonomous_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            marker_path = restored / "RESTORE_RECONCILIATION_REQUIRED.json"
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker.pop("runtime_checkpoint_evidence")
+            marker.pop("runtime_checkpoint_reconstitution_required")
+            marker.pop("runtime_checkpoint_evidence_sha256")
+            (
+                restored
+                / "restore-evidence"
+                / "autonomous-runtime-checkpoint.json"
+            ).unlink()
+            marker_path.write_text(
+                json.dumps(
+                    marker,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertTrue(restore_requires_reconciliation(restored))
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "cannot downgrade journal-bound restore provenance",
+            ):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=None,
+                    reconciliation_checkpoint_event_id="unused",
+                    fencing_evidence=(),
+                    completed_at="2026-09-25T08:00:03Z",
+                )
+            self.assertFalse(
+                (restored / "RESTORE_RECONCILIATION_COMPLETE.json").exists()
+            )
 
     def test_schema_v1_cannot_smuggle_runtime_checkpoint_evidence(self):
         with TemporaryDirectory() as directory:

@@ -97,6 +97,10 @@ def resolution(**overrides):
 class SecuritiesBorrowEvidenceTests(unittest.TestCase):
     def test_quantity_unit_is_part_of_provider_evidence_identity(self):
         evidence = availability()
+        self.assertEqual(
+            provider_borrow_evidence_receipt(evidence)["schema_version"],
+            2,
+        )
         self.assertEqual(evidence.resource_detail()["quantity_unit"], "share")
         restored = BorrowAvailabilityEvidence.from_resource_detail(
             evidence.resource_detail()

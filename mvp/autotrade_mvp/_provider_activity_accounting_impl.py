@@ -2285,6 +2285,34 @@ def _require_same_financial_journal_generation(
     return other_store
 
 
+def _make_durable_provider_economic_audit_digest(
+    *,
+    _digest_payload=payload_digest,
+    _getattribute=object.__getattribute__,
+):
+    """Bind the durable facade digest primitive selected at module import."""
+
+    def audit_digest(self) -> str:
+        authority = _require_durable_provider_economic_book_authority(self)
+        projection = _getattribute(self, "_book")
+        return _digest_payload(
+            {
+                "schema_version": "1.0.0",
+                "environment": authority.environment,
+                "account_id": authority.account_id,
+                "economic_book_digest": projection.audit_digest(),
+            }
+        )
+
+    return audit_digest
+
+
+_durable_provider_economic_audit_digest = (
+    _make_durable_provider_economic_audit_digest()
+)
+del _make_durable_provider_economic_audit_digest
+
+
 class DurableProviderEconomicBook(ScopedEconomicBook):
     """JournalStore-backed provider/account economic book.
 
@@ -2382,17 +2410,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         projection = object.__getattribute__(self, "_book")
         return projection.fee_expense(currency)
 
-    def audit_digest(self) -> str:
-        authority = _require_durable_provider_economic_book_authority(self)
-        projection = object.__getattribute__(self, "_book")
-        return payload_digest(
-            {
-                "schema_version": "1.0.0",
-                "environment": authority.environment,
-                "account_id": authority.account_id,
-                "economic_book_digest": projection.audit_digest(),
-            }
-        )
+    audit_digest = _durable_provider_economic_audit_digest
 
     def _events(self) -> list[dict[str, Any]]:
         authority = _require_durable_provider_economic_book_authority(self)
@@ -2942,6 +2960,9 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             raise
         DurableProviderEconomicBook._reload(self)
         return inserted
+
+
+del _durable_provider_economic_audit_digest
 
 
 (

@@ -2,6 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+import mvp.autotrade_mvp._provider_activity_accounting_impl as provider_accounting_impl
 from mvp.autotrade_mvp.accounting import (
     AccountingConflict,
     EconomicBook,
@@ -64,6 +65,22 @@ class DurableProviderEconomicBookAuthorityTests(unittest.TestCase):
             reopened = economic_book(JournalStore(path), environment="SIMULATION")
             self.assertEqual(reopened.transactions, (transaction,))
             self.assertEqual(reopened.audit_digest(), book.audit_digest())
+
+    def test_durable_audit_digest_ignores_rebound_module_payload_digest(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            book = economic_book(JournalStore(path), environment="SIMULATION")
+            self.assertTrue(book.append(cash_transaction()))
+
+            expected = book.audit_digest()
+            forged = "sha256:" + "0" * 64
+            original_payload_digest = provider_accounting_impl.payload_digest
+            provider_accounting_impl.payload_digest = lambda _payload: forged
+            try:
+                self.assertEqual(book.audit_digest(), expected)
+                self.assertNotEqual(book.audit_digest(), forged)
+            finally:
+                provider_accounting_impl.payload_digest = original_payload_digest
 
     def test_bybit_provider_environment_separates_durable_book_identity(self):
         with TemporaryDirectory() as directory:

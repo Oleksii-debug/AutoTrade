@@ -16,6 +16,11 @@ from mvp.autotrade_mvp.dispatch import (
     submission_response_binding_projection,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
+from mvp.autotrade_mvp.provider_core import (
+    ProviderCoreError,
+    observe_submission_json_response,
+    provider_submission_observation_projection,
+)
 
 
 class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
@@ -805,6 +810,151 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 _factory_token=dispatch_module._SUBMISSION_RESPONSE_BINDING_TOKEN,
             )
         self.assertEqual(TrapDict.callbacks, 0)
+
+
+    def test_restart_binding_composes_into_authenticated_provider_observation(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            request = {"side": "BUY", "symbol": "BTCUSDT"}
+            request_sha = (
+                "sha256:"
+                + sha256(canonical_json(request).encode("utf-8")).hexdigest()
+            )
+            scope = {
+                "endpoint": "/v5/order/create",
+                "prepared_request_sha256": request_sha,
+                "capability_snapshot_ids": ["cap-1"],
+                "instrument_versions": ["BTCUSDT:v1"],
+                "provider_environment": "TESTNET",
+            }
+            store = JournalStore(path)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            result = dispatcher.dispatch(
+                attempt_id="provider-observation-sent-a1",
+                intent_id="intent-provider-observation-sent",
+                intent_hash="sha256:" + "7" * 64,
+                provider="BYBIT",
+                request=request,
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(
+                        b'{"retCode":0,"result":{"orderId":"provider-1"}}',
+                        http_status=200,
+                    ),
+                )[1],
+                submission_scope=scope,
+            )
+            self.assertEqual(result.status, "SENT")
+
+            binding = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="provider-observation-sent-a1",
+            )
+            observation = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSDT:v1",),
+            )
+            projected = provider_submission_observation_projection(observation)
+            self.assertEqual(projected["terminal_state"], "SENT")
+            self.assertEqual(projected["provider_id"], "BYBIT")
+            self.assertEqual(projected["attempt_id"], "provider-observation-sent-a1")
+            self.assertEqual(projected["response_encoding"], "utf-8-json")
+            self.assertEqual(projected["payload"]["retCode"], 0)
+            self.assertEqual(
+                projected["payload"]["result"]["orderId"],
+                "provider-1",
+            )
+            self.assertEqual(
+                projected["submission_scope_hash"],
+                submission_response_binding_projection(binding)[
+                    "submission_scope_hash"
+                ],
+            )
+
+    def test_restart_unknown_binding_cannot_be_promoted_to_provider_observation(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            request = {"side": "BUY", "symbol": "BTCUSDT"}
+            request_sha = (
+                "sha256:"
+                + sha256(canonical_json(request).encode("utf-8")).hexdigest()
+            )
+            scope = {
+                "endpoint": "/v5/order/create",
+                "prepared_request_sha256": request_sha,
+                "capability_snapshot_ids": ["cap-1"],
+                "instrument_versions": ["BTCUSDT:v1"],
+                "provider_environment": "TESTNET",
+            }
+            store = JournalStore(path)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            result = dispatcher.dispatch(
+                attempt_id="provider-observation-unknown-a1",
+                intent_id="intent-provider-observation-unknown",
+                intent_hash="sha256:" + "8" * 64,
+                provider="BYBIT",
+                request=request,
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(
+                        b'{"retCode":0,"result":{"orderId":"ambiguous"}}',
+                        http_status=200,
+                        requires_reconciliation=True,
+                        ambiguity_reason="provider_response_ambiguous",
+                    ),
+                )[1],
+                submission_scope=scope,
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+
+            binding = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="provider-observation-unknown-a1",
+            )
+            projected = submission_response_binding_projection(binding)
+            self.assertEqual(projected["terminal_state"], "UNKNOWN")
+            self.assertEqual(
+                projected["ambiguity_reason"],
+                "provider_response_ambiguous",
+            )
+            self.assertEqual(
+                projected["retry_disposition"],
+                "RECONCILE_FIRST",
+            )
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "requires definitive SENT response",
+            ):
+                observe_submission_json_response(
+                    response_binding=binding,
+                    provider_id="BYBIT",
+                    endpoint="/v5/order/create",
+                    prepared_request_sha256=request_sha,
+                    capability_snapshot_ids=("cap-1",),
+                    instrument_versions=("BTCUSDT:v1",),
+                )
 
 if __name__ == "__main__":
     unittest.main()

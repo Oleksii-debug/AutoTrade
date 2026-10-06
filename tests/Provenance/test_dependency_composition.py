@@ -90,6 +90,77 @@ class DependencyCompositionGateTests(unittest.TestCase):
             requirements,
         )
 
+    def test_research_runtime_dependency_is_exact_and_source_bound(self):
+        for blocker in (
+            "MISSING_RESEARCH_RUNTIME_REQUIREMENTS",
+            "RESEARCH_RUNTIME_REQUIREMENTS_DRIFT",
+            "UNREADABLE_ROOT_PYPROJECT",
+            "MALFORMED_ROOT_PROJECT",
+            "MALFORMED_ROOT_PROJECT_IDENTITY",
+        ):
+            self.assertNotIn(blocker, self.report.blockers)
+        self.assertFalse(
+            any(
+                blocker.startswith("NON_EXACT_RESEARCH_RUNTIME_REQUIREMENT:")
+                for blocker in self.report.blockers
+            )
+        )
+        root = Path(__file__).resolve().parents[2]
+        research = (root / "research" / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'dependencies = ["autotrade-exact-numeric==0.0.1"]',
+            research,
+        )
+
+    def test_research_runtime_dependency_drift_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "research").mkdir()
+            (root / ".github" / "workflows").mkdir(parents=True)
+            (root / "requirements-dev.txt").write_text(
+                "setuptools==84.0.0 \\\n"
+                "    --hash=sha256:"
+                "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670\n"
+                "jsonschema==4.26.0 \\\n"
+                "    --hash=sha256:"
+                "d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce\n",
+                encoding="utf-8",
+            )
+            (root / "pyproject.toml").write_text(
+                "[project]\n"
+                'name = "autotrade-exact-numeric"\n'
+                'version = "0.0.1"\n',
+                encoding="utf-8",
+            )
+            (root / "research" / "pyproject.toml").write_text(
+                "[build-system]\n"
+                'requires = ["setuptools==84.0.0"]\n\n'
+                "[project]\n"
+                'name = "sample"\n'
+                'version = "0.0.1"\n'
+                'dependencies = ["unreviewed-runtime==9.9.9"]\n\n'
+                "[project.optional-dependencies]\n"
+                'test = ["jsonschema==4.26.0"]\n',
+                encoding="utf-8",
+            )
+            (root / ".github" / "workflows" / "research-primitives.yml").write_text(
+                'paths:\n  - "requirements-dev.txt"\n'
+                'steps:\n'
+                '  - run: "python -m pip install --disable-pip-version-check '
+                '--force-reinstall --no-deps --only-binary=:all: --require-hashes '
+                '-r requirements-dev.txt"\n'
+                '  - run: python -m pip install --no-deps --no-build-isolation -e research\n',
+                encoding="utf-8",
+            )
+            blockers, _ = _python_blockers(root)
+            self.assertIn("RESEARCH_RUNTIME_REQUIREMENTS_DRIFT", blockers)
+            self.assertNotIn(
+                "NON_EXACT_RESEARCH_RUNTIME_REQUIREMENT:unreviewed-runtime==9.9.9",
+                blockers,
+            )
+
     def test_research_install_workflow_closes_build_isolation_escape(self):
         root = Path(__file__).resolve().parents[2]
         workflow = (

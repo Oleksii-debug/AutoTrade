@@ -5436,5 +5436,70 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
         self.assertEqual(callbacks, [])
 
 
+    def test_credential_parsers_reject_polymorphic_plaintext_before_virtual_dispatch(self):
+        callbacks = []
+
+        class HostilePlaintext(str):
+            def __bool__(self):
+                callbacks.append("bool")
+                raise AssertionError("hostile bool executed")
+
+            def strip(self, *_args):
+                callbacks.append("strip")
+                raise AssertionError("hostile strip executed")
+
+            def encode(self, *_args, **_kwargs):
+                callbacks.append("encode")
+                raise AssertionError("hostile encode executed")
+
+        parsers = (
+            WhiteBitCredential.parse,
+            KrakenFuturesCredential.parse,
+            KrakenSpotCredential.parse,
+            AlpacaTradingCredential.parse,
+            BybitV5Credential.parse,
+            BinanceSpotCredential.parse,
+        )
+        for parser in parsers:
+            with self.subTest(parser=parser.__qualname__):
+                with self.assertRaisesRegex(
+                    ProviderTransportScopeError,
+                    "credential material is unavailable",
+                ):
+                    parser(HostilePlaintext(
+                        '{"api_key":"synthetic","api_secret":"synthetic"}'
+                    ))
+                self.assertEqual(callbacks, [])
+
+
+    def test_binance_order_signing_rejects_polymorphic_parameter_values_before_strip(self):
+        callbacks = []
+
+        class HostileValue(str):
+            def strip(self, *_args):
+                callbacks.append("strip")
+                raise AssertionError("hostile strip executed")
+
+        policy = BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"]
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "order parameters must be canonical strings",
+        ):
+            BinanceSpotSigner.sign(
+                policy=policy,
+                endpoint=BinanceSpotSigner.PLACE_ORDER_ENDPOINT,
+                body={
+                    "symbol": "BTCUSDT",
+                    "side": "BUY",
+                    "type": "LIMIT",
+                    "quantity": HostileValue("0.001"),
+                    "timestamp": "must-be-rejected-by-field-check",
+                },
+                credential_plaintext='{"api_key":"key","api_secret":"secret"}',
+                timestamp_ms=1,
+            )
+        self.assertEqual(callbacks, [])
+
+
 if __name__ == "__main__":
     unittest.main()

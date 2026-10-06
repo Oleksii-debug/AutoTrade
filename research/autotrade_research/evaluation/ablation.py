@@ -1258,32 +1258,50 @@ class AblationQualificationAuthority:
         task: str | None = None,
         instrument_family: str | None = None,
     ) -> None:
-        if not isinstance(scientific_registry, ScientificRegistry):
-            raise TypeError("scientific_registry must be ScientificRegistry")
-        if not isinstance(experience_memory, ExperienceMemory):
-            raise TypeError("experience_memory must be ExperienceMemory")
-        if not isinstance(artifact_store, ArtifactStore):
-            raise TypeError("artifact_store must be ArtifactStore")
-        if type(protocol_id) is not str or not protocol_id.strip():
-            raise ValueError("protocol_id is required")
+        if type(scientific_registry) is not ScientificRegistry:
+            raise TypeError("scientific_registry must be exact ScientificRegistry")
+        if type(experience_memory) is not ExperienceMemory:
+            raise TypeError("experience_memory must be exact ExperienceMemory")
+        if type(artifact_store) is not ArtifactStore:
+            raise TypeError("artifact_store must be exact ArtifactStore")
+        canonical_protocol_id = _identity_text(protocol_id, "protocol_id")
+        if canonical_protocol_id != protocol_id:
+            raise ValueError("protocol_id must use canonical text")
         if type(protocol_hash) is not str:
-            raise TypeError("protocol_hash must be text")
+            raise TypeError("protocol_hash must be exact text")
         if type(source_revision) is not str or _GIT_SHA.fullmatch(source_revision) is None:
             raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
         if type(granted_permissions) is not set or not granted_permissions:
-            raise ValueError("granted_permissions must be a non-empty set")
-        if any(type(value) is not str or not value for value in granted_permissions):
-            raise ValueError("granted_permissions must contain non-empty text")
+            raise ValueError("granted_permissions must be a non-empty exact set")
+        canonical_permissions: set[str] = set()
+        for value in granted_permissions:
+            canonical_permission = _identity_text(value, "granted_permission")
+            if canonical_permission != value:
+                raise ValueError("granted_permissions must contain canonical text")
+            canonical_permissions.add(canonical_permission)
+        canonical_task = None
+        if task is not None:
+            canonical_task = _identity_text(task, "task")
+            if canonical_task != task:
+                raise ValueError("task must use canonical text")
+        canonical_instrument_family = None
+        if instrument_family is not None:
+            canonical_instrument_family = _identity_text(
+                instrument_family,
+                "instrument_family",
+            )
+            if canonical_instrument_family != instrument_family:
+                raise ValueError("instrument_family must use canonical text")
         self.scientific_registry = scientific_registry
         self.experience_memory = experience_memory
         self.artifact_store = artifact_store
-        self.protocol_id = protocol_id.strip()
+        self.protocol_id = canonical_protocol_id
         self.protocol_hash = _digest(protocol_hash, "protocol_hash")
         self.source_revision = source_revision
         self.causal_cutoff = _utc(causal_cutoff, "causal_cutoff")
-        self.granted_permissions = set(granted_permissions)
-        self.task = task
-        self.instrument_family = instrument_family
+        self.granted_permissions = canonical_permissions
+        self.task = canonical_task
+        self.instrument_family = canonical_instrument_family
 
     def _load_outcome(
         self,

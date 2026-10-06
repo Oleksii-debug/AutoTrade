@@ -6,6 +6,7 @@ import unittest
 from uuid import uuid4
 
 from mvp.autotrade_mvp.bybit_v5 import (
+    BybitFeeCurrencyAuthority,
     build_order_payload,
     prepare_order_submission,
     coverage_evidence,
@@ -921,7 +922,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual((fills[0].account_id, fills[0].environment), ("account-a", "PAPER"))
         self.assertEqual(observation.query_binding.account_id, "account-a")
 
-    def test_documented_linear_execution_requires_qualified_fee_currency(self):
+    def test_documented_linear_execution_requires_typed_fee_currency_authority(self):
         response = {"retCode": 0, "result": {"category": "linear", "list": [{
             "execId": "e0cbe81d-0f18-5866-9415-cf319b5dab3b", "orderLinkId": "",
             "symbol": "ETHPERP", "side": "Buy", "execQty": "0.1", "execPrice": "1190.15",
@@ -929,16 +930,30 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execTime": "1672282722429",
         }]}}
         evidence = bound_execution_response(response, instrument_version="ETHPERP@v1")
-        with self.assertRaisesRegex(ProviderCoreError, "fee currency is unresolved"):
+        with self.assertRaisesRegex(ProviderCoreError, "typed fee-currency authority"):
             parse_executions(evidence, instrument_versions={"ETHPERP": "ETHPERP@v1"})
-        fills = parse_executions(
-            evidence,
-            instrument_versions={"ETHPERP": "ETHPERP@v1"},
-            qualified_fee_currencies={"ETHPERP@v1": "USDT"},
-        )
-        self.assertEqual(len(fills), 1)
-        self.assertEqual(fills[0].fee_amount, Decimal("0.071409"))
-        self.assertEqual(fills[0].fee_currency, "USDT")
+        with self.assertRaisesRegex(ProviderCoreError, "BybitFeeCurrencyAuthority"):
+            parse_executions(
+                evidence,
+                instrument_versions={"ETHPERP": "ETHPERP@v1"},
+                qualified_fee_currency={"ETHPERP@v1": "USDT"},
+            )
+
+    def test_fee_currency_authority_cannot_be_locally_constructed_as_qualified(self):
+        with self.assertRaisesRegex(ProviderCoreError, "canonical issuance"):
+            BybitFeeCurrencyAuthority(
+                provider_id="BYBIT",
+                provider_environment="TESTNET",
+                entity_id="bybit-test",
+                product_category="linear",
+                instrument_version="ETHPERP@v1",
+                fee_currency="USDT",
+                evidence_identity="sha256:" + "a" * 64,
+                valid_from="2026-01-01T00:00:00Z",
+                valid_to="2027-01-01T00:00:00Z",
+                qualification_id="sha256:" + "b" * 64,
+                adapter_build_sha="a" * 40,
+            )
 
     def test_nonempty_extra_fees_cannot_silently_disappear(self):
         response = {"retCode": 0, "result": {"category": "spot", "list": [{

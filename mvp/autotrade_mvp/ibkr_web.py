@@ -61,6 +61,18 @@ def _provider_text(value: object, *, name: str) -> str:
     return _text(value, name=name)
 
 
+def _optional_provider_text(value: object, *, name: str) -> str | None:
+    """Classify optional provider text without invoking caller virtual methods."""
+
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise IbkrWebAdapterError(f"{name} must be provider text")
+    if value == "":
+        return None
+    return _text(value, name=name)
+
+
 def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise IbkrWebAdapterError(f"{name} must use exact decimal input")
@@ -499,30 +511,44 @@ def parse_cancel_response(
     """Classify an observed cancel response without inventing terminal state.
 
     A successful request means only that IBKR acknowledged the cancel request.
-    Order truth still comes from subsequent order/execution/reconciliation
-    evidence because cancellation can race with fills.
+    The acknowledgement is accepted only when the documented integer order_id
+    names the exact ticket requested. Order truth still comes from subsequent
+    order/execution/reconciliation evidence because cancellation can race with
+    fills.
     """
 
     order_id = _text(provider_order_id, name="provider_order_id")
-    if not isinstance(payload, Mapping):
-        raise TypeError("cancel response must be an object")
-    error = payload.get("error")
-    if error not in {None, ""}:
+    if type(payload) is not dict:
+        raise TypeError("cancel response must be an exact object")
+
+    error = _optional_provider_text(payload.get("error"), name="error")
+    if error is not None:
         return IbkrCancelOutcome(
             provider_order_id=order_id,
             acknowledged=False,
-            message=_text(str(error), name="error"),
+            message=error,
         )
-    message = payload.get("msg", payload.get("message"))
+
+    raw_order_id = payload.get("order_id")
+    if (
+        type(raw_order_id) is not int
+        or raw_order_id <= 0
+        or re.fullmatch(r"[1-9][0-9]*", order_id) is None
+        or order_id != str(raw_order_id)
+    ):
+        raise IbkrWebAdapterError(
+            "cancel acknowledgement order_id does not match requested order"
+        )
+    message = _provider_text(payload.get("msg"), name="msg")
     return IbkrCancelOutcome(
         provider_order_id=order_id,
         acknowledged=True,
-        message=None if message in {None, ""} else _text(str(message), name="message"),
+        message=message,
     )
 
 
 def _reply_id(value: object) -> str:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise IbkrWebAdapterError("reply id must be a string")
     reply_id = _text(value, name="reply id")
     if (
@@ -597,15 +623,14 @@ def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
     """
 
     item = _single_submission_item(payload)
-    order_value = item.get("order_id")
+    order_text = _optional_provider_text(item.get("order_id"), name="order_id")
+    error_text = _optional_provider_text(item.get("error"), name="error")
     reply_value = item.get("id")
     message_value = item.get("message")
-    error_value = item.get("error")
-    has_order = order_value is not None and order_value != ""
-    has_reply_shape = "id" in item and message_value is not None and message_value != ""
-    validated_reply_id = _reply_id(reply_value) if has_reply_shape else None
-    has_reply = has_reply_shape
-    has_error = error_value is not None and error_value != ""
+    has_order = order_text is not None
+    has_reply = "id" in item and message_value is not None
+    validated_reply_id = _reply_id(reply_value) if has_reply else None
+    has_error = error_text is not None
 
     if sum(bool(value) for value in (has_order, has_reply, has_error)) != 1:
         raise IbkrWebAdapterError("submission response shape is ambiguous or unsupported")
@@ -613,7 +638,7 @@ def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
     if has_order:
         return IbkrSubmissionOutcome(
             status="ACKNOWLEDGED",
-            provider_order_id=_provider_text(item["order_id"], name="order_id"),
+            provider_order_id=order_text,
             provider_order_status=_provider_text(
                 item.get("order_status", ""),
                 name="order_status",
@@ -622,14 +647,18 @@ def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
 
     if has_reply:
         raw_messages = item["message"]
-        if isinstance(raw_messages, (str, bytes)) or not isinstance(raw_messages, (list, tuple)):
-            raise IbkrWebAdapterError("reply message must be a sequence of strings")
+        if type(raw_messages) not in {list, tuple}:
+            raise IbkrWebAdapterError(
+                "reply message must be an exact sequence of strings"
+            )
         messages = tuple(
             _provider_text(value, name="reply message") for value in raw_messages
         )
         raw_ids = item.get("messageIds", ())
-        if isinstance(raw_ids, (str, bytes)) or not isinstance(raw_ids, (list, tuple)):
-            raise IbkrWebAdapterError("messageIds must be a sequence when present")
+        if type(raw_ids) not in {list, tuple}:
+            raise IbkrWebAdapterError(
+                "messageIds must be an exact sequence when present"
+            )
         message_ids = tuple(
             _provider_text(value, name="messageId") for value in raw_ids
         )
@@ -645,7 +674,7 @@ def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
 
     return IbkrSubmissionOutcome(
         status="REJECTED",
-        rejection_reason=_provider_text(item["error"], name="error"),
+        rejection_reason=error_text,
     )
 
 

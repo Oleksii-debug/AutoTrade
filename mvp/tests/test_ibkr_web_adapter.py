@@ -417,7 +417,12 @@ class IbkrWebAdapterTests(unittest.TestCase):
     def test_cancel_acknowledgement_never_proves_terminal_cancel(self):
         outcome = parse_cancel_response(
             provider_order_id="123456789",
-            payload={"msg": "Request was submitted"},
+            payload={
+                "msg": "Request was submitted",
+                "order_id": 123456789,
+                "conid": 265598,
+                "account": "U1234567",
+            },
         )
         self.assertTrue(outcome.acknowledged)
         self.assertFalse(outcome.terminal_cancel_proven)

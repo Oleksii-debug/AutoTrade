@@ -2,6 +2,7 @@ import unittest
 
 from mvp.autotrade_mvp.ibkr_web import (
     IbkrWebAdapterError,
+    parse_cancel_response,
     parse_order_submission_response,
 )
 
@@ -30,11 +31,29 @@ class _ExecutableStr(str):
         raise AssertionError("provider string subclass callback executed")
 
 
+class _EqualityTrap:
+    eq_called = False
+
+    def __eq__(self, other):
+        type(self).eq_called = True
+        raise AssertionError("provider value equality callback executed")
+
+
+class _ExecutableList(list):
+    iter_called = False
+
+    def __iter__(self):
+        type(self).iter_called = True
+        raise AssertionError("provider sequence callback executed")
+
+
 class IbkrProviderResponseIngressTests(unittest.TestCase):
     def setUp(self):
         _ExecutableDict.get_called = False
         _StringificationTrap.str_called = False
         _ExecutableStr.strip_called = False
+        _EqualityTrap.eq_called = False
+        _ExecutableList.iter_called = False
 
     def test_submission_parser_rejects_executable_mapping_before_callbacks(self):
         with self.assertRaisesRegex(TypeError, "exact object"):
@@ -100,6 +119,69 @@ class IbkrProviderResponseIngressTests(unittest.TestCase):
                 ]
             )
         self.assertFalse(_ExecutableStr.strip_called)
+
+    def test_shape_classification_rejects_objects_before_equality_callbacks(self):
+        with self.assertRaisesRegex(IbkrWebAdapterError, "provider text"):
+            parse_order_submission_response(
+                [{"order_id": _EqualityTrap(), "order_status": "Submitted"}]
+            )
+        self.assertFalse(_EqualityTrap.eq_called)
+
+    def test_reply_sequences_reject_executable_subclasses_before_iteration(self):
+        with self.assertRaisesRegex(IbkrWebAdapterError, "exact sequence"):
+            parse_order_submission_response(
+                [
+                    {
+                        "id": "07a13a5a-4a48-44a5-bb25-5ab37b79186c",
+                        "message": _ExecutableList(["Confirm"]),
+                        "messageIds": ["o163"],
+                    }
+                ]
+            )
+        self.assertFalse(_ExecutableList.iter_called)
+
+    def test_cancel_ack_binds_exact_provider_ticket_and_inert_response(self):
+        outcome = parse_cancel_response(
+            provider_order_id="123456789",
+            payload={
+                "msg": "Request was submitted",
+                "order_id": 123456789,
+                "conid": 265598,
+                "account": "U1234567",
+            },
+        )
+        self.assertTrue(outcome.acknowledged)
+        self.assertFalse(outcome.terminal_cancel_proven)
+        self.assertEqual(outcome.provider_order_id, "123456789")
+        self.assertEqual(outcome.message, "Request was submitted")
+
+        for payload in (
+            {"msg": "Request was submitted"},
+            {"msg": "Request was submitted", "order_id": 987654321},
+            {"msg": "Request was submitted", "order_id": "123456789"},
+        ):
+            with self.subTest(payload=payload), self.assertRaisesRegex(
+                IbkrWebAdapterError, "order_id"
+            ):
+                parse_cancel_response(
+                    provider_order_id="123456789",
+                    payload=payload,
+                )
+
+    def test_cancel_response_rejects_executable_or_coercible_provider_values(self):
+        with self.assertRaisesRegex(TypeError, "exact object"):
+            parse_cancel_response(
+                provider_order_id="123456789",
+                payload=_ExecutableDict({"error": "rejected"}),
+            )
+        self.assertFalse(_ExecutableDict.get_called)
+
+        with self.assertRaisesRegex(IbkrWebAdapterError, "provider text"):
+            parse_cancel_response(
+                provider_order_id="123456789",
+                payload={"error": _StringificationTrap()},
+            )
+        self.assertFalse(_StringificationTrap.str_called)
 
     def test_documented_ack_reply_and_reject_shapes_still_parse(self):
         ack = parse_order_submission_response(

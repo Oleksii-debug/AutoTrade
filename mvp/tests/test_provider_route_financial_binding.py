@@ -137,6 +137,74 @@ class ProviderRouteFinancialBindingTests(unittest.TestCase):
                     **_prepared_scope_kwargs(route),
                 )
 
+    def test_financial_submission_scope_rejects_other_capability(self):
+        with TemporaryDirectory() as directory:
+            route = self._route(directory)
+            provider_scope = route.qualification.scope.provider_scope
+            kwargs = _prepared_scope_kwargs(route)
+            kwargs["capability_snapshot_ids"] = ("other-capability",)
+            with self.assertRaisesRegex(
+                ProviderRouteFinancialBindingError,
+                "capability differs from selected provider route",
+            ):
+                build_selected_provider_route_financial_submission_scope(
+                    route,
+                    account_id=route.candidate.account_id,
+                    runtime_environment=provider_scope.runtime_environment,
+                    **kwargs,
+                )
+
+    def test_financial_submission_scope_rejects_noncanonical_request_digest(self):
+        with TemporaryDirectory() as directory:
+            route = self._route(directory)
+            provider_scope = route.qualification.scope.provider_scope
+            kwargs = _prepared_scope_kwargs(route)
+            kwargs["prepared_request_sha256"] = "sha256:not-a-digest"
+            with self.assertRaisesRegex(
+                ProviderRouteFinancialBindingError,
+                "canonical SHA-256 digest",
+            ):
+                build_selected_provider_route_financial_submission_scope(
+                    route,
+                    account_id=route.candidate.account_id,
+                    runtime_environment=provider_scope.runtime_environment,
+                    **kwargs,
+                )
+
+    def test_financial_submission_scope_rejects_absolute_endpoint(self):
+        with TemporaryDirectory() as directory:
+            route = self._route(directory)
+            provider_scope = route.qualification.scope.provider_scope
+            kwargs = _prepared_scope_kwargs(route)
+            kwargs["endpoint"] = "https://api.example.test/v5/order/create"
+            with self.assertRaisesRegex(
+                ProviderRouteFinancialBindingError,
+                "provider-relative path",
+            ):
+                build_selected_provider_route_financial_submission_scope(
+                    route,
+                    account_id=route.candidate.account_id,
+                    runtime_environment=provider_scope.runtime_environment,
+                    **kwargs,
+                )
+
+    def test_financial_submission_scope_requires_one_instrument_version(self):
+        with TemporaryDirectory() as directory:
+            route = self._route(directory)
+            provider_scope = route.qualification.scope.provider_scope
+            kwargs = _prepared_scope_kwargs(route)
+            kwargs["instrument_versions"] = ("7", "8")
+            with self.assertRaisesRegex(
+                ProviderRouteFinancialBindingError,
+                "exactly one instrument version",
+            ):
+                build_selected_provider_route_financial_submission_scope(
+                    route,
+                    account_id=route.candidate.account_id,
+                    runtime_environment=provider_scope.runtime_environment,
+                    **kwargs,
+                )
+
     def test_selected_route_c_is_directly_reusable_by_existing_transport_registry(self):
         with TemporaryDirectory() as directory:
             route = self._route(directory)

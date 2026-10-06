@@ -35,10 +35,10 @@ jobs:
         python-version: ["3.12.10"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m unittest discover -s tests/Control -v
@@ -49,7 +49,7 @@ jobs:
           --command "python -m unittest discover -s tests/Control -v"
           --output "artifacts/control-plane-${{ runner.os }}.json"
       - name: Upload exact-head control-plane evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: control-plane-evidence-${{ runner.os }}
           path: artifacts/control-plane-${{ runner.os }}.json

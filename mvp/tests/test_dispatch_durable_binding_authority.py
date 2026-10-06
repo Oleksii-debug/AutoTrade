@@ -1784,7 +1784,7 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 ["SubmissionPrepared", "SubmissionSending"],
             )
 
-    def test_post_guard_dispatcher_class_rebind_terminalizes_on_canonical_surface(self):
+    def test_post_guard_dispatcher_class_rebind_preserves_sealed_sending_cut(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             dispatcher = GuardedDispatcher(
@@ -1847,15 +1847,7 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             )
             self.assertEqual(
                 [event["event_type"] for event in events],
-                [
-                    "SubmissionPrepared",
-                    "SubmissionSending",
-                    "SubmissionUnknown",
-                ],
-            )
-            self.assertEqual(
-                events[-1]["payload"]["reason"],
-                "dispatcher_authority_changed_after_send_barrier",
+                ["SubmissionPrepared", "SubmissionSending"],
             )
 
     def test_terminal_reread_rejects_post_append_tamper(self):

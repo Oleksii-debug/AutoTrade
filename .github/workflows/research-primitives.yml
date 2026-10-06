@@ -45,10 +45,10 @@ jobs:
       AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -67,7 +67,7 @@ jobs:
       - name: Write exact-head WP-04 evidence
         run: python tools/write_ci_evidence.py --suite wp04-neutral-reuse --command "python -m unittest discover -s research/tests -v" --output "artifacts/wp04-neutral-reuse-${{ runner.os }}.json"
       - name: Upload exact-head WP-04 evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: wp04-neutral-reuse-evidence-${{ runner.os }}
           path: artifacts/wp04-neutral-reuse-${{ runner.os }}.json

@@ -1502,8 +1502,8 @@
         "Exclusive mutation key: FINANCE / corporate-settlement",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Corporate-action/settlement foundation is present on main from the integrated financial-core wave. Remaining work: broader split/dividend/merger/delisting/settlement cases and exact accounting/reconciliation qualification."
+      "proposed_status": "DONE",
+      "status_note": "DONE for Section 11 corporate-settlement on main via PR #2294, merge commit 70718f6f509de3ec0b11267df4809a6e72d84df6. The merged tree is byte-identical to the accepted candidate. Canonical source/integration authority now covers sealed corporate-action provider facts and revisions, durable evidence/reconciliation, CASH_DIVIDEND, qualified long-position SPLIT economics and correction/restart, fail-closed unsupported merger/delist boundaries, securities-borrow quantity-unit authority through admission/replay/dispatch, and durable financing chronology/lifetime binding. Section-10 InstrumentRegistry remains the single product-selected registry authority; no duplicate registry was introduced. Positive PAPER/LIVE provider-origin qualification, release readiness and economic-edge claims remain separately owned and do not reopen Section 11."
     },
     {
       "id": "WP-32",

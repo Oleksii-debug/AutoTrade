@@ -40,6 +40,7 @@ BYBIT_DOCUMENTED_ENDPOINTS: Mapping[str, str] = {
     "POSITIONS": "/v5/position/list",
     "WALLET": "/v5/account/wallet-balance",
     "ACTIVITIES": "/v5/account/transaction-log",
+    "OPTION_DELIVERIES": "/v5/asset/delivery-record",
 }
 
 _CATEGORY_BY_FAMILY = {
@@ -1176,6 +1177,210 @@ def parse_executions(
         by_execution[execution_id] = fill
 
     return tuple(by_execution.values())
+
+
+BYBIT_OPTION_DELIVERY_PARSER_IDENTITY = "BYBIT_OPTION_DELIVERY_V5_JSON_V1"
+_BYBIT_OPTION_DELIVERY_DECIMAL_RE = re.compile(
+    r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$"
+)
+_BYBIT_OPTION_DELIVERY_CURSOR_RE = re.compile(
+    r"^(?:[A-Za-z0-9._~-]|%[0-9A-F]{2})+$"
+)
+
+
+def _bybit_option_delivery_decimal_text(
+    value: object,
+    *,
+    name: str,
+) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or len(value) > 160
+        or _BYBIT_OPTION_DELIVERY_DECIMAL_RE.fullmatch(value) is None
+    ):
+        raise ProviderCoreError(
+            f"{name} must be canonical provider decimal text"
+        )
+    return value
+
+
+@dataclass(frozen=True)
+class BybitOptionDeliveryRecord:
+    """One raw documented option-delivery row, without lifecycle classification."""
+
+    delivery_time_ms: int
+    symbol: str
+    side: str
+    position: str
+    entry_price: str | None
+    delivery_price: str
+    strike: str
+    fee: str
+    delivery_rpl: str
+
+
+@dataclass(frozen=True)
+class BybitOptionDeliveryPage:
+    """One exact provider page plus its continuation token and byte evidence."""
+
+    records: tuple[BybitOptionDeliveryRecord, ...]
+    next_page_cursor: str
+    evidence_ref: str
+    response_sha256: str
+    observed_at: str
+
+
+def parse_option_delivery_page(
+    observation: ProviderResponseObservation,
+) -> BybitOptionDeliveryPage:
+    """Parse exact Bybit option delivery rows without minting lifecycle economics.
+
+    Bybit's delivery endpoint does not expose an EXERCISE/ASSIGNMENT/EXPIRY
+    discriminator. This parser therefore preserves only documented provider
+    facts and must not be treated as OptionLifecycleObservation authority.
+    """
+
+    if type(observation) is not ProviderResponseObservation:
+        raise TypeError(
+            "observation must be exact ProviderResponseObservation"
+        )
+    observation.require_scope(
+        provider_id="BYBIT",
+        surface=Surface.ACTIVITIES,
+        endpoint=BYBIT_DOCUMENTED_ENDPOINTS["OPTION_DELIVERIES"],
+    )
+    binding = observation.query_binding
+    if (
+        binding.permission_scope != "ACCOUNT.READ"
+        or binding.query.get("category") != "option"
+    ):
+        raise ProviderCoreError(
+            "Bybit option delivery evidence requires ACCOUNT.READ category=option"
+        )
+
+    envelope = _mapping(observation.payload, name="response")
+    ret_code = envelope.get("retCode")
+    if type(ret_code) is not int or ret_code != 0:
+        raise ProviderCoreError(
+            "Bybit option delivery response requires exact integer retCode=0"
+        )
+    result = _mapping(envelope.get("result"), name="result")
+    if result.get("category") != "option":
+        raise ProviderCoreError(
+            "Bybit option delivery result category must be option"
+        )
+    rows = result.get("list")
+    if not isinstance(rows, (list, tuple)):
+        raise ProviderCoreError(
+            "Bybit option delivery result.list must be an array"
+        )
+
+    next_cursor = result.get("nextPageCursor")
+    if type(next_cursor) is not str:
+        raise ProviderCoreError(
+            "Bybit option delivery nextPageCursor must be text"
+        )
+    if (
+        next_cursor
+        and _BYBIT_OPTION_DELIVERY_CURSOR_RE.fullmatch(next_cursor) is None
+    ):
+        raise ProviderCoreError(
+            "Bybit option delivery nextPageCursor is non-canonical"
+        )
+
+    required_row_fields = frozenset(
+        {
+            "symbol",
+            "side",
+            "deliveryTime",
+            "strike",
+            "fee",
+            "position",
+            "deliveryPrice",
+            "deliveryRpl",
+        }
+    )
+    optional_row_fields = frozenset({"entryPrice"})
+    records: list[BybitOptionDeliveryRecord] = []
+    for index, value in enumerate(rows):
+        row = _mapping(value, name=f"result.list[{index}]")
+        row_fields = frozenset(row)
+        if (
+            not required_row_fields.issubset(row_fields)
+            or row_fields - required_row_fields - optional_row_fields
+        ):
+            raise ProviderCoreError(
+                f"result.list[{index}] fields do not match the qualified delivery schema"
+            )
+        symbol = row.get("symbol")
+        if (
+            type(symbol) is not str
+            or not symbol
+            or symbol != symbol.strip()
+            or len(symbol) > 160
+            or re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", symbol) is None
+        ):
+            raise ProviderCoreError(
+                "Bybit option delivery symbol is non-canonical"
+            )
+        side = row.get("side")
+        if side not in {"Buy", "Sell"}:
+            raise ProviderCoreError(
+                "Bybit option delivery side must be Buy or Sell"
+            )
+        delivery_time_value = row.get("deliveryTime")
+        if (
+            type(delivery_time_value) is not int
+            or delivery_time_value < 0
+        ):
+            raise ProviderCoreError(
+                f"result.list[{index}].deliveryTime must be an exact non-negative integer"
+            )
+        delivery_time_ms = delivery_time_value
+        if "entryPrice" in row:
+            entry_price = _bybit_option_delivery_decimal_text(
+                row["entryPrice"],
+                name=f"result.list[{index}].entryPrice",
+            )
+        else:
+            entry_price = None
+        records.append(
+            BybitOptionDeliveryRecord(
+                delivery_time_ms=delivery_time_ms,
+                symbol=symbol,
+                side=side,
+                position=_bybit_option_delivery_decimal_text(
+                    row.get("position"),
+                    name=f"result.list[{index}].position",
+                ),
+                entry_price=entry_price,
+                delivery_price=_bybit_option_delivery_decimal_text(
+                    row.get("deliveryPrice"),
+                    name=f"result.list[{index}].deliveryPrice",
+                ),
+                strike=_bybit_option_delivery_decimal_text(
+                    row.get("strike"),
+                    name=f"result.list[{index}].strike",
+                ),
+                fee=_bybit_option_delivery_decimal_text(
+                    row.get("fee"),
+                    name=f"result.list[{index}].fee",
+                ),
+                delivery_rpl=_bybit_option_delivery_decimal_text(
+                    row.get("deliveryRpl"),
+                    name=f"result.list[{index}].deliveryRpl",
+                ),
+            )
+        )
+
+    return BybitOptionDeliveryPage(
+        records=tuple(records),
+        next_page_cursor=next_cursor,
+        evidence_ref=observation.evidence_ref,
+        response_sha256=observation.response_sha256,
+        observed_at=observation.observed_at,
+    )
 
 
 def coverage_evidence(

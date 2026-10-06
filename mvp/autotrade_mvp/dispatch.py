@@ -528,15 +528,14 @@ def stable_client_order_id(
     )
     if normalized_format == "UUID":
         if (
-            not isinstance(max_length, int)
-            or isinstance(max_length, bool)
+            type(max_length) is not int
             or max_length < 36
         ):
             raise ValueError(
                 "UUID client-order identity requires max_length of at least 36"
             )
         return str(uuid5(NAMESPACE_URL, "client-order:" + digest))
-    if not isinstance(max_length, int) or isinstance(max_length, bool) or max_length < 20:
+    if type(max_length) is not int or max_length < 20:
         raise ValueError(
             "max_length must be an integer of at least 20 "
             "to preserve client-order identity entropy"
@@ -669,7 +668,7 @@ class GuardedDispatcher:
         if owner_token is not None and (type(owner_token) is not str or not owner_token.strip()):
             raise ValueError("owner_token must be exact non-empty text when provided")
         self.owner_token = owner_token if owner_token is not None else str(uuid4())
-        if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool) or owner_epoch < 1:
+        if type(owner_epoch) is not int or owner_epoch < 1:
             raise ValueError("owner_epoch must be a positive integer")
         self.owner_epoch = owner_epoch
         if type(prepared_lease_seconds) is not int or prepared_lease_seconds < 1:

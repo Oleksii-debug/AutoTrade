@@ -80,6 +80,7 @@ internal sealed class ProviderIssuerAuthority : IDisposable
         "autotrade-provider-authenticated-read-attempt:v1";
     internal const string ReadReceiptSchema =
         "autotrade-provider-authenticated-read-receipt:v1";
+    internal const int MaxResponseBytes = 16 * 1024 * 1024;
 
     private static readonly HashSet<string> FinancialRuntimes =
         new(StringComparer.Ordinal) { "PAPER", "LIVE" };
@@ -602,10 +603,10 @@ internal sealed class ProviderIssuerAuthority : IDisposable
 
     private static void RequireEvidenceBytes(byte[] value, string name)
     {
-        if (value.Length == 0)
+        if (value.Length == 0 || value.Length > MaxResponseBytes)
         {
             throw new ProviderIssuerAuthorityException(
-                name + " must contain exact retained evidence bytes");
+                name + " must contain 1..16777216 exact retained evidence bytes");
         }
     }
 

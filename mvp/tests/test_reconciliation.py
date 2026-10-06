@@ -82,6 +82,84 @@ def resource_availability(**overrides):
 
 
 class ReconciliationTests(unittest.TestCase):
+    def test_bybit_provider_evidence_requires_explicit_provider_environment(self):
+        with self.assertRaisesRegex(ValueError, "BYBIT provider evidence requires explicit provider_environment"):
+            ProviderFillEvidence.create(
+                provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+                provider_execution_id="bx1", client_order_id="bc1", instrument="BTCUSDT",
+                quantity="1", price="100", fee_currency="USDT",
+                trade_time="2026-09-24T18:00:00Z",
+            )
+        with self.assertRaisesRegex(ValueError, "BYBIT provider evidence requires explicit provider_environment"):
+            SnapshotConsistencyEvidence(
+                provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+                mode="ATOMIC", query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+            )
+
+    def test_bybit_provider_environment_mismatch_is_rejected_at_reconciliation_boundary(self):
+        bybit_fill = ProviderFillEvidence.create(
+            provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+            provider_environment="TESTNET", provider_execution_id="bx1",
+            client_order_id="bc1", instrument="BTCUSDT", quantity="1", price="100",
+            fee_currency="USDT", trade_time="2026-09-24T18:00:00Z",
+        )
+        snapshot = SnapshotConsistencyEvidence(
+            provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+            provider_environment="TESTNET", mode="ATOMIC",
+            query_started_at="2026-09-24T17:00:00Z", query_completed_at="2026-09-24T19:00:00Z",
+        )
+        with self.assertRaisesRegex(ValueError, "provider fill evidence provider_environment mismatch"):
+            reconcile_account(
+                provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+                provider_environment="DEMO",
+                local_cash={"USDT": "100"}, provider_cash={"USDT": "100"},
+                local_positions={"BTCUSDT": "1"}, provider_positions={"BTCUSDT": "1"},
+                local_execution_ids=["bx1"], provider_fills=[bybit_fill],
+                snapshot_consistency=snapshot,
+                coverage_start="2026-09-24T17:00:00Z", coverage_end="2026-09-24T19:00:00Z",
+                pagination_complete=True,
+            )
+
+    def test_bybit_activity_coverage_cannot_cross_provider_environment(self):
+        bybit_fill = ProviderFillEvidence.create(
+            provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+            provider_environment="TESTNET", provider_execution_id="bx1",
+            client_order_id="bc1", instrument="BTCUSDT", quantity="1", price="100",
+            fee_currency="USDT", trade_time="2026-09-24T18:00:00Z",
+        )
+        snapshot = SnapshotConsistencyEvidence(
+            provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+            provider_environment="TESTNET", mode="ATOMIC",
+            query_started_at="2026-09-24T17:00:00Z",
+            query_completed_at="2026-09-24T19:00:00Z",
+        )
+        demo_activity_coverage = CoverageSurfaceEvidence(
+            provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+            provider_environment="DEMO", surface="ACTIVITIES",
+            coverage_start="2026-09-24T17:00:00Z",
+            coverage_end="2026-09-24T19:00:00Z",
+            pagination_complete=True,
+            consistency_horizon_satisfied=True,
+            provider_semantics_exclude_execution=True,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "provider activity coverage scope mismatch"
+        ):
+            reconcile_account(
+                provider_id="BYBIT", account_id="bybit-account", environment="PAPER",
+                provider_environment="TESTNET",
+                local_cash={"USDT": "100"}, provider_cash={"USDT": "100"},
+                local_positions={"BTCUSDT": "1"}, provider_positions={"BTCUSDT": "1"},
+                local_execution_ids=["bx1"], provider_fills=[bybit_fill],
+                snapshot_consistency=snapshot,
+                coverage_start="2026-09-24T17:00:00Z",
+                coverage_end="2026-09-24T19:00:00Z",
+                pagination_complete=True,
+                require_activity_reconciliation=True,
+                activity_coverage=demo_activity_coverage,
+            )
+
     def base(self, **overrides):
         values = dict(
             provider_id="TEST_PROVIDER",

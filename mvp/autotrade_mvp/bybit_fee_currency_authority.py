@@ -115,6 +115,34 @@ def _canonical_digest(value: object) -> str:
     ).hexdigest()
 
 
+def _evidence_ref_material(
+    value: EvidenceArtifactRef,
+    *,
+    name: str,
+) -> dict[str, str]:
+    """Snapshot one exact evidence ref without invoking caller-rebindable methods."""
+
+    if type(value) is not EvidenceArtifactRef:
+        raise BybitFeeCurrencyAuthorityError(
+            f"{name} must be exact EvidenceArtifactRef"
+        )
+    material = {}
+    for field_name in (
+        "artifact_id",
+        "sha256",
+        "media_type",
+        "evidence_kind",
+        "source_sha",
+    ):
+        field_value = object.__getattribute__(value, field_name)
+        if type(field_value) is not str:
+            raise BybitFeeCurrencyAuthorityError(
+                f"{name} evidence fields are non-canonical"
+            )
+        material[field_name] = field_value
+    return material
+
+
 def _fee_rule_material(
     *,
     provider_environment: object,
@@ -307,6 +335,15 @@ def _qualification_semantics(
             raise BybitFeeCurrencyAuthorityError(
                 "provider qualification identity fields are non-canonical"
             )
+    if type(getattr(identity, "campaign_version", None)) is not int:
+        raise BybitFeeCurrencyAuthorityError(
+            "provider qualification identity fields are non-canonical"
+        )
+    packaged_artifact_id = getattr(identity, "packaged_artifact_id", None)
+    if packaged_artifact_id is not None and type(packaged_artifact_id) is not str:
+        raise BybitFeeCurrencyAuthorityError(
+            "provider qualification identity fields are non-canonical"
+        )
 
     for field_name in ("campaign_id", "protocol_id", "protocol_version", "product_family"):
         if type(getattr(scope, field_name)) is not str:
@@ -370,14 +407,26 @@ def _qualification_semantics(
         raise BybitFeeCurrencyAuthorityError(
             "provider qualification evidence set is non-canonical"
         )
-    all_refs = tuple(
+    evidence_material = tuple(
         sorted(
-            (campaign_ref, *raw_refs),
-            key=lambda item: item.artifact_id,
+            (
+                _evidence_ref_material(
+                    campaign_ref,
+                    name="campaign_artifact_ref",
+                ),
+                *(
+                    _evidence_ref_material(
+                        item,
+                        name=f"raw_evidence_refs[{index}]",
+                    )
+                    for index, item in enumerate(raw_refs)
+                ),
+            ),
+            key=lambda item: item["artifact_id"],
         )
     )
     if getattr(identity, "evidence_set_digest", None) != _canonical_digest(
-        [item.canonical() for item in all_refs]
+        list(evidence_material)
     ):
         raise BybitFeeCurrencyAuthorityError(
             "provider qualification evidence set does not match Q identity"
@@ -410,6 +459,24 @@ def _qualification_semantics(
         qualification,
         "release_artifact_id",
     )
+    for field_name, value in (
+        ("attestation_id", attestation_id),
+        ("attestation_digest", attestation_digest),
+        ("policy_id", policy_id),
+        ("policy_version", policy_version),
+        ("trust_root_id", trust_root_id),
+        ("producer_id", producer_id),
+        ("verifier_id", verifier_id),
+        ("signed_at", signed_at),
+    ):
+        if type(value) is not str:
+            raise BybitFeeCurrencyAuthorityError(
+                "provider qualification acceptance metadata fields are non-canonical"
+            )
+    if release_artifact_id is not None and type(release_artifact_id) is not str:
+        raise BybitFeeCurrencyAuthorityError(
+            "provider qualification acceptance metadata fields are non-canonical"
+        )
     acceptance_metadata = {
         "attestation_id": attestation_id,
         "attestation_digest": attestation_digest,

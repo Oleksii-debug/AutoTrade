@@ -355,6 +355,8 @@ class BybitFeeCurrencyAuthorityTests(unittest.TestCase):
             ("result_set_digest", object()),
             ("documentation_revision_digest", object()),
             ("lineage_digest", object()),
+            ("campaign_version", object()),
+            ("packaged_artifact_id", object()),
             ("provider_scope", object()),
         )
         for field, value in mutations:
@@ -406,6 +408,82 @@ class BybitFeeCurrencyAuthorityTests(unittest.TestCase):
                 rule_valid_until=RULE_UNTIL,
                 at=NOW,
             )
+
+    def test_mutated_q_acceptance_metadata_is_type_fenced_before_digesting(self):
+        for field in (
+            "attestation_id",
+            "attestation_digest",
+            "policy_id",
+            "policy_version",
+            "trust_root_id",
+            "producer_id",
+            "verifier_id",
+            "signed_at",
+            "release_artifact_id",
+        ):
+            with self.subTest(field=field):
+                _instrument, registry, capability, qualification, _authority = (
+                    issued_fixture()
+                )
+                object.__setattr__(qualification, field, object())
+                with self.assertRaisesRegex(
+                    BybitFeeCurrencyAuthorityError,
+                    "acceptance metadata fields are non-canonical",
+                ):
+                    issue_bybit_execution_fee_currency_authority(
+                        qualification=qualification,
+                        capability=capability,
+                        instrument_registry=registry,
+                        venue_id="BYBIT",
+                        provider_symbol="ETHPERP",
+                        fee_currency="USDT",
+                        rule_id="BYBIT_EXECUTION_FEE_CURRENCY",
+                        rule_version="2026-10",
+                        rule_valid_from=RULE_FROM,
+                        rule_valid_until=RULE_UNTIL,
+                        at=NOW,
+                    )
+
+    def test_mutated_q_evidence_ref_fields_fail_before_virtual_callbacks(self):
+        _instrument, registry, capability, qualification, _authority = issued_fixture()
+        callbacks = []
+
+        class Hostile:
+            def __str__(self):
+                callbacks.append("__str__")
+                raise AssertionError("hostile evidence callback executed")
+
+            def __eq__(self, _other):
+                callbacks.append("__eq__")
+                raise AssertionError("hostile evidence callback executed")
+
+            def __lt__(self, _other):
+                callbacks.append("__lt__")
+                raise AssertionError("hostile evidence callback executed")
+
+        campaign_ref = object.__getattribute__(
+            qualification,
+            "campaign_artifact_ref",
+        )
+        object.__setattr__(campaign_ref, "artifact_id", Hostile())
+        with self.assertRaisesRegex(
+            BybitFeeCurrencyAuthorityError,
+            "campaign_artifact_ref evidence fields are non-canonical",
+        ):
+            issue_bybit_execution_fee_currency_authority(
+                qualification=qualification,
+                capability=capability,
+                instrument_registry=registry,
+                venue_id="BYBIT",
+                provider_symbol="ETHPERP",
+                fee_currency="USDT",
+                rule_id="BYBIT_EXECUTION_FEE_CURRENCY",
+                rule_version="2026-10",
+                rule_valid_from=RULE_FROM,
+                rule_valid_until=RULE_UNTIL,
+                at=NOW,
+            )
+        self.assertEqual(callbacks, [])
 
     def test_q_identity_and_scope_are_exact_source_types_before_field_access(self):
         instrument, registry, capability, qualification, _authority = issued_fixture()

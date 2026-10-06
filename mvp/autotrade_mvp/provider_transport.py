@@ -60,6 +60,7 @@ from .whitebit import (
 from .provider_core import (
     AuthenticatedReadQueryBinding,
     _require_authenticated_read_query_binding_authority,
+    ProviderCoreError,
     ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
@@ -2875,6 +2876,15 @@ def _install_direct_authenticated_read_observation_authority(
     observation_type = ProviderResponseObservation
     receipt_type = DirectAuthenticatedReadExecutionReceipt
     transport_error = ProviderTransportError
+    core_error = ProviderCoreError
+
+    def require_projection(observation: object):
+        try:
+            return canonical_projection(observation)
+        except core_error as error:
+            raise transport_error(
+                "canonical provider response observation authority is unavailable"
+            ) from error
 
     def prune() -> None:
         for object_id, state in canonical_tuple(states.items()):
@@ -2899,7 +2909,7 @@ def _install_direct_authenticated_read_observation_authority(
             raise transport_error(
                 "direct authenticated-read observation authority changed"
             )
-        projection = canonical_projection(observation)
+        projection = require_projection(observation)
         # Custom/injected clients remain useful test seams but receive no
         # production direct-wire provenance.
         if canonical_type(client) is not client_type:
@@ -2963,7 +2973,7 @@ def _install_direct_authenticated_read_observation_authority(
             raise transport_error(
                 "direct authenticated-read observation authority changed"
             )
-        projection = canonical_projection(observation)
+        projection = require_projection(observation)
         prune()
         state = states.get(canonical_id(observation))
         if state is None or state[0]() is not observation:

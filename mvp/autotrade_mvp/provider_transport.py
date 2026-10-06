@@ -548,6 +548,22 @@ _BYBIT_OPTION_DELIVERY_QUERY_FIELDS = frozenset(
 _BYBIT_OPTION_DELIVERY_MONTHS = frozenset(
     {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"}
 )
+_BYBIT_OPTION_DELIVERY_MAX_DAY = MappingProxyType(
+    {
+        "JAN": 31,
+        "FEB": 29,
+        "MAR": 31,
+        "APR": 30,
+        "MAY": 31,
+        "JUN": 30,
+        "JUL": 31,
+        "AUG": 31,
+        "SEP": 30,
+        "OCT": 31,
+        "NOV": 30,
+        "DEC": 31,
+    }
+)
 _BYBIT_OPTION_DELIVERY_MAX_RANGE_MS = 30 * 24 * 60 * 60 * 1000
 
 
@@ -631,7 +647,11 @@ def _validate_bybit_option_delivery_query(
             )
         day = int(exp_date[:2], 10)
         month = exp_date[2:5]
-        if day < 1 or day > 31 or month not in _BYBIT_OPTION_DELIVERY_MONTHS:
+        if (
+            day < 1
+            or month not in _BYBIT_OPTION_DELIVERY_MONTHS
+            or day > _BYBIT_OPTION_DELIVERY_MAX_DAY[month]
+        ):
             raise ProviderTransportScopeError(
                 "Bybit option delivery expDate must use DDMMMYY"
             )

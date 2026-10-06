@@ -349,6 +349,64 @@ class BybitFeeCurrencyAuthorityTests(unittest.TestCase):
                         at=NOW,
                     )
 
+    def test_mutated_q_scalar_slots_are_rejected_before_digest_access(self):
+        mutations = (
+            ("required_case_policy_digest", object()),
+            ("result_set_digest", object()),
+            ("documentation_revision_digest", object()),
+            ("lineage_digest", object()),
+            ("provider_scope", object()),
+        )
+        for field, value in mutations:
+            with self.subTest(field=field):
+                _instrument, registry, capability, qualification, _authority = (
+                    issued_fixture()
+                )
+                identity = object.__getattribute__(qualification, "identity")
+                if field == "provider_scope":
+                    object.__setattr__(identity, field, value)
+                    message = "financial scope is non-canonical"
+                else:
+                    object.__setattr__(identity, field, value)
+                    message = "identity fields are non-canonical"
+                with self.assertRaisesRegex(
+                    BybitFeeCurrencyAuthorityError,
+                    message,
+                ):
+                    issue_bybit_execution_fee_currency_authority(
+                        qualification=qualification,
+                        capability=capability,
+                        instrument_registry=registry,
+                        venue_id="BYBIT",
+                        provider_symbol="ETHPERP",
+                        fee_currency="USDT",
+                        rule_id="BYBIT_EXECUTION_FEE_CURRENCY",
+                        rule_version="2026-10",
+                        rule_valid_from=RULE_FROM,
+                        rule_valid_until=RULE_UNTIL,
+                        at=NOW,
+                    )
+
+        _instrument, registry, capability, qualification, _authority = issued_fixture()
+        object.__setattr__(qualification, "required_cases", object())
+        with self.assertRaisesRegex(
+            BybitFeeCurrencyAuthorityError,
+            "required_cases are non-canonical",
+        ):
+            issue_bybit_execution_fee_currency_authority(
+                qualification=qualification,
+                capability=capability,
+                instrument_registry=registry,
+                venue_id="BYBIT",
+                provider_symbol="ETHPERP",
+                fee_currency="USDT",
+                rule_id="BYBIT_EXECUTION_FEE_CURRENCY",
+                rule_version="2026-10",
+                rule_valid_from=RULE_FROM,
+                rule_valid_until=RULE_UNTIL,
+                at=NOW,
+            )
+
     def test_q_identity_and_scope_are_exact_source_types_before_field_access(self):
         instrument, registry, capability, qualification, _authority = issued_fixture()
         callbacks = []

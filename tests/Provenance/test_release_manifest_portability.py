@@ -66,6 +66,23 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
                 )
             )
 
+    def test_manifest_records_source_bound_python_runtime_dependency(self):
+        document = json.loads(rendered_manifest())
+        self.assertEqual(
+            document["python_runtime_dependencies"],
+            [
+                {
+                    "name": "autotrade-exact-numeric",
+                    "source": "repository-root",
+                    "version": "0.0.1",
+                }
+            ],
+        )
+        self.assertEqual(
+            document["source_inventory"]["root_pyproject_blob_sha"],
+            git_blob_sha(ROOT / "pyproject.toml"),
+        )
+
     def test_manifest_binds_research_dependency_entrypoint(self):
         document = json.loads(rendered_manifest())
         self.assertEqual(
@@ -91,6 +108,13 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
         graph = {
             "python_development_dependencies": [
                 {"name": "attrs", "version": "26.1.0", "hashes": ["sha256:" + "1" * 64]}
+            ],
+            "python_runtime_dependencies": [
+                {
+                    "name": "autotrade-exact-numeric",
+                    "version": "0.0.1",
+                    "source": "repository-root",
+                }
             ],
             "dotnet_package_dependencies": [
                 {"name": "Example.Package", "version": "1.2.3"}
@@ -120,6 +144,7 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
             "reviewed_components": [
                 "nuget:Example.Package@1.2.3",
                 "python:attrs==26.1.0",
+                "python-runtime:autotrade-exact-numeric==0.0.1",
                 "source:owner/repo@" + "a" * 40,
             ],
             "blocking_findings": [],

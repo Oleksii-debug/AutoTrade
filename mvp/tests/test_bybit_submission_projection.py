@@ -305,6 +305,61 @@ class AuthenticatedBybitSubmissionProjectionTests(unittest.TestCase):
             self.assertEqual(events[-1]["payload"]["request"]["status"], "UNKNOWN")
             self.assertEqual(events[-1]["evidence_refs"], [])
 
+    def test_paper_ack_after_oms_restart_revalidates_and_stays_unknown(self):
+        with TemporaryDirectory() as directory:
+            store, artifacts, _book, prepared, attempt, client_order_id = self._sent(
+                directory,
+                {
+                    "retCode": 0,
+                    "retMsg": "OK",
+                    "result": {
+                        "orderId": "provider-restart-ack",
+                        "orderLinkId": "__CLIENT__",
+                    },
+                },
+                intent_id="provider-origin-restart-ack",
+            )
+
+            restarted = DurableOrderBookProjection(
+                JournalStore(f"{directory}/journal.sqlite3"),
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                host_id="host-restarted",
+                owner_epoch="2",
+                evidence_artifact_store=ArtifactStore(f"{directory}/artifacts"),
+            )
+            with self.assertRaisesRegex(
+                projection_module.BybitSubmissionProjectionError,
+                "requires sealed PROVIDER_ORIGIN authority",
+            ):
+                project_authenticated_bybit_submission(
+                    restarted,
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                )
+
+            snapshot = restarted.order(client_order_id).snapshot()
+            self.assertEqual(snapshot.state, "UNKNOWN")
+            self.assertIsNone(snapshot.provider_order_id)
+            self.assertEqual(snapshot.filled_quantity, 0)
+            submission_events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                next(
+                    event["aggregate_id"]
+                    for event in JournalStore.load_events_by_aggregate_type(
+                        store,
+                        "submission_attempt",
+                    )
+                    if event["payload"].get("attempt_id") == attempt
+                ),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in submission_events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
+            )
+
     def test_provider_specific_unknown_does_not_add_second_unknown_mutation(self):
         with TemporaryDirectory() as directory:
             store, _artifacts, book, prepared, attempt, _client_order_id = self._sent(

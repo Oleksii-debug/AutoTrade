@@ -1423,6 +1423,22 @@ class GuardedDispatcher:
             if name in initial_instance_state
         )
 
+        def restore_dispatcher_class_surface() -> None:
+            # A callback may mutate GuardedDispatcher after the send barrier.
+            # Restore the exact per-call class surface before any reconciliation
+            # read/write can dispatch through self._events/self._append again.
+            for base, members in dispatcher_class_surfaces:
+                expected_members = dict(members)
+                current_names = set(base.__dict__)
+                for name in current_names - set(expected_members):
+                    delattr(base, name)
+                for name, member in members:
+                    if (
+                        name not in base.__dict__
+                        or base.__dict__[name] is not member
+                    ):
+                        setattr(base, name, member)
+
         def require_dispatch_call_authority() -> None:
             (
                 authority_store,
@@ -1496,8 +1512,11 @@ class GuardedDispatcher:
                 return
 
             # Restore the exact invocation-selected authority before propagating
-            # the failure. Error handling must not continue through a store or
-            # scope that an external callback retargeted.
+            # the failure. Error handling must not continue through a store,
+            # scope, instance shadow or rebound class method that an external
+            # callback retargeted.
+            if not class_surface_is_unchanged:
+                restore_dispatcher_class_surface()
             self.store = authority_store
             self._journal_store_path = authority_path
             self._journal_store_identity = authority_identity

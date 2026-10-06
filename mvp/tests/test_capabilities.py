@@ -11,6 +11,8 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot as _derive_capability_snapshot,
 )
 
+from mvp.tests.capability_test_support import fresh_test_admission
+
 
 NOW = datetime(2026, 9, 24, 16, 0, tzinfo=timezone.utc)
 SNAPSHOT_1 = "11111111-1111-4111-8111-111111111111"
@@ -23,7 +25,7 @@ def _trusted_test_evidence(_claim: CapabilityClaim) -> EvidenceVerification:
 
 def derive_capability_snapshot(**kwargs):
     kwargs.setdefault("evidence_verifier", _trusted_test_evidence)
-    return _derive_capability_snapshot(**kwargs)
+    return fresh_test_admission(_derive_capability_snapshot(**kwargs))
 
 
 def claim(
@@ -37,13 +39,19 @@ def claim(
     observed_at=NOW - timedelta(minutes=1),
     expires_at=NOW + timedelta(minutes=10),
     instrument_version="instrument-v1",
+    provider_id="simulated",
+    account_id="paper-account",
+    entity_id="entity-1",
+    environment="PAPER",
+    provider_environment=None,
 ) -> CapabilityClaim:
     return CapabilityClaim(
         source=source,
-        provider_id="simulated",
-        account_id="paper-account",
-        entity_id="entity-1",
-        environment="PAPER",
+        provider_id=provider_id,
+        account_id=account_id,
+        entity_id=entity_id,
+        environment=environment,
+        provider_environment=provider_environment,
         instrument_version=instrument_version,
         observed_at=observed_at,
         expires_at=expires_at,
@@ -281,6 +289,50 @@ class CapabilityFoundationTests(unittest.TestCase):
                 observed_at=NOW,
             )
 
+    def test_bybit_claim_never_infers_testnet_or_demo_from_paper(self):
+        with self.assertRaisesRegex(CapabilityError, "explicit provider_environment"):
+            claim("API", provider_id="BYBIT")
+        with self.assertRaisesRegex(CapabilityError, "does not match runtime"):
+            claim("API", provider_id="BYBIT", environment="LIVE", provider_environment="TESTNET")
+
+    def test_mixed_provider_environments_are_distinct_claim_identities(self):
+        claims = list(complete_claims(provider_id="BYBIT", provider_environment="TESTNET"))
+        claims[-1] = claim("INSTRUMENT", provider_id="BYBIT", provider_environment="DEMO")
+        with self.assertRaisesRegex(CapabilityError, "different identities"):
+            derive_capability_snapshot(snapshot_id=SNAPSHOT_1, claims=claims, observed_at=NOW)
+
+    def test_bybit_testnet_and_demo_coexist_without_cross_resolution(self):
+        registry = CapabilityRegistry()
+        testnet = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(provider_id="BYBIT", provider_environment="TESTNET"),
+            observed_at=NOW,
+        )
+        demo = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_2,
+            claims=complete_claims(provider_id="BYBIT", provider_environment="DEMO"),
+            observed_at=NOW,
+        )
+        registry.add(testnet)
+        registry.add(demo)
+        common = dict(
+            provider_id="BYBIT", account_id="paper-account", entity_id="entity-1",
+            environment="PAPER", instrument_version="instrument-v1", at=NOW,
+        )
+        self.assertEqual(registry.require_verified(**common, provider_environment="TESTNET").snapshot_id, SNAPSHOT_1)
+        self.assertEqual(registry.require_verified(**common, provider_environment="DEMO").snapshot_id, SNAPSHOT_2)
+        with self.assertRaisesRegex(CapabilityError, "explicit provider_environment"):
+            registry.latest(**common)
+
+    def test_contract_projection_preserves_provider_environment(self):
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(provider_id="BYBIT", provider_environment="TESTNET"),
+            observed_at=NOW,
+        )
+        self.assertEqual(snapshot.provider_environment, "TESTNET")
+        self.assertEqual(snapshot.to_contract_dict()["provider_environment"], "TESTNET")
+
     def test_registry_uses_latest_snapshot_and_expiry(self):
         registry = CapabilityRegistry()
         first = derive_capability_snapshot(
@@ -510,6 +562,202 @@ class CapabilityFoundationTests(unittest.TestCase):
             replace(unverified, sources={"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT", "MODEL"})
         with self.assertRaisesRegex(CapabilityError, "must be a collection"):
             replace(unverified, permission_scopes="ORDER.WRITE")
+
+    def test_public_derivation_cannot_mint_fresh_admission_from_caller_verifier(self):
+        snapshot = _derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(),
+            observed_at=NOW,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
+        self.assertEqual(snapshot.status, "VERIFIED")
+        self.assertFalse(
+            snapshot.admits(
+                at=NOW,
+                order_type="LIMIT",
+                time_in_force="DAY",
+                permission_scope="ORDER.WRITE",
+            )
+        )
+        registry = CapabilityRegistry()
+        registry.add(snapshot)
+        with self.assertRaisesRegex(CapabilityError, "fresh admission"):
+            registry.require_verified(
+                provider_id="simulated",
+                account_id="paper-account",
+                entity_id="entity-1",
+                environment="PAPER",
+                instrument_version="instrument-v1",
+                at=NOW,
+            )
+
+    def test_registry_rejects_snapshot_subclass_authority(self):
+        class ForgedSnapshot(CapabilitySnapshot):
+            pass
+
+        canonical = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(),
+            observed_at=NOW,
+        )
+        forged = ForgedSnapshot(
+            snapshot_id=SNAPSHOT_2,
+            provider_id=canonical.provider_id,
+            account_id=canonical.account_id,
+            entity_id=canonical.entity_id,
+            environment=canonical.environment,
+            instrument_version=canonical.instrument_version,
+            observed_at=canonical.observed_at,
+            expires_at=canonical.expires_at,
+            supported_order_types=canonical.supported_order_types,
+            time_in_force=canonical.time_in_force,
+            permission_scopes=canonical.permission_scopes,
+            position_mode=canonical.position_mode,
+            native_protection=canonical.native_protection,
+            rate_limit_policy_id=canonical.rate_limit_policy_id,
+            data_entitlements=canonical.data_entitlements,
+            evidence=canonical.evidence,
+            status="UNKNOWN",
+            sources=canonical.sources,
+        )
+        registry = CapabilityRegistry()
+        with self.assertRaisesRegex(TypeError, "exact CapabilitySnapshot"):
+            registry.add(forged)
+
+    def test_claim_graph_is_detached_before_verifier_can_mutate_callers(self):
+        originals = list(complete_claims())
+        original_by_source = {item.source: item for item in originals}
+        verified_claims = []
+
+        def hostile_verifier(detached):
+            verified_claims.append(detached)
+            original = original_by_source[detached.source]
+            object.__setattr__(original, "provider_id", "mutated-provider")
+            object.__setattr__(
+                original,
+                "supported_order_types",
+                frozenset({"MARKET"}),
+            )
+            object.__setattr__(
+                original,
+                "permission_scopes",
+                frozenset({"ORDER.READ"}),
+            )
+            object.__setattr__(
+                original,
+                "expires_at",
+                NOW - timedelta(seconds=1),
+            )
+            object.__setattr__(
+                original,
+                "evidence_ref",
+                {
+                    "artifact_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    "sha256": "sha256:" + "f" * 64,
+                    "observed_at": "2026-09-24T15:59:00Z",
+                },
+            )
+            return EvidenceVerification(valid=True)
+
+        snapshot = _derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=tuple(originals),
+            observed_at=NOW,
+            evidence_verifier=hostile_verifier,
+        )
+
+        self.assertEqual(snapshot.status, "VERIFIED")
+        self.assertEqual(snapshot.provider_id, "simulated")
+        self.assertEqual(
+            snapshot.supported_order_types,
+            frozenset({"LIMIT", "MARKET"}),
+        )
+        self.assertIn("ORDER.WRITE", snapshot.permission_scopes)
+        self.assertEqual(snapshot.expires_at, NOW + timedelta(minutes=10))
+        self.assertEqual(
+            {item["sha256"] for item in snapshot.evidence},
+            {"sha256:" + "a" * 64},
+        )
+        self.assertEqual(len(verified_claims), 4)
+        self.assertTrue(
+            all(
+                detached is not original_by_source[detached.source]
+                for detached in verified_claims
+            )
+        )
+
+    def test_verifier_cannot_mutate_detached_snapshot_material(self):
+        originals = tuple(complete_claims())
+
+        def hostile_verifier(item):
+            object.__setattr__(item, "provider_id", "mutated-provider")
+            object.__setattr__(item, "supported_order_types", frozenset({"MARKET"}))
+            object.__setattr__(item, "permission_scopes", frozenset({"ORDER.READ"}))
+            object.__setattr__(item, "expires_at", NOW - timedelta(seconds=1))
+            return EvidenceVerification(valid=True)
+
+        snapshot = _derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=originals,
+            observed_at=NOW,
+            evidence_verifier=hostile_verifier,
+        )
+
+        self.assertEqual(snapshot.status, "VERIFIED")
+        self.assertEqual(snapshot.provider_id, "simulated")
+        self.assertEqual(snapshot.supported_order_types, frozenset({"LIMIT", "MARKET"}))
+        self.assertIn("ORDER.WRITE", snapshot.permission_scopes)
+        self.assertEqual(snapshot.expires_at, NOW + timedelta(minutes=10))
+
+    def test_evidence_verification_subclass_is_not_authority(self):
+        class ForgedVerification(EvidenceVerification):
+            pass
+
+        with self.assertRaisesRegex(TypeError, "exact EvidenceVerification"):
+            _derive_capability_snapshot(
+                snapshot_id=SNAPSHOT_1,
+                claims=complete_claims(),
+                observed_at=NOW,
+                evidence_verifier=lambda _claim: ForgedVerification(valid=True),
+            )
+
+    def test_capability_claim_subclass_is_rejected_before_verifier(self):
+        class ForgedClaim(CapabilityClaim):
+            pass
+
+        base = claim("DOCUMENTED")
+        forged = ForgedClaim(
+            source=base.source,
+            provider_id=base.provider_id,
+            account_id=base.account_id,
+            entity_id=base.entity_id,
+            environment=base.environment,
+            instrument_version=base.instrument_version,
+            observed_at=base.observed_at,
+            expires_at=base.expires_at,
+            supported_order_types=base.supported_order_types,
+            time_in_force=base.time_in_force,
+            permission_scopes=base.permission_scopes,
+            position_mode=base.position_mode,
+            native_protection=base.native_protection,
+            rate_limit_policy_id=base.rate_limit_policy_id,
+            data_entitlements=base.data_entitlements,
+            evidence_ref=base.evidence_ref,
+        )
+        calls = []
+
+        def verifier(item):
+            calls.append(item)
+            return EvidenceVerification(valid=True)
+
+        with self.assertRaisesRegex(TypeError, "exact CapabilityClaim"):
+            _derive_capability_snapshot(
+                snapshot_id=SNAPSHOT_1,
+                claims=(forged,),
+                observed_at=NOW,
+                evidence_verifier=verifier,
+            )
+        self.assertEqual(calls, [])
 
     def test_old_evidence_cannot_be_relabelled_as_fresh_claim(self):
         original = claim(

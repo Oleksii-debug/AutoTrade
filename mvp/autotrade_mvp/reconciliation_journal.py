@@ -14,7 +14,13 @@ from uuid import NAMESPACE_URL, uuid5
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .dispatch import submission_attempt_aggregate_id
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .reconciliation import (
     ReconciliationResult,
     UnknownSubmission,
@@ -25,11 +31,63 @@ from .securities_borrow import (
     verify_provider_borrow_evidence,
 )
 
+def _install_journal_store_call():
+    """Freeze reconciliation journal dispatch to canonical store operations."""
+
+    store_type = JournalStore
+    canonical_require = require_exact_journal_store_authority
+    canonical_scope = journal_store_authority_scope
+    canonical_getattr = getattr
+    operations = {
+        "append_event": store_type.append_event,
+        "current_journal_sequence": store_type.current_journal_sequence,
+        "get_event": store_type.get_event,
+        "load_events": store_type.load_events,
+        "load_events_by_aggregate_type": store_type.load_events_by_aggregate_type,
+        "next_aggregate_version": store_type.next_aggregate_version,
+    }
+
+    def call(
+        store: JournalStore,
+        operation_name: str,
+        /,
+        *args,
+        **kwargs,
+    ):
+        if (
+            JournalStore is not store_type
+            or require_exact_journal_store_authority is not canonical_require
+            or journal_store_authority_scope is not canonical_scope
+        ):
+            raise RuntimeError("reconciliation journal authority changed")
+        if type(operation_name) is not str or operation_name not in operations:
+            raise TypeError("unsupported reconciliation journal operation")
+        operation = operations[operation_name]
+        if canonical_getattr(store_type, operation_name, None) is not operation:
+            raise RuntimeError(
+                f"reconciliation journal operation changed: {operation_name}"
+            )
+        identity = canonical_require(
+            store,
+            subject="reconciliation JournalStore",
+        )
+        with canonical_scope(store, identity):
+            return operation(store, *args, **kwargs)
+
+    return call
+
+
+_journal_store_call = _install_journal_store_call()
+del _install_journal_store_call
+
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
         raise ValueError(f"{name} is required")
-    return value.strip()
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{name} is required")
+    return normalized
 
 
 def _instant(value: str, *, name: str) -> str:
@@ -52,12 +110,25 @@ def _scope(
     provider_id: str,
     account_id: str,
     environment: str,
-) -> tuple[str, str, str]:
-    return (
-        _text(provider_id, name="provider_id").upper(),
-        _text(account_id, name="account_id"),
-        _text(environment, name="environment").upper(),
+    provider_environment: str | None = None,
+) -> tuple[str, str, str, str]:
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    runtime = _text(environment, name="environment").upper()
+    if provider == "BYBIT" and provider_environment is None:
+        raise ValueError("BYBIT reconciliation requires explicit provider_environment")
+    provider_scope = (
+        runtime
+        if provider_environment is None
+        else _text(provider_environment, name="provider_environment").upper()
     )
+    if provider == "BYBIT":
+        if provider_scope not in {"MAINNET", "TESTNET", "DEMO"}:
+            raise ValueError("BYBIT provider_environment must be MAINNET, TESTNET or DEMO")
+        expected = "LIVE" if provider_scope == "MAINNET" else "PAPER"
+        if runtime != expected:
+            raise ValueError("BYBIT provider_environment does not match runtime environment")
+    return provider, account, runtime, provider_scope
 
 
 def _reconciliation_aggregate_id(
@@ -66,14 +137,20 @@ def _reconciliation_aggregate_id(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> str:
     rid = _text(reconciliation_id, name="reconciliation_id")
-    provider, account, scope = _scope(
+    provider, account, scope, provider_scope = _scope(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
-    scoped_identity = canonical_json([provider, account, scope, rid])
+    parts = [provider, account, scope]
+    if provider_scope != scope:
+        parts.append(provider_scope)
+    parts.append(rid)
+    scoped_identity = canonical_json(parts)
     return "account-reconciliation:" + str(
         uuid5(
             NAMESPACE_URL,
@@ -89,19 +166,22 @@ def _require_checkpoint_scope(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> Mapping[str, Any]:
     payload = checkpoint.get("payload")
     if not isinstance(payload, Mapping):
         raise ValueError("checkpoint payload is required")
-    provider, account, scope = _scope(
+    provider, account, scope, provider_scope = _scope(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     if (
         payload.get("provider_id") != provider
         or payload.get("account_id") != account
         or payload.get("environment") != scope
+        or payload.get("provider_environment", scope) != provider_scope
     ):
         raise ValueError("checkpoint reconciliation scope mismatch")
     return payload
@@ -119,6 +199,41 @@ def _checkpoint_owner(
     )
 
 
+def _require_negative_resolution_authority(
+    payload: Mapping[str, Any],
+) -> None:
+    """Reject durable real-provider absence verdicts without accepted Q authority.
+
+    Reconciliation coverage objects remain useful diagnostic state, but their
+    caller-authored booleans are not financial authority. Until WP-20 has an
+    immutable provider-Q coverage proof bound to exact source semantics, a real
+    PAPER/LIVE provider cannot durably publish or re-consume PROVEN_ABSENT.
+
+    The exact SIMULATED provider is retained only for the existing PAPER
+    vertical-slice/test path. LIVE never receives that exception.
+    """
+
+    provider = _text(payload.get("provider_id"), name="provider_id").upper()
+    environment = _text(payload.get("environment"), name="environment").upper()
+    if environment not in {"PAPER", "LIVE"}:
+        return
+    if environment == "PAPER" and provider == "SIMULATED":
+        return
+
+    resolutions = payload.get("submission_resolutions")
+    if not isinstance(resolutions, list):
+        raise ValueError("checkpoint submission_resolutions must be a list")
+    for item in resolutions:
+        if not isinstance(item, Mapping):
+            raise ValueError("submission resolution must be an object")
+        outcome = _text(item.get("outcome"), name="outcome").upper()
+        if outcome == "PROVEN_ABSENT":
+            raise ValueError(
+                "PAPER/LIVE real-provider PROVEN_ABSENT requires accepted "
+                "provider coverage authority"
+            )
+
+
 def reconciliation_payload(
     result: ReconciliationResult,
     *,
@@ -128,6 +243,17 @@ def reconciliation_payload(
         raise TypeError("result must be ReconciliationResult")
     timestamp = _instant(observed_at, name="observed_at")
 
+    availability = result.resource_availability
+    if availability is not None and (
+        availability.provider_id != result.provider_id
+        or availability.account_id != result.account_id
+        or availability.environment != result.environment
+        or availability.provider_environment != result.provider_environment
+    ):
+        raise ValueError(
+            "resource availability scope must match reconciliation result"
+        )
+
     unexpected_fill_bindings: list[dict[str, Any]] = []
     unexpected_fill_ids: list[str] = []
     for fill in result.unexpected_provider_fills:
@@ -136,6 +262,7 @@ def reconciliation_payload(
             identity["provider_id"] != result.provider_id
             or identity["account_id"] != result.account_id
             or identity["environment"] != result.environment
+            or identity["provider_environment"] != result.provider_environment
         ):
             raise ValueError(
                 "unexpected provider fill identity scope must match reconciliation result"
@@ -166,6 +293,7 @@ def reconciliation_payload(
         "provider_id": result.provider_id,
         "account_id": result.account_id,
         "environment": result.environment,
+        "provider_environment": result.provider_environment,
         "observed_at": timestamp,
         "complete": result.complete,
         "snapshot_consistent": result.snapshot_consistent,
@@ -198,6 +326,13 @@ def reconciliation_payload(
         "borrow_differences": _decimal_map(
             result.borrow_differences or {}
         ),
+        "settlement_reconciliation_performed": (
+            result.settlement_reconciliation_performed
+        ),
+        "settlement_differences": _decimal_map(
+            result.settlement_differences or {}
+        ),
+        "settlement_activity_complete": result.settlement_activity_complete,
         "submission_resolutions": [
             {
                 "attempt_id": item.attempt_id,
@@ -230,6 +365,7 @@ def reconciliation_payload(
                 "provider_id": result.resource_availability.provider_id,
                 "account_id": result.resource_availability.account_id,
                 "environment": result.resource_availability.environment,
+                "provider_environment": result.resource_availability.provider_environment,
                 "snapshot_id": result.resource_availability.snapshot_id,
                 "query_started_at": result.resource_availability.query_started_at,
                 "query_completed_at": result.resource_availability.query_completed_at,
@@ -295,8 +431,12 @@ def record_reconciliation_checkpoint(
 ) -> dict[str, Any]:
     """Persist one exact reconciliation outcome, idempotently for retries."""
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
+    require_exact_journal_store_authority(
+        store,
+        subject="reconciliation JournalStore",
+    )
+    if type(result) is not ReconciliationResult:
+        raise TypeError("result must be exact ReconciliationResult")
     _verify_borrow_checkpoint_evidence(result, evidence_artifact_store)
     rid = _text(reconciliation_id, name="reconciliation_id")
     host = _text(host_id, name="host_id")
@@ -306,17 +446,19 @@ def record_reconciliation_checkpoint(
         "host_id": host,
         "owner_epoch": epoch,
     }
+    _require_negative_resolution_authority(payload)
     aggregate_id = _reconciliation_aggregate_id(
         reconciliation_id=rid,
         provider_id=result.provider_id,
         account_id=result.account_id,
         environment=result.environment,
+        provider_environment=result.provider_environment,
     )
-    existing = store.load_events("account_reconciliation", aggregate_id)
+    existing = _journal_store_call(store, "load_events", "account_reconciliation", aggregate_id)
     if existing and existing[-1]["payload"] == payload:
         return existing[-1]
 
-    version = store.next_aggregate_version(
+    version = _journal_store_call(store, "next_aggregate_version", 
         "account_reconciliation", aggregate_id
     )
     event_id = str(
@@ -345,13 +487,13 @@ def record_reconciliation_checkpoint(
         "payload_hash": payload_digest(payload),
         "evidence_refs": [],
     }
-    store.append_event(
+    _journal_store_call(store, "append_event", 
         envelope,
         outbox_topic="autotrade.reconciliation.events",
         expected_journal_sequence=expected_journal_sequence,
         expected_whole_store_counts=expected_whole_store_counts,
     )
-    event = store.get_event(event_id)
+    event = _journal_store_call(store, "get_event", event_id)
     if event is None:
         raise RuntimeError("reconciliation checkpoint was not persisted")
     return event
@@ -364,26 +506,32 @@ def load_latest_reconciliation_checkpoint(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> dict[str, Any] | None:
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
+    require_exact_journal_store_authority(
+        store,
+        subject="reconciliation JournalStore",
+    )
     rid = _text(reconciliation_id, name="reconciliation_id")
     aggregate_id = _reconciliation_aggregate_id(
         reconciliation_id=rid,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
-    events = store.load_events("account_reconciliation", aggregate_id)
+    events = _journal_store_call(store, "load_events", "account_reconciliation", aggregate_id)
     if not events:
         return None
     event = events[-1]
-    _require_checkpoint_scope(
+    payload = _require_checkpoint_scope(
         event,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
+    _require_negative_resolution_authority(payload)
     return event
 
 
@@ -393,6 +541,7 @@ def load_latest_reconciliation_checkpoint_for_scope(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest durably recorded reconciliation fact for one scope.
 
@@ -405,16 +554,19 @@ def load_latest_reconciliation_checkpoint_for_scope(
     greatest matching sequence is the canonical scope head.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
-    provider, account, scope = _scope(
+    require_exact_journal_store_authority(
+        store,
+        subject="reconciliation JournalStore",
+    )
+    provider, account, scope, provider_scope = _scope(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     latest: dict[str, Any] | None = None
     latest_sequence = 0
-    for event in store.load_events_by_aggregate_type("account_reconciliation"):
+    for event in _journal_store_call(store, "load_events_by_aggregate_type", "account_reconciliation"):
         if event.get("event_type") != "AccountReconciled":
             continue
         payload = event.get("payload")
@@ -424,8 +576,10 @@ def load_latest_reconciliation_checkpoint_for_scope(
             payload.get("provider_id") != provider
             or payload.get("account_id") != account
             or payload.get("environment") != scope
+            or payload.get("provider_environment", scope) != provider_scope
         ):
             continue
+        _require_negative_resolution_authority(payload)
         aggregate_version = event.get("aggregate_version")
         if type(aggregate_version) is not int or aggregate_version <= 0:
             raise ValueError(
@@ -457,6 +611,7 @@ def require_current_reconciliation_checkpoint(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> dict[str, Any]:
     """Fail closed unless an exact checkpoint is current scope-wide truth."""
 
@@ -466,6 +621,7 @@ def require_current_reconciliation_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     if latest is None:
         raise ValueError("no reconciliation checkpoint exists for account scope")
@@ -483,6 +639,7 @@ def load_reconciliation_checkpoint_for_readiness(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
     host_id: str,
     owner_epoch: str,
 ) -> dict[str, Any] | None:
@@ -499,6 +656,7 @@ def load_reconciliation_checkpoint_for_readiness(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     if checkpoint is None:
         return None
@@ -507,12 +665,14 @@ def load_reconciliation_checkpoint_for_readiness(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     latest_scope_checkpoint = load_latest_reconciliation_checkpoint_for_scope(
         store,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     if (
         latest_scope_checkpoint is None
@@ -537,6 +697,7 @@ def load_submission_resolution_evidence(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
     attempt_id: str,
     intent_id: str,
     client_order_id: str,
@@ -549,14 +710,16 @@ def load_submission_resolution_evidence(
     reconciliation-complete booleans are intentionally not accepted as inputs.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
+    require_exact_journal_store_authority(
+        store,
+        subject="reconciliation JournalStore",
+    )
     event_id = _text(checkpoint_event_id, name="checkpoint_event_id")
     expected_attempt = _text(attempt_id, name="attempt_id")
     expected_intent = _text(intent_id, name="intent_id")
     expected_client = _text(client_order_id, name="client_order_id")
 
-    checkpoint = store.get_event(event_id)
+    checkpoint = _journal_store_call(store, "get_event", event_id)
     if checkpoint is None:
         raise KeyError(f"Unknown reconciliation checkpoint event: {event_id}")
     if checkpoint.get("event_type") != "AccountReconciled":
@@ -569,7 +732,9 @@ def load_submission_resolution_evidence(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
+    _require_negative_resolution_authority(payload)
     resolutions = payload.get("submission_resolutions")
     if not isinstance(resolutions, list):
         raise ValueError("checkpoint submission_resolutions must be a list")
@@ -644,6 +809,10 @@ def load_submission_resolution_evidence(
         "provider_id": _text(payload.get("provider_id"), name="provider_id").upper(),
         "account_id": _text(payload.get("account_id"), name="account_id"),
         "environment": _text(payload.get("environment"), name="environment").upper(),
+        "provider_environment": _text(
+            payload.get("provider_environment", payload.get("environment")),
+            name="provider_environment",
+        ).upper(),
         "attempt_id": expected_attempt,
         "intent_id": item_intent,
         "client_order_id": item_client,
@@ -662,6 +831,7 @@ def load_account_resource_availability_evidence(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
     resources: Iterable[str],
     now: str,
     max_age_seconds: Decimal | str | int,
@@ -677,13 +847,15 @@ def load_account_resource_availability_evidence(
     Caller-supplied numeric availability is never authority.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
+    require_exact_journal_store_authority(
+        store,
+        subject="reconciliation JournalStore",
+    )
     if not isinstance(require_latest_scope, bool):
         raise TypeError("require_latest_scope must be boolean")
     if journal_sequence_cut is not None:
         if (type(journal_sequence_cut) is not int or journal_sequence_cut < 0
-                or journal_sequence_cut > store.current_journal_sequence()):
+                or journal_sequence_cut > _journal_store_call(store, "current_journal_sequence")):
             raise ValueError("historical availability journal cut is invalid")
         if require_latest_scope:
             raise ValueError("current availability cannot use a historical journal cut")
@@ -696,8 +868,9 @@ def load_account_resource_availability_evidence(
             provider_id=provider_id,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         )
-    checkpoint = store.get_event(event_id)
+    checkpoint = _journal_store_call(store, "get_event", event_id)
     if checkpoint is None:
         raise KeyError(f"Unknown reconciliation checkpoint event: {event_id}")
     if (journal_sequence_cut is not None
@@ -715,7 +888,9 @@ def load_account_resource_availability_evidence(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
+    _require_negative_resolution_authority(payload)
     if (
         payload.get("complete") is not True
         or payload.get("snapshot_consistent") is not True
@@ -774,15 +949,17 @@ def load_account_resource_availability_evidence(
         raise ValueError(
             "availability checkpoint lacks explicit provider resource availability"
         )
-    provider, account, scope = _scope(
+    provider, account, scope, provider_scope = _scope(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     if (
         resource_evidence.get("provider_id") != provider
         or resource_evidence.get("account_id") != account
         or resource_evidence.get("environment") != scope
+        or resource_evidence.get("provider_environment", scope) != provider_scope
     ):
         raise ValueError("resource availability evidence scope mismatch")
 
@@ -868,7 +1045,7 @@ def load_account_resource_availability_evidence(
         resource_started = datetime.fromisoformat(
             resource_started_text.replace("Z", "+00:00")
         )
-        for settlement_event in store.load_events_by_aggregate_type(
+        for settlement_event in _journal_store_call(store, "load_events_by_aggregate_type", 
             "settlement_book"
         ):
             settlement_sequence = settlement_event.get("journal_sequence")
@@ -890,6 +1067,15 @@ def load_account_resource_availability_evidence(
                 or settlement_scope.get("environment") != scope
             ):
                 continue
+            settlement_provider_environment = settlement_scope.get("provider_environment")
+            if settlement_provider_environment is None:
+                if provider == "BYBIT":
+                    raise ValueError(
+                        "BYBIT settlement financial truth lacks provider_environment"
+                    )
+                settlement_provider_environment = settlement_scope.get("environment")
+            if settlement_provider_environment != provider_scope:
+                continue
             if settlement_sequence >= checkpoint_sequence:
                 raise ValueError(
                     "availability checkpoint predates settlement financial truth"
@@ -910,7 +1096,7 @@ def load_account_resource_availability_evidence(
         # provider cash snapshot taken before the lifecycle fact must not authorize
         # fresh capital reuse.  Reuse this single availability authority rather
         # than teaching reservation or option accounting a second freshness rule.
-        for lifecycle_event in store.load_events_by_aggregate_type(
+        for lifecycle_event in _journal_store_call(store, "load_events_by_aggregate_type", 
             "option_lifecycle"
         ):
             lifecycle_sequence = lifecycle_event.get("journal_sequence")
@@ -928,6 +1114,17 @@ def load_account_resource_availability_evidence(
                 or lifecycle_payload.get("account_id") != account
                 or lifecycle_payload.get("environment") != scope
             ):
+                continue
+            lifecycle_provider_environment = lifecycle_payload.get(
+                "provider_environment"
+            )
+            if lifecycle_provider_environment is None:
+                if provider == "BYBIT":
+                    raise ValueError(
+                        "BYBIT option lifecycle financial truth lacks provider_environment"
+                    )
+                lifecycle_provider_environment = lifecycle_payload.get("environment")
+            if lifecycle_provider_environment != provider_scope:
                 continue
             if lifecycle_sequence >= checkpoint_sequence:
                 raise ValueError(
@@ -1046,6 +1243,10 @@ def load_account_resource_availability_evidence(
         "provider_id": _text(payload.get("provider_id"), name="provider_id").upper(),
         "account_id": _text(payload.get("account_id"), name="account_id"),
         "environment": _text(payload.get("environment"), name="environment").upper(),
+        "provider_environment": _text(
+            payload.get("provider_environment", payload.get("environment")),
+            name="provider_environment",
+        ).upper(),
         "snapshot_mode": _text(snapshot.get("mode"), name="snapshot.mode").upper(),
         "snapshot_query_completed_at": completed_text,
         "resource_snapshot_id": _text(
@@ -1098,12 +1299,14 @@ def load_account_resource_availability_evidence(
         )
     return evidence
 
+
 def unresolved_attempt_ids_from_checkpoint(
     checkpoint: Mapping[str, Any] | None,
     *,
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> tuple[str, ...]:
     if checkpoint is None:
         return ()
@@ -1112,7 +1315,9 @@ def unresolved_attempt_ids_from_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
+    _require_negative_resolution_authority(payload)
     resolutions = payload.get("submission_resolutions")
     if not isinstance(resolutions, list):
         raise ValueError("checkpoint submission_resolutions must be a list")
@@ -1133,6 +1338,7 @@ def unresolved_provider_activity_ids_from_checkpoint(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> tuple[str, ...]:
     if checkpoint is None:
         return ()
@@ -1141,7 +1347,9 @@ def unresolved_provider_activity_ids_from_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
+    _require_negative_resolution_authority(payload)
     unexpected = payload.get("unexpected_provider_activity_ids", [])
     missing = payload.get("missing_local_provider_activity_ids", [])
     for values, name in (
@@ -1174,8 +1382,10 @@ def unknown_submissions_from_dispatch(
     used by a scoped dispatcher, without duplicating dispatch identity logic.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
+    require_exact_journal_store_authority(
+        store,
+        subject="reconciliation JournalStore",
+    )
     normalized = tuple(_text(value, name="attempt_id") for value in attempt_ids)
     if len(normalized) != len(set(normalized)):
         raise ValueError("attempt_ids must be unique")
@@ -1215,7 +1425,7 @@ def unknown_submissions_from_dispatch(
     recovered: list[UnknownSubmission] = []
     for attempt_id in normalized:
         aggregate_id = durable_ids.get(attempt_id, attempt_id)
-        events = store.load_events("submission_attempt", aggregate_id)
+        events = _journal_store_call(store, "load_events", "submission_attempt", aggregate_id)
         if not events:
             raise KeyError(f"Unknown submission attempt: {attempt_id}")
         first = events[0]

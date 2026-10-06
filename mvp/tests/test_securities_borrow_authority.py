@@ -1,5 +1,5 @@
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -332,6 +332,46 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
             Decimal("0"),
         )
 
+    def test_incremental_short_borrow_is_independent_of_ambient_decimal_context(self):
+        cases = (
+            (6, ROUND_FLOOR),
+            (10, ROUND_CEILING),
+            (28, ROUND_HALF_EVEN),
+            (80, ROUND_CEILING),
+        )
+        expected = Decimal("0.000000000000000000000000000001")
+        for precision, rounding in cases:
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    self.assertEqual(
+                        incremental_short_borrow_quantity(
+                            side="SELL",
+                            quantity="0.000000000000000000000000000001",
+                            current_position="-1000000000000000000000000000000",
+                            reserved_position_delta="0",
+                        ),
+                        expected,
+                    )
+
+    def test_borrow_numeric_ingress_rejects_unbounded_or_polymorphic_values(self):
+        class DecimalSubclass(Decimal):
+            pass
+
+        with self.assertRaises(TypeError):
+            incremental_short_borrow_quantity(
+                side="SELL",
+                quantity=DecimalSubclass("1"),
+                current_position="0",
+            )
+        with self.assertRaises(ValueError):
+            incremental_short_borrow_quantity(
+                side="SELL",
+                quantity="1E+100000000",
+                current_position="0",
+            )
+
     def test_capacity_100_existing_40_reserved_30_allows_20_then_rejects_next_20(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
@@ -518,6 +558,13 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
             self.assertEqual(
                 authority.dispatch_allowed(
                     **dispatch_args,
+                    now="2026-09-25T05:01:15Z",
+                ),
+                (True, "allowed"),
+            )
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    **dispatch_args,
                     now="2026-09-25T05:01:30Z",
                 ),
                 (False, "borrow_recall_active"),
@@ -537,6 +584,20 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                     effective_at="2026-09-25T05:01:40Z",
                     evidence_ref="provider:dispatch-recall-r2",
                 )
+            )
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    **dispatch_args,
+                    now="2026-09-25T05:01:42Z",
+                ),
+                (False, "borrow_recall_active"),
+            )
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    **dispatch_args,
+                    now="2026-09-25T05:01:50Z",
+                ),
+                (True, "allowed"),
             )
             reloaded_projection = DurableBorrowRecallProjection(
                 store,

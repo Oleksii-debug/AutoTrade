@@ -58,13 +58,16 @@ class PerpetualFundingConflict(PerpetualFundingError):
 
 
 def _text(value: str, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
+        raise PerpetualFundingError(f"{name} must use exact text")
+    normalized = value.strip()
+    if not normalized:
         raise PerpetualFundingError(f"{name} is required")
-    return value.strip()
+    return normalized
 
 
 def _decimal(value: Decimal | str | int, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
+    if type(value) not in {Decimal, str, int}:
         raise PerpetualFundingError(f"{name} must use exact decimal input")
     try:
         result = parse_bounded_exact_decimal(value)
@@ -74,8 +77,10 @@ def _decimal(value: Decimal | str | int, name: str) -> Decimal:
 
 
 def _utc(value: datetime, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
-        raise PerpetualFundingError(f"{name} must be timezone-aware")
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise PerpetualFundingError(
+            f"{name} must use an exact datetime with stdlib timezone"
+        )
     return value.astimezone(timezone.utc)
 
 
@@ -190,8 +195,8 @@ class PerpetualFundingObservation:
 def canonical_perpetual_funding_observation(
     observation: PerpetualFundingObservation,
 ) -> dict[str, object]:
-    if not isinstance(observation, PerpetualFundingObservation):
-        raise TypeError("observation must be PerpetualFundingObservation")
+    if type(observation) is not PerpetualFundingObservation:
+        raise TypeError("observation must be exact PerpetualFundingObservation")
     return {
         "schema_version": "1.0.0",
         "provider_id": observation.provider_id,

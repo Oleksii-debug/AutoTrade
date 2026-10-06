@@ -36,7 +36,8 @@ internal static class Program
         string version = "0",
         string hostFreshness = "CURRENT",
         string? freshnessAsOf = null,
-        string? eventCursor = null)
+        string? eventCursor = null,
+        string hostId = "host-local-1")
     {
         string serverTime = NowUtc();
         return new
@@ -44,7 +45,7 @@ internal static class Program
             state_version = version,
             event_cursor = eventCursor ?? version,
             server_time = serverTime,
-            host_id = "host-local-1",
+            host_id = hostId,
             account_id = "paper-account-1",
             environment = "PAPER",
             permission_summary = new
@@ -80,6 +81,206 @@ internal static class Program
             "request actor header is missing or changed");
     }
     
+    static void WebExperienceSecurityPolicyOriginAndNavigationTest()
+    {
+        WebExperienceSecurityPolicy policy = new(HostOrigin);
+
+        Check.True(
+            policy.HostOrigin == HostOrigin,
+            "embedded web policy changed the canonical paired host origin");
+        Check.True(
+            policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/")),
+            "canonical host root was not admitted");
+        Check.True(
+            policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/index.html")),
+            "canonical index document was not admitted");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/app/index.html")),
+            "arbitrary same-origin document entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/api/v1/state")),
+            "Host API JSON was admitted as a trusted top-level document");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/index.html?mode=debug")),
+            "query-selected UI document entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/index.html#debug")),
+            "fragment-selected UI document entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8766/app/")),
+            "cross-port navigation entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("https://127.0.0.1:8765/app/")),
+            "cross-scheme navigation entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("https://example.com/")),
+            "external HTTPS navigation entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("file:///C:/AutoTrade/index.html")),
+            "file navigation entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("data:text/html,untrusted")),
+            "data URI navigation entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://user@127.0.0.1:8765/app/")),
+            "userinfo-bearing URI entered the trusted embedded surface");
+
+        Check.Throws<ArgumentException>(
+            () => _ = new WebExperienceSecurityPolicy(new Uri("http://example.com/")),
+            "non-loopback plaintext host origin was accepted");
+        Check.Throws<ArgumentException>(
+            () => _ = new WebExperienceSecurityPolicy(new Uri("http://127.0.0.1:8765/path")),
+            "host origin with a path was accepted");
+    }
+
+    static void WebExperienceSecurityPolicyCredentialForwardingTest()
+    {
+        WebExperienceSecurityPolicy policy = new(HostOrigin);
+
+        Uri trustedDocument = new(HostOrigin, "/index.html");
+        foreach ((string Method, string Path) request in new[]
+        {
+            ("GET", "/api/v1/state"),
+            ("POST", "/api/v1/commands"),
+            ("GET", "/api/v1/events"),
+            ("GET", "/api/v1/events?after=7"),
+            ("GET", "/api/v1/operations/11111111-1111-1111-1111-111111111111"),
+        })
+        {
+            Check.True(
+                policy.AllowsSessionHeaderForwarding(
+                    request.Method,
+                    new Uri(HostOrigin, request.Path),
+                    trustedDocument),
+                "canonical Host API request lost session-header eligibility: "
+                    + request.Method + " " + request.Path);
+        }
+
+        foreach ((string Method, string Path) request in new[]
+        {
+            ("POST", "/api/v1/state"),
+            ("GET", "/api/v1/commands"),
+            ("POST", "/api/v1/events"),
+            ("POST", "/api/v1/events?after=7"),
+            ("POST", "/api/v1/operations/11111111-1111-1111-1111-111111111111"),
+            ("get", "/api/v1/state"),
+            ("", "/api/v1/state"),
+        })
+        {
+            Check.True(
+                !policy.AllowsSessionHeaderForwarding(
+                    request.Method,
+                    new Uri(HostOrigin, request.Path),
+                    trustedDocument),
+                "noncanonical HTTP method gained session-header forwarding authority: "
+                    + request.Method + " " + request.Path);
+        }
+
+        foreach (Uri target in new[]
+        {
+            new Uri(HostOrigin, "/"),
+            new Uri(HostOrigin, "/index.html"),
+            new Uri(HostOrigin, "/api/v1"),
+            new Uri(HostOrigin, "/api/v1/health"),
+            new Uri(HostOrigin, "/api/v1/future"),
+            new Uri(HostOrigin, "/api/v1/operations/not-a-uuid"),
+            new Uri(HostOrigin, "/api/v1/operations/11111111-1111-1111-1111-111111111111/extra"),
+            new Uri(HostOrigin, "/api/v1/operations/11111111-1111-1111-1111-11111111111A"),
+            new Uri(HostOrigin, "/api/v1/state?unexpected=1"),
+            new Uri(HostOrigin, "/api/v1/commands?unexpected=1"),
+            new Uri(HostOrigin, "/api/v1/operations/11111111-1111-1111-1111-111111111111?unexpected=1"),
+            new Uri(HostOrigin, "/api/v1/events?unexpected=1"),
+            new Uri(HostOrigin, "/api/v1/events?after="),
+            new Uri(HostOrigin, "/api/v1/events?after=01"),
+            new Uri(HostOrigin, "/api/v1/events?after=1&other=2"),
+            new Uri(HostOrigin, "/api/v10/state"),
+            new Uri(HostOrigin, "/api/v1evil/state"),
+            new Uri(HostOrigin, "/api/v1/state#debug"),
+            new Uri("http://127.0.0.1:8766/api/v1/state"),
+            new Uri("https://example.com/api/v1/state"),
+        })
+        {
+            Check.True(
+                !policy.AllowsSessionHeaderForwarding("GET", target, trustedDocument),
+                "credential forwarding escaped canonical Host API origin/path: " + target);
+        }
+
+        foreach (Uri untrustedDocument in new[]
+        {
+            new Uri(HostOrigin, "/app.js"),
+            new Uri(HostOrigin, "/api/v1/state"),
+            new Uri("http://127.0.0.1:8766/index.html"),
+            new Uri(HostOrigin, "/index.html?debug=1"),
+            new Uri(HostOrigin, "/index.html#debug"),
+        })
+        {
+            Check.True(
+                !policy.AllowsSessionHeaderForwarding(
+                    "GET",
+                    new Uri(HostOrigin, "/api/v1/state"),
+                    untrustedDocument),
+                "untrusted top-level document gained bearer forwarding authority: "
+                    + untrustedDocument);
+        }
+    }
+
+    static void WebExperienceSecurityPolicyDisablesPrivilegedBrowserSurfacesTest()
+    {
+        WebExperienceSecurityPolicy policy = new(HostOrigin);
+
+        Check.True(
+            !policy.AllowsWebMessageCommandAuthority,
+            "web messages acquired financial command authority");
+        Check.True(
+            !policy.AllowsDeveloperTools,
+            "release-mode developer tools were admitted by the trust policy");
+        Check.True(
+            !policy.AllowsServiceWorkers,
+            "service workers acquired same-origin interception authority");
+        Check.True(
+            !policy.AllowsDownloads,
+            "embedded downloads were admitted by the trust policy");
+        Check.True(
+            !policy.AllowsNewWindow(new Uri(HostOrigin, "/app/help")),
+            "same-origin popup was silently admitted as trusted content");
+        Check.True(
+            !policy.AllowsNewWindow(new Uri("https://example.com/")),
+            "external popup was silently admitted as trusted content");
+    }
+
+    static void WebViewProcessFailureRecoveryClassificationTest()
+    {
+        const System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.Static
+            | System.Reflection.BindingFlags.NonPublic;
+        var classifier = typeof(MainWindow).GetMethod(
+            "RequiresFreshWebViewAfterFailure",
+            flags)
+            ?? throw new InvalidOperationException(
+                "WebView process-failure classifier is missing");
+
+        bool Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind kind) =>
+            (bool)(classifier.Invoke(null, new object[] { kind })
+                ?? throw new InvalidOperationException(
+                    "WebView process-failure classifier returned null"));
+
+        Check.True(
+            Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind.BrowserProcessExited),
+            "browser-process exit must require a fresh WebView");
+        Check.True(
+            Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind.RenderProcessExited),
+            "render-process exit must require a fresh WebView");
+        Check.True(
+            Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind.RenderProcessUnresponsive),
+            "unresponsive renderer must expose fresh-WebView recovery");
+        Check.True(
+            !Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind.GpuProcessExited),
+            "GPU-process exit must not discard the whole WebView authority surface");
+        Check.True(
+            !Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind.UtilityProcessExited),
+            "utility-process exit must not discard the whole WebView authority surface");
+    }
+
     static void CanonicalOperationIdentityVectorTest()
     {
         Check.True(
@@ -841,8 +1042,11 @@ internal static class Program
                 StringComparison.Ordinal),
             "durable recovery record did not persist the canonical public session reference");
         Check.True(
-            pendingStore.Payload!.Contains("\"schema_version\":\"2\"", StringComparison.Ordinal),
-            "durable recovery record was not upgraded to the bearer-free v2 schema");
+            pendingStore.Payload!.Contains("\"schema_version\":\"3\"", StringComparison.Ordinal)
+                && pendingStore.Payload.Contains(
+                    "\"host_id\":\"host-local-1\"",
+                    StringComparison.Ordinal),
+            "new unresolved emergency command did not persist the host-bound bearer-free v3 schema");
 
         AuthenticatedEmergencyHostClient restartedProcess = new(
             new HttpClient(handler),
@@ -891,6 +1095,345 @@ internal static class Program
             "terminal recovered operation did not clear the secure recovery record");
     }
 
+
+    static async Task SnapshotBusyIsExplicitRetryableConditionTest()
+    {
+        const string token = "session-token-snapshot-busy";
+        MutableSessionProvider sessions = new(PairedSession(token));
+        DelegateHandler busyHandler = new((request, _, _) =>
+        {
+            AssertAuth(request, token);
+            Check.True(
+                request.Method == HttpMethod.Get
+                    && request.RequestUri!.AbsolutePath == "/api/v1/state",
+                "snapshot-busy test issued an unexpected request");
+            return Task.FromResult(
+                Json(
+                    HttpStatusCode.ServiceUnavailable,
+                    new { error = "SNAPSHOT_BUSY", retryable = true }));
+        });
+        MemoryPendingCommandStore pendingStore = new();
+        AuthenticatedEmergencyHostClient busyClient = new(
+            new HttpClient(busyHandler),
+            HostOrigin,
+            sessions,
+            pendingStore);
+
+        await Check.ThrowsAsync<EmergencySnapshotBusyException>(
+            () => busyClient.GetStatusAsync(CancellationToken.None),
+            "canonical SNAPSHOT_BUSY was collapsed into a generic disconnect/error");
+        await Check.ThrowsAsync<EmergencySnapshotBusyException>(
+            () => busyClient.BlockNewExposureAsync(CancellationToken.None),
+            "emergency block did not stop at the retryable pre-command snapshot boundary");
+        Check.True(
+            pendingStore.Payload is null,
+            "snapshot contention minted or persisted an emergency command before coherent state existed");
+
+        DelegateHandler malformedHandler = new((request, _, _) =>
+        {
+            AssertAuth(request, token);
+            return Task.FromResult(
+                Json(
+                    HttpStatusCode.ServiceUnavailable,
+                    new { error = "SNAPSHOT_BUSY", retryable = false }));
+        });
+        AuthenticatedEmergencyHostClient malformedClient = new(
+            new HttpClient(malformedHandler),
+            HostOrigin,
+            sessions);
+        await Check.ThrowsAsync<HttpRequestException>(
+            () => malformedClient.GetStatusAsync(CancellationToken.None),
+            "non-retryable/malformed 503 was trusted as canonical SNAPSHOT_BUSY");
+    }
+
+    static async Task RestartedCommandRecoversAcceptedOperationAfterSessionRotationWithoutResendTest()
+    {
+        const string originalToken = "session-token-restart-rotation-original";
+        const string replacementToken = "session-token-restart-rotation-replacement";
+        MutableSessionProvider sessions =
+            new(PairedSession(originalToken));
+        MemoryPendingCommandStore pendingStore = new();
+        int stateReads = 0;
+        int posts = 0;
+        int operationReads = 0;
+        string? operationId = null;
+
+        DelegateHandler handler = new(async (request, _, cancellationToken) =>
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            if (request.Method == HttpMethod.Get && path == "/api/v1/state")
+            {
+                stateReads++;
+                string expectedToken =
+                    stateReads == 1 ? originalToken : replacementToken;
+                AssertAuth(request, expectedToken);
+                return Json(
+                    HttpStatusCode.OK,
+                    Snapshot(expectedToken, stateReads == 1 ? "11" : "13"));
+            }
+
+            if (request.Method == HttpMethod.Post
+                && path == "/api/v1/commands")
+            {
+                AssertAuth(request, originalToken);
+                posts++;
+                string body =
+                    await request.Content!.ReadAsStringAsync(cancellationToken);
+                using JsonDocument parsed = JsonDocument.Parse(body);
+                string commandId =
+                    parsed.RootElement.GetProperty("command_id").GetString()!;
+                operationId = HostOperationIdentity.Derive(
+                    "paper-account-1",
+                    "PAPER",
+                    commandId);
+                throw new HttpRequestException(
+                    "response lost after durable acceptance");
+            }
+
+            if (request.Method == HttpMethod.Get
+                && operationId is not null
+                && path == "/api/v1/operations/" + operationId)
+            {
+                AssertAuth(request, replacementToken);
+                operationReads++;
+                return Json(
+                    HttpStatusCode.OK,
+                    new
+                    {
+                        operation_id = operationId,
+                        phase = "SUCCEEDED",
+                        started_at = NowUtc(),
+                        updated_at = NowUtc(),
+                        affected_refs = Array.Empty<string>(),
+                        evidence = Array.Empty<object>(),
+                        remaining_uncertainty = Array.Empty<string>(),
+                    });
+            }
+
+            throw new InvalidOperationException(
+                "session-rotation recovery issued an unexpected request "
+                + request.Method + " " + path);
+        });
+
+        AuthenticatedEmergencyHostClient firstProcess = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions,
+            pendingStore);
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => firstProcess.BlockNewExposureAsync(CancellationToken.None),
+            "lost first response must persist an unresolved command");
+        Check.True(
+            pendingStore.Payload is not null,
+            "uncertain command was not persisted before session rotation");
+        Check.True(
+            pendingStore.Payload!.Contains(
+                "\"schema_version\":\"3\"",
+                StringComparison.Ordinal)
+                && pendingStore.Payload.Contains(
+                    "\"host_id\":\"host-local-1\"",
+                    StringComparison.Ordinal),
+            "new unresolved emergency command did not persist the exact authenticated host identity");
+
+        sessions.Session = PairedSession(replacementToken);
+        AuthenticatedEmergencyHostClient restartedProcess = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions,
+            pendingStore);
+        EmergencyCommandResult recovered =
+            await restartedProcess.BlockNewExposureAsync(CancellationToken.None);
+
+        Check.True(
+            recovered.Accepted && recovered.DurableBlockConfirmed,
+            "replacement session did not recover the already-accepted durable operation");
+        Check.True(
+            recovered.OperationId == operationId,
+            "replacement-session recovery observed the wrong operation identity");
+        Check.True(
+            posts == 1,
+            "replacement session resent or retargeted the unresolved command");
+        Check.True(
+            stateReads == 2 && operationReads == 1,
+            "replacement-session recovery did not perform one scope proof and one exact operation read");
+        Check.True(
+            pendingStore.Payload is null,
+            "terminal operation recovery did not clear the durable pending record");
+    }
+
+    static async Task RestartedCommandRemainsUnresolvedWhenExactOperationIsAbsentAfterSessionRotationTest()
+    {
+        const string originalToken = "session-token-restart-absent-original";
+        const string replacementToken = "session-token-restart-absent-replacement";
+        MutableSessionProvider sessions =
+            new(PairedSession(originalToken));
+        MemoryPendingCommandStore pendingStore = new();
+        int stateReads = 0;
+        int posts = 0;
+        int operationReads = 0;
+        string? operationId = null;
+
+        DelegateHandler handler = new(async (request, _, cancellationToken) =>
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            if (request.Method == HttpMethod.Get && path == "/api/v1/state")
+            {
+                stateReads++;
+                string expectedToken =
+                    stateReads == 1 ? originalToken : replacementToken;
+                AssertAuth(request, expectedToken);
+                return Json(
+                    HttpStatusCode.OK,
+                    Snapshot(expectedToken, stateReads == 1 ? "21" : "22"));
+            }
+
+            if (request.Method == HttpMethod.Post
+                && path == "/api/v1/commands")
+            {
+                AssertAuth(request, originalToken);
+                posts++;
+                string body =
+                    await request.Content!.ReadAsStringAsync(cancellationToken);
+                using JsonDocument parsed = JsonDocument.Parse(body);
+                string commandId =
+                    parsed.RootElement.GetProperty("command_id").GetString()!;
+                operationId = HostOperationIdentity.Derive(
+                    "paper-account-1",
+                    "PAPER",
+                    commandId);
+                throw new HttpRequestException(
+                    "response lost without a provable durable operation");
+            }
+
+            if (request.Method == HttpMethod.Get
+                && operationId is not null
+                && path == "/api/v1/operations/" + operationId)
+            {
+                AssertAuth(request, replacementToken);
+                operationReads++;
+                return Json(
+                    HttpStatusCode.NotFound,
+                    new { error = "OPERATION_NOT_FOUND" });
+            }
+
+            throw new InvalidOperationException(
+                "absent-operation recovery issued an unexpected request "
+                + request.Method + " " + path);
+        });
+
+        AuthenticatedEmergencyHostClient firstProcess = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions,
+            pendingStore);
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => firstProcess.BlockNewExposureAsync(CancellationToken.None),
+            "lost first response must persist an unresolved command");
+
+        sessions.Session = PairedSession(replacementToken);
+        AuthenticatedEmergencyHostClient restartedProcess = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions,
+            pendingStore);
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => restartedProcess.BlockNewExposureAsync(CancellationToken.None),
+            "missing exact operation must remain unresolved after session rotation");
+
+        Check.True(
+            posts == 1,
+            "missing exact operation caused a replacement-session command resend");
+        Check.True(
+            stateReads == 2 && operationReads == 1,
+            "missing-operation path did not remain bounded to scope proof plus exact read");
+        Check.True(
+            pendingStore.Payload is not null,
+            "missing exact operation cleared the durable unresolved command");
+    }
+
+    static async Task RestartedCommandRejectsDifferentHostAfterSessionRotationWithoutResendTest()
+    {
+        const string originalToken = "session-token-restart-host-original";
+        const string replacementToken = "session-token-restart-host-replacement";
+        MutableSessionProvider sessions = new(PairedSession(originalToken));
+        MemoryPendingCommandStore pendingStore = new();
+        int stateReads = 0;
+        int posts = 0;
+        int operationReads = 0;
+
+        DelegateHandler handler = new(async (request, _, cancellationToken) =>
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            if (request.Method == HttpMethod.Get && path == "/api/v1/state")
+            {
+                stateReads++;
+                string token =
+                    stateReads == 1 ? originalToken : replacementToken;
+                AssertAuth(request, token);
+                return Json(
+                    HttpStatusCode.OK,
+                    Snapshot(
+                        token,
+                        stateReads == 1 ? "31" : "32",
+                        hostId: stateReads == 1
+                            ? "host-local-1"
+                            : "foreign-host"));
+            }
+
+            if (request.Method == HttpMethod.Post
+                && path == "/api/v1/commands")
+            {
+                AssertAuth(request, originalToken);
+                posts++;
+                await request.Content!.ReadAsStringAsync(cancellationToken);
+                throw new HttpRequestException(
+                    "response lost before host-continuity recovery");
+            }
+
+            if (request.Method == HttpMethod.Get
+                && path.StartsWith(
+                    "/api/v1/operations/",
+                    StringComparison.Ordinal))
+            {
+                operationReads++;
+                throw new InvalidOperationException(
+                    "foreign host must be rejected before operation lookup");
+            }
+
+            throw new InvalidOperationException(
+                "host-continuity recovery issued an unexpected request "
+                + request.Method + " " + path);
+        });
+
+        AuthenticatedEmergencyHostClient firstProcess = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions,
+            pendingStore);
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => firstProcess.BlockNewExposureAsync(CancellationToken.None),
+            "first response loss must retain the unresolved command");
+
+        sessions.Session = PairedSession(replacementToken);
+        AuthenticatedEmergencyHostClient restartedProcess = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions,
+            pendingStore);
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => restartedProcess.BlockNewExposureAsync(CancellationToken.None),
+            "replacement session on a foreign host must not recover the pending command");
+
+        Check.True(
+            posts == 1,
+            "foreign-host recovery resent or retargeted the unresolved command");
+        Check.True(
+            stateReads == 2 && operationReads == 0,
+            "foreign-host recovery did not fail before deterministic operation lookup");
+        Check.True(
+            pendingStore.Payload is not null,
+            "foreign-host recovery cleared the unresolved command");
+    }
     static async Task RestartedCommandCannotRetargetSessionTest()
     {
         const string originalToken = "session-token-restart-original";
@@ -1144,6 +1687,13 @@ internal static class Program
                 }
                 Accept(first);
                 Accept(first with { StateVersion = "8", ObservedAtUtc = origin.AddMinutes(-10), IsCurrent = false });
+                var announcement =
+                    (System.Windows.Controls.TextBlock)window.FindName("HostStatusAnnouncement");
+                Check.True(
+                    announcement.Text.StartsWith(
+                        "Host status is stale.",
+                        StringComparison.Ordinal),
+                    "automatic freshness transitions must announce stale host evidence");
                 Reject(first with { StateVersion = "9", ObservedAtUtc = origin.AddMinutes(-5) });
                 Accept(first with { StateVersion = "9", ObservedAtUtc = origin.AddMinutes(-20), IsCurrent = false });
                 Reject(first with { StateVersion = "10", ObservedAtUtc = origin.AddMinutes(-1) });
@@ -1152,6 +1702,11 @@ internal static class Program
                 Reject(first with { StateVersion = "8", ObservedAtUtc = origin.AddMinutes(1) });
                 Reject(first with { StateVersion = "10", HostId = "different-host" });
                 Accept(first with { StateVersion = "10" }); // Equality is valid.
+                Check.True(
+                    announcement.Text.StartsWith(
+                        "Host status refreshed.",
+                        StringComparison.Ordinal),
+                    "automatic freshness transitions must announce restored current evidence");
                 Accept(first with { StateVersion = "11", ObservedAtUtc = origin.AddMinutes(1) });
                 Check.True(((EmergencyHostStatus)current.GetValue(window)!).ObservedAtUtc == origin.AddMinutes(1),
                     "new CURRENT evidence did not advance the retained floor");
@@ -1170,9 +1725,431 @@ internal static class Program
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
-    public static async Task Main()
+    static void SnapshotBusyKeepsLastVerifiedHostEvidenceStaleTest()
     {
+        Exception? failure = null;
+        Thread thread = new(() =>
+        {
+            MainWindow? window = null;
+            try
+            {
+                const System.Reflection.BindingFlags flags =
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                SnapshotBusyStatusHostClient client = new();
+                window = (MainWindow)Activator.CreateInstance(
+                    typeof(MainWindow),
+                    flags,
+                    null,
+                    new object?[] { client, null },
+                    null)!;
+                var refresh =
+                    typeof(MainWindow).GetMethod("RefreshHostStatusAsync", flags)!;
+                var retainedConnected =
+                    typeof(MainWindow).GetField("_lastKnownConnectedStatus", flags)!;
+                var retainedCurrent =
+                    typeof(MainWindow).GetField("_lastKnownCurrentStatus", flags)!;
+                var host =
+                    (System.Windows.Controls.TextBox)window.FindName("HostValue");
+                var stateVersion =
+                    (System.Windows.Controls.TextBox)window.FindName("StateVersionValue");
+                var connection =
+                    (System.Windows.Controls.TextBlock)window.FindName("ConnectionStatus");
+                var announcement =
+                    (System.Windows.Controls.TextBlock)window.FindName("HostStatusAnnouncement");
+                var refreshButton =
+                    (System.Windows.Controls.Button)window.FindName("RefreshStatusButton");
+
+                ((Task)refresh.Invoke(window, new object[] { false, false })!)
+                    .GetAwaiter().GetResult();
+
+                object? connectedBefore = retainedConnected.GetValue(window);
+                object? currentBefore = retainedCurrent.GetValue(window);
+                Check.True(
+                    host.Text == "host-local-1"
+                        && stateVersion.Text == "17",
+                    "initial verified Desktop host evidence was not rendered");
+
+                ((Task)refresh.Invoke(window, new object[] { true, false })!)
+                    .GetAwaiter().GetResult();
+
+                Check.True(
+                    host.Text == "host-local-1 (stale)",
+                    "snapshot contention erased or fabricated the last verified host identity");
+                Check.True(
+                    stateVersion.Text == "17 (stale)",
+                    "snapshot contention advanced or discarded the last verified state version");
+                Check.True(
+                    connection.Text.Contains(
+                        "temporarily busy",
+                        StringComparison.Ordinal)
+                    && connection.Text.Contains(
+                        "Retry is safe.",
+                        StringComparison.Ordinal),
+                    "Desktop did not preserve explicit retryable snapshot-busy semantics");
+                Check.True(
+                    !connection.Text.Contains(
+                        "refresh failed",
+                        StringComparison.OrdinalIgnoreCase),
+                    "retryable snapshot contention was mislabeled as a generic host refresh failure");
+                Check.True(
+                    announcement.Text.Contains(
+                        "Retry is safe.",
+                        StringComparison.Ordinal)
+                    && announcement.Text.Contains(
+                        "No cancellation, flattening, provider outcome, or command acceptance is implied.",
+                        StringComparison.Ordinal),
+                    "snapshot contention did not produce bounded accessible retry guidance");
+                Check.True(
+                    ReferenceEquals(connectedBefore, retainedConnected.GetValue(window))
+                        && ReferenceEquals(currentBefore, retainedCurrent.GetValue(window)),
+                    "snapshot contention mutated the retained host authority evidence chain");
+                Check.True(
+                    refreshButton.IsEnabled,
+                    "snapshot contention left the focusable refresh control disabled");
+            }
+            catch (Exception error) { failure = error; }
+            finally { window?.Close(); }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
+    static void HostRefreshTimerLifecycleTest()
+    {
+        Exception? failure = null;
+        Thread thread = new(() =>
+        {
+            MainWindow? window = null;
+            try
+            {
+                const System.Reflection.BindingFlags flags =
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                InspectingStatusHostClient client = new();
+                window = (MainWindow)Activator.CreateInstance(
+                    typeof(MainWindow), flags, null, new object?[] { client, null }, null)!;
+                var timer = (System.Windows.Threading.DispatcherTimer)typeof(MainWindow)
+                    .GetField("_hostRefreshTimer", flags)!.GetValue(window)!;
+
+                typeof(MainWindow).GetMethod("MainWindow_Loaded", flags)!
+                    .Invoke(window, new object[] { window, new System.Windows.RoutedEventArgs() });
+                Check.True(
+                    timer.IsEnabled && timer.Interval == TimeSpan.FromSeconds(10),
+                    "native status refresh did not start its bounded ten-second cadence");
+
+                typeof(MainWindow).GetMethod("MainWindow_Closed", flags)!
+                    .Invoke(window, new object?[] { window, EventArgs.Empty });
+                Check.True(!timer.IsEnabled,
+                    "native status refresh continued after the window closed");
+            }
+            catch (Exception error) { failure = error; }
+            finally { window?.Close(); }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
+    static void AutomaticHostRefreshKeepsRefreshButtonEnabledTest()
+    {
+        Exception? failure = null;
+        Thread thread = new(() =>
+        {
+            MainWindow? window = null;
+            try
+            {
+                const System.Reflection.BindingFlags flags =
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                InspectingStatusHostClient client = new();
+                window = (MainWindow)Activator.CreateInstance(
+                    typeof(MainWindow), flags, null, new object?[] { client, null }, null)!;
+                var button =
+                    (System.Windows.Controls.Button)window.FindName("RefreshStatusButton");
+                client.OnGetStatus = () => Check.True(
+                    button.IsEnabled,
+                    "automatic host refresh disabled the focusable refresh button");
+                var refresh = typeof(MainWindow).GetMethod("RefreshHostStatusAsync", flags)!;
+                ((Task)refresh.Invoke(window, new object[] { false, false })!)
+                    .GetAwaiter().GetResult();
+                Check.True(button.IsEnabled,
+                    "automatic host refresh left the focusable refresh button disabled");
+            }
+            catch (Exception error) { failure = error; }
+            finally { window?.Close(); }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
+    static void ManualRefreshDuringAutomaticRefreshIsAnnouncedTest()
+    {
+        Exception? failure = null;
+        Thread thread = new(() =>
+        {
+            MainWindow? window = null;
+            try
+            {
+                const System.Reflection.BindingFlags flags =
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                int transportCalls = 0;
+                InspectingStatusHostClient client = new();
+                window = (MainWindow)Activator.CreateInstance(
+                    typeof(MainWindow), flags, null, new object?[] { client, null }, null)!;
+                var refresh = typeof(MainWindow).GetMethod("RefreshHostStatusAsync", flags)!;
+                var announcement =
+                    (System.Windows.Controls.TextBlock)window.FindName("HostStatusAnnouncement");
+                var button =
+                    (System.Windows.Controls.Button)window.FindName("RefreshStatusButton");
+
+                client.OnGetStatus = () =>
+                {
+                    transportCalls++;
+                    Task overlap =
+                        (Task)refresh.Invoke(window, new object[] { true, true })!;
+                    overlap.GetAwaiter().GetResult();
+                    Check.True(
+                        announcement.Text.StartsWith(
+                            "Host status refresh is already in progress.",
+                            StringComparison.Ordinal),
+                        "manual refresh overlap was silent to keyboard/NVDA users");
+                };
+
+                ((Task)refresh.Invoke(window, new object[] { false, false })!)
+                    .GetAwaiter().GetResult();
+
+                Check.True(transportCalls == 1,
+                    "manual refresh overlap started a second host request");
+                Check.True(
+                    announcement.Text.Contains(
+                        "Inspecting status client is intentionally disconnected.",
+                        StringComparison.Ordinal),
+                    "coalesced manual refresh did not announce the in-flight request result");
+                Check.True(
+                    !announcement.Text.StartsWith(
+                        "Host status refresh is already in progress.",
+                        StringComparison.Ordinal),
+                    "coalesced manual refresh left only the interim announcement");
+                Check.True(button.IsEnabled,
+                    "manual refresh overlap disabled the focusable refresh button");
+            }
+            catch (Exception error) { failure = error; }
+            finally { window?.Close(); }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
+    static void ExplicitExternalHostConfigurationNeverFallsBackTest()
+    {
+        const System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.Static
+            | System.Reflection.BindingFlags.NonPublic;
+        var classifier = typeof(App).GetMethod(
+            "ExternalHostConfigurationRequested",
+            flags)
+            ?? throw new InvalidOperationException(
+                "external-host startup policy is missing");
+
+        bool Requested(string? uri, string? credentialTarget) =>
+            (bool)(classifier.Invoke(
+                null,
+                new object?[] { uri, credentialTarget })
+                ?? throw new InvalidOperationException(
+                    "external-host startup policy returned null"));
+
+        Check.True(
+            !Requested(null, null),
+            "absent external-host configuration did not select owned ZERO runtime");
+
+        foreach ((string? Uri, string? CredentialTarget) configured in new[]
+        {
+            ("", (string?)null),
+            ("   ", (string?)null),
+            ("\t", (string?)null),
+            ((string?)null, ""),
+            ((string?)null, "   "),
+            ((string?)null, "\t"),
+            ("http://127.0.0.1:8765/", (string?)null),
+            ((string?)null, "AutoTrade.HostSession:test"),
+        })
+        {
+            Check.True(
+                Requested(configured.Uri, configured.CredentialTarget),
+                "explicit external-host configuration silently fell back to owned ZERO runtime");
+        }
+    }
+
+    static async Task OwnedRuntimeBrokenControlPipeTerminatesChildTest()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        System.Diagnostics.Process process = new()
+        {
+            StartInfo = new System.Diagnostics.ProcessStartInfo(
+                "cmd.exe",
+                "/d /c ping -n 60 127.0.0.1 > nul")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            },
+        };
+        Check.True(process.Start(), "owned-runtime shutdown probe child could not start");
+        int pid = process.Id;
+        Task stdoutDrain = process.StandardOutput.ReadToEndAsync();
+        Task stderrDrain = process.StandardError.ReadToEndAsync();
+
+        // Keep the child alive but make the graceful STOP pipe unusable.
+        process.StandardInput.Dispose();
+        await Task.Delay(100);
+        Check.True(!process.HasExited, "owned-runtime shutdown probe child exited before disposal");
+
+        Type runtimeType =
+            typeof(MainWindow).Assembly.GetType(
+                "AutoTrade.Desktop.OwnedProviderFreeRuntime",
+                throwOnError: true)!
+            ?? throw new InvalidOperationException("owned runtime type is unavailable");
+        System.Reflection.ConstructorInfo constructor =
+            runtimeType.GetConstructors(
+                System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.NonPublic)
+            .Single(candidate => candidate.GetParameters().Length == 6);
+        HttpClient http = new();
+        object runtime = constructor.Invoke(new object[]
+        {
+            process,
+            http,
+            PairedSession(
+                "session-token-owned-shutdown",
+                actor: "local-owner"),
+            "test-data",
+            stdoutDrain,
+            stderrDrain,
+        });
+        System.Reflection.MethodInfo disposeMethod =
+            runtimeType.GetMethod(
+                "DisposeAsync",
+                System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.Public)
+            ?? throw new InvalidOperationException("owned runtime disposal method is unavailable");
+        ValueTask disposal =
+            (ValueTask)(disposeMethod.Invoke(runtime, null)
+                ?? throw new InvalidOperationException("owned runtime disposal did not return a ValueTask"));
+
+        await Check.ThrowsAsync<InvalidOperationException>(
+            () => disposal.AsTask(),
+            "broken owned-runtime control pipe did not report fail-closed shutdown");
+
+        bool childStillAlive;
+        try
+        {
+            using System.Diagnostics.Process reopened =
+                System.Diagnostics.Process.GetProcessById(pid);
+            childStillAlive = !reopened.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            childStillAlive = false;
+        }
+        Check.True(
+            !childStillAlive,
+            "broken STOP pipe stranded the owned provider-free host child");
+    }
+
+    static async Task PackagedOwnedRuntimeBootstrapSmoke(
+        string payload,
+        string dataDirectory)
+    {
+        Type runtimeType = typeof(App).Assembly.GetType(
+            "AutoTrade.Desktop.OwnedProviderFreeRuntime",
+            throwOnError: true)!;
+        var start = runtimeType.GetMethod(
+            "StartAsync",
+            System.Reflection.BindingFlags.Static
+                | System.Reflection.BindingFlags.NonPublic,
+            binder: null,
+            types: new[] { typeof(string), typeof(string) },
+            modifiers: null)
+            ?? throw new InvalidOperationException(
+                "installed owned-runtime bootstrap is missing");
+
+        object taskObject = start.Invoke(
+            null,
+            new object[] { payload, dataDirectory })
+            ?? throw new InvalidOperationException(
+                "installed owned-runtime bootstrap returned null");
+        await (Task)taskObject;
+        object runtime = taskObject.GetType().GetProperty("Result")!.GetValue(taskObject)
+            ?? throw new InvalidOperationException(
+                "installed owned-runtime bootstrap produced no runtime");
+
+        try
+        {
+            Uri origin = (Uri)(runtimeType.GetProperty("Origin")!.GetValue(runtime)
+                ?? throw new InvalidOperationException("owned runtime origin is missing"));
+            string actualData = (string)(runtimeType.GetProperty("DataDirectory")!.GetValue(runtime)
+                ?? throw new InvalidOperationException("owned runtime data directory is missing"));
+            Check.True(
+                origin.Scheme == Uri.UriSchemeHttp
+                    && origin.Host == "127.0.0.1"
+                    && origin.Port > 0
+                    && origin.AbsolutePath == "/"
+                    && string.IsNullOrEmpty(origin.UserInfo)
+                    && string.IsNullOrEmpty(origin.Query)
+                    && string.IsNullOrEmpty(origin.Fragment),
+                "packaged Desktop bootstrap did not bind a canonical loopback origin");
+            Check.True(
+                string.Equals(
+                    Path.GetFullPath(actualData),
+                    Path.GetFullPath(dataDirectory),
+                    StringComparison.OrdinalIgnoreCase),
+                "packaged Desktop bootstrap escaped its isolated data directory");
+        }
+        finally
+        {
+            await ((IAsyncDisposable)runtime).DisposeAsync();
+        }
+    }
+
+    public static async Task Main(string[] args)
+    {
+        if (args.Length != 0)
+        {
+            if (args.Length != 3 || args[0] != "--owned-runtime-smoke")
+            {
+                throw new ArgumentException(
+                    "Usage: Desktop.Client [--owned-runtime-smoke PAYLOAD DATA_DIRECTORY]");
+            }
+            await PackagedOwnedRuntimeBootstrapSmoke(args[1], args[2]);
+            Console.WriteLine("Packaged Desktop owned-runtime bootstrap passed.");
+            return;
+        }
+        ExplicitExternalHostConfigurationNeverFallsBackTest();
+        await OwnedRuntimeBrokenControlPipeTerminatesChildTest();
+        WebExperienceSecurityPolicyOriginAndNavigationTest();
+        WebExperienceSecurityPolicyCredentialForwardingTest();
+        WebExperienceSecurityPolicyDisablesPrivilegedBrowserSurfacesTest();
+        WebViewProcessFailureRecoveryClassificationTest();
         WindowRetainsCurrentEvidenceFloorTest();
+        SnapshotBusyKeepsLastVerifiedHostEvidenceStaleTest();
+        HostRefreshTimerLifecycleTest();
+        AutomaticHostRefreshKeepsRefreshButtonEnabledTest();
+        ManualRefreshDuringAutomaticRefreshIsAnnouncedTest();
         CanonicalOperationIdentityVectorTest();
         CredentialTargetIsOriginBoundTest();
         await PairedOriginMismatchFailsBeforeTransportTest();
@@ -1186,6 +2163,10 @@ internal static class Program
         await ForeignOperationIdentityFailsClosedTest();
         await UncertainCommandCannotRetargetSessionTest();
         await UncertainCommandSurvivesDesktopRestartTest();
+        await SnapshotBusyIsExplicitRetryableConditionTest();
+        await RestartedCommandRecoversAcceptedOperationAfterSessionRotationWithoutResendTest();
+        await RestartedCommandRemainsUnresolvedWhenExactOperationIsAbsentAfterSessionRotationTest();
+        await RestartedCommandRejectsDifferentHostAfterSessionRotationWithoutResendTest();
         await RestartedCommandCannotRetargetSessionTest();
         await LegacyBearerRecoveryRecordMigratesFailClosedTest();
         CorruptPersistedCommandFailsClosedTest();
@@ -1193,6 +2174,67 @@ internal static class Program
         await SnapshotBearerEchoFailsClosedTest();
         Console.WriteLine("Desktop authenticated host-client contract tests passed.");
     }
+}
+
+internal sealed class SnapshotBusyStatusHostClient : IEmergencyHostClient
+{
+    private int _calls;
+
+    public Task<EmergencyHostStatus> GetStatusAsync(
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        int call = Interlocked.Increment(ref _calls);
+        if (call == 1)
+        {
+            return Task.FromResult(
+                new EmergencyHostStatus(
+                    Connected: true,
+                    HostId: "host-local-1",
+                    AccountId: "paper-account-1",
+                    Environment: "PAPER",
+                    StateVersion: "17",
+                    ObservedAtUtc: DateTimeOffset.UtcNow.AddSeconds(-1),
+                    Message: "verified current host evidence")
+                {
+                    IsCurrent = true,
+                });
+        }
+
+        throw new EmergencySnapshotBusyException();
+    }
+
+    public Task<EmergencyCommandResult> BlockNewExposureAsync(
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+
+    public Task<EmergencyOperationStatus> GetOperationAsync(
+        string operationId,
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+}
+
+internal sealed class InspectingStatusHostClient : IEmergencyHostClient
+{
+    public Action? OnGetStatus { get; set; }
+
+    public Task<EmergencyHostStatus> GetStatusAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        OnGetStatus?.Invoke();
+        return Task.FromResult(
+            EmergencyHostStatus.Disconnected(
+                "Inspecting status client is intentionally disconnected."));
+    }
+
+    public Task<EmergencyCommandResult> BlockNewExposureAsync(
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+
+    public Task<EmergencyOperationStatus> GetOperationAsync(
+        string operationId,
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
 }
 
 internal static class Check

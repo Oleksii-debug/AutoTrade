@@ -4,12 +4,36 @@ import gc
 import threading
 import unittest
 import weakref
+from types import MappingProxyType
 
 from mvp.autotrade_mvp import durable_reservations as reservation_authority
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reservations import ReservationConflict
 from research.autotrade_research.artifacts import ArtifactStore
+
+
+
+class _HostileText(str):
+    def strip(self, *_args, **_kwargs):
+        raise AssertionError("hostile strip dispatched")
+
+    def upper(self, *_args, **_kwargs):
+        raise AssertionError("hostile upper dispatched")
+
+
+class _HostileMapping(dict):
+    def __bool__(self):
+        raise AssertionError("hostile mapping truth dispatched")
+
+    def __len__(self):
+        raise AssertionError("hostile mapping length dispatched")
+
+    def __iter__(self):
+        raise AssertionError("hostile mapping iteration dispatched")
+
+    def items(self):
+        raise AssertionError("hostile mapping items dispatched")
 
 
 class DurableReservationStoreAuthorityTests(unittest.TestCase):
@@ -395,6 +419,100 @@ class DurableReservationStoreAuthorityTests(unittest.TestCase):
 
             with self.assertRaises(ReservationConflict):
                 book._reload()
+
+
+    def test_hostile_environment_text_subclass_fails_before_callback_or_journal_write(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "selected.sqlite3")
+            with self.assertRaisesRegex(
+                ValueError,
+                "environment must be REPLAY, SIMULATION, PAPER, or LIVE",
+            ):
+                DurableReservationBook(
+                    store,
+                    environment=_HostileText(" paper "),
+                    account_id="acct-reservation-authority",
+                )
+
+            self.assertEqual(store.current_journal_sequence(), 0)
+
+    def test_hostile_account_text_subclass_fails_before_callback_or_journal_write(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "selected.sqlite3")
+            with self.assertRaisesRegex(ValueError, "account_id is required"):
+                DurableReservationBook(
+                    store,
+                    environment="PAPER",
+                    account_id=_HostileText(" acct-reservation-authority "),
+                )
+
+            self.assertEqual(store.current_journal_sequence(), 0)
+
+    def test_executable_resource_mapping_is_rejected_before_callbacks_or_journal_write(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "selected.sqlite3")
+            book = self._book(store)
+            requirements = _HostileMapping()
+            dict.__setitem__(requirements, "CASH:USD", "10")
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "resource amounts must use an exact dict",
+            ):
+                book.reserve(
+                    command_id="cmd-hostile-map",
+                    idempotency_key="idem-hostile-map",
+                    reservation_id="reservation-hostile-map",
+                    intent_id="intent-hostile-map",
+                    requirements=requirements,
+                    available={"CASH:USD": "100"},
+                )
+
+            self.assertEqual(store.current_journal_sequence(), 0)
+            self.assertEqual(book.active(), ())
+
+    def test_mapping_proxy_over_executable_mapping_is_rejected_before_callbacks(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "selected.sqlite3")
+            book = self._book(store)
+            hostile = _HostileMapping()
+            dict.__setitem__(hostile, "CASH:USD", "10")
+            proxied = MappingProxyType(hostile)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "resource amounts must use an exact dict",
+            ):
+                book.reserve(
+                    command_id="cmd-hostile-proxy",
+                    idempotency_key="idem-hostile-proxy",
+                    reservation_id="reservation-hostile-proxy",
+                    intent_id="intent-hostile-proxy",
+                    requirements=proxied,
+                    available={"CASH:USD": "100"},
+                )
+
+            self.assertEqual(store.current_journal_sequence(), 0)
+            self.assertEqual(book.active(), ())
+
+    def test_snapshot_digest_rejects_subclass_before_snapshot_semantics(self):
+        class SnapshotSubclass(reservation_authority.ReservationSnapshot):
+            pass
+
+        snapshot = SnapshotSubclass(
+            reservation_id="reservation-subclass",
+            intent_id="intent-subclass",
+            original={},
+            remaining={},
+            consumed={},
+            state="WORKING",
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "snapshot must be exact ReservationSnapshot",
+        ):
+            reservation_authority.reservation_snapshot_digest(snapshot)
+
 
 
 if __name__ == "__main__":

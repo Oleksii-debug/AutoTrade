@@ -954,11 +954,22 @@ def _install_spot_submission_response_parser_authority(parser):
     reconciliation_classifier_code = reconciliation_classifier.__code__
     canonical_text = _text
     canonical_text_code = canonical_text.__code__
+    canonical_uuid = UUID
+    value_error_type = ValueError
+    attribute_error_type = AttributeError
+    canonical_re = re
+    canonical_re_fullmatch = canonical_re.fullmatch
+    canonical_re_fullmatch_code = canonical_re_fullmatch.__code__
+    free_client_id_pattern = _FREE_CLIENT_ID
+    canonical_uuid5 = uuid5
+    canonical_uuid5_code = canonical_uuid5.__code__
+    canonical_namespace = NAMESPACE_URL
     error_type = KrakenSpotAdapterError
     type_error = TypeError
     canonical_type = type
     canonical_bool = bool
     canonical_isinstance = isinstance
+    canonical_any = any
     mapping_type = Mapping
     canonical_str = str
     canonical_bytes = bytes
@@ -1000,11 +1011,24 @@ def _install_spot_submission_response_parser_authority(parser):
             or _text is not canonical_text
             or canonical_getattr(canonical_text, "__code__", None)
             is not canonical_text_code
+            or UUID is not canonical_uuid
+            or ValueError is not value_error_type
+            or AttributeError is not attribute_error_type
+            or re is not canonical_re
+            or canonical_re.fullmatch is not canonical_re_fullmatch
+            or canonical_getattr(canonical_re_fullmatch, "__code__", None)
+            is not canonical_re_fullmatch_code
+            or _FREE_CLIENT_ID is not free_client_id_pattern
+            or uuid5 is not canonical_uuid5
+            or canonical_getattr(canonical_uuid5, "__code__", None)
+            is not canonical_uuid5_code
+            or NAMESPACE_URL is not canonical_namespace
             or KrakenSpotAdapterError is not error_type
             or TypeError is not type_error
             or type is not canonical_type
             or bool is not canonical_bool
             or isinstance is not canonical_isinstance
+            or any is not canonical_any
             or Mapping is not mapping_type
             or str is not canonical_str
             or bytes is not canonical_bytes

@@ -38,7 +38,9 @@ class InstrumentNotFound(InstrumentRegistryError):
 
 
 def _text(value: str, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    # Financial/provider metadata ingress must not virtual-dispatch caller text
+    # subclasses before the value has been reduced to inert built-in authority.
+    if type(value) is not str or not value.strip():
         raise InstrumentRegistryError(f"{field} is required")
     return value.strip()
 
@@ -58,9 +60,15 @@ def _decimal(value: Decimal | str | int, field: str, *, positive: bool = False) 
 
 
 def _utc(value: datetime, field: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise InstrumentRegistryError(f"{field} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    # An exact datetime can still carry an arbitrary tzinfo implementation whose
+    # utcoffset()/fromutc() methods execute caller code. Instrument authority is
+    # canonical UTC, so admit only an exact built-in datetime already bound to
+    # the process-owned UTC singleton and avoid conversion callbacks entirely.
+    if type(value) is not datetime or value.tzinfo is not timezone.utc:
+        raise InstrumentRegistryError(
+            f"{field} must be an exact timezone-aware UTC datetime"
+        )
+    return value
 
 
 def _utc_text(value: datetime) -> str:
@@ -117,19 +125,21 @@ def _split_instrument_version_ref(value: str, field: str = "instrument_version")
 
 
 def _freeze_jsonish(value: object, field: str) -> object:
-    if isinstance(value, Mapping):
+    # Never iterate or stringify arbitrary Mapping/container/scalar subclasses
+    # at an authority-bearing metadata boundary.
+    if type(value) is dict:
         frozen: dict[str, object] = {}
         for key, item in value.items():
-            if not isinstance(key, str) or not key:
+            if type(key) is not str or not key:
                 raise InstrumentRegistryError(f"{field} object keys must be non-empty strings")
             frozen[key] = _freeze_jsonish(item, field)
         return MappingProxyType(frozen)
-    if isinstance(value, (list, tuple)):
+    if type(value) in (list, tuple):
         return tuple(_freeze_jsonish(item, field) for item in value)
-    if value is None or isinstance(value, (str, bool, int)):
+    if value is None or type(value) in (str, bool, int):
         return value
     raise InstrumentRegistryError(
-        f"{field} must contain only JSON-safe string, integer, boolean, null, object or array values"
+        f"{field} must contain only exact built-in JSON-safe string, integer, boolean, null, object or array values"
     )
 
 
@@ -146,8 +156,10 @@ _EVIDENCE_ALLOWED = _EVIDENCE_REQUIRED | {"source_uri", "rights_id"}
 
 
 def _evidence_ref(value: Mapping[str, object]) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise InstrumentRegistryError("metadata_evidence entries must be objects")
+    if type(value) is not dict:
+        raise InstrumentRegistryError(
+            "metadata_evidence entries must be exact built-in objects"
+        )
     keys = set(value)
     missing = _EVIDENCE_REQUIRED - keys
     unknown = keys - _EVIDENCE_ALLOWED

@@ -310,15 +310,30 @@ def _economic_batch_digest(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
     transactions: Iterable[JournalTransaction],
 ) -> str:
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    scope = _environment(environment)
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
+    )
     material = {
         "schema_version": "1.0.0",
-        "provider_id": _text(provider_id, name="provider_id").upper(),
-        "account_id": _text(account_id, name="account_id"),
-        "environment": _environment(environment),
+        "provider_id": provider,
+        "account_id": account,
+        "environment": scope,
         "transactions": [_transaction_payload(item) for item in transactions],
     }
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=provider_scope,
+        environment=scope,
+    )
+    if provider_scope_payload is not None:
+        material["provider_environment"] = provider_scope_payload
     return payload_digest(material)
 
 
@@ -1604,6 +1619,7 @@ class ProviderEconomicCut:
     provider_id: str
     account_id: str
     environment: str
+    provider_environment: str
     book_id: str
     aggregate_version: int
     journal_sequence: int
@@ -1628,6 +1644,7 @@ class ProviderEconomicCut:
             "provider_id",
             "account_id",
             "environment",
+            "provider_environment",
             "book_id",
             "event_id",
             "payload_hash",
@@ -1680,6 +1697,7 @@ def _provider_economic_cut_seal_digest(value: ProviderEconomicCut) -> str:
             "provider_id": value.provider_id,
             "account_id": value.account_id,
             "environment": value.environment,
+            "provider_environment": value.provider_environment,
             "book_id": value.book_id,
             "aggregate_version": value.aggregate_version,
             "journal_sequence": value.journal_sequence,
@@ -1773,6 +1791,7 @@ def reverify_provider_economic_cut(
         cut.provider_id != book.provider_id
         or cut.account_id != book.account_id
         or cut.environment != book.environment
+        or cut.provider_environment != book.provider_environment
         or cut.book_id != book.book_id
     ):
         raise AccountingConflict(
@@ -1997,6 +2016,7 @@ def _install_durable_provider_economic_book_authority():
                 provider_id=object.__getattribute__(value, "provider_id"),
                 account_id=object.__getattribute__(value, "account_id"),
                 environment=object.__getattribute__(value, "environment"),
+                provider_environment=provider_environment_value,
             ),
         )
         state = object.__getattribute__(value, "__dict__")
@@ -2214,6 +2234,8 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 payload.get("provider_id") != authority.provider_id
                 or payload.get("account_id") != authority.account_id
                 or payload.get("environment") != authority.environment
+                or payload.get("provider_environment", authority.environment)
+                != authority.provider_environment
             ):
                 raise AccountingConflict(
                     "economic durable event scope does not match provider book"
@@ -2237,6 +2259,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 provider_id=authority.provider_id,
                 account_id=authority.account_id,
                 environment=authority.environment,
+                provider_environment=authority.provider_environment,
                 transactions=transactions,
             )
             if payload.get("batch_digest") != batch_digest:
@@ -2306,10 +2329,11 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         previously frozen historical cut must supply that cut's recorded
         visibility_journal_sequence explicitly.
 
-        Current main does not yet retain exact provider_environment in this
-        durable book.  BYBIT PAPER/LIVE therefore remains too ambiguous for
-        terminal provider-cost evidence and is rejected here until the shared
-        provider-domain migration lands.
+        The durable book identity, event scope and batch digest retain exact
+        provider_environment when it differs from the runtime environment.
+        Historical cuts therefore remain isolated across BYBIT MAINNET,
+        TESTNET and DEMO while preserving legacy identity for providers whose
+        provider environment is identical to the runtime environment.
         """
 
         if type(aggregate_version) is not int or aggregate_version <= 0:
@@ -2353,16 +2377,14 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=self.provider_id,
             account_id=self.account_id,
             environment=self.environment,
+            provider_environment=self.provider_environment,
         )
         if self.book_id != expected_book_id:
             raise AccountingConflict(
                 "historical economic cut book identity does not match owner scope"
             )
-        if self.provider_id == "BYBIT" and self.environment in {"PAPER", "LIVE"}:
-            raise AccountingConflict(
-                "BYBIT historical economic cut requires exact provider_environment "
-                "before terminal provider-cost evidence"
-            )
+        # Provider environment is part of the durable book identity, so
+        # historical cuts are unambiguous across BYBIT TESTNET/DEMO/MAINNET.
         if type(self.store) is not JournalStore:
             raise AccountingConflict(
                 "historical economic cut requires exact canonical JournalStore"
@@ -2466,6 +2488,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             "provider_id": self.provider_id,
             "account_id": self.account_id,
             "environment": self.environment,
+            "provider_environment": self.provider_environment,
             "book_id": self.book_id,
             "aggregate_version": aggregate_version,
             "journal_sequence": journal_sequence,
@@ -2481,6 +2504,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=self.provider_id,
             account_id=self.account_id,
             environment=self.environment,
+            provider_environment=self.provider_environment,
             book_id=self.book_id,
             aggregate_version=aggregate_version,
             journal_sequence=journal_sequence,
@@ -2532,6 +2556,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=authority.provider_id,
             account_id=authority.account_id,
             environment=authority.environment,
+            provider_environment=authority.provider_environment,
             transactions=batch,
         )
         request = {
@@ -2539,6 +2564,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             "provider_id": authority.provider_id,
             "account_id": authority.account_id,
             "environment": authority.environment,
+            "provider_environment": authority.provider_environment,
             "batch_digest": batch_digest,
             "transactions": transaction_payloads,
         }
@@ -2616,6 +2642,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             "provider_id": authority.provider_id,
             "account_id": authority.account_id,
             "environment": authority.environment,
+            "provider_environment": authority.provider_environment,
             "batch_digest": batch_digest,
             "previous_book_digest": previous_digest,
             "resulting_book_digest": resulting_digest,
@@ -4829,6 +4856,7 @@ def _snapshot_external_cash_activity(
         "provider_id",
         "account_id",
         "environment",
+        "provider_environment",
         "activity_id",
         "activity_type",
         "origin",
@@ -4846,6 +4874,7 @@ def _snapshot_external_cash_activity(
         "provider_id",
         "account_id",
         "environment",
+        "provider_environment",
         "activity_id",
         "activity_type",
         "origin",
@@ -4871,6 +4900,7 @@ def _snapshot_external_cash_activity(
         provider_id=state["provider_id"],
         account_id=state["account_id"],
         environment=state["environment"],
+        provider_environment=state["provider_environment"],
         activity_id=state["activity_id"],
         activity_type=state["activity_type"],
         origin=state["origin"],
@@ -4888,6 +4918,7 @@ def _snapshot_external_cash_activity(
             "provider_id",
             "account_id",
             "environment",
+            "provider_environment",
             "activity_id",
             "activity_type",
             "origin",
@@ -4904,6 +4935,7 @@ def _snapshot_external_cash_activity(
         snapshot.provider_id,
         snapshot.account_id,
         snapshot.environment,
+        snapshot.provider_environment,
         snapshot.activity_id,
         snapshot.activity_type,
         snapshot.origin,
@@ -4970,6 +5002,11 @@ def book_external_provider_cash_activity(
     provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")
     scope = _environment(environment)
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=activity.provider_environment,
+    )
     if activity.provider_id != provider:
         raise ValueError("provider activity evidence provider_id mismatch")
     if activity.account_id != account:
@@ -5018,17 +5055,23 @@ def book_external_provider_cash_activity(
     if observed < occurred:
         raise ValueError("observed_at must not precede provider activity occurred_at")
     observed_text = observed.isoformat().replace("+00:00", "Z")
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=provider_scope,
+        environment=scope,
+    )
 
     identity = _activity_identity(
         provider_id=provider,
         account_id=account,
         environment=scope,
+        provider_environment=provider_scope,
         activity_id=activity.activity_id,
     )
     book_id = _book_id(
         provider_id=provider,
         account_id=account,
         environment=scope,
+        provider_environment=provider_scope,
     )
     cause_event_id = f"provider-activity:{identity}"
     transaction_id = str(
@@ -5062,6 +5105,10 @@ def book_external_provider_cash_activity(
         },
         "amount": amount_text,
     }
+    if provider_scope_payload is not None:
+        request["provider_environment"] = provider_scope_payload
+        request["activity"]["provider_environment"] = provider_scope_payload
+
     result = {
         "provider_id": provider,
         "account_id": account,
@@ -5071,6 +5118,8 @@ def book_external_provider_cash_activity(
         "amount": amount_text,
         "currency": activity.currency,
     }
+    if provider_scope_payload is not None:
+        result["provider_environment"] = provider_scope_payload
 
     imported_event_id = str(
         uuid5(
@@ -5150,6 +5199,7 @@ def book_external_provider_cash_activity(
             or economic_payload.get("provider_id") != provider
             or economic_payload.get("account_id") != account
             or economic_payload.get("environment") != scope
+            or economic_payload.get("provider_environment", scope) != provider_scope
             or economic_payload.get("source_activity_identity") != identity
             or economic_payload.get("transaction")
             != _transaction_payload(transaction)
@@ -5228,6 +5278,8 @@ def book_external_provider_cash_activity(
         "observed_at": observed_text,
         "transaction": _transaction_payload(transaction),
     }
+    if provider_scope_payload is not None:
+        economic_payload["provider_environment"] = provider_scope_payload
     economic_envelope = {
         "event_id": economic_event_id,
         "event_type": "EconomicTransactionBooked",
@@ -5285,6 +5337,7 @@ def load_provider_account_economic_book(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> EconomicBook:
     """Rebuild canonical economics from the one durable provider/account journal."""
 
@@ -5293,5 +5346,6 @@ def load_provider_account_economic_book(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     return EconomicBook(durable.transactions)

@@ -21,6 +21,7 @@ def activity(
     provider_id="ALPACA",
     account_id="paper-1",
     environment="PAPER",
+    provider_environment=None,
     activity_id="cash-1",
     activity_type="DEPOSIT",
     origin="EXTERNAL",
@@ -36,6 +37,7 @@ def activity(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         activity_id=activity_id,
         activity_type=activity_type,
         origin=origin,
@@ -103,6 +105,76 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 environment="LIVE",
             ),
         )
+
+    def test_bybit_provider_environment_is_part_of_cash_and_book_identity(self):
+        testnet_activity_identity = paper_activity_identity(
+            provider_id="BYBIT",
+            account_id="shared-account",
+            provider_environment="TESTNET",
+            activity_id="shared-id",
+        )
+        demo_activity_identity = paper_activity_identity(
+            provider_id="BYBIT",
+            account_id="shared-account",
+            provider_environment="DEMO",
+            activity_id="shared-id",
+        )
+        self.assertNotEqual(testnet_activity_identity, demo_activity_identity)
+        self.assertNotEqual(
+            paper_book_id(
+                provider_id="BYBIT",
+                account_id="shared-account",
+                provider_environment="TESTNET",
+            ),
+            paper_book_id(
+                provider_id="BYBIT",
+                account_id="shared-account",
+                provider_environment="DEMO",
+            ),
+        )
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            for provider_environment, amount in (("TESTNET", "11"), ("DEMO", "22")):
+                transaction, inserted = book_paper_activity(
+                    store,
+                    provider_id="BYBIT",
+                    account_id="shared-account",
+                    activity=activity(
+                        provider_id="BYBIT",
+                        account_id="shared-account",
+                        provider_environment=provider_environment,
+                        activity_id="shared-id",
+                    ),
+                    amount=amount,
+                    observed_at="2026-09-24T18:01:00Z",
+                )
+                self.assertTrue(inserted)
+                self.assertEqual(
+                    transaction.cause_event_id,
+                    "provider-activity:"
+                    + paper_activity_identity(
+                        provider_id="BYBIT",
+                        account_id="shared-account",
+                        provider_environment=provider_environment,
+                        activity_id="shared-id",
+                    ),
+                )
+
+            testnet = load_paper_book(
+                store,
+                provider_id="BYBIT",
+                account_id="shared-account",
+                provider_environment="TESTNET",
+            )
+            demo = load_paper_book(
+                store,
+                provider_id="BYBIT",
+                account_id="shared-account",
+                provider_environment="DEMO",
+            )
+            self.assertEqual(testnet.cash("USD"), Decimal("11"))
+            self.assertEqual(demo.cash("USD"), Decimal("22"))
 
     def test_bridge_requires_canonical_environment_scope(self):
         with TemporaryDirectory() as directory:

@@ -322,13 +322,13 @@ class AuthenticatedBybitSubmissionProjectionTests(unittest.TestCase):
             )
 
             restarted = DurableOrderBookProjection(
-                JournalStore(f"{directory}/journal.sqlite3"),
+                store,
                 provider_id="BYBIT",
                 account_id="bybit-account",
                 environment="PAPER",
                 host_id="host-restarted",
                 owner_epoch="2",
-                evidence_artifact_store=ArtifactStore(f"{directory}/artifacts"),
+                evidence_artifact_store=artifacts,
             )
             with self.assertRaisesRegex(
                 projection_module.BybitSubmissionProjectionError,

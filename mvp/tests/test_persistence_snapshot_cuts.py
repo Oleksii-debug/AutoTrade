@@ -144,6 +144,64 @@ class PersistenceSnapshotCutTests(unittest.TestCase):
             self.assertTrue(raced)
             self.assertEqual(JournalStore(path).current_journal_sequence(), 2)
 
+    def test_projection_rebuild_from_zero_equals_checkpoint_plus_tail_after_restart(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+
+            events = [
+                event("evt-rebuild-a1", 1),
+                event("evt-rebuild-a2", 2),
+                event("evt-rebuild-a3", 3),
+            ]
+            second_account = event("evt-rebuild-b1", 1)
+            second_account["aggregate_id"] = "paper-2"
+            second_account["payload"] = {"kind": "fill", "quantity": "7"}
+            second_account["payload_hash"] = payload_digest(second_account["payload"])
+
+            store.append_event(events[0])
+            store.append_event(second_account)
+            store.append_event(events[1])
+
+            checkpoint_cut = store.current_journal_sequence()
+            self.assertEqual(checkpoint_cut, 3)
+            checkpoint_state = {"paper-1": "3", "paper-2": "7"}
+            self.assertTrue(
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio-equivalence",
+                    journal_sequence=checkpoint_cut,
+                    state=checkpoint_state,
+                )
+            )
+
+            store.append_event(events[2])
+            reopened = JournalStore(path)
+
+            def reduce_fill(state, item):
+                if item["payload"].get("kind") != "fill":
+                    return
+                aggregate_id = item["aggregate_id"]
+                state[aggregate_id] = str(
+                    int(state.get(aggregate_id, "0"))
+                    + int(item["payload"]["quantity"])
+                )
+
+            from_zero = {}
+            for item in reopened.load_events_after_journal_sequence(0):
+                reduce_fill(from_zero, item)
+
+            checkpoint = reopened.load_global_projection_checkpoint(
+                projection_name="portfolio-equivalence"
+            )
+            from_checkpoint = dict(checkpoint["state"])
+            for item in reopened.load_events_after_journal_sequence(
+                checkpoint["journal_sequence"]
+            ):
+                reduce_fill(from_checkpoint, item)
+
+            self.assertEqual(from_zero, {"paper-1": "6", "paper-2": "7"})
+            self.assertEqual(from_checkpoint, from_zero)
+
 
 if __name__ == "__main__":
     unittest.main()

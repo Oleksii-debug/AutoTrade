@@ -34,6 +34,26 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaises(InvalidJsonDomainError):
             strict_json_loads('{"a":' + ('1' * 641) + '}')
 
+    def test_strict_json_rejects_float_underflow_and_unbounded_lexemes(self):
+        with self.assertRaisesRegex(InvalidJsonDomainError, "underflows"):
+            strict_json_loads('{"a":1e-10000}')
+
+        huge_significand = "1" * 641
+        with self.assertRaisesRegex(
+            InvalidJsonDomainError,
+            "floating-point significand exceeds",
+        ):
+            strict_json_loads('{"a":' + huge_significand + '.0}')
+
+        with self.assertRaisesRegex(
+            InvalidJsonDomainError,
+            "floating-point exponent exceeds",
+        ):
+            strict_json_loads('{"a":1e+1234567}')
+
+        self.assertEqual(strict_json_loads('{"a":0e-10000}'), {"a": 0.0})
+        self.assertGreater(strict_json_loads('{"a":5e-324}')["a"], 0.0)
+
     def test_strict_json_rejects_oversized_document_and_decoded_domain(self):
         with self.assertRaisesRegex(InvalidJsonDomainError, "document exceeds"):
             strict_json_loads('{"value":"' + ("x" * 1_000_000) + '"}')

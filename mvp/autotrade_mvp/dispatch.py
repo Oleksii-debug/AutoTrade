@@ -36,6 +36,27 @@ def _has_exact_response_markers(payload: Mapping[str, Any]) -> bool:
     return any(marker in payload for marker in _EXACT_RESPONSE_MARKERS)
 
 
+def _exact_response_terminal_semantics_are_canonical(
+    event_type: str,
+    payload: Mapping[str, Any],
+) -> bool:
+    if not _has_exact_response_markers(payload):
+        return True
+    if event_type == "SubmissionSent":
+        return (
+            "reason" not in payload
+            and "retry_disposition" not in payload
+        )
+    if event_type == "SubmissionUnknown":
+        reason = payload.get("reason")
+        return (
+            type(reason) is str
+            and bool(reason.strip())
+            and payload.get("retry_disposition") == "RECONCILE_FIRST"
+        )
+    return False
+
+
 def _decode_exact_json_bytes(raw: bytes) -> Any:
     if type(raw) is not bytes or not raw:
         raise ValueError("provider response bytes must be non-empty bytes")
@@ -434,6 +455,11 @@ def load_submission_response_binding(
     sent_payload = sent.get("payload")
     if not isinstance(sent_payload, dict):
         raise ValueError("durable terminal submission payload is invalid")
+    if not _exact_response_terminal_semantics_are_canonical(
+        sent["event_type"],
+        sent_payload,
+    ):
+        raise ValueError("durable exact response terminal semantics are invalid")
     response_text = sent_payload.get("response_text")
     response_sha256 = sent_payload.get("response_sha256")
     if (
@@ -831,6 +857,16 @@ class GuardedDispatcher:
     @staticmethod
     def _outcome_from_terminal(event: dict[str, Any], client_order_id: str) -> DispatchOutcome:
         payload = event["payload"]
+        if not _exact_response_terminal_semantics_are_canonical(
+            event["event_type"],
+            payload,
+        ):
+            return DispatchOutcome(
+                "UNKNOWN",
+                client_order_id,
+                None,
+                "exact_response_terminal_semantics_invalid",
+            )
         if event["event_type"] == "SubmissionSent":
             if _has_exact_response_markers(payload):
                 # Any reserved exact marker commits the row to the SHA-bound
@@ -992,7 +1028,8 @@ class GuardedDispatcher:
                 or events[1].get("owner_epoch") != str(prepared_owner_epoch)
             ):
                 return False
-        return tuple(event_types) in {
+        history_shape = tuple(event_types)
+        if history_shape not in {
             ("SubmissionPrepared",),
             ("SubmissionPrepared", "SubmissionBlocked"),
             ("SubmissionPrepared", "SubmissionUnknown"),
@@ -1000,7 +1037,15 @@ class GuardedDispatcher:
             ("SubmissionPrepared", "SubmissionBlocked", "SubmissionUnknown"),
             ("SubmissionPrepared", "SubmissionSending", "SubmissionSent"),
             ("SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"),
-        }
+        }:
+            return False
+        terminal_type = event_types[-1]
+        if terminal_type in {"SubmissionSent", "SubmissionUnknown"}:
+            return _exact_response_terminal_semantics_are_canonical(
+                terminal_type,
+                events[-1]["payload"],
+            )
+        return True
 
     def _terminal_outcome_from_existing_history(
         self,

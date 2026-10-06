@@ -8,6 +8,8 @@ from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
     SubmissionResponseBinding,
+    _event_id,
+    _identity_digest,
     load_submission_response_binding,
     stable_client_order_id,
     submission_attempt_aggregate_id,
@@ -717,6 +719,112 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                     environment="SIMULATION",
                     account_id="acct",
                     attempt_id="terminal-retarget-a1",
+                )
+
+    def test_unknown_to_sent_retarget_with_matching_event_id_stays_unknown(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            result = dispatcher.dispatch(
+                attempt_id="terminal-semantic-retarget-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(
+                        b'{"accepted":false}',
+                        http_status=503,
+                        requires_reconciliation=True,
+                        ambiguity_reason="provider_execution_unknown",
+                    ),
+                )[1],
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+
+            scope_key = _identity_digest("SIMULATION", "acct")
+            canonical_sent_event_id = _event_id(
+                scope_key,
+                "terminal-semantic-retarget-a1",
+                "SubmissionSent",
+                3,
+            )
+            connection = sqlite3.connect(path)
+            try:
+                row = connection.execute(
+                    "SELECT event_id, envelope_json "
+                    "FROM events WHERE event_type = 'SubmissionUnknown'"
+                ).fetchone()
+                self.assertIsNotNone(row)
+                old_event_id, envelope_json = row
+                envelope = json.loads(envelope_json)
+                envelope["event_id"] = canonical_sent_event_id
+                envelope["event_type"] = "SubmissionSent"
+                new_envelope_json = canonical_json(envelope)
+                new_envelope_hash = (
+                    "sha256:"
+                    + sha256(new_envelope_json.encode("utf-8")).hexdigest()
+                )
+                connection.execute(
+                    "UPDATE events SET event_id = ?, event_type = ?, "
+                    "envelope_json = ?, envelope_hash = ? WHERE event_id = ?",
+                    (
+                        canonical_sent_event_id,
+                        "SubmissionSent",
+                        new_envelope_json,
+                        new_envelope_hash,
+                        old_event_id,
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            restarted = GuardedDispatcher(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="restart-owner",
+            )
+            recovered = restarted.dispatch(
+                attempt_id="terminal-semantic-retarget-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:02Z",
+                authority_check=lambda *_args: (_ for _ in ()).throw(
+                    AssertionError("corrupt terminal history must not rerun authority")
+                ),
+                transport_send=lambda *_args: (_ for _ in ()).throw(
+                    AssertionError("corrupt terminal history must not resend")
+                ),
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(recovered.status, "UNKNOWN")
+            self.assertEqual(
+                recovered.reason,
+                "durable_submission_history_invalid",
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "terminal semantics are invalid",
+            ):
+                load_submission_response_binding(
+                    JournalStore(path),
+                    environment="SIMULATION",
+                    account_id="acct",
+                    attempt_id="terminal-semantic-retarget-a1",
                 )
 
     def test_runtime_redispatch_rejects_submission_scope_retargeting(self):

@@ -31,22 +31,54 @@ from .securities_borrow import (
     verify_provider_borrow_evidence,
 )
 
-def _journal_store_call(
-    store: JournalStore,
-    operation,
-    /,
-    *args,
-    **kwargs,
-):
-    """Run one reconciliation journal operation on exact bound store authority."""
+def _install_journal_store_call():
+    """Freeze reconciliation journal dispatch to canonical store operations."""
 
-    identity = require_exact_journal_store_authority(
-        store,
-        subject="reconciliation JournalStore",
-    )
-    with journal_store_authority_scope(store, identity):
-        return operation(store, *args, **kwargs)
+    store_type = JournalStore
+    canonical_require = require_exact_journal_store_authority
+    canonical_scope = journal_store_authority_scope
+    canonical_getattr = getattr
+    operations = {
+        "append_event": store_type.append_event,
+        "current_journal_sequence": store_type.current_journal_sequence,
+        "get_event": store_type.get_event,
+        "load_events": store_type.load_events,
+        "load_events_by_aggregate_type": store_type.load_events_by_aggregate_type,
+        "next_aggregate_version": store_type.next_aggregate_version,
+    }
 
+    def call(
+        store: JournalStore,
+        operation_name: str,
+        /,
+        *args,
+        **kwargs,
+    ):
+        if (
+            JournalStore is not store_type
+            or require_exact_journal_store_authority is not canonical_require
+            or journal_store_authority_scope is not canonical_scope
+        ):
+            raise RuntimeError("reconciliation journal authority changed")
+        if type(operation_name) is not str or operation_name not in operations:
+            raise TypeError("unsupported reconciliation journal operation")
+        operation = operations[operation_name]
+        if canonical_getattr(store_type, operation_name, None) is not operation:
+            raise RuntimeError(
+                f"reconciliation journal operation changed: {operation_name}"
+            )
+        identity = canonical_require(
+            store,
+            subject="reconciliation JournalStore",
+        )
+        with canonical_scope(store, identity):
+            return operation(store, *args, **kwargs)
+
+    return call
+
+
+_journal_store_call = _install_journal_store_call()
+del _install_journal_store_call
 
 
 def _text(value: str, *, name: str) -> str:
@@ -415,11 +447,11 @@ def record_reconciliation_checkpoint(
         environment=result.environment,
         provider_environment=result.provider_environment,
     )
-    existing = _journal_store_call(store, JournalStore.load_events, "account_reconciliation", aggregate_id)
+    existing = _journal_store_call(store, "load_events", "account_reconciliation", aggregate_id)
     if existing and existing[-1]["payload"] == payload:
         return existing[-1]
 
-    version = _journal_store_call(store, JournalStore.next_aggregate_version, 
+    version = _journal_store_call(store, "next_aggregate_version", 
         "account_reconciliation", aggregate_id
     )
     event_id = str(
@@ -448,13 +480,13 @@ def record_reconciliation_checkpoint(
         "payload_hash": payload_digest(payload),
         "evidence_refs": [],
     }
-    _journal_store_call(store, JournalStore.append_event, 
+    _journal_store_call(store, "append_event", 
         envelope,
         outbox_topic="autotrade.reconciliation.events",
         expected_journal_sequence=expected_journal_sequence,
         expected_whole_store_counts=expected_whole_store_counts,
     )
-    event = _journal_store_call(store, JournalStore.get_event, event_id)
+    event = _journal_store_call(store, "get_event", event_id)
     if event is None:
         raise RuntimeError("reconciliation checkpoint was not persisted")
     return event
@@ -481,7 +513,7 @@ def load_latest_reconciliation_checkpoint(
         environment=environment,
         provider_environment=provider_environment,
     )
-    events = _journal_store_call(store, JournalStore.load_events, "account_reconciliation", aggregate_id)
+    events = _journal_store_call(store, "load_events", "account_reconciliation", aggregate_id)
     if not events:
         return None
     event = events[-1]
@@ -527,7 +559,7 @@ def load_latest_reconciliation_checkpoint_for_scope(
     )
     latest: dict[str, Any] | None = None
     latest_sequence = 0
-    for event in _journal_store_call(store, JournalStore.load_events_by_aggregate_type, "account_reconciliation"):
+    for event in _journal_store_call(store, "load_events_by_aggregate_type", "account_reconciliation"):
         if event.get("event_type") != "AccountReconciled":
             continue
         payload = event.get("payload")
@@ -680,7 +712,7 @@ def load_submission_resolution_evidence(
     expected_intent = _text(intent_id, name="intent_id")
     expected_client = _text(client_order_id, name="client_order_id")
 
-    checkpoint = _journal_store_call(store, JournalStore.get_event, event_id)
+    checkpoint = _journal_store_call(store, "get_event", event_id)
     if checkpoint is None:
         raise KeyError(f"Unknown reconciliation checkpoint event: {event_id}")
     if checkpoint.get("event_type") != "AccountReconciled":
@@ -816,7 +848,7 @@ def load_account_resource_availability_evidence(
         raise TypeError("require_latest_scope must be boolean")
     if journal_sequence_cut is not None:
         if (type(journal_sequence_cut) is not int or journal_sequence_cut < 0
-                or journal_sequence_cut > _journal_store_call(store, JournalStore.current_journal_sequence)):
+                or journal_sequence_cut > _journal_store_call(store, "current_journal_sequence")):
             raise ValueError("historical availability journal cut is invalid")
         if require_latest_scope:
             raise ValueError("current availability cannot use a historical journal cut")
@@ -831,7 +863,7 @@ def load_account_resource_availability_evidence(
             environment=environment,
             provider_environment=provider_environment,
         )
-    checkpoint = _journal_store_call(store, JournalStore.get_event, event_id)
+    checkpoint = _journal_store_call(store, "get_event", event_id)
     if checkpoint is None:
         raise KeyError(f"Unknown reconciliation checkpoint event: {event_id}")
     if (journal_sequence_cut is not None
@@ -1006,7 +1038,7 @@ def load_account_resource_availability_evidence(
         resource_started = datetime.fromisoformat(
             resource_started_text.replace("Z", "+00:00")
         )
-        for settlement_event in _journal_store_call(store, JournalStore.load_events_by_aggregate_type, 
+        for settlement_event in _journal_store_call(store, "load_events_by_aggregate_type", 
             "settlement_book"
         ):
             settlement_sequence = settlement_event.get("journal_sequence")
@@ -1057,7 +1089,7 @@ def load_account_resource_availability_evidence(
         # provider cash snapshot taken before the lifecycle fact must not authorize
         # fresh capital reuse.  Reuse this single availability authority rather
         # than teaching reservation or option accounting a second freshness rule.
-        for lifecycle_event in _journal_store_call(store, JournalStore.load_events_by_aggregate_type, 
+        for lifecycle_event in _journal_store_call(store, "load_events_by_aggregate_type", 
             "option_lifecycle"
         ):
             lifecycle_sequence = lifecycle_event.get("journal_sequence")
@@ -1386,7 +1418,7 @@ def unknown_submissions_from_dispatch(
     recovered: list[UnknownSubmission] = []
     for attempt_id in normalized:
         aggregate_id = durable_ids.get(attempt_id, attempt_id)
-        events = _journal_store_call(store, JournalStore.load_events, "submission_attempt", aggregate_id)
+        events = _journal_store_call(store, "load_events", "submission_attempt", aggregate_id)
         if not events:
             raise KeyError(f"Unknown submission attempt: {attempt_id}")
         first = events[0]

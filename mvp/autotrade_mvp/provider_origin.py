@@ -933,6 +933,8 @@ def observe_test_injected_json_response(
 _HOST_ATTESTED_PENDING_KIND = "HOST_ATTESTED_PENDING"
 _HOST_ATTESTED_OBSERVED_KIND = "HOST_ATTESTED_OBSERVED"
 _HOST_JOURNAL_IDENTITY_SCHEMA = "autotrade-provider-origin-journal-identity:v1"
+_HOST_PREPARED_DURABILITY_SCHEMA = "autotrade-provider-read-durable-prepared:v1"
+_HOST_OBSERVED_DURABILITY_SCHEMA = "autotrade-provider-read-durable-observed:v1"
 _HOST_PREPARED_PAYLOAD_KEYS = frozenset(
     {
         "origin_kind",
@@ -1144,7 +1146,7 @@ def _host_prepared_receipt_payload(receipt: object) -> dict[str, object]:
             "prepared durability receipt must be exact HostPreparedDurabilityReceipt"
         )
     return {
-        "schema": _PREPARED_DURABILITY_SCHEMA,
+        "schema": _HOST_PREPARED_DURABILITY_SCHEMA,
         "issuer_session_identity": receipt.issuer_session_identity,
         "read_attempt_id": receipt.read_attempt_id,
         "read_attempt_binding_sha256": receipt.read_attempt_binding_sha256,
@@ -1165,7 +1167,7 @@ def _host_observed_receipt_payload(receipt: object) -> dict[str, object]:
             "observed durability receipt must be exact HostObservedDurabilityReceipt"
         )
     return {
-        "schema": _OBSERVED_DURABILITY_SCHEMA,
+        "schema": _HOST_OBSERVED_DURABILITY_SCHEMA,
         "issuer_session_identity": receipt.issuer_session_identity,
         "read_attempt_id": receipt.read_attempt_id,
         "read_attempt_binding_sha256": receipt.read_attempt_binding_sha256,
@@ -1316,7 +1318,7 @@ class HostAuthenticatedReadJournalBridge:
                 "durable Host Prepared event lacks canonical journal cut"
             )
         material = canonical_host_material(
-            _PREPARED_DURABILITY_SCHEMA,
+            _HOST_PREPARED_DURABILITY_SCHEMA,
             verified.issuer_session.session_identity,
             attempt.read_attempt_id,
             attempt.binding_sha256,
@@ -1498,7 +1500,7 @@ class HostAuthenticatedReadJournalBridge:
             )
         attempt = verified_prepared.attempt
         material = canonical_host_material(
-            _OBSERVED_DURABILITY_SCHEMA,
+            _HOST_OBSERVED_DURABILITY_SCHEMA,
             verified_prepared.issuer_session.session_identity,
             attempt.read_attempt_id,
             attempt.binding_sha256,

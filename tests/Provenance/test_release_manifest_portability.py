@@ -73,6 +73,20 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
             git_blob_sha(ROOT / "research" / "pyproject.toml"),
         )
 
+    def test_manifest_binds_nuget_package_rights_policy(self):
+        document = json.loads(rendered_manifest())
+        self.assertEqual(document["dotnet_package_rights"], [])
+        self.assertEqual(
+            document["source_inventory"]["dotnet_package_rights_blob_sha"],
+            git_blob_sha(ROOT / "provenance" / "dotnet-package-rights.json"),
+        )
+        self.assertFalse(
+            any(
+                issue.get("code") == "DOTNET_PACKAGE_RIGHTS_UNQUALIFIED"
+                for issue in document["blocking_issues"]
+            )
+        )
+
     def _advisory_fixture(self):
         graph = {
             "python_development_dependencies": [

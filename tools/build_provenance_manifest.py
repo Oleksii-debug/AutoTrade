@@ -25,6 +25,7 @@ if __package__:
         dotnet_restore_workflow_commands,
         dotnet_restore_workflow_environment_authority_lines,
     )
+    from .dotnet_package_rights import package_rights_blockers, package_rights_records
 else:
     from dotnet_lock import (
         dotnet_locked_dependency_graph,
@@ -36,6 +37,7 @@ else:
         dotnet_restore_workflow_commands,
         dotnet_restore_workflow_environment_authority_lines,
     )
+    from dotnet_package_rights import package_rights_blockers, package_rights_records
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -944,6 +946,7 @@ def build_manifest() -> dict[str, object]:
     requirements_path = ROOT / "requirements-dev.txt"
     research_pyproject_path = ROOT / "research" / "pyproject.toml"
     global_path = ROOT / "global.json"
+    dotnet_package_rights_path = ROOT / "provenance" / "dotnet-package-rights.json"
     components_doc = _require_provenance_schema_1(
         _strict_json_loads_bytes(components_path.read_bytes()),
         label="components provenance",
@@ -1076,6 +1079,22 @@ def build_manifest() -> dict[str, object]:
             }
         )
         dotnet_packages = []
+    package_rights_findings = package_rights_blockers(ROOT)
+    if package_rights_findings:
+        blockers.append(
+            {
+                "code": "DOTNET_PACKAGE_RIGHTS_UNQUALIFIED",
+                "findings": sorted(package_rights_findings),
+                "detail": (
+                    "Locked NuGet artifacts must have one exact reviewed rights "
+                    "record bound to restored package/license/notice bytes."
+                ),
+            }
+        )
+        dotnet_rights: list[dict[str, str]] = []
+    else:
+        dotnet_rights = package_rights_records(ROOT)
+
     dependency_graph = {
         "python_development_dependencies": python_dependencies,
         "dotnet_package_dependencies": dotnet_packages,
@@ -1282,6 +1301,7 @@ def build_manifest() -> dict[str, object]:
         "requirements_dev_blob_sha": git_blob_sha(requirements_path),
         "research_pyproject_blob_sha": git_blob_sha(research_pyproject_path),
         "global_json_blob_sha": git_blob_sha(global_path),
+        "dotnet_package_rights_blob_sha": git_blob_sha(dotnet_package_rights_path),
     }
     if release_policy_digest is not None:
         if release_policy_pin_blob_sha is None:
@@ -1301,6 +1321,7 @@ def build_manifest() -> dict[str, object]:
         "dotnet_sdk": str(global_doc["sdk"]["version"]),
         "python_development_dependencies": python_dependencies,
         "dotnet_package_dependencies": dotnet_packages,
+        "dotnet_package_rights": dotnet_rights,
         "inspected_components": components,
         "blocking_issues": blockers,
         "release_eligible": not blockers,

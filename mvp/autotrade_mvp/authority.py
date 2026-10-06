@@ -89,6 +89,16 @@ def _authority_text(value: object, *, name: str) -> str:
     return value.strip()
 
 
+def _authority_decimal(value: object, *, name: str) -> Decimal:
+    """Parse financial authority scalars only after exact built-in admission."""
+
+    if type(value) not in {Decimal, str, int}:
+        raise TypeError(
+            f"{name} must use exact Decimal, string or integer input"
+        )
+    return _decimal(value, name=name)
+
+
 def _instant(value: str, *, name: str) -> datetime:
     text = _text(value, name=name)
     try:
@@ -713,12 +723,27 @@ def _authority_service_capital_operations():
         settlement_book, economic_book = binding(service, required=required)
         if settlement_book is None:
             return None
+        if (
+            type(provider_available) is not dict
+            or any(type(key) is not str for key in provider_available)
+        ):
+            raise AuthorityConflict(
+                "settlement capital provider availability is malformed"
+            )
+        if (
+            type(resources) is not tuple
+            or any(type(resource) is not str for resource in resources)
+        ):
+            raise AuthorityConflict("settlement capital resources are malformed")
         cash_resources = tuple(
             sorted(resource for resource in resources if resource.startswith("CASH:"))
         )
         if not cash_resources:
             return None
-        if not isinstance(provider_evidence, Mapping):
+        if (
+            type(provider_evidence) is not dict
+            or any(type(key) is not str for key in provider_evidence)
+        ):
             raise AuthorityConflict(
                 "settlement capital requires provider availability evidence"
             )
@@ -728,13 +753,14 @@ def _authority_service_capital_operations():
         # A writer between the causal history read and projection must not turn
         # newer cash into capital backed by the older provider snapshot.
         before = _authority_store_call(service, "current_journal_sequence")
-        checkpoint_event_id = _text(
+        checkpoint_event_id = _authority_text(
             provider_evidence.get("checkpoint_event_id"),
             name="checkpoint_event_id",
         )
         checkpoint = _authority_store_call(service, "get_event", checkpoint_event_id)
         if (
-            checkpoint is None
+            type(checkpoint) is not dict
+            or any(type(key) is not str for key in checkpoint)
             or checkpoint.get("event_type") != "AccountReconciled"
             or checkpoint.get("aggregate_type") != "account_reconciliation"
         ):
@@ -758,17 +784,26 @@ def _authority_service_capital_operations():
                 "settlement capital requires the exact current provider checkpoint"
             )
         checkpoint_payload = checkpoint.get("payload")
-        if not isinstance(checkpoint_payload, Mapping):
+        if (
+            type(checkpoint_payload) is not dict
+            or any(type(key) is not str for key in checkpoint_payload)
+        ):
             raise AuthorityConflict(
                 "settlement capital provider checkpoint is malformed"
             )
         resource_evidence = checkpoint_payload.get("resource_availability")
-        if not isinstance(resource_evidence, Mapping):
+        if (
+            type(resource_evidence) is not dict
+            or any(type(key) is not str for key in resource_evidence)
+        ):
             raise AuthorityConflict(
                 "settlement capital provider resource evidence is missing"
             )
         provider_query_started = _instant(
-            resource_evidence.get("query_started_at"),
+            _authority_text(
+                resource_evidence.get("query_started_at"),
+                name="resource_availability.query_started_at",
+            ),
             name="resource_availability.query_started_at",
         )
 
@@ -790,8 +825,18 @@ def _authority_service_capital_operations():
                     "provider availability predates local economic financial truth"
                 )
             for economic_event in economic_events:
+                if (
+                    type(economic_event) is not dict
+                    or any(type(key) is not str for key in economic_event)
+                ):
+                    raise AuthorityConflict(
+                        "settlement capital economic event is malformed"
+                    )
                 economic_committed_at = _instant(
-                    economic_event.get("committed_at"),
+                    _authority_text(
+                        economic_event.get("committed_at"),
+                        name="economic_book.committed_at",
+                    ),
                     name="economic_book.committed_at",
                 )
                 if economic_committed_at >= provider_query_started:
@@ -820,7 +865,7 @@ def _authority_service_capital_operations():
                 raise AuthorityConflict(
                     f"provider availability lacks required cash resource {resource}"
                 )
-            provider_amount = _decimal(
+            provider_amount = _authority_decimal(
                 raw_provider,
                 name=f"provider availability[{resource}]",
             )
@@ -875,8 +920,23 @@ def _canonical_settlement_capital_adjustment(
     risk_journal_sequence: int | None = None,
     expected_journal_sequence: int | None = None,
 ) -> tuple[dict[str, object], dict[str, Decimal]]:
-    if not isinstance(value, Mapping):
+    if (
+        type(value) is not dict
+        or any(type(key) is not str for key in value)
+    ):
         raise AuthorityConflict("settlement capital adjustment is malformed")
+    if (
+        type(provider_available) is not dict
+        or any(type(key) is not str for key in provider_available)
+    ):
+        raise AuthorityConflict(
+            "authoritative provider availability is malformed"
+        )
+    if (
+        type(required_resources) is not tuple
+        or any(type(resource) is not str for resource in required_resources)
+    ):
+        raise AuthorityConflict("required settlement resources are malformed")
     expected_fields = {
         "schema_version",
         "journal_sequence",
@@ -913,13 +973,26 @@ def _canonical_settlement_capital_adjustment(
         raise AuthorityConflict(
             "settlement capital cut must precede the durable risk decision"
         )
-    canonical_provider = _text(provider_id, name="provider_id").upper()
-    canonical_account = _text(account_id, name="account_id")
-    canonical_environment = _text(environment, name="environment").upper()
+    canonical_provider = _authority_text(
+        provider_id, name="provider_id"
+    ).upper()
+    canonical_account = _authority_text(account_id, name="account_id")
+    canonical_environment = _authority_text(
+        environment, name="environment"
+    ).upper()
+    value_provider = _authority_text(
+        value.get("provider_id"), name="capital.provider_id"
+    ).upper()
+    value_account = _authority_text(
+        value.get("account_id"), name="capital.account_id"
+    )
+    value_environment = _authority_text(
+        value.get("environment"), name="capital.environment"
+    ).upper()
     if (
-        value.get("provider_id") != canonical_provider
-        or value.get("account_id") != canonical_account
-        or value.get("environment") != canonical_environment
+        value_provider != canonical_provider
+        or value_account != canonical_account
+        or value_environment != canonical_environment
     ):
         raise AuthorityConflict("settlement capital scope is inconsistent")
     if canonical_provider == "BYBIT" and provider_environment is None:
@@ -929,7 +1002,7 @@ def _canonical_settlement_capital_adjustment(
     expected_provider_environment = (
         canonical_environment
         if provider_environment is None
-        else _text(
+        else _authority_text(
             provider_environment,
             name="expected_provider_environment",
         ).upper()
@@ -946,7 +1019,7 @@ def _canonical_settlement_capital_adjustment(
             raise AuthorityConflict(
                 "BYBIT settlement capital provider domain does not match runtime"
             )
-    provider_environment = _text(
+    provider_environment = _authority_text(
         value.get("provider_environment"),
         name="provider_environment",
     ).upper()
@@ -954,16 +1027,19 @@ def _canonical_settlement_capital_adjustment(
         raise AuthorityConflict(
             "settlement capital provider domain is inconsistent"
         )
-    settlement_scope_id = _text(
+    settlement_scope_id = _authority_text(
         value.get("settlement_scope_id"),
         name="settlement_scope_id",
     )
-    economic_book_id = _text(
+    economic_book_id = _authority_text(
         value.get("economic_book_id"),
         name="economic_book_id",
     )
     raw_resources = value.get("resources")
-    if not isinstance(raw_resources, Mapping):
+    if (
+        type(raw_resources) is not dict
+        or any(type(key) is not str for key in raw_resources)
+    ):
         raise AuthorityConflict("settlement capital resources are malformed")
     cash_resources = tuple(
         sorted(
@@ -981,27 +1057,31 @@ def _canonical_settlement_capital_adjustment(
     canonical_resources: dict[str, dict[str, str]] = {}
     for resource in cash_resources:
         raw = raw_resources.get(resource)
-        if not isinstance(raw, Mapping) or set(raw) != {
-            "provider_available",
-            "local_available",
-            "effective_available",
-        }:
+        if (
+            type(raw) is not dict
+            or any(type(key) is not str for key in raw)
+            or set(raw) != {
+                "provider_available",
+                "local_available",
+                "effective_available",
+            }
+        ):
             raise AuthorityConflict(
                 "settlement capital resource adjustment is malformed"
             )
-        provider_amount = _decimal(
+        provider_amount = _authority_decimal(
             raw.get("provider_available"),
             name=f"capital.provider_available[{resource}]",
         )
-        local_amount = _decimal(
+        local_amount = _authority_decimal(
             raw.get("local_available"),
             name=f"capital.local_available[{resource}]",
         )
-        effective_amount = _decimal(
+        effective_amount = _authority_decimal(
             raw.get("effective_available"),
             name=f"capital.effective_available[{resource}]",
         )
-        current_provider = _decimal(
+        current_provider = _authority_decimal(
             provider_available.get(resource),
             name=f"authoritative availability[{resource}]",
         )

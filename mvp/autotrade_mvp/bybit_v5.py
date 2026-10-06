@@ -1291,12 +1291,31 @@ def parse_option_delivery_page(
         )
 
     requested_symbol = query.get("symbol")
-    if requested_symbol is not None and (
+    if requested_symbol is None:
+        raise ProviderCoreError(
+            "Bybit option delivery query requires an exact symbol filter"
+        )
+    if (
         type(requested_symbol) is not str
         or re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", requested_symbol) is None
     ):
         raise ProviderCoreError(
             "Bybit option delivery query symbol is non-canonical"
+        )
+    instrument_version = binding.instrument_version
+    if "@" not in instrument_version:
+        raise ProviderCoreError(
+            "Bybit option delivery instrument_version is not canonical"
+        )
+    expected_symbol, version_suffix = instrument_version.rsplit("@", 1)
+    if (
+        not expected_symbol
+        or not version_suffix
+        or re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", expected_symbol) is None
+        or expected_symbol != requested_symbol
+    ):
+        raise ProviderCoreError(
+            "Bybit option delivery query symbol does not match instrument_version"
         )
 
     start_ms = (
@@ -1420,7 +1439,7 @@ def parse_option_delivery_page(
                 f"result.list[{index}].deliveryTime must be an exact non-negative integer"
             )
         delivery_time_ms = delivery_time_value
-        if requested_symbol is not None and symbol != requested_symbol:
+        if symbol != requested_symbol:
             raise ProviderCoreError(
                 "Bybit option delivery row violates requested symbol filter"
             )

@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from decimal import Inexact, Rounded, ROUND_CEILING, localcontext
 from hashlib import sha256
 from pathlib import Path
@@ -1342,6 +1343,59 @@ class VerticalSliceTests(unittest.TestCase):
             )
 
             self.assertFalse(verify_replay(directory))
+
+    def test_replay_and_resume_reject_corrupt_simulation_outbox(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            database = root / "journal.sqlite3"
+
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "UPDATE outbox SET payload_json = ?",
+                    ("{}",),
+                )
+                connection.commit()
+                corrupt_payload = connection.execute(
+                    "SELECT payload_json FROM outbox"
+                ).fetchone()[0]
+
+            checkpoint_before = (root / "checkpoint.json").read_bytes()
+            evidence_before = (root / "learning-evidence.jsonl").read_bytes()
+            intents_before = {
+                path.name: path.read_bytes()
+                for path in (root / "order-intents").glob("*.json")
+            }
+
+            self.assertFalse(verify_replay(directory))
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox envelope hash does not match stored payload",
+            ):
+                run_vertical_slice([103, 102, 101, 100], directory)
+
+            with sqlite3.connect(database) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT payload_json FROM outbox"
+                    ).fetchone()[0],
+                    corrupt_payload,
+                )
+            self.assertEqual(
+                (root / "checkpoint.json").read_bytes(),
+                checkpoint_before,
+            )
+            self.assertEqual(
+                (root / "learning-evidence.jsonl").read_bytes(),
+                evidence_before,
+            )
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in (root / "order-intents").glob("*.json")
+                },
+                intents_before,
+            )
 
     def test_replay_rejects_unrelated_simulation_aggregate_event(self):
         with TemporaryDirectory() as directory:

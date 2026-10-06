@@ -1643,6 +1643,35 @@ class QualificationAttestationTests(unittest.TestCase):
                     policy(trust_root),
                 )
 
+    def test_verified_snapshot_is_detached_from_post_verify_receipt_mutation(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        receipt = SignedQualificationAttestation(original, sign(original))
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            accepted = verify(receipt, store, policy(trust_root))
+
+        expected_requirement_ids = original.requirement_ids
+        expected_evidence_refs = original.evidence_refs
+        expected_completed_at = original.completed_at
+        expected_signed_at = original.signed_at
+        expected_attestation_json = original.canonical_bytes().decode("utf-8")
+        expected_signature = receipt.signature_b64
+
+        object.__setattr__(original, "requirement_ids", ("forged-requirement",))
+        object.__setattr__(original, "evidence_refs", ())
+        object.__setattr__(original, "completed_at", "2026-09-25T03:10:00Z")
+        object.__setattr__(original, "signed_at", "2026-09-25T03:11:00Z")
+
+        self.assertEqual(accepted.requirement_ids, expected_requirement_ids)
+        self.assertEqual(accepted.evidence_refs, expected_evidence_refs)
+        self.assertEqual(accepted.completed_at, expected_completed_at)
+        self.assertEqual(accepted.signed_at, expected_signed_at)
+        self.assertEqual(accepted.attestation_json, expected_attestation_json)
+        self.assertEqual(accepted.signature_b64, expected_signature)
+
+
 
 if __name__ == "__main__":
     unittest.main()

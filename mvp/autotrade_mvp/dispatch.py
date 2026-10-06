@@ -2513,10 +2513,15 @@ class GuardedDispatcher:
             barrier_passed = True
 
         exact_response_snapshot = _snapshot_exact_transport_response
+        exact_response_type = ExactJsonTransportResponse
         snapshot_getattr = getattr
+        snapshot_setattr = setattr
         snapshot_type = type
         snapshot_tuple = tuple
         snapshot_len = len
+        snapshot_module_globals = globals()
+        snapshot_module_globals_get = snapshot_module_globals.get
+        snapshot_module_globals_set = snapshot_module_globals.__setitem__
         snapshot_code = snapshot_getattr(
             exact_response_snapshot,
             "__code__",
@@ -2544,16 +2549,16 @@ class GuardedDispatcher:
             snapshot_getattr(dependency, "__code__", None)
             for dependency in snapshot_defaults
         )
+        decoder_authority = snapshot_defaults[0]
+        decoder_function = snapshot_defaults[1]
+        decoder_digest = snapshot_defaults[2]
         decoder_json_module = json
-        decoder_json_loads = snapshot_getattr(
-            decoder_json_module,
-            "loads",
-            None,
-        )
-        decoder_json_decode_error = snapshot_getattr(
-            decoder_json_module,
-            "JSONDecodeError",
-            None,
+        decoder_json_namespace = vars(decoder_json_module)
+        decoder_json_namespace_get = decoder_json_namespace.get
+        decoder_json_namespace_set = decoder_json_namespace.__setitem__
+        decoder_json_loads = decoder_json_namespace_get("loads")
+        decoder_json_decode_error = decoder_json_namespace_get(
+            "JSONDecodeError"
         )
         decoder_depth_guard = require_provider_json_depth
         decoder_depth_guard_code = snapshot_getattr(
@@ -2574,9 +2579,111 @@ class GuardedDispatcher:
             None,
         )
         decoder_exact_decimal_error = ExactDecimalError
+        exact_response_module_bindings = (
+            ("ExactJsonTransportResponse", exact_response_type),
+            ("_snapshot_exact_transport_response", exact_response_snapshot),
+            (
+                "_require_canonical_exact_transport_response",
+                decoder_authority,
+            ),
+            ("_decode_exact_json_bytes", decoder_function),
+            ("sha256", decoder_digest),
+            ("json", decoder_json_module),
+            ("require_provider_json_depth", decoder_depth_guard),
+            (
+                "parse_bounded_json_number_token",
+                decoder_number_parser,
+            ),
+            (
+                "parse_bounded_json_integer_token",
+                decoder_integer_parser,
+            ),
+            ("ExactDecimalError", decoder_exact_decimal_error),
+        )
+        exact_response_code_bindings = (
+            (exact_response_snapshot, snapshot_code),
+            *snapshot_tuple(
+                (dependency, code)
+                for dependency, code in zip(
+                    snapshot_defaults,
+                    snapshot_dependency_codes,
+                )
+                if code is not None
+            ),
+            (decoder_depth_guard, decoder_depth_guard_code),
+            (decoder_number_parser, decoder_number_parser_code),
+            (decoder_integer_parser, decoder_integer_parser_code),
+        )
 
+        def restore_exact_response_authority() -> bool:
+            changed = False
+            for name, expected in exact_response_module_bindings:
+                if snapshot_module_globals_get(name) is not expected:
+                    snapshot_module_globals_set(name, expected)
+                    changed = True
+
+            if (
+                snapshot_getattr(
+                    exact_response_snapshot,
+                    "__defaults__",
+                    None,
+                )
+                is not snapshot_defaults
+            ):
+                snapshot_setattr(
+                    exact_response_snapshot,
+                    "__defaults__",
+                    snapshot_defaults,
+                )
+                changed = True
+            if (
+                snapshot_getattr(
+                    exact_response_snapshot,
+                    "__kwdefaults__",
+                    None,
+                )
+                is not snapshot_kwdefaults
+            ):
+                snapshot_setattr(
+                    exact_response_snapshot,
+                    "__kwdefaults__",
+                    snapshot_kwdefaults,
+                )
+                changed = True
+            for dependency, expected_code in exact_response_code_bindings:
+                if expected_code is None:
+                    continue
+                if (
+                    snapshot_getattr(dependency, "__code__", None)
+                    is not expected_code
+                ):
+                    snapshot_setattr(
+                        dependency,
+                        "__code__",
+                        expected_code,
+                    )
+                    changed = True
+
+            if decoder_json_namespace_get("loads") is not decoder_json_loads:
+                decoder_json_namespace_set("loads", decoder_json_loads)
+                changed = True
+            if (
+                decoder_json_namespace_get("JSONDecodeError")
+                is not decoder_json_decode_error
+            ):
+                decoder_json_namespace_set(
+                    "JSONDecodeError",
+                    decoder_json_decode_error,
+                )
+                changed = True
+            return changed
+
+        exact_response_authority_changed = False
         try:
             response = transport_send(client_order_id, request_frozen, final_guard)
+            exact_response_authority_changed = (
+                restore_exact_response_authority()
+            )
             try:
                 require_dispatch_call_authority()
             except _DispatchAuthorityChanged:
@@ -2810,54 +2917,8 @@ class GuardedDispatcher:
                 # is not sufficient authority because object.__setattr__ can
                 # alter fields after __post_init__ and before transport returns.
                 if (
-                    _snapshot_exact_transport_response is not exact_response_snapshot
-                    or snapshot_getattr(
-                        exact_response_snapshot,
-                        "__code__",
-                        None,
-                    ) is not snapshot_code
-                    or snapshot_getattr(
-                        exact_response_snapshot,
-                        "__defaults__",
-                        None,
-                    ) is not snapshot_defaults
-                    or snapshot_getattr(
-                        exact_response_snapshot,
-                        "__kwdefaults__",
-                        None,
-                    ) is not snapshot_kwdefaults
-                    or snapshot_tuple(
-                        snapshot_getattr(dependency, "__code__", None)
-                        for dependency in snapshot_defaults
-                    )
-                    != snapshot_dependency_codes
-                    or json is not decoder_json_module
-                    or snapshot_getattr(json, "loads", None)
-                    is not decoder_json_loads
-                    or snapshot_getattr(json, "JSONDecodeError", None)
-                    is not decoder_json_decode_error
-                    or require_provider_json_depth is not decoder_depth_guard
-                    or snapshot_getattr(
-                        require_provider_json_depth,
-                        "__code__",
-                        None,
-                    )
-                    is not decoder_depth_guard_code
-                    or parse_bounded_json_number_token is not decoder_number_parser
-                    or snapshot_getattr(
-                        parse_bounded_json_number_token,
-                        "__code__",
-                        None,
-                    )
-                    is not decoder_number_parser_code
-                    or parse_bounded_json_integer_token is not decoder_integer_parser
-                    or snapshot_getattr(
-                        parse_bounded_json_integer_token,
-                        "__code__",
-                        None,
-                    )
-                    is not decoder_integer_parser_code
-                    or ExactDecimalError is not decoder_exact_decimal_error
+                    exact_response_authority_changed
+                    or restore_exact_response_authority()
                 ):
                     raise ValueError(
                         "exact transport response authority changed after send"

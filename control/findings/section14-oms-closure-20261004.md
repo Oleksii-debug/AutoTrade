@@ -69,3 +69,27 @@ The Section 14 source patch was re-applied to exact `main@884e573a6171a8c85fe2a3
 ## Weakref authority-erasure hardening — 2026-10-06
 
 The current-main review found that the donor's `WeakKeyDictionary` aggregate seal registries inherited the same callback-erasure class already demonstrated elsewhere in financial authority code. Section 14 therefore no longer uses `WeakKeyDictionary` for book/OCO seals. Closure-owned id-keyed registries retain callback-free weakrefs, seal entries retain callback-free order weakrefs, and live aggregate reinitialization is rejected before caller-visible scope or registration state can be reset. Focused regressions require zero callable weakref removal callbacks and prove book/OCO `__init__` cannot reset a live seal. This is fail-closed OMS authority hardening; it adds no provider or economic-edge claim.
+
+
+## Final integration closure — 2026-10-06
+
+Section 14 provider-free internal OMS/projection authority is closed on `main`.
+
+- Final PR: #1629
+- Accepted head: `345608e4edd3d06fc52e58af3752e73b128b70c0`
+- Exact base: `9544ca69d1593c8a880956504591122c42771f16`
+- Merge commit: `f899a085d79e970a39cb92350f1b623050d571da`
+- Candidate tree: `73237e9ae28fb5da36d466ad55767984fb368514`
+- Post-merge main tree: `73237e9ae28fb5da36d466ad55767984fb368514`
+- Post-merge tree equality: PASS.
+
+The accepted source closes the remaining demonstrated provider-free projection trust seams:
+- exact built-in scalar/type admission at OMS authority boundaries;
+- retained order registration identity outside caller-mutable order state;
+- aggregate scope/registration seals outside caller-mutable aggregate state;
+- callback-free weakref registries;
+- live book/OCO reinitialization cannot reset a seal;
+- hostile equality / executable-subclass inputs fail before authority-bearing comparisons;
+- amendment child ownership is reconstructed from retained registration identity.
+
+Hosted exact-head provider-free/baseline/Verify runs were queued without runner assignment at the closure cut and are not represented as PASS. This is a provider-free source/integration closure only. Provider-normalized event qualification, PAPER/LIVE transport, release, economic edge and NVDA remain separate gates and do not reopen the internal OMS conservation/trust invariant.

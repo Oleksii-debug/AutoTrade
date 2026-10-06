@@ -920,9 +920,12 @@ class JournalStore:
 
     @staticmethod
     def _require_text(value: Any, name: str) -> str:
-        if not isinstance(value, str) or not value.strip():
+        if not isinstance(value, str):
             raise ValueError(f"{name} must be non-empty text")
-        return value.strip()
+        normalized = str.strip(value)
+        if not normalized:
+            raise ValueError(f"{name} must be non-empty text")
+        return normalized
 
     @staticmethod
     def _decode_event_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -2165,7 +2168,11 @@ class JournalStore:
 
     @staticmethod
     def _command_environment(value: object) -> str:
-        normalized = value.strip().upper() if isinstance(value, str) else ""
+        normalized = (
+            str.upper(str.strip(value))
+            if isinstance(value, str)
+            else ""
+        )
         if normalized not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
             raise ValueError(
                 "environment must be REPLAY, SIMULATION, PAPER, or LIVE"

@@ -1,5 +1,5 @@
 import base64
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone, tzinfo
 from hashlib import sha256
 from tempfile import TemporaryDirectory
 import unittest
@@ -21,7 +21,85 @@ from mvp.tests.test_provider_transport import (
 )
 
 
+class _HostileTimezone(tzinfo):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def utcoffset(self, _dt):
+        self.calls += 1
+        raise AssertionError("hostile tzinfo callback executed")
+
+    def dst(self, _dt):
+        self.calls += 1
+        raise AssertionError("hostile tzinfo callback executed")
+
+    def tzname(self, _dt):
+        self.calls += 1
+        raise AssertionError("hostile tzinfo callback executed")
+
+
 class ProviderOriginJournalTests(unittest.TestCase):
+    def test_prepare_rejects_tzinfo_subclass_before_callback_or_journal_mutation(self):
+        query = authenticated_read_binding()
+        hostile_tz = _HostileTimezone()
+        hostile_time = datetime(
+            READ_NOW.year,
+            READ_NOW.month,
+            READ_NOW.day,
+            READ_NOW.hour,
+            READ_NOW.minute,
+            READ_NOW.second,
+            READ_NOW.microsecond,
+            tzinfo=hostile_tz,
+        )
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            journal = ProviderOriginJournal(store)
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "exact datetime.timezone tzinfo",
+            ):
+                journal.prepare(
+                    query,
+                    transport_identity="UrllibJsonWireClient:v1",
+                    network_policy_identity="sha256:" + "f" * 64,
+                    recorded_at=hostile_time,
+                )
+            self.assertEqual(hostile_tz.calls, 0)
+            self.assertEqual(
+                JournalStore.load_events(
+                    store,
+                    "authenticated_provider_read",
+                    "provider-read:does-not-exist",
+                ),
+                [],
+            )
+
+    def test_prepare_accepts_exact_fixed_offset_timezone_and_normalizes_to_utc(self):
+        query = authenticated_read_binding()
+        fixed = READ_NOW.astimezone(timezone(timedelta(hours=2)))
+        self.assertIs(type(fixed), datetime)
+        self.assertIs(type(fixed.tzinfo), timezone)
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            journal = ProviderOriginJournal(store)
+            attempt_id = journal.prepare(
+                query,
+                transport_identity="UrllibJsonWireClient:v1",
+                network_policy_identity="sha256:" + "e" * 64,
+                recorded_at=fixed,
+            )
+            events = JournalStore.load_events(
+                store,
+                "authenticated_provider_read",
+                attempt_id,
+            )
+            self.assertEqual(len(events), 1)
+            self.assertEqual(
+                events[0]["committed_at"],
+                READ_NOW.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            )
+
     def test_test_injected_replay_survives_restart_without_network_requery(self):
         query = authenticated_read_binding()
         body = b'{"balances":[{"asset":"USDT","free":"100.00"}]}'

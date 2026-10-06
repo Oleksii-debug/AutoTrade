@@ -33,7 +33,12 @@ from mvp.autotrade_mvp.futures_journal import (
 )
 from mvp.autotrade_mvp.instruments import InstrumentVersion
 from mvp.autotrade_mvp.settlement_convention import SettlementConvention
-from mvp.autotrade_mvp.persistence import (\n    JournalStore,\n    _event_envelope_digest,\n    canonical_json,\n    payload_digest,\n)
+from mvp.autotrade_mvp.persistence import (
+    JournalStore,
+    _event_envelope_digest,
+    canonical_json,
+    payload_digest,
+)
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 

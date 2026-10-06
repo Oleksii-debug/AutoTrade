@@ -161,6 +161,37 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 package_rights_blockers(root),
             )
 
+    def test_nuget_packages_authority_override_is_blocked(self):
+        for override in (
+            '      env: {NUGET_PACKAGES: /tmp/alternate}\n',
+            '      - run: echo "NUGET_PACKAGES=/tmp/alternate" >> "$GITHUB_ENV"\n',
+        ):
+            with self.subTest(override=override.strip()):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    project = _write_project(root)
+                    _write_policy(root)
+                    workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
+                    workflow.parent.mkdir(parents=True)
+                    workflow.write_text(
+                        "env:\n"
+                        "  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages\n"
+                        "jobs:\n"
+                        "  verify:\n"
+                        "    steps:\n"
+                        + override
+                        + "      - run: dotnet restore src/App/App.csproj --locked-mode\n"
+                        "      - run: python tools/dotnet_package_rights.py "
+                        "--verify-restored "
+                        '--packages-root "${{ env.NUGET_PACKAGES }}" '
+                        "--project src/App/App.csproj\n",
+                        encoding="utf-8",
+                    )
+                    self.assertIn(
+                        "DOTNET_PACKAGE_RIGHTS_NUGET_PACKAGES_AUTHORITY_INVALID",
+                        package_rights_blockers(root),
+                    )
+
     def test_rights_verifier_must_follow_exact_locked_restore(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

@@ -3532,7 +3532,7 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             )
             self.assertEqual(restored.attempt_id, "binding-type-a1")
 
-    def test_binding_loader_rejects_json_encoder_and_regex_rebinding_before_callbacks(self):
+    def test_binding_loader_rejects_json_encoder_rebinding_before_callbacks(self):
         from mvp.autotrade_mvp import dispatch as dispatch_module
 
         with TemporaryDirectory() as directory:
@@ -3547,7 +3547,6 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
 
             original_dumps = dispatch_module.json.dumps
             original_encoder = dispatch_module.json.JSONEncoder
-            original_fullmatch = dispatch_module.re.fullmatch
 
             class ForgedEncoder:
                 def __init__(self, **_kwargs):
@@ -3570,15 +3569,6 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                         dispatch_module.json,
                         "JSONEncoder",
                         original_encoder,
-                    ),
-                ),
-                (
-                    "re.fullmatch",
-                    lambda: setattr(dispatch_module.re, "fullmatch", forged),
-                    lambda: setattr(
-                        dispatch_module.re,
-                        "fullmatch",
-                        original_fullmatch,
                     ),
                 ),
             )
@@ -3606,6 +3596,7 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 attempt_id="binding-type-a1",
             )
             self.assertEqual(restored.attempt_id, "binding-type-a1")
+            self.assertNotIn("re", vars(dispatch_module))
 
     def test_response_binding_constructor_rejects_polymorphic_authority_inputs(self):
         from mvp.autotrade_mvp import dispatch as dispatch_module

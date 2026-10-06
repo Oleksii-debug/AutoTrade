@@ -42,6 +42,7 @@ from .options import (
 )
 from .persistence import JournalStore, payload_digest
 from .provider_activity_accounting import DurableProviderEconomicBook, EconomicBookCut
+from . import provider_core as provider_core_module
 from .provider_core import ProviderResponseObservation, Surface
 
 
@@ -94,7 +95,10 @@ def _canonical_observation_from_sealed_response(
     invents lifecycle economics.
     """
 
-    payload = source.payload
+    payload = object.__getattribute__(source, "payload")
+    query_binding = object.__getattribute__(source, "query_binding")
+    observed_at_text = object.__getattribute__(source, "observed_at")
+    response_sha256 = object.__getattribute__(source, "response_sha256")
     if not isinstance(payload, Mapping):
         raise OptionLifecycleError(
             "provider lifecycle payload must be a canonical object"
@@ -129,7 +133,7 @@ def _canonical_observation_from_sealed_response(
         return _utc(parsed, name)
 
     try:
-        observed_at = instant(source.observed_at, "observed_at")
+        observed_at = instant(observed_at_text, "observed_at")
         effective_at = instant(payload["effective_at"], "effective_at")
         signed_contracts = _decimal(
             payload["signed_contracts"],
@@ -154,11 +158,11 @@ def _canonical_observation_from_sealed_response(
         ) from error
 
     return OptionLifecycleObservation(
-        provider_id=source.provider_id,
-        account_id=source.account_id,
-        environment=source.environment,
+        provider_id=object.__getattribute__(query_binding, "provider_id"),
+        account_id=object.__getattribute__(query_binding, "account_id"),
+        environment=object.__getattribute__(query_binding, "environment"),
         venue_id=_text(payload["venue_id"], "venue_id"),
-        instrument_version=source.query_binding.instrument_version,
+        instrument_version=object.__getattribute__(query_binding, "instrument_version"),
         external_event_id=_text(
             payload["external_event_id"],
             "external_event_id",
@@ -167,7 +171,7 @@ def _canonical_observation_from_sealed_response(
         signed_contracts=signed_contracts,
         effective_at=effective_at,
         observed_at=observed_at,
-        raw_evidence_digest=source.response_sha256,
+        raw_evidence_digest=response_sha256,
         provider_revision=_text(
             payload["provider_revision"],
             "provider_revision",
@@ -899,8 +903,18 @@ class DurableOptionLifecycleAuthority:
         # Pin the exact sealed-response scope validator and normalization helper
         # before crossing it so callback-time class/module mutation cannot turn
         # neutral evidence into a different lifecycle fact.
-        require_scope = ProviderResponseObservation.require_scope
-        require_scope_code = getattr(require_scope, "__code__", None)
+        response_authority_guard = (
+            provider_core_module._require_provider_response_observation_authority
+        )
+        response_authority_guard_code = getattr(
+            response_authority_guard, "__code__", None
+        )
+        query_authority_guard = (
+            provider_core_module._require_authenticated_read_query_binding_authority
+        )
+        query_authority_guard_code = getattr(
+            query_authority_guard, "__code__", None
+        )
         observation_parser = _canonical_observation_from_sealed_response
         observation_parser_code = getattr(observation_parser, "__code__", None)
         financial_authority_fingerprint = _callback_financial_authority_fingerprint
@@ -987,12 +1001,21 @@ class DurableOptionLifecycleAuthority:
             )
         self._require_canonical_authorities()
         if (
-            ProviderResponseObservation.require_scope is not require_scope
-            or _canonical_observation_from_sealed_response is not observation_parser
+            provider_core_module._require_provider_response_observation_authority
+            is not response_authority_guard
+            or provider_core_module._require_authenticated_read_query_binding_authority
+            is not query_authority_guard
             or (
-                require_scope_code is not None
-                and getattr(require_scope, "__code__", None) is not require_scope_code
+                response_authority_guard_code is not None
+                and getattr(response_authority_guard, "__code__", None)
+                is not response_authority_guard_code
             )
+            or (
+                query_authority_guard_code is not None
+                and getattr(query_authority_guard, "__code__", None)
+                is not query_authority_guard_code
+            )
+            or _canonical_observation_from_sealed_response is not observation_parser
             or (
                 observation_parser_code is not None
                 and getattr(observation_parser, "__code__", None)
@@ -1019,29 +1042,39 @@ class DurableOptionLifecycleAuthority:
             raise OptionLifecycleError(
                 "provider lifecycle evidence must be an exact sealed ProviderResponseObservation"
             )
-        if source.evidence_ref != reference:
+        try:
+            response_authority_guard(source)
+        except Exception as error:
+            raise OptionLifecycleError(
+                "provider lifecycle evidence construction authority is invalid"
+            ) from error
+        query_binding = object.__getattribute__(source, "query_binding")
+        source_evidence_ref = object.__getattribute__(source, "evidence_ref")
+        if source_evidence_ref != reference:
             raise OptionLifecycleError(
                 "resolved provider lifecycle evidence identity mismatch"
             )
-        endpoint = source.query_binding.endpoint
+        endpoint = object.__getattribute__(query_binding, "endpoint")
         if endpoint not in self.lifecycle_endpoints:
             raise OptionLifecycleError(
                 "provider lifecycle evidence endpoint is not allowed"
             )
-        try:
-            require_scope(
-                source,
-                provider_id=self.economic_book.provider_id,
-                surface=Surface.ACTIVITIES,
-                endpoint=endpoint,
-                account_id=self.economic_book.account_id,
-                environment=self.economic_book.environment,
-            )
-        except Exception as error:
+        if (
+            object.__getattribute__(query_binding, "provider_id")
+            != self.economic_book.provider_id
+            or object.__getattribute__(query_binding, "surface") is not Surface.ACTIVITIES
+            or object.__getattribute__(query_binding, "account_id")
+            != self.economic_book.account_id
+            or object.__getattribute__(query_binding, "environment")
+            != self.economic_book.environment
+        ):
             raise OptionLifecycleError(
                 "provider lifecycle evidence scope mismatch"
-            ) from error
-        if source.query_binding.permission_scope != self.permission_scope:
+            )
+        if (
+            object.__getattribute__(query_binding, "permission_scope")
+            != self.permission_scope
+        ):
             raise OptionLifecycleError(
                 "provider lifecycle evidence permission scope mismatch"
             )
@@ -1050,12 +1083,16 @@ class DurableOptionLifecycleAuthority:
             source.observed_at.replace("Z", "+00:00")
         ).astimezone(timezone.utc)
         if (
-            observation.provider_id != source.provider_id
-            or observation.account_id != source.account_id
-            or observation.environment != source.environment
+            observation.provider_id
+            != object.__getattribute__(query_binding, "provider_id")
+            or observation.account_id
+            != object.__getattribute__(query_binding, "account_id")
+            or observation.environment
+            != object.__getattribute__(query_binding, "environment")
             or observation.instrument_version
-            != source.query_binding.instrument_version
-            or observation.raw_evidence_digest != source.response_sha256
+            != object.__getattribute__(query_binding, "instrument_version")
+            or observation.raw_evidence_digest
+            != object.__getattribute__(source, "response_sha256")
             or observation.observed_at != observed_at
             or observation.provider_environment is not None
         ):
@@ -1089,13 +1126,13 @@ class DurableOptionLifecycleAuthority:
         observation_digest = payload_digest(observation_payload)
         instrument_digest = payload_digest(version.to_contract_dict())
         provider_evidence_payload = {
-            "evidence_ref": provider_evidence.evidence_ref,
-            "response_sha256": provider_evidence.response_sha256,
-            "query_digest": provider_evidence.query_binding.query_digest,
-            "endpoint": provider_evidence.query_binding.endpoint,
-            "permission_scope": provider_evidence.query_binding.permission_scope,
+            "evidence_ref": object.__getattribute__(provider_evidence, "evidence_ref"),
+            "response_sha256": object.__getattribute__(provider_evidence, "response_sha256"),
+            "query_digest": object.__getattribute__(object.__getattribute__(provider_evidence, "query_binding"), "query_digest"),
+            "endpoint": object.__getattribute__(object.__getattribute__(provider_evidence, "query_binding"), "endpoint"),
+            "permission_scope": object.__getattribute__(object.__getattribute__(provider_evidence, "query_binding"), "permission_scope"),
             "capability_snapshot_id": (
-                provider_evidence.query_binding.capability_snapshot_id
+                object.__getattribute__(object.__getattribute__(provider_evidence, "query_binding"), "capability_snapshot_id")
             ),
             "instrument_version": provider_evidence.query_binding.instrument_version,
             "observed_at": provider_evidence.observed_at,
@@ -1203,7 +1240,7 @@ class DurableOptionLifecycleAuthority:
                 )
             if (
                 prior_payload.get("provider_evidence_ref")
-                == provider_evidence.evidence_ref
+                == object.__getattribute__(provider_evidence, "evidence_ref")
                 or prior_payload.get("raw_evidence_digest")
                 == observation.raw_evidence_digest
             ):
@@ -1335,7 +1372,7 @@ class DurableOptionLifecycleAuthority:
             "observed_at": _utc_text(observation.observed_at),
             "provider_revision": observation.provider_revision,
             "raw_evidence_digest": observation.raw_evidence_digest,
-            "provider_evidence_ref": provider_evidence.evidence_ref,
+            "provider_evidence_ref": object.__getattribute__(provider_evidence, "evidence_ref"),
             "provider_evidence_digest": provider_evidence_digest,
             "provider_evidence": provider_evidence_payload,
             "observation_digest": observation_digest,

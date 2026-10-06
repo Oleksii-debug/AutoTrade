@@ -18,6 +18,7 @@ from mvp.autotrade_mvp.instruments import (
     InstrumentVersion,
 )
 import mvp.autotrade_mvp.option_lifecycle as option_lifecycle_module
+import mvp.autotrade_mvp.provider_core as provider_core_module
 from mvp.autotrade_mvp.option_lifecycle import (
     DurableOptionLifecycleAuthority,
     OptionLifecycleConflict,
@@ -903,6 +904,98 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                 authority.apply(reference)
         finally:
             source_type.require_scope = original_require_scope
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            before_lifecycle,
+        )
+
+    def test_simulation_resolver_cannot_rebind_provider_response_authority_guard(self):
+        reference = self.evidence(
+            external_event_id="resolver-provider-response-guard-rebind-life",
+        )
+        original_guard = (
+            provider_core_module._require_provider_response_observation_authority
+        )
+
+        def rebind_guard_then_resolve(evidence_ref):
+            provider_core_module._require_provider_response_observation_authority = (
+                lambda _value: None
+            )
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=rebind_guard_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", authority.aggregate_id)
+        )
+        try:
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "provider lifecycle evidence authority changed during resolution",
+            ):
+                authority.apply(reference)
+        finally:
+            provider_core_module._require_provider_response_observation_authority = (
+                original_guard
+            )
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            before_lifecycle,
+        )
+
+    def test_simulation_resolver_cannot_forge_sealed_response_after_guard_rebind(self):
+        reference = self.evidence(
+            external_event_id="resolver-provider-response-forge-life",
+        )
+        source = self._evidence[reference]
+        original_guard = (
+            provider_core_module._require_provider_response_observation_authority
+        )
+        original_payload = object.__getattribute__(source, "payload")
+
+        def forge_response_then_resolve(evidence_ref):
+            provider_core_module._require_provider_response_observation_authority = (
+                lambda _value: None
+            )
+            forged_payload = dict(original_payload)
+            forged_payload["external_event_id"] = "forged-after-observation"
+            object.__setattr__(source, "payload", forged_payload)
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=forge_response_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", authority.aggregate_id)
+        )
+        try:
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "provider lifecycle evidence authority changed during resolution",
+            ):
+                authority.apply(reference)
+        finally:
+            object.__setattr__(source, "payload", original_payload)
+            provider_core_module._require_provider_response_observation_authority = (
+                original_guard
+            )
 
         self.assertEqual(tuple(self.book.transactions), before_economic)
         self.assertEqual(

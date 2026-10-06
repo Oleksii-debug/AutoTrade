@@ -3063,6 +3063,52 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             )
             self.assertEqual(restored.attempt_id, "binding-type-a1")
 
+    def test_binding_loader_rejects_late_helper_rebinding_before_callbacks(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+
+            surfaces = (
+                "_canonical_submission_event_instant",
+                "_event_id",
+                "_identity_digest",
+                "_exact_response_terminal_semantics_are_canonical",
+            )
+            for surface in surfaces:
+                callbacks = 0
+                original = getattr(dispatch_module, surface)
+
+                def forged(*_args, **_kwargs):
+                    nonlocal callbacks
+                    callbacks += 1
+                    raise AssertionError(f"rebound {surface} executed")
+
+                try:
+                    setattr(dispatch_module, surface, forged)
+                    with self.subTest(surface=surface), self.assertRaisesRegex(
+                        ValueError,
+                        "submission response binding authority is unavailable",
+                    ):
+                        load_submission_response_binding(
+                            JournalStore(path),
+                            environment="SIMULATION",
+                            account_id="acct",
+                            attempt_id="binding-type-a1",
+                        )
+                finally:
+                    setattr(dispatch_module, surface, original)
+                self.assertEqual(callbacks, 0)
+
+            restored = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-type-a1",
+            )
+            self.assertEqual(restored.attempt_id, "binding-type-a1")
+
     def test_response_binding_constructor_rejects_polymorphic_authority_inputs(self):
         from mvp.autotrade_mvp import dispatch as dispatch_module
 

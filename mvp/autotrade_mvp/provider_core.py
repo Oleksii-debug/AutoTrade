@@ -102,14 +102,18 @@ def _canonical_query_values(
 ) -> Mapping[str, str]:
     if values is None:
         return MappingProxyType({})
-    if not isinstance(values, Mapping):
-        raise ProviderCoreError("query must be a mapping")
+    if type(values) not in {dict, MappingProxyType}:
+        raise ProviderCoreError("query must be an exact inert mapping")
     normalized: dict[str, str] = {}
     for raw_key, raw_value in values.items():
-        key = _text(raw_key, "query key")
+        if type(raw_key) is not str or not raw_key or raw_key != raw_key.strip():
+            raise ProviderCoreError(
+                "authenticated-read query keys must be canonical strings"
+            )
+        key = raw_key
         if key in normalized:
             raise ProviderCoreError("query keys must be unique after normalization")
-        if not isinstance(raw_value, str) or raw_value != raw_value.strip():
+        if type(raw_value) is not str or raw_value != raw_value.strip():
             raise ProviderCoreError(
                 "authenticated-read query values must be canonical strings"
             )
@@ -285,8 +289,16 @@ def _prepare_authenticated_read_query_impl(
         raise ProviderCoreError(
             "authenticated-read binding requires AUTHENTICATED_READ or ACTIVITIES"
         )
+    if type(at) is not datetime or type(at.tzinfo) is not timezone:
+        raise ProviderCoreError("at must be an exact timezone-aware datetime")
     point = _utc(at, "at")
-    scope = _text(permission_scope, "permission_scope")
+    if (
+        type(permission_scope) is not str
+        or not permission_scope
+        or permission_scope != permission_scope.strip()
+    ):
+        raise ProviderCoreError("permission_scope must be a canonical string")
+    scope = permission_scope
     if (
         capability.status != "VERIFIED"
         or not (capability.observed_at <= point < capability.expires_at)
@@ -298,7 +310,15 @@ def _prepare_authenticated_read_query_impl(
     provider = capability.provider_id.upper()
     if provider not in PROVIDERS:
         raise ProviderCoreError("unknown provider")
-    normalized_endpoint = _text(endpoint, "endpoint")
+    if (
+        type(endpoint) is not str
+        or not endpoint
+        or endpoint != endpoint.strip()
+    ):
+        raise ProviderCoreError(
+            "authenticated-read endpoint must be a canonical string"
+        )
+    normalized_endpoint = endpoint
     if not normalized_endpoint.startswith("/") or "://" in normalized_endpoint:
         raise ProviderCoreError(
             "authenticated-read endpoint must be a canonical provider-relative path"

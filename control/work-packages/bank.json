@@ -143,7 +143,7 @@
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
       "proposed_status": "IN_PROGRESS",
-      "status_note": "Exact revision/license evidence recorded for LEAN, WhiteBit.Net, CryptoExchange.Net and Alpaca C# SDK; Autosport/Nika root license absence recorded. Transitive locks, advisories, first-party contributor rights, model/data rights and release SBOM remain."
+      "status_note": "SOURCE/INTEGRATION AUTHORITY COMPLETE on main via PR #2264, merge 458cd7bb43b8457e0bb0593b523f54e35f5cd54d. Exact dependency locks/content identities, restored NuGet package-rights verification, release dependency provenance, distributed release composition-to-provenance mapping (issue #2203), SBOM dependency reachability/scope closure and canonical WP-64 supply-chain proof binding are integrated. Remaining terminal WP-03 evidence is external/fail-closed: complete first-party contributor/release-distribution rights, model/data/news rights where applicable to the selected distribution, independently reviewed production qualification trust-policy bytes/pin, exact dependency-advisory qualification, and a final frozen-release SBOM/provenance bound to the delivered release. Public repository visibility or development authorization is not release-rights evidence."
     },
     {
       "id": "WP-04",

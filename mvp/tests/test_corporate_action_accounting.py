@@ -852,6 +852,18 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                 local_ids,
                 tuple(activity.activity_id for activity in provider_activities),
             )
+            duplicate_local_ids, duplicate_provider_activities = (
+                corporate_action_reconciliation_inputs(
+                    durable_evidence,
+                    provider_actions=(first, later),
+                )
+            )
+            self.assertEqual(duplicate_local_ids, local_ids)
+            self.assertEqual(len(duplicate_provider_activities), 1)
+            self.assertEqual(
+                duplicate_provider_activities[0].occurred_at,
+                first.event.effective_at.isoformat().replace("+00:00", "Z"),
+            )
 
     def test_same_provider_fact_new_receipt_does_not_duplicate_economics(self):
         with TemporaryDirectory() as directory:

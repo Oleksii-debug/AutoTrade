@@ -1,0 +1,382 @@
+from tempfile import TemporaryDirectory
+import unittest
+
+from mvp.autotrade_mvp import dispatch as dispatch_module
+from mvp.autotrade_mvp.dispatch import ExactJsonTransportResponse, GuardedDispatcher
+from mvp.autotrade_mvp.persistence import JournalStore
+
+
+class PostSendBuiltinAuthorityTests(unittest.TestCase):
+    @staticmethod
+    def _dispatcher(path: str) -> GuardedDispatcher:
+        return GuardedDispatcher(
+            JournalStore(path),
+            environment="SIMULATION",
+            account_id="acct",
+            owner_token="owner",
+        )
+
+    @staticmethod
+    def _allow(_intent_hash, _now):
+        return True, "allowed"
+
+    def _dispatch(self, dispatcher, *, attempt_id, transport):
+        return dispatcher.dispatch(
+            attempt_id=attempt_id,
+            intent_id="intent-1",
+            intent_hash="sha256:" + "1" * 64,
+            provider="provider",
+            request={"side": "BUY"},
+            now="2026-10-06T18:15:00Z",
+            authority_check=self._allow,
+            transport_send=transport,
+            submission_scope={"endpoint": "/orders"},
+        )
+
+    def _event_types(self, path, dispatcher, attempt_id):
+        events = JournalStore.load_events(
+            JournalStore(path),
+            "submission_attempt",
+            dispatcher._aggregate_id(attempt_id),
+        )
+        return [event["event_type"] for event in events], events
+
+    def test_exact_response_uses_pretransport_type_builtin(self):
+        callbacks = 0
+
+        def hostile_type(*_args):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("rebound type executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original = getattr(dispatch_module, "type", None)
+            had_global = "type" in vars(dispatch_module)
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                dispatch_module.type = hostile_type
+                return ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-type-exact-a1",
+                    transport=transport,
+                )
+            finally:
+                if had_global:
+                    dispatch_module.type = original
+                else:
+                    del dispatch_module.type
+
+            self.assertEqual(callbacks, 0)
+            self.assertEqual(result.status, "SENT")
+            self.assertEqual(result.reason, "sent_confirmed")
+            self.assertEqual(result.response, {"accepted": True})
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-type-exact-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
+            )
+
+    def test_legacy_response_uses_pretransport_isinstance_builtin(self):
+        callbacks = 0
+
+        def hostile_isinstance(*_args):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("rebound isinstance executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original = getattr(dispatch_module, "isinstance", None)
+            had_global = "isinstance" in vars(dispatch_module)
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                dispatch_module.isinstance = hostile_isinstance
+                return {"accepted": True}
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-isinstance-legacy-a1",
+                    transport=transport,
+                )
+            finally:
+                if had_global:
+                    dispatch_module.isinstance = original
+                else:
+                    del dispatch_module.isinstance
+
+            self.assertEqual(callbacks, 0)
+            self.assertEqual(result.status, "SENT")
+            self.assertEqual(result.reason, "sent_confirmed")
+            self.assertEqual(result.response, {"accepted": True})
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-isinstance-legacy-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
+            )
+
+    def test_transport_exception_uses_pretransport_type_builtin(self):
+        callbacks = 0
+
+        def hostile_type(*_args):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("rebound type executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original = getattr(dispatch_module, "type", None)
+            had_global = "type" in vars(dispatch_module)
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                dispatch_module.type = hostile_type
+                raise RuntimeError("provider result lost after send")
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-type-error-a1",
+                    transport=transport,
+                )
+            finally:
+                if had_global:
+                    dispatch_module.type = original
+                else:
+                    del dispatch_module.type
+
+            self.assertEqual(callbacks, 0)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "transport_result_ambiguous")
+            event_types, events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-type-error-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "transport_exception_after_send_barrier:RuntimeError",
+            )
+
+    def test_pre_guard_transport_exception_uses_pretransport_type_builtin(self):
+        callbacks = 0
+
+        def hostile_type(*_args):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("rebound type executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original = getattr(dispatch_module, "type", None)
+            had_global = "type" in vars(dispatch_module)
+
+            def transport(_client_order_id, _request, _final_guard):
+                dispatch_module.type = hostile_type
+                raise RuntimeError("provider failed before final guard")
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    attempt_id="preguard-type-error-a1",
+                    transport=transport,
+                )
+            finally:
+                if had_global:
+                    dispatch_module.type = original
+                else:
+                    del dispatch_module.type
+
+            self.assertEqual(callbacks, 0)
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "transport_failed_before_send")
+            event_types, events = self._event_types(
+                path,
+                dispatcher,
+                "preguard-type-error-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "transport_failed_before_final_guard:RuntimeError",
+            )
+
+
+    def test_transport_builtin_shadows_are_removed_before_next_dispatch(self):
+        callbacks = 0
+
+        def hostile_type(*_args):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("rebound type executed")
+
+        def hostile_isinstance(*_args):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("rebound isinstance executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original_type = getattr(dispatch_module, "type", None)
+            original_isinstance = getattr(dispatch_module, "isinstance", None)
+            had_type = "type" in vars(dispatch_module)
+            had_isinstance = "isinstance" in vars(dispatch_module)
+            outbound = 0
+
+            def poisoned_transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                dispatch_module.type = hostile_type
+                dispatch_module.isinstance = hostile_isinstance
+                return {"accepted": True}
+
+            try:
+                first = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-builtin-restore-a1",
+                    transport=poisoned_transport,
+                )
+                self.assertEqual(first.status, "SENT")
+                self.assertEqual(first.reason, "sent_confirmed")
+                self.assertEqual(callbacks, 0)
+                if had_type:
+                    self.assertIs(dispatch_module.type, original_type)
+                else:
+                    self.assertNotIn("type", vars(dispatch_module))
+                if had_isinstance:
+                    self.assertIs(dispatch_module.isinstance, original_isinstance)
+                else:
+                    self.assertNotIn("isinstance", vars(dispatch_module))
+
+                def clean_transport(_client_order_id, _request, final_guard):
+                    nonlocal outbound
+                    final_guard()
+                    outbound += 1
+                    return ExactJsonTransportResponse(
+                        b'{"accepted":true}',
+                        http_status=200,
+                    )
+
+                second = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-builtin-restore-a2",
+                    transport=clean_transport,
+                )
+                self.assertEqual(second.status, "SENT")
+                self.assertEqual(second.reason, "sent_confirmed")
+                self.assertEqual(callbacks, 0)
+                self.assertEqual(outbound, 2)
+            finally:
+                if had_type:
+                    dispatch_module.type = original_type
+                else:
+                    vars(dispatch_module).pop("type", None)
+                if had_isinstance:
+                    dispatch_module.isinstance = original_isinstance
+                else:
+                    vars(dispatch_module).pop("isinstance", None)
+
+    def test_type_shadow_transport_unknown_replays_after_restart_without_resend(self):
+        callbacks = 0
+
+        def hostile_type(*_args):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("rebound type executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original = getattr(dispatch_module, "type", None)
+            had_global = "type" in vars(dispatch_module)
+            outbound = 0
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                dispatch_module.type = hostile_type
+                raise RuntimeError("provider result lost after send")
+
+            try:
+                first = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-type-restart-a1",
+                    transport=transport,
+                )
+                self.assertEqual(first.status, "UNKNOWN")
+                self.assertEqual(first.reason, "transport_result_ambiguous")
+                self.assertEqual(callbacks, 0)
+                self.assertEqual(outbound, 1)
+                if had_global:
+                    self.assertIs(dispatch_module.type, original)
+                else:
+                    self.assertNotIn("type", vars(dispatch_module))
+
+                restarted = GuardedDispatcher(
+                    JournalStore(path),
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner-b",
+                )
+                replay = restarted.dispatch(
+                    attempt_id="postsend-type-restart-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T18:15:01Z",
+                    authority_check=lambda *_args: (
+                        _ for _ in ()
+                    ).throw(AssertionError("restart must not re-authorize")),
+                    transport_send=lambda *_args: (
+                        _ for _ in ()
+                    ).throw(AssertionError("restart must not resend")),
+                    submission_scope={"endpoint": "/orders"},
+                )
+                self.assertEqual(replay.status, "UNKNOWN")
+                self.assertEqual(
+                    replay.reason,
+                    "transport_exception_after_send_barrier:RuntimeError",
+                )
+                self.assertEqual(callbacks, 0)
+                self.assertEqual(outbound, 1)
+            finally:
+                if had_global:
+                    dispatch_module.type = original
+                else:
+                    vars(dispatch_module).pop("type", None)
+
+
+if __name__ == "__main__":
+    unittest.main()

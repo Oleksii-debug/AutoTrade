@@ -8,6 +8,7 @@ import unittest
 from uuid import NAMESPACE_URL, uuid5
 
 from autotrade_research.artifacts.store import ArtifactStore
+from autotrade_research.data.vintages import HistoricalVintageRegistry
 
 from research.autotrade_research.learning.champion import (
     CandidateApproval,
@@ -29,6 +30,88 @@ BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 def digest(value: str) -> str:
     return "sha256:" + sha256(value.encode("utf-8")).hexdigest()
+
+
+def _vintage_manifest(seed: str) -> dict:
+    return {
+        "dataset_id": str(uuid5(NAMESPACE_URL, f"wp35-dataset:{seed}")),
+        "version": "1",
+        "content_hashes": [digest(f"wp35-content:{seed}")],
+        "instrument_universe_version": "universe:test-v1",
+        "calendar_version": "calendar:test-v1",
+        "coverage": {
+            "from": "2026-07-02T00:00:00Z",
+            "to": "2026-09-30T23:59:59Z",
+        },
+        "availability_policy": {
+            "point_in_time": True,
+            "no_future_leakage": True,
+            "cutoff": "2026-09-30T23:59:59Z",
+            "basis": "test-fixture-evidence",
+        },
+        "revision_policy": {
+            "append_only": True,
+            "replace_prior_vintages": False,
+        },
+        "normalization_version": "normalization:test-v1",
+        "adjustment_policy": {
+            "raw_retained": True,
+            "adjusted_available": False,
+            "method": "none",
+        },
+        "rights": {
+            "storage": True,
+            "research_use": True,
+            "redistribution": False,
+            "basis": "first-party-test-fixture",
+        },
+        "missingness_report": {
+            "expected_count": 1,
+            "observed_count": 1,
+            "missing_keys": [],
+            "invented_count": 0,
+        },
+        "source_evidence": [
+            {
+                "artifact_id": str(uuid5(NAMESPACE_URL, f"wp35-evidence:{seed}")),
+                "sha256": digest(f"wp35-evidence:{seed}"),
+                "observed_at": "2026-09-30T23:59:59Z",
+            }
+        ],
+        "created_at": "2026-10-01T00:00:00Z",
+    }
+
+
+def _manifest_digest(seed: str) -> str:
+    raw = json.dumps(
+        _vintage_manifest(seed),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + sha256(raw).hexdigest()
+
+
+def preregister_holdout(
+    science: ScientificRegistry,
+    protocol_id: str,
+    *,
+    seed: str,
+):
+    vintages = HistoricalVintageRegistry(
+        science.path.parent / f"historical-vintages-{seed}"
+    )
+    manifest = _vintage_manifest(seed)
+    committed = vintages.commit(manifest)
+    if committed != _manifest_digest(seed):
+        raise AssertionError("test vintage digest drifted from canonical manifest")
+    return science.preregister_locked_holdout(
+        protocol_id,
+        vintage_registry=vintages,
+        dataset_id=manifest["dataset_id"],
+        dataset_version=1,
+    )
 
 
 class FakeObligationAuthority:
@@ -143,7 +226,7 @@ def champion_registry(
 
 def holdout_identity(seed: str) -> dict[str, str]:
     return {
-        "dataset_digest": digest(f"locked-forward:{seed}"),
+        "dataset_digest": _manifest_digest(seed),
         "segment_start": "2026-07-02",
         "segment_end": "2026-09-30",
         "role": "LOCKED_FORWARD",
@@ -204,6 +287,7 @@ def approval(
     record_trial=True,
 ):
     registered = science.register_protocol(protocol())
+    preregister_holdout(science, registered.protocol_id, seed=candidate)
     valid_until = BASE + timedelta(days=valid_days)
     if record_trial:
         science.record_trial(
@@ -375,6 +459,11 @@ class ChampionRegistryTests(unittest.TestCase):
             registered = science.register_protocol(protocol())
             original_candidate = "candidate-original"
             promoted_candidate = "candidate-forged"
+            preregister_holdout(
+                science,
+                registered.protocol_id,
+                seed="holdout-forged-trial-binding",
+            )
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -467,6 +556,11 @@ class ChampionRegistryTests(unittest.TestCase):
             registered = science.register_protocol(value)
             candidate = "candidate-early-stop"
             artifact = digest(candidate)
+            preregister_holdout(
+                science,
+                registered.protocol_id,
+                seed="holdout-early-stop",
+            )
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -537,6 +631,11 @@ class ChampionRegistryTests(unittest.TestCase):
             registered = science.register_protocol(value)
             candidate = "candidate-log-bound"
             artifact = digest(candidate)
+            preregister_holdout(
+                science,
+                registered.protocol_id,
+                seed="holdout-log-bound",
+            )
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -892,6 +991,11 @@ class ChampionRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = science.register_protocol(protocol())
+            preregister_holdout(
+                science,
+                registered.protocol_id,
+                seed="holdout-a",
+            )
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",

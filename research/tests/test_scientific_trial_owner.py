@@ -20,7 +20,7 @@ from research.autotrade_research.science.registry import (
     ScientificRegistry,
 )
 from research.tests.test_evaluation_gates import evidence, profile
-from research.tests.test_science_registry import protocol
+from research.tests.test_science_registry import preregister_holdout, protocol
 
 
 def bound_protocol(gate_profile, *, trial_budget: int = 12):
@@ -32,6 +32,7 @@ def bound_protocol(gate_profile, *, trial_budget: int = 12):
 
 
 def fill_trials(registry: ScientificRegistry, protocol_id: str, count: int) -> None:
+    preregister_holdout(registry, protocol_id)
     for index in range(count):
         registry.record_trial(
             protocol_id,

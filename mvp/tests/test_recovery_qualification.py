@@ -1071,6 +1071,37 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             )
 
 
+    def test_invalid_evidence_fails_before_trusted_reader_touch(self):
+        item = evidence(RecoveryScenario.POWER_LOSS)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            with patch.object(
+                recovery_qualification_module,
+                "trusted_authenticated_reader",
+                side_effect=AssertionError(
+                    "trusted reader must not run before evidence validation"
+                ),
+            ) as trusted_reader:
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "RecoveryScenarioEvidence",
+                ):
+                    qualify_recovery_release(
+                        policy=policy(),
+                        evidence=[object()],
+                        evidence_store=store,
+                        evidence_root=directory,
+                    )
+                with self.assertRaisesRegex(ValueError, "duplicate evidence"):
+                    qualify_recovery_release(
+                        policy=policy(),
+                        evidence=[item, item],
+                        evidence_store=store,
+                        evidence_root=directory,
+                    )
+                trusted_reader.assert_not_called()
+
+
     def test_caller_cannot_mint_pass_decision_with_copied_trust_identity(self):
         current_policy = policy()
         with self.assertRaisesRegex(

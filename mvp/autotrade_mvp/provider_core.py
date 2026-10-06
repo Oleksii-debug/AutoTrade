@@ -431,6 +431,7 @@ def _install_authenticated_provider_read_authority():
     canonical_weakref_ref = weakref.ref
     object_getattribute = object.__getattribute__
     mapping_proxy_type = MappingProxyType
+    canonical_text = _text
 
     def prune(states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]]) -> None:
         for object_id, (value_ref, _snapshot) in tuple(states.items()):
@@ -590,12 +591,46 @@ def _install_authenticated_provider_read_authority():
             }
         )
 
+    def provider_response_observation_require_scope(
+        value: object,
+        *,
+        provider_id: str,
+        surface: Surface,
+        endpoint: str,
+        account_id: str | None = None,
+        environment: str | None = None,
+    ) -> None:
+        projection = provider_response_observation_projection(value)
+        if canonical_type(surface) is not Surface:
+            raise TypeError("surface must be exact Surface")
+        if (
+            canonical_text(provider_id, "provider_id").upper()
+            != projection["provider_id"]
+        ):
+            raise ProviderCoreError("provider-read provenance provider mismatch")
+        if surface is not projection["surface"]:
+            raise ProviderCoreError("provider-read provenance surface mismatch")
+        if canonical_text(endpoint, "endpoint") != projection["endpoint"]:
+            raise ProviderCoreError("provider-read provenance endpoint mismatch")
+        if (
+            account_id is not None
+            and canonical_text(account_id, "account_id") != projection["account_id"]
+        ):
+            raise ProviderCoreError("provider-read provenance account mismatch")
+        if (
+            environment is not None
+            and canonical_text(environment, "environment").upper()
+            != projection["environment"]
+        ):
+            raise ProviderCoreError("provider-read provenance environment mismatch")
+
     return (
         register_query,
         require_query,
         register_response,
         require_response,
         provider_response_observation_projection,
+        provider_response_observation_require_scope,
     )
 
 
@@ -605,6 +640,7 @@ def _install_authenticated_provider_read_authority():
     _register_provider_response_observation_authority,
     _require_provider_response_observation_authority,
     provider_response_observation_projection,
+    provider_response_observation_require_scope,
 ) = _install_authenticated_provider_read_authority()
 del _install_authenticated_provider_read_authority
 

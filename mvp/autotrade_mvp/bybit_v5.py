@@ -1406,6 +1406,7 @@ def parse_executions(
                 type(qualified_fee_currency) is not str
                 or not qualified_fee_currency
                 or qualified_fee_currency != qualified_fee_currency.strip()
+                or qualified_fee_currency != qualified_fee_currency.upper()
             ):
                 raise ProviderCoreError(
                     "qualified fee currency must be canonical exact text"
@@ -1415,6 +1416,7 @@ def parse_executions(
             if (
                 type(provider_fee_currency) is not str
                 or provider_fee_currency != provider_fee_currency.strip()
+                or provider_fee_currency != provider_fee_currency.upper()
             ):
                 raise ProviderCoreError(
                     "Bybit execution fee currency must be canonical exact text"

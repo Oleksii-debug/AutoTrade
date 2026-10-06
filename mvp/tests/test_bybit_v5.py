@@ -1729,7 +1729,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execFee": "0.5",
             "execTime": "1790280000000",
         }
-        for malformed in (" USDT ", 123):
+        for malformed in (" USDT ", "usdt", 123):
             with self.subTest(feeCurrency=malformed):
                 row = dict(base, feeCurrency=malformed)
                 with self.assertRaisesRegex(
@@ -1754,15 +1754,17 @@ class BybitV5AdapterTests(unittest.TestCase):
         evidence = bound_execution_response(response, instrument_version="ETHPERP@v1")
         with self.assertRaisesRegex(ProviderCoreError, "fee currency is unresolved"):
             parse_executions(evidence, instrument_versions={"ETHPERP": "ETHPERP@v1"})
-        with self.assertRaisesRegex(
-            ProviderCoreError,
-            "qualified fee currency must be canonical exact text",
-        ):
-            parse_executions(
-                evidence,
-                instrument_versions={"ETHPERP": "ETHPERP@v1"},
-                qualified_fee_currencies={"ETHPERP@v1": " USDT "},
-            )
+        for malformed in (" USDT ", "usdt", 123):
+            with self.subTest(qualified_fee_currency=malformed):
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "qualified fee currency must be canonical exact text",
+                ):
+                    parse_executions(
+                        evidence,
+                        instrument_versions={"ETHPERP": "ETHPERP@v1"},
+                        qualified_fee_currencies={"ETHPERP@v1": malformed},
+                    )
         fills = parse_executions(
             evidence,
             instrument_versions={"ETHPERP": "ETHPERP@v1"},

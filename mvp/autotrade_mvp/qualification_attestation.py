@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
-from typing import Callable, Iterable, Mapping
+from typing import Callable, Iterable, Mapping, NamedTuple
 from uuid import UUID
 
 from research.autotrade_research.artifacts import (
@@ -257,6 +257,16 @@ def _instant_value(value: str) -> datetime:
     )
 
 
+class _AcceptedEvidenceArtifactRef(NamedTuple):
+    """Deeply immutable evidence reference carried by the accepted TCB snapshot."""
+
+    artifact_id: str
+    sha256: str
+    media_type: str
+    evidence_kind: str
+    source_sha: str
+
+
 @dataclass(frozen=True)
 class EvidenceArtifactRef:
     artifact_id: str
@@ -462,7 +472,7 @@ class QualificationAttestation:
     protocol_id: str
     protocol_version: str
     requirement_ids: tuple[str, ...]
-    evidence_refs: tuple[EvidenceArtifactRef, ...]
+    evidence_refs: tuple[_AcceptedEvidenceArtifactRef, ...]
     producer_id: str
     verifier_id: str
     trust_root_id: str
@@ -1548,7 +1558,16 @@ def verify_qualification_attestation(
         protocol_version=attestation.protocol_version,
         requirement_id=expected_requirement_id,
         requirement_ids=tuple(attestation.requirement_ids),
-        evidence_refs=tuple(_evidence_artifact_ref_snapshot(ref) for ref in attestation.evidence_refs),
+        evidence_refs=tuple(
+            _AcceptedEvidenceArtifactRef(
+                ref.artifact_id,
+                ref.sha256,
+                ref.media_type,
+                ref.evidence_kind,
+                ref.source_sha,
+            )
+            for ref in attestation.evidence_refs
+        ),
         producer_id=attestation.producer_id,
         verifier_id=attestation.verifier_id,
         runner_id=attestation.runner_id,

@@ -100,9 +100,6 @@ def evidence(
             f"autotrade-recovery-evidence:{scenario.value}",
         )
     )
-    receipt_bytes = (
-        "autotrade-recovery-evidence:" + scenario.value
-    ).encode("utf-8")
     values = dict(
         scenario=scenario,
         status=status,
@@ -398,6 +395,76 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             decision.qualification_trust_root_id.startswith("sha256:")
         )
         self.assertFalse(decision.authorizes_trading)
+
+    def test_noncanonical_receipt_bytes_cannot_self_authenticate_summary_facts(self):
+        forged = b'{"forged":"summary"}'
+        target = evidence(
+            RecoveryScenario.POWER_LOSS,
+            evidence_artifact_sha256=(
+                "sha256:" + sha256(forged).hexdigest()
+            ),
+        )
+        items = complete_evidence()
+        items[0] = target
+        decision = qualify(
+            policy=policy(),
+            evidence=items,
+            receipt_bytes_overrides={
+                target.evidence_artifact_id: forged,
+            },
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.INCONCLUSIVE)
+        self.assertIn(
+            "power_loss:evidence_integrity_unverified",
+            decision.blockers,
+        )
+
+    def test_signed_recovery_attestation_must_bind_exact_policy(self):
+        decision = qualify(
+            policy=policy(),
+            evidence=complete_evidence(),
+            trusted=True,
+            omit_policy_requirement=True,
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.FAIL)
+        self.assertIn(
+            "independent_recovery_policy_mismatch",
+            decision.blockers,
+        )
+
+    def test_recovery_policy_attestation_cannot_replay_across_threshold_change(self):
+        original_policy = policy()
+        changed_policy = policy(
+            limits={RecoveryScenario.POWER_LOSS: 120_000},
+        )
+        self.assertNotEqual(
+            recovery_policy_subject_requirement(original_policy),
+            recovery_policy_subject_requirement(changed_policy),
+        )
+        decision = qualify(
+            policy=changed_policy,
+            evidence=complete_evidence(),
+            trusted=True,
+            attested_policy=original_policy,
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.FAIL)
+        self.assertIn(
+            "independent_recovery_policy_mismatch",
+            decision.blockers,
+        )
+
+    def test_signed_evidence_identity_includes_kind_not_only_id_and_digest(self):
+        decision = qualify(
+            policy=policy(),
+            evidence=complete_evidence(),
+            trusted=True,
+            attestation_evidence_kind="RECOVERY_SCENARIO_RECEIPT",
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.FAIL)
+        self.assertIn(
+            "independent_evidence_set_mismatch",
+            decision.blockers,
+        )
 
     def test_canonical_trust_unavailable_remains_inconclusive(self):
         decision = qualify(

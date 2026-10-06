@@ -1644,6 +1644,14 @@ class ReconciliationTests(unittest.TestCase):
             self.base(environment="PRODUCTION")
 
 
+    def test_no_settlement_surfaces_are_distinct_from_clean_settlement_reconciliation(self):
+        result = self.base()
+
+        self.assertTrue(result.complete)
+        self.assertFalse(result.settlement_reconciliation_performed)
+        self.assertTrue(result.settlement_activity_complete)
+        self.assertEqual(dict(result.settlement_differences), {})
+
     def test_matching_settlement_surfaces_are_part_of_account_reconciliation(self):
         result = self.base(
             local_settled_cash={"USD": "800"},
@@ -1655,6 +1663,7 @@ class ReconciliationTests(unittest.TestCase):
             settlement_activity_complete=True,
         )
         self.assertTrue(result.complete)
+        self.assertTrue(result.settlement_reconciliation_performed)
         self.assertTrue(result.settlement_activity_complete)
         self.assertEqual(dict(result.settlement_differences), {})
 
@@ -1669,6 +1678,7 @@ class ReconciliationTests(unittest.TestCase):
             settlement_activity_complete=False,
         )
         self.assertFalse(result.complete)
+        self.assertTrue(result.settlement_reconciliation_performed)
         self.assertFalse(result.settlement_activity_complete)
         self.assertIn("ACCOUNT", result.blocking_resources)
         self.assertIn(
@@ -1687,6 +1697,7 @@ class ReconciliationTests(unittest.TestCase):
             settlement_activity_complete=True,
         )
         self.assertFalse(result.complete)
+        self.assertTrue(result.settlement_reconciliation_performed)
         self.assertIn("CASH:USD", result.blocking_resources)
         self.assertEqual(
             result.settlement_differences["RECEIVABLE:USD"],

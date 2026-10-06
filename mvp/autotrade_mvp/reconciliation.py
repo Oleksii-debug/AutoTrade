@@ -1346,6 +1346,7 @@ class ReconciliationResult:
     settlement_differences: Mapping[str, Decimal] | None = None
     settlement_activity_complete: bool = True
     unexpected_provider_fills: tuple[ProviderFillEvidence, ...] = ()
+    settlement_reconciliation_performed: bool = False
 
     @property
     def blocks_new_risk(self) -> bool:
@@ -2515,6 +2516,7 @@ def reconcile_account(
         settlement_activity_complete=(
             True if not settlement_requested else bool(settlement_activity_complete)
         ),
+        settlement_reconciliation_performed=settlement_requested,
         unexpected_provider_fills=tuple(
             provider_by_id[execution_id] for execution_id in unexpected
         ),

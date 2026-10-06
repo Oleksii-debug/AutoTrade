@@ -547,6 +547,12 @@ IBKR_WEB_AUTHENTICATED_READ_ENDPOINTS: Mapping[
     str, AuthenticatedReadEndpointRule
 ] = MappingProxyType(
     {
+        "/iserver/auth/status": AuthenticatedReadEndpointRule(
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="ORDER.READ",
+            data_entitlement="SESSION",
+            success_statuses=frozenset({200}),
+        ),
         "/iserver/accounts": AuthenticatedReadEndpointRule(
             surface=Surface.AUTHENTICATED_READ,
             permission_scope="ORDER.READ",

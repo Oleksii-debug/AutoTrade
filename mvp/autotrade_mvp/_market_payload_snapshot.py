@@ -105,10 +105,14 @@ def _snapshot(
     if type(value) in (str, bool, int, Decimal):
         return value
     if type(value) is datetime:
-        if value.tzinfo is None:
+        if type(value.tzinfo) is not timezone:
+            raise PayloadSnapshotError(
+                f"{path} datetime must use an exact built-in timezone"
+            )
+        if datetime.utcoffset(value) is None:
             raise PayloadSnapshotError(f"{path} datetime must be timezone-aware")
         try:
-            normalized = value.astimezone(timezone.utc)
+            normalized = datetime.astimezone(value, timezone.utc)
         except (OverflowError, ValueError, TypeError) as error:
             raise PayloadSnapshotError(
                 f"{path} datetime must have a deterministic timezone"

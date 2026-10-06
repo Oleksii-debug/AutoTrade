@@ -1,10 +1,11 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
 from autotrade_runtime.artifacts import ArtifactStore
+import mvp.autotrade_mvp.provider_selection as provider_selection_module
 
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.durable_provider_qualification import (
@@ -168,6 +169,34 @@ def accepted_spot_q(
     return record, receipt, protocol
 
 
+class _HostileTimezone(tzinfo):
+    calls = 0
+
+    def utcoffset(self, _dt):
+        type(self).calls += 1
+        raise AssertionError("hostile timezone callback executed")
+
+    def dst(self, _dt):
+        type(self).calls += 1
+        raise AssertionError("hostile timezone callback executed")
+
+
+class _HostileCandidateList(list):
+    calls = 0
+
+    def __iter__(self):
+        type(self).calls += 1
+        raise AssertionError("hostile candidate iterator executed")
+
+
+class _HostileTuple(tuple):
+    calls = 0
+
+    def __iter__(self):
+        type(self).calls += 1
+        raise AssertionError("hostile nested tuple iterator executed")
+
+
 class ProviderSelectionTests(unittest.TestCase):
     def authorities(self, directory: str, *, unsupported=()):
         journal = JournalStore(Path(directory) / "journal.sqlite3")
@@ -201,6 +230,191 @@ class ProviderSelectionTests(unittest.TestCase):
             receipt=receipt,
         )
         return capabilities, qualifications, record
+
+    def test_selection_rejects_executable_timezone_before_callback(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            _HostileTimezone.calls = 0
+            hostile_at = datetime(
+                2026,
+                10,
+                6,
+                9,
+                0,
+                tzinfo=_HostileTimezone(),
+            )
+
+            with self.assertRaisesRegex(
+                ProviderSelectionError,
+                "exact stdlib timezone datetime",
+            ):
+                select_provider(
+                    request(),
+                    [candidate()],
+                    at=hostile_at,
+                    capability_registry=capabilities,
+                    qualification_registry=qualifications,
+                )
+
+            self.assertEqual(_HostileTimezone.calls, 0)
+
+    def test_selection_compatibility_authority_ignores_public_rebinding(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            original = provider_selection_module.ASSET_FAMILY_COMPATIBILITY
+            self.assertIsInstance(original["FX"], frozenset)
+            with self.assertRaises(TypeError):
+                original["FX"] = frozenset({("BYBIT", "SPOT")})
+            with self.assertRaises(AttributeError):
+                original["FX"].add(("BYBIT", "SPOT"))
+
+            provider_selection_module.ASSET_FAMILY_COMPATIBILITY = {
+                "FX": {("BYBIT", "SPOT")}
+            }
+            self.addCleanup(
+                setattr,
+                provider_selection_module,
+                "ASSET_FAMILY_COMPATIBILITY",
+                original,
+            )
+
+            result = select_provider(
+                request(asset_class="FX"),
+                [candidate()],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            self.assertEqual(result.status, "NO_ELIGIBLE_PROVIDER")
+            self.assertIn("ASSET_PRODUCT_MISMATCH", result.decisions[0].reasons)
+
+    def test_selection_rejects_executable_candidate_container_before_iteration(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            _HostileCandidateList.calls = 0
+            hostile_candidates = _HostileCandidateList([candidate()])
+
+            with self.assertRaisesRegex(TypeError, "exact list or tuple"):
+                select_provider(
+                    request(),
+                    hostile_candidates,
+                    at=NOW,
+                    capability_registry=capabilities,
+                    qualification_registry=qualifications,
+                )
+
+            self.assertEqual(_HostileCandidateList.calls, 0)
+
+    def test_selection_detaches_caller_owned_request_and_candidate(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            original_request = request()
+            original_candidate = candidate()
+            result = select_provider(
+                original_request,
+                [original_candidate],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            self.assertEqual(result.status, "SELECTED_UNAMBIGUOUS")
+            route = result.selected
+            self.assertIsNotNone(route)
+            self.assertIsNot(route.candidate, original_candidate)
+
+            object.__setattr__(
+                original_candidate,
+                "account_id",
+                "caller-retargeted-account",
+            )
+            object.__setattr__(
+                original_request,
+                "permission_scope",
+                "WITHDRAW",
+            )
+
+            self.assertEqual(route.candidate.account_id, "paper-account")
+            self.assertEqual(route.capability.account_id, "paper-account")
+
+    def test_candidate_constructor_ignores_public_provider_definition_rebinding(self):
+        original = provider_selection_module.provider_definition
+        calls = []
+
+        def hostile_definition(*_args, **_kwargs):
+            calls.append("provider_definition")
+            raise AssertionError("rebound provider definition executed")
+
+        provider_selection_module.provider_definition = hostile_definition
+        try:
+            value = candidate()
+        finally:
+            provider_selection_module.provider_definition = original
+
+        self.assertEqual(value.provider_id, "BYBIT")
+        self.assertEqual(calls, [])
+
+    def test_selection_rejects_journal_cut_instance_shadow_before_callback(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            store = capabilities.store
+            calls = []
+
+            def hostile_cut(*_args, **_kwargs):
+                calls.append("whole_store_state_cut")
+                raise AssertionError("instance-shadowed journal cut executed")
+
+            store.whole_store_state_cut = hostile_cut
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical JournalStore instance state is shadowed",
+            ):
+                select_provider(
+                    request(),
+                    [candidate()],
+                    at=NOW,
+                    capability_registry=capabilities,
+                    qualification_registry=qualifications,
+                )
+            self.assertEqual(calls, [])
+
+    def test_selection_rejects_journal_cut_class_rebind_before_callback(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            calls = []
+
+            def hostile_cut(*_args, **_kwargs):
+                calls.append("whole_store_state_cut")
+                raise AssertionError("class-rebound journal cut executed")
+
+            original = JournalStore.whole_store_state_cut
+            JournalStore.whole_store_state_cut = hostile_cut
+            try:
+                with self.assertRaisesRegex(
+                    ProviderSelectionError,
+                    "journal cut authority changed",
+                ):
+                    select_provider(
+                        request(),
+                        [candidate()],
+                        at=NOW,
+                        capability_registry=capabilities,
+                        qualification_registry=qualifications,
+                    )
+            finally:
+                JournalStore.whole_store_state_cut = original
+            self.assertEqual(calls, [])
+
+    def test_selection_accepts_exact_tuple_candidate_population(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            result = select_provider(
+                request(),
+                (candidate(),),
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            self.assertEqual(result.status, "SELECTED_UNAMBIGUOUS")
 
     def test_candidate_contains_no_caller_capability_or_qualification_authority(self):
         route = candidate()
@@ -265,6 +479,149 @@ class ProviderSelectionTests(unittest.TestCase):
                     qualification=route.qualification,
                     decision_journal_sequence_cut=route.decision_journal_sequence_cut,
                 )
+
+    def test_selected_route_rejects_post_selection_candidate_mutation(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            result = select_provider(
+                request(),
+                [candidate()],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            route = result.selected
+            self.assertIsNotNone(route)
+            selected_candidate = route.candidate
+            original_account_id = selected_candidate.account_id
+
+            object.__setattr__(
+                selected_candidate,
+                "account_id",
+                "retargeted-account",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    (ProviderSelectionError, PermissionError),
+                    "selected provider route authority changed",
+                ):
+                    _ = route.candidate
+            finally:
+                object.__setattr__(
+                    selected_candidate,
+                    "account_id",
+                    original_account_id,
+                )
+
+            self.assertIs(route.candidate, selected_candidate)
+
+    def test_selected_route_rejects_post_selection_capability_mutation(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            result = select_provider(
+                request(),
+                [candidate()],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            route = result.selected
+            self.assertIsNotNone(route)
+            selected_capability = route.capability
+            original_account_id = selected_capability.account_id
+
+            object.__setattr__(
+                selected_capability,
+                "account_id",
+                "retargeted-account",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    (ProviderSelectionError, PermissionError),
+                    "selected provider route authority changed",
+                ):
+                    _ = route.capability
+            finally:
+                object.__setattr__(
+                    selected_capability,
+                    "account_id",
+                    original_account_id,
+                )
+
+            self.assertIs(route.capability, selected_capability)
+
+    def test_selected_route_rejects_post_selection_qualification_scope_mutation(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            result = select_provider(
+                request(),
+                [candidate()],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            route = result.selected
+            self.assertIsNotNone(route)
+            selected_qualification = route.qualification
+            selected_scope = selected_qualification.scope
+            original_product_family = selected_scope.product_family
+
+            object.__setattr__(
+                selected_scope,
+                "product_family",
+                "OPTIONS",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    (ProviderSelectionError, PermissionError),
+                    "selected provider route authority changed",
+                ):
+                    _ = route.qualification
+            finally:
+                object.__setattr__(
+                    selected_scope,
+                    "product_family",
+                    original_product_family,
+                )
+
+            self.assertIs(route.qualification, selected_qualification)
+
+    def test_selected_route_rejects_executable_nested_q_tuple_before_iteration(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            result = select_provider(
+                request(),
+                [candidate()],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            route = result.selected
+            self.assertIsNotNone(route)
+            selected_qualification = route.qualification
+            original_unsupported = selected_qualification.unsupported_features
+            _HostileTuple.calls = 0
+
+            object.__setattr__(
+                selected_qualification,
+                "unsupported_features",
+                _HostileTuple(original_unsupported),
+            )
+            try:
+                with self.assertRaisesRegex(
+                    (ProviderSelectionError, PermissionError),
+                    "selected provider route authority changed",
+                ):
+                    _ = route.qualification
+            finally:
+                object.__setattr__(
+                    selected_qualification,
+                    "unsupported_features",
+                    original_unsupported,
+                )
+
+            self.assertEqual(_HostileTuple.calls, 0)
+            self.assertIs(route.qualification, selected_qualification)
 
     def test_testnet_authority_does_not_admit_demo_route(self):
         with TemporaryDirectory() as directory:

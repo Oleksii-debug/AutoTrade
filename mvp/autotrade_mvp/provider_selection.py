@@ -10,59 +10,71 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import re
-from typing import Callable, Iterable
+from types import MappingProxyType
+from typing import Callable
 from weakref import ref as weakref_ref
 
 from .capabilities import CapabilityError, CapabilitySnapshot
 from .durable_capabilities import DurableCapabilityRegistry
 from .durable_provider_qualification import DurableProviderQualificationRegistry
+from .persistence import (
+    JournalStore,
+    journal_store_authority_scope,
+    require_exact_journal_store_authority,
+)
 from .provider_core import provider_definition
 from .provider_domain import ProviderDomainError, ProviderFinancialScope
 from .provider_qualification_authority import (
     AcceptedProviderQualification,
     ProviderQualificationError,
+    ProviderQualificationScope,
 )
+from .provider_qualification_identity import ProviderQualificationIdentity
+from .qualification_attestation import EvidenceArtifactRef
 from .provider_qualification_current_scope import (
     ProviderQualificationCurrentScope,
     ProviderQualificationCurrentScopeError,
 )
 
 
-ASSET_FAMILY_COMPATIBILITY = {
-    "CRYPTO_SPOT": {
+_ASSET_FAMILY_COMPATIBILITY = MappingProxyType({
+    "CRYPTO_SPOT": frozenset({
         ("BYBIT", "SPOT"),
         ("KRAKEN", "SPOT"),
         ("WHITEBIT", "SPOT"),
         ("BINANCE", "SPOT"),
         ("ALPACA", "CRYPTO"),
-    },
-    "CRYPTO_MARGIN": {
+    }),
+    "CRYPTO_MARGIN": frozenset({
         ("BYBIT", "MARGIN"),
         ("KRAKEN", "MARGIN"),
         ("WHITEBIT", "COLLATERAL"),
         ("BINANCE", "MARGIN"),
-    },
-    "LINEAR_PERPETUAL": {
+    }),
+    "LINEAR_PERPETUAL": frozenset({
         ("BYBIT", "LINEAR_DERIVATIVES"),
         ("KRAKEN", "DERIVATIVES"),
         ("WHITEBIT", "FUTURES"),
         ("BINANCE", "USD_M"),
-    },
-    "INVERSE_PERPETUAL": {
+    }),
+    "INVERSE_PERPETUAL": frozenset({
         ("BYBIT", "INVERSE_DERIVATIVES"),
         ("KRAKEN", "DERIVATIVES"),
         ("BINANCE", "COIN_M"),
-    },
-    "LISTED_FUTURE": {("IBKR", "FUTURES")},
-    "EQUITY": {("IBKR", "EQUITIES"), ("ALPACA", "EQUITIES")},
-    "OPTION": {
+    }),
+    "LISTED_FUTURE": frozenset({("IBKR", "FUTURES")}),
+    "EQUITY": frozenset({("IBKR", "EQUITIES"), ("ALPACA", "EQUITIES")}),
+    "OPTION": frozenset({
         ("BYBIT", "OPTIONS"),
         ("BINANCE", "OPTIONS"),
         ("IBKR", "OPTIONS"),
         ("ALPACA", "OPTIONS"),
-    },
-    "FX": {("IBKR", "FX")},
-}
+    }),
+    "FX": frozenset({("IBKR", "FX")}),
+})
+# Public diagnostic view only. Financial selection binds the original immutable
+# object at function definition time and does not trust later module rebinding.
+ASSET_FAMILY_COMPATIBILITY = _ASSET_FAMILY_COMPATIBILITY
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -95,19 +107,52 @@ def _digest(value: object, name: str) -> str:
 
 
 def _instant(value: datetime, name: str) -> datetime:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
-        raise ProviderSelectionError(f"{name} must be an exact timezone-aware datetime")
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise ProviderSelectionError(
+            f"{name} must be an exact stdlib timezone datetime"
+        )
     return value.astimezone(timezone.utc)
 
 
-def _journal_cut(store: object) -> int:
-    value = store.whole_store_state_cut()
-    if type(value) is not dict:
-        raise ProviderSelectionError("whole-store decision cut is non-canonical")
-    sequence = value.get("journal_sequence")
-    if type(sequence) is not int or sequence < 0:
-        raise ProviderSelectionError("whole-store decision cut lacks canonical sequence")
-    return sequence
+def _install_journal_cut_reader():
+    """Freeze provider selection to canonical JournalStore cut authority."""
+
+    store_type = JournalStore
+    canonical_require = require_exact_journal_store_authority
+    canonical_scope = journal_store_authority_scope
+    canonical_operation = store_type.whole_store_state_cut
+    canonical_getattr = getattr
+
+    def journal_cut(store: object) -> int:
+        if (
+            JournalStore is not store_type
+            or require_exact_journal_store_authority is not canonical_require
+            or journal_store_authority_scope is not canonical_scope
+            or canonical_getattr(store_type, "whole_store_state_cut", None)
+            is not canonical_operation
+        ):
+            raise ProviderSelectionError("journal cut authority changed")
+
+        identity = canonical_require(
+            store,
+            subject="provider selection JournalStore",
+        )
+        with canonical_scope(store, identity):
+            value = canonical_operation(store)
+        if type(value) is not dict:
+            raise ProviderSelectionError("whole-store decision cut is non-canonical")
+        sequence = value.get("journal_sequence")
+        if type(sequence) is not int or sequence < 0:
+            raise ProviderSelectionError(
+                "whole-store decision cut lacks canonical sequence"
+            )
+        return sequence
+
+    return journal_cut
+
+
+_journal_cut = _install_journal_cut_reader()
+del _install_journal_cut_reader
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,9 +165,12 @@ class ProviderRouteRequest:
     permission_scope: str
     preferred_provider_id: str | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _compatibility=_ASSET_FAMILY_COMPATIBILITY,
+    ) -> None:
         asset = _text(self.asset_class, "asset_class").upper()
-        if asset not in ASSET_FAMILY_COMPATIBILITY:
+        if asset not in _compatibility:
             raise ProviderSelectionError("asset_class has no canonical provider crosswalk")
         object.__setattr__(self, "asset_class", asset)
         environment = _text(self.environment, "environment").upper()
@@ -174,9 +222,12 @@ class ProviderCandidate:
     protocol_id: str
     protocol_version: str
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _provider_definition=provider_definition,
+    ) -> None:
         provider = _text(self.provider_id, "provider_id").upper()
-        definition = provider_definition(provider)
+        definition = _provider_definition(provider)
         family = _text(self.product_family, "product_family").upper()
         if family not in definition.product_families:
             raise ProviderSelectionError("product_family is not declared for provider")
@@ -228,13 +279,25 @@ def _install_selected_route_authority() -> tuple[
     """
 
     route_ref = weakref_ref
+    capability_type = CapabilitySnapshot
+    qualification_type = AcceptedProviderQualification
+    qualification_scope_type = ProviderQualificationScope
+    qualification_identity_type = ProviderQualificationIdentity
+    financial_scope_type = ProviderFinancialScope
+    evidence_ref_type = EvidenceArtifactRef
+    mapping_proxy_type = MappingProxyType
+    datetime_type = datetime
+    timezone_type = timezone
     bindings: dict[
         int,
         tuple[
             object,
             ProviderCandidate,
+            tuple[str, ...],
             CapabilitySnapshot,
+            tuple[object, ...],
             AcceptedProviderQualification,
+            tuple[object, ...],
             int,
         ],
     ] = {}
@@ -249,6 +312,19 @@ def _install_selected_route_authority() -> tuple[
         }
     )
 
+    candidate_field_names = (
+        "provider_id",
+        "product_family",
+        "provider_environment",
+        "account_id",
+        "entity_id",
+        "entity_policy_id",
+        "adapter_code_sha",
+        "packaged_artifact_digest",
+        "protocol_id",
+        "protocol_version",
+    )
+
     def authority_changed() -> None:
         message = "selected provider route authority changed"
         # The generic selector must not statically depend on the financial
@@ -260,6 +336,244 @@ def _install_selected_route_authority() -> tuple[
         except (ImportError, AttributeError):
             raise ProviderSelectionError(message)
         raise FinancialSendAuthorityError(message)
+
+    def candidate_snapshot(value: ProviderCandidate) -> tuple[str, ...]:
+        current = tuple(
+            object.__getattribute__(value, field_name)
+            for field_name in candidate_field_names
+        )
+        if any(type(item) is not str for item in current):
+            authority_changed()
+        return current
+
+    def _string_tuple_state(value: object) -> tuple[str, ...]:
+        if type(value) is not tuple or any(type(item) is not str for item in value):
+            authority_changed()
+        return value
+
+    def _string_frozenset_state(value: object) -> tuple[str, ...]:
+        if type(value) is not frozenset or any(type(item) is not str for item in value):
+            authority_changed()
+        return tuple(sorted(value))
+
+    def _financial_scope_state(value: object) -> tuple[str, str, str, str]:
+        if type(value) is not financial_scope_type:
+            authority_changed()
+        state = tuple(
+            object.__getattribute__(value, name)
+            for name in (
+                "provider_id",
+                "runtime_environment",
+                "provider_environment",
+                "entity_policy_id",
+            )
+        )
+        if any(type(item) is not str for item in state):
+            authority_changed()
+        return state
+
+    def _capability_state(value: object) -> tuple[object, ...]:
+        if type(value) is not capability_type:
+            authority_changed()
+        text_fields = tuple(
+            object.__getattribute__(value, name)
+            for name in (
+                "snapshot_id",
+                "provider_id",
+                "account_id",
+                "entity_id",
+                "environment",
+                "provider_environment",
+                "instrument_version",
+                "position_mode",
+                "rate_limit_policy_id",
+                "status",
+            )
+        )
+        if any(type(item) is not str for item in text_fields):
+            authority_changed()
+        observed_at = object.__getattribute__(value, "observed_at")
+        expires_at = object.__getattribute__(value, "expires_at")
+        for instant in (observed_at, expires_at):
+            if (
+                type(instant) is not datetime_type
+                or type(object.__getattribute__(instant, "tzinfo")) is not timezone_type
+            ):
+                authority_changed()
+        set_state = tuple(
+            _string_frozenset_state(object.__getattribute__(value, name))
+            for name in (
+                "supported_order_types",
+                "time_in_force",
+                "permission_scopes",
+                "native_protection",
+                "data_entitlements",
+                "sources",
+            )
+        )
+        evidence = object.__getattribute__(value, "evidence")
+        if type(evidence) is not tuple:
+            authority_changed()
+        evidence_state = []
+        for item in evidence:
+            if type(item) is not mapping_proxy_type:
+                authority_changed()
+            pairs = tuple(item.items())
+            if any(type(key) is not str or type(raw) is not str for key, raw in pairs):
+                authority_changed()
+            evidence_state.append(tuple(sorted(pairs)))
+        can_admit = object.__getattribute__(value, "_can_admit")
+        if type(can_admit) is not bool:
+            authority_changed()
+        return (
+            text_fields,
+            observed_at,
+            expires_at,
+            set_state,
+            tuple(evidence_state),
+            can_admit,
+        )
+
+    def _qualification_scope_state(value: object) -> tuple[object, ...]:
+        if type(value) is not qualification_scope_type:
+            authority_changed()
+        campaign_version = object.__getattribute__(value, "campaign_version")
+        text_fields = tuple(
+            object.__getattribute__(value, name)
+            for name in (
+                "product_family",
+                "adapter_source_git_sha",
+                "packaged_artifact_digest",
+                "campaign_id",
+                "protocol_id",
+                "protocol_version",
+            )
+        )
+        if type(campaign_version) is not int or any(
+            type(item) is not str for item in text_fields
+        ):
+            authority_changed()
+        return (
+            _financial_scope_state(object.__getattribute__(value, "provider_scope")),
+            text_fields,
+            campaign_version,
+        )
+
+    def _qualification_identity_state(value: object) -> tuple[object, ...]:
+        if type(value) is not qualification_identity_type:
+            authority_changed()
+        campaign_version = object.__getattribute__(value, "campaign_version")
+        packaged_artifact_id = object.__getattribute__(value, "packaged_artifact_id")
+        if type(campaign_version) is not int or (
+            packaged_artifact_id is not None
+            and type(packaged_artifact_id) is not str
+        ):
+            authority_changed()
+        text_fields = tuple(
+            object.__getattribute__(value, name)
+            for name in (
+                "product_family",
+                "adapter_source_git_sha",
+                "packaged_artifact_digest",
+                "campaign_id",
+                "protocol_id",
+                "protocol_version",
+                "required_case_policy_digest",
+                "result_set_digest",
+                "route_semantics_digest",
+                "documentation_revision_digest",
+                "evidence_set_digest",
+                "chronology_digest",
+                "lineage_digest",
+                "acceptance_metadata_digest",
+                "attestation_digest",
+                "trust_policy_digest",
+                "issuer_identity_digest",
+                "verifier_identity_digest",
+            )
+        )
+        if any(type(item) is not str for item in text_fields):
+            authority_changed()
+        return (
+            _financial_scope_state(object.__getattribute__(value, "provider_scope")),
+            text_fields,
+            packaged_artifact_id,
+            campaign_version,
+        )
+
+    def _evidence_ref_state(value: object) -> tuple[str, str, str, str, str]:
+        if type(value) is not evidence_ref_type:
+            authority_changed()
+        state = tuple(
+            object.__getattribute__(value, name)
+            for name in (
+                "artifact_id",
+                "sha256",
+                "media_type",
+                "evidence_kind",
+                "source_sha",
+            )
+        )
+        if any(type(item) is not str for item in state):
+            authority_changed()
+        return state
+
+    def _qualification_state(value: object) -> tuple[object, ...]:
+        if type(value) is not qualification_type:
+            authority_changed()
+        required_cases = _string_tuple_state(
+            object.__getattribute__(value, "required_cases")
+        )
+        unsupported_features = _string_tuple_state(
+            object.__getattribute__(value, "unsupported_features")
+        )
+        documentation_revisions = _string_tuple_state(
+            object.__getattribute__(value, "documentation_revisions")
+        )
+        raw_refs = object.__getattribute__(value, "raw_evidence_refs")
+        if type(raw_refs) is not tuple:
+            authority_changed()
+        raw_ref_state = tuple(_evidence_ref_state(item) for item in raw_refs)
+        optional_fields = tuple(
+            object.__getattribute__(value, name)
+            for name in ("supersedes_qualification_id", "release_artifact_id")
+        )
+        if any(item is not None and type(item) is not str for item in optional_fields):
+            authority_changed()
+        text_fields = tuple(
+            object.__getattribute__(value, name)
+            for name in (
+                "qualification_id",
+                "route_semantics_json",
+                "completed_at",
+                "valid_until",
+                "attestation_id",
+                "attestation_digest",
+                "policy_id",
+                "policy_version",
+                "trust_root_id",
+                "producer_id",
+                "verifier_id",
+                "signed_at",
+            )
+        )
+        if any(type(item) is not str for item in text_fields):
+            authority_changed()
+        return (
+            _qualification_identity_state(
+                object.__getattribute__(value, "identity")
+            ),
+            _qualification_scope_state(object.__getattribute__(value, "scope")),
+            text_fields,
+            required_cases,
+            unsupported_features,
+            documentation_revisions,
+            _evidence_ref_state(
+                object.__getattribute__(value, "campaign_artifact_ref")
+            ),
+            raw_ref_state,
+            optional_fields,
+        )
 
     @dataclass(frozen=True, slots=True, init=False, weakref_slot=True)
     class SelectedProviderRoute:
@@ -290,7 +604,16 @@ def _install_selected_route_authority() -> tuple[
                 binding = bindings.get(id(self))
                 if binding is None:
                     authority_changed()
-                bound_ref, candidate, capability, qualification, decision_cut = binding
+                (
+                    bound_ref,
+                    candidate,
+                    candidate_state,
+                    capability,
+                    capability_state,
+                    qualification,
+                    qualification_state,
+                    decision_cut,
+                ) = binding
                 if bound_ref() is not self:
                     authority_changed()
                 try:
@@ -305,8 +628,11 @@ def _install_selected_route_authority() -> tuple[
                     authority_changed()
                 if (
                     current_candidate is not candidate
+                    or candidate_snapshot(current_candidate) != candidate_state
                     or current_capability is not capability
+                    or _capability_state(current_capability) != capability_state
                     or current_qualification is not qualification
+                    or _qualification_state(current_qualification) != qualification_state
                     or type(current_cut) is not int
                     or current_cut != decision_cut
                 ):
@@ -352,6 +678,9 @@ def _install_selected_route_authority() -> tuple[
         for key in dead:
             bindings.pop(key, None)
 
+        candidate_state = candidate_snapshot(candidate)
+        capability_state = _capability_state(capability)
+        qualification_state = _qualification_state(qualification)
         route = object.__new__(SelectedProviderRoute)
         object.__setattr__(route, "candidate", candidate)
         object.__setattr__(route, "capability", capability)
@@ -364,8 +693,11 @@ def _install_selected_route_authority() -> tuple[
         bindings[id(route)] = (
             route_ref(route),
             candidate,
+            candidate_state,
             capability,
+            capability_state,
             qualification,
+            qualification_state,
             decision_journal_sequence_cut,
         )
         return route
@@ -428,12 +760,13 @@ def _unsupported_features(request: ProviderRouteRequest) -> frozenset[str]:
 
 def _select_provider_impl(
     request: ProviderRouteRequest,
-    candidates: Iterable[ProviderCandidate],
+    candidates: list[ProviderCandidate] | tuple[ProviderCandidate, ...],
     *,
     at: datetime,
     capability_registry: DurableCapabilityRegistry,
     qualification_registry: DurableProviderQualificationRegistry,
     route_issuer: Callable[..., SelectedProviderRoute],
+    _compatibility=_ASSET_FAMILY_COMPATIBILITY,
 ) -> ProviderSelection:
     if type(request) is not ProviderRouteRequest:
         raise TypeError("request must be exact ProviderRouteRequest")
@@ -449,7 +782,12 @@ def _select_provider_impl(
         )
 
     point = _instant(at, "at")
-    materialized = tuple(candidates)
+    if type(candidates) is tuple:
+        materialized = candidates
+    elif type(candidates) is list:
+        materialized = tuple(candidates)
+    else:
+        raise TypeError("candidates must be an exact list or tuple")
     if any(type(candidate) is not ProviderCandidate for candidate in materialized):
         raise TypeError("candidates must contain exact ProviderCandidate values")
     identities = [candidate.identity for candidate in materialized]
@@ -457,7 +795,7 @@ def _select_provider_impl(
         raise ProviderSelectionError("provider route candidate identities must be unique")
 
     decision_cut = _journal_cut(capability_registry.store)
-    allowed_pairs = ASSET_FAMILY_COMPATIBILITY[request.asset_class]
+    allowed_pairs = _compatibility[request.asset_class]
     requested_features = _unsupported_features(request)
     eligible: list[SelectedProviderRoute] = []
     decisions: list[CandidateDecision] = []
@@ -598,11 +936,66 @@ def _install_provider_selector(
     route_issuer: Callable[..., SelectedProviderRoute],
     implementation: Callable[..., ProviderSelection],
 ) -> Callable[..., ProviderSelection]:
-    """Bind canonical route issuance into the only public selector entry point."""
+    """Bind canonical route issuance and detach caller-owned route inputs."""
+
+    request_type = ProviderRouteRequest
+    candidate_type = ProviderCandidate
+    request_initializer = request_type.__post_init__
+    candidate_initializer = candidate_type.__post_init__
+    object_new = object.__new__
+    object_getattribute = object.__getattribute__
+    object_setattr = object.__setattr__
+    request_fields = (
+        "asset_class",
+        "environment",
+        "instrument_version",
+        "order_type",
+        "time_in_force",
+        "permission_scope",
+        "preferred_provider_id",
+    )
+    candidate_fields = (
+        "provider_id",
+        "product_family",
+        "provider_environment",
+        "account_id",
+        "entity_id",
+        "entity_policy_id",
+        "adapter_code_sha",
+        "packaged_artifact_digest",
+        "protocol_id",
+        "protocol_version",
+    )
+
+    def detach_request(value: object) -> ProviderRouteRequest:
+        if type(value) is not request_type:
+            raise TypeError("request must be exact ProviderRouteRequest")
+        state = tuple(object_getattribute(value, name) for name in request_fields)
+        if any(type(item) is not str for item in state[:-1]) or (
+            state[-1] is not None and type(state[-1]) is not str
+        ):
+            raise TypeError("request fields must be canonical inert values")
+        detached = object_new(request_type)
+        for name, item in zip(request_fields, state, strict=True):
+            object_setattr(detached, name, item)
+        request_initializer(detached)
+        return detached
+
+    def detach_candidate(value: object) -> ProviderCandidate:
+        if type(value) is not candidate_type:
+            raise TypeError("candidates must contain exact ProviderCandidate values")
+        state = tuple(object_getattribute(value, name) for name in candidate_fields)
+        if any(type(item) is not str for item in state):
+            raise TypeError("candidate fields must be canonical inert values")
+        detached = object_new(candidate_type)
+        for name, item in zip(candidate_fields, state, strict=True):
+            object_setattr(detached, name, item)
+        candidate_initializer(detached)
+        return detached
 
     def select_provider(
         request: ProviderRouteRequest,
-        candidates: Iterable[ProviderCandidate],
+        candidates: list[ProviderCandidate] | tuple[ProviderCandidate, ...],
         *,
         at: datetime,
         capability_registry: DurableCapabilityRegistry,
@@ -610,14 +1003,22 @@ def _install_provider_selector(
     ) -> ProviderSelection:
         """Resolve one exact route from durable C/Q authority or fail closed.
 
-        C and Q are both replayed at one captured global journal sequence. If the
-        shared JournalStore advances while selection is evaluating candidates,
-        no route is returned; the caller must retry against a fresh decision cut.
+        Caller-owned request/candidate objects are detached before any registry
+        callback. C and Q are replayed at one captured global journal sequence;
+        if that JournalStore advances during selection, no route is returned.
         """
 
+        detached_request = detach_request(request)
+        if type(candidates) is tuple:
+            detached_candidates = tuple(detach_candidate(item) for item in candidates)
+        elif type(candidates) is list:
+            detached_candidates = tuple(detach_candidate(item) for item in candidates)
+        else:
+            raise TypeError("candidates must be an exact list or tuple")
+
         return implementation(
-            request,
-            candidates,
+            detached_request,
+            detached_candidates,
             at=at,
             capability_registry=capability_registry,
             qualification_registry=qualification_registry,

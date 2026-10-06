@@ -567,6 +567,30 @@ def prepare_normalized_order(
         raise TypeError("capability must be exact CapabilitySnapshot")
     if type(session) is not IbkrBrokerageSessionStatus:
         raise TypeError("session must be exact IbkrBrokerageSessionStatus")
+
+    raw_contract = intent.contract
+    if type(raw_contract) is not IbkrContractIdentity:
+        raise TypeError("intent contract must remain exact IbkrContractIdentity")
+    sealed_contract = IbkrContractIdentity(
+        conid=raw_contract.conid,
+        conidex=raw_contract.conidex,
+    )
+    sealed_intent = IbkrWebOrderIntent.create(
+        instrument_version=intent.instrument_version,
+        account_id=intent.account_id,
+        contract=sealed_contract,
+        side=intent.side,
+        order_type=intent.order_type,
+        time_in_force=intent.time_in_force,
+        quantity=intent.quantity,
+        limit_price=intent.limit_price,
+        stop_price=intent.stop_price,
+        regulatory_manual_indicator_required=(
+            intent.regulatory_manual_indicator_required
+        ),
+        manual_indicator=sealed_intent.manual_indicator,
+        ext_operator=sealed_intent.ext_operator,
+    )
     point = _instant(at, name="at")
     if (
         type(maximum_session_age_seconds) is not int
@@ -610,44 +634,44 @@ def prepare_normalized_order(
             raise TypeError(f"capability {field} must remain an exact text frozenset")
     if capability_provider_id != "IBKR":
         raise IbkrWebAdapterError("capability belongs to another provider")
-    if capability_account_id != intent.account_id:
+    if capability_account_id != sealed_intent.account_id:
         raise IbkrWebAdapterError("capability account does not match intent account")
-    if capability_instrument_version != intent.instrument_version:
+    if capability_instrument_version != sealed_intent.instrument_version:
         raise IbkrWebAdapterError("capability instrument version does not match intent")
     if not CapabilitySnapshot.admits(
         capability,
         at=point,
-        order_type=intent.order_type,
-        time_in_force=intent.time_in_force,
+        order_type=sealed_intent.order_type,
+        time_in_force=sealed_intent.time_in_force,
         permission_scope="ORDER_WRITE",
     ):
         raise IbkrWebAdapterError("exact capability evidence does not admit this order")
 
     fields: dict[str, object] = {
-        "acctId": intent.account_id,
-        "orderType": _ORDER_TYPES[intent.order_type],
-        "side": intent.side,
-        "tif": intent.time_in_force,
+        "acctId": sealed_intent.account_id,
+        "orderType": _ORDER_TYPES[sealed_intent.order_type],
+        "side": sealed_intent.side,
+        "tif": sealed_intent.time_in_force,
         "cOID": coid,
     }
-    if intent.contract.conid is not None:
-        fields["conid"] = intent.contract.conid
+    if sealed_intent.contract.conid is not None:
+        fields["conid"] = sealed_intent.contract.conid
     else:
-        fields["conidex"] = intent.contract.conidex
-    if intent.manual_indicator is not None:
-        fields["manualIndicator"] = intent.manual_indicator
-    if intent.ext_operator is not None:
-        fields["extOperator"] = intent.ext_operator
+        fields["conidex"] = sealed_intent.contract.conidex
+    if sealed_intent.manual_indicator is not None:
+        fields["manualIndicator"] = sealed_intent.manual_indicator
+    if sealed_intent.ext_operator is not None:
+        fields["extOperator"] = sealed_intent.ext_operator
 
     return IbkrNormalizedOrder(
-        endpoint=f"/iserver/account/{intent.account_id}/orders",
+        endpoint=f"/iserver/account/{sealed_intent.account_id}/orders",
         fields=fields,
-        exact_quantity_text=_decimal_text(intent.quantity),
+        exact_quantity_text=_decimal_text(sealed_intent.quantity),
         exact_limit_price_text=(
-            None if intent.limit_price is None else _decimal_text(intent.limit_price)
+            None if sealed_intent.limit_price is None else _decimal_text(sealed_intent.limit_price)
         ),
         exact_stop_price_text=(
-            None if intent.stop_price is None else _decimal_text(intent.stop_price)
+            None if sealed_intent.stop_price is None else _decimal_text(sealed_intent.stop_price)
         ),
         capability_snapshot_id=capability.snapshot_id,
         documentation_refs=tuple(IBKR_WEB_DOCS.values()),

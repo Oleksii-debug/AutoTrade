@@ -240,9 +240,12 @@ def _install_ibkr_brokerage_session_observation_authority():
     canonical_text = _text
     mapping_proxy_type = MappingProxyType
     surface = Surface.AUTHENTICATED_READ
+    status_endpoint = IBKR_WEB_BROKERAGE_STATUS_ENDPOINT
+    datetime_type = datetime
     object_getattribute = object.__getattribute__
     canonical_type = type
     canonical_id = id
+    canonical_set = set
     weakref = weakref_ref
     states: dict[int, tuple[object, tuple[object, ...]]] = {}
 
@@ -256,6 +259,8 @@ def _install_ibkr_brokerage_session_observation_authority():
             IbkrBrokerageSessionStatus is not session_type
             or ProviderResponseObservation is not observation_type
             or observation_type.require_scope is not canonical_require_scope
+            or IBKR_WEB_BROKERAGE_STATUS_ENDPOINT != status_endpoint
+            or datetime is not datetime_type
             or _instant is not canonical_instant
             or _text is not canonical_text
         ):
@@ -278,29 +283,46 @@ def _install_ibkr_brokerage_session_observation_authority():
             observation,
             provider_id="IBKR",
             surface=surface,
-            endpoint=IBKR_WEB_BROKERAGE_STATUS_ENDPOINT,
+            endpoint=status_endpoint,
         )
         payload = object_getattribute(observation, "payload")
         if canonical_type(payload) is not mapping_proxy_type:
             raise IbkrWebAdapterError(
                 "brokerage session status payload must be an exact provider object"
             )
+        if canonical_set(payload) != {"success"}:
+            raise IbkrWebAdapterError(
+                "brokerage session status requires documented success envelope"
+            )
+        success = payload["success"]
+        if (
+            canonical_type(success) is not mapping_proxy_type
+            or canonical_set(success) != {"value"}
+        ):
+            raise IbkrWebAdapterError(
+                "brokerage session status requires documented success.value envelope"
+            )
+        status_payload = success["value"]
+        if canonical_type(status_payload) is not mapping_proxy_type:
+            raise IbkrWebAdapterError(
+                "brokerage session status value must be an exact provider object"
+            )
 
         flags: dict[str, bool] = {}
         for name in ("connected", "authenticated", "established", "competing"):
-            if name not in payload:
+            if name not in status_payload:
                 raise IbkrWebAdapterError(
                     f"brokerage session status is missing {name}"
                 )
-            value = payload[name]
+            value = status_payload[name]
             if canonical_type(value) is not bool:
                 raise IbkrWebAdapterError(
                     f"brokerage session status {name} must be exact boolean"
                 )
             flags[name] = value
 
-        if "fail" in payload:
-            failure = payload["fail"]
+        if "fail" in status_payload:
+            failure = status_payload["fail"]
             if failure is not None:
                 if (
                     canonical_type(failure) is not str
@@ -323,7 +345,7 @@ def _install_ibkr_brokerage_session_observation_authority():
                 "brokerage session observation time must be canonical UTC text"
             )
         try:
-            observed_at = datetime.fromisoformat(
+            observed_at = datetime_type.fromisoformat(
                 observed_text[:-1] + "+00:00"
             )
         except ValueError as error:
@@ -795,7 +817,7 @@ class IbkrNormalizedOrder:
         )
 
 
-def prepare_normalized_order(
+def _prepare_normalized_order_impl(
     intent: IbkrWebOrderIntent,
     *,
     client_order_id: str,
@@ -803,6 +825,7 @@ def prepare_normalized_order(
     session: IbkrBrokerageSessionStatus,
     at: datetime,
     maximum_session_age_seconds: int,
+    _require_session_authority,
 ) -> IbkrNormalizedOrder:
     """Build normalized fields but deliberately stop before provider serialization.
 
@@ -891,7 +914,7 @@ def prepare_normalized_order(
         raise IbkrWebAdapterError("capability account does not match intent account")
     if capability_instrument_version != sealed_intent.instrument_version:
         raise IbkrWebAdapterError("capability instrument version does not match intent")
-    _require_ibkr_brokerage_session_observation(
+    _require_session_authority(
         session,
         account_id=sealed_intent.account_id,
         environment=capability_environment,
@@ -935,6 +958,43 @@ def prepare_normalized_order(
         capability_snapshot_id=capability.snapshot_id,
         documentation_refs=tuple(IBKR_WEB_DOCS.values()),
     )
+
+
+def _bind_prepare_normalized_order(
+    implementation,
+    require_session_authority,
+):
+    """Keep the financial session-evidence guard outside mutable module lookup."""
+
+    def prepare_normalized_order(
+        intent: IbkrWebOrderIntent,
+        *,
+        client_order_id: str,
+        capability: CapabilitySnapshot,
+        session: IbkrBrokerageSessionStatus,
+        at: datetime,
+        maximum_session_age_seconds: int,
+    ) -> IbkrNormalizedOrder:
+        return implementation(
+            intent,
+            client_order_id=client_order_id,
+            capability=capability,
+            session=session,
+            at=at,
+            maximum_session_age_seconds=maximum_session_age_seconds,
+            _require_session_authority=require_session_authority,
+        )
+
+    return prepare_normalized_order
+
+
+prepare_normalized_order = _bind_prepare_normalized_order(
+    _prepare_normalized_order_impl,
+    _require_ibkr_brokerage_session_observation,
+)
+del _bind_prepare_normalized_order
+del _prepare_normalized_order_impl
+del _require_ibkr_brokerage_session_observation
 
 
 @dataclass(frozen=True)

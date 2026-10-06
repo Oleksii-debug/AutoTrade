@@ -141,6 +141,7 @@ def ibkr_session_observation(
     endpoint="/iserver/auth/status",
     query=None,
     permission_scope="ORDER.READ",
+    documented_envelope=True,
 ):
     point = NOW - timedelta(seconds=1) if observed_at is None else observed_at
     binding = prepare_authenticated_read_query(
@@ -158,7 +159,11 @@ def ibkr_session_observation(
         query_binding=binding,
         http_status=200,
         response_bytes=json.dumps(
-            payload,
+            (
+                {"success": {"value": payload}}
+                if documented_envelope
+                else payload
+            ),
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8"),
@@ -258,6 +263,71 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 maximum_session_age_seconds=30,
             )
 
+    def test_session_financial_guard_ignores_runtime_private_rebinding(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        forged = IbkrBrokerageSessionStatus(
+            connected=True,
+            authenticated=True,
+            established=True,
+            competing=False,
+            observed_at=NOW - timedelta(seconds=1),
+        )
+        self.assertFalse(
+            hasattr(
+                ibkr_web_module,
+                "_require_ibkr_brokerage_session_observation",
+            )
+        )
+        ibkr_web_module._require_ibkr_brokerage_session_observation = (
+            lambda *_args, **_kwargs: None
+        )
+        try:
+            with self.assertRaisesRegex(
+                IbkrWebAdapterError,
+                "/iserver/auth/status provider observation",
+            ):
+                prepare_normalized_order(
+                    intent,
+                    client_order_id="at-runtime-session-rebind",
+                    capability=capability(),
+                    session=forged,
+                    at=NOW,
+                    maximum_session_age_seconds=30,
+                )
+        finally:
+            delattr(
+                ibkr_web_module,
+                "_require_ibkr_brokerage_session_observation",
+            )
+
+    def test_session_parser_rejects_runtime_endpoint_authority_rebinding(self):
+        observation = ibkr_session_observation(
+            {
+                "connected": True,
+                "authenticated": True,
+                "established": True,
+                "competing": False,
+            }
+        )
+        original = ibkr_web_module.IBKR_WEB_BROKERAGE_STATUS_ENDPOINT
+        ibkr_web_module.IBKR_WEB_BROKERAGE_STATUS_ENDPOINT = "/iserver/accounts"
+        try:
+            with self.assertRaisesRegex(
+                IbkrWebAdapterError,
+                "session observation authority changed",
+            ):
+                brokerage_session_status_from_observation(observation)
+        finally:
+            ibkr_web_module.IBKR_WEB_BROKERAGE_STATUS_ENDPOINT = original
+
     def test_brokerage_status_requires_exact_authenticated_read_scope(self):
         observation = ibkr_session_observation(
             {
@@ -273,6 +343,28 @@ class IbkrWebAdapterTests(unittest.TestCase):
             "endpoint mismatch",
         ):
             brokerage_session_status_from_observation(observation)
+
+    def test_brokerage_status_requires_documented_success_value_envelope(self):
+        payload = {
+            "connected": True,
+            "authenticated": True,
+            "established": True,
+            "competing": False,
+        }
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "documented success envelope",
+        ):
+            brokerage_session_status_from_observation(
+                ibkr_session_observation(
+                    payload,
+                    documented_envelope=False,
+                )
+            )
+
+        observation = ibkr_session_observation(payload)
+        session = brokerage_session_status_from_observation(observation)
+        self.assertTrue(session.trade_ready)
 
     def test_brokerage_status_requires_empty_query_and_read_scope(self):
         payload = {

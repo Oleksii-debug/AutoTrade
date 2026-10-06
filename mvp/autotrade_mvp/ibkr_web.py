@@ -336,6 +336,19 @@ def _install_ibkr_brokerage_session_observation_authority():
         )
 
         query_binding = object_getattribute(observation, "query_binding")
+        query = object_getattribute(query_binding, "query")
+        permission_scope = object_getattribute(
+            query_binding,
+            "permission_scope",
+        )
+        if canonical_type(query) is not mapping_proxy_type or len(query) != 0:
+            raise IbkrWebAdapterError(
+                "brokerage session status requires an empty authenticated query"
+            )
+        if permission_scope != "ORDER.READ":
+            raise IbkrWebAdapterError(
+                "brokerage session status requires ORDER.READ scope"
+            )
         account_id = object_getattribute(query_binding, "account_id")
         environment = object_getattribute(query_binding, "environment")
         evidence_ref = object_getattribute(observation, "evidence_ref")

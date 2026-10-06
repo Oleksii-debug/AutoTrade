@@ -78,7 +78,7 @@ class DurableReservationStoreAuthorityTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 TypeError,
-                "resource amounts must use exact dict or MappingProxyType",
+                "resource amounts must use an exact dict",
             ):
                 book.reserve(
                     command_id="cmd-hostile-map",
@@ -92,22 +92,29 @@ class DurableReservationStoreAuthorityTests(unittest.TestCase):
             self.assertEqual(store.current_journal_sequence(), 0)
             self.assertEqual(book.active(), ())
 
-    def test_inert_mapping_proxy_remains_supported_at_reservation_boundary(self):
+    def test_mapping_proxy_over_executable_mapping_is_rejected_before_callbacks(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "selected.sqlite3")
             book = self._book(store)
+            hostile = _HostileMapping()
+            dict.__setitem__(hostile, "CASH:USD", "10")
+            proxied = MappingProxyType(hostile)
 
-            snapshot = book.reserve(
-                command_id="cmd-mapping-proxy",
-                idempotency_key="idem-mapping-proxy",
-                reservation_id="reservation-mapping-proxy",
-                intent_id="intent-mapping-proxy",
-                requirements=MappingProxyType({"CASH:USD": "10"}),
-                available=MappingProxyType({"CASH:USD": "100"}),
-            )
+            with self.assertRaisesRegex(
+                TypeError,
+                "resource amounts must use an exact dict",
+            ):
+                book.reserve(
+                    command_id="cmd-hostile-proxy",
+                    idempotency_key="idem-hostile-proxy",
+                    reservation_id="reservation-hostile-proxy",
+                    intent_id="intent-hostile-proxy",
+                    requirements=proxied,
+                    available={"CASH:USD": "100"},
+                )
 
-            self.assertEqual(tuple(snapshot.original), ("CASH:USD",))
-            self.assertEqual(store.current_journal_sequence(), 1)
+            self.assertEqual(store.current_journal_sequence(), 0)
+            self.assertEqual(book.active(), ())
 
     def test_snapshot_digest_rejects_subclass_before_snapshot_semantics(self):
         class SnapshotSubclass(ReservationSnapshot):

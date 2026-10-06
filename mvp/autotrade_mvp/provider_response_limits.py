@@ -26,8 +26,10 @@ def require_provider_response_bytes(
         raise ValueError("provider response byte budget is invalid")
     if type(allow_empty) is not bool:
         raise TypeError("allow_empty must be boolean")
-    if type(raw) is not bytes or (not raw and not allow_empty):
+    if type(raw) is not bytes:
         raise ValueError("provider response must be exact bytes")
+    if not raw and not allow_empty:
+        raise ValueError("provider response must be nonempty exact bytes")
     if len(raw) > max_bytes:
         raise ValueError("provider response exceeds byte budget")
     return raw

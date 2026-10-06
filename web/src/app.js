@@ -1086,9 +1086,15 @@
     }, 750);
   }
 
-  function announce(message, urgent = false) {
+  function announce(message, urgent = false, historyKey = null) {
     if (!message) return;
     const history = byId("notification-history");
+    const normalizedHistoryKey = historyKey === null ? null : String(historyKey);
+    if (history && normalizedHistoryKey !== null &&
+        [...history.children].some(
+          (item) => item.dataset.notificationKey === normalizedHistoryKey)) {
+      return;
+    }
     if (history && history.children.length === 1 &&
         history.firstElementChild.textContent.startsWith("No material")) {
       history.replaceChildren();
@@ -1096,6 +1102,9 @@
     if (history) {
       const item = document.createElement("li");
       item.textContent = message;
+      if (normalizedHistoryKey !== null) {
+        item.dataset.notificationKey = normalizedHistoryKey;
+      }
       history.prepend(item);
       while (history.children.length > 50) {
         history.lastElementChild.remove();
@@ -1109,13 +1118,10 @@
         const pending = state.pendingUrgentAnnouncements;
         state.pendingUrgentAnnouncements = [];
         state.urgentAnnouncementTimer = null;
-        // Preserve every urgent event in the burst, including identical ones,
-        // while producing one stable assertive live-region mutation for NVDA.
         announceLiveText("urgent-status", pending.join(" "));
       }, 0);
       return;
     }
-
     queuePoliteAnnouncement(message);
   }
 
@@ -1207,35 +1213,61 @@
   function renderHostEvent(event, cursor, stateVersion) {
     const body = byId("event-history-body");
     if (!body) return;
-    const kind = requiredText(
-      event.kind ?? event.event_type,
-      "event.kind");
+    const kind = requiredText(event.kind ?? event.event_type, "event.kind");
     const payload = event.payload === undefined ? {} : event.payload;
+    const cursorText = cursor.toString();
+    const stateVersionText = stateVersion.toString();
+    const payloadText = projectionText(payload);
 
     if (body.children.length === 1 &&
         body.firstElementChild.dataset.hostEventCursor === undefined) {
       body.replaceChildren();
     }
 
-    const row = document.createElement("tr");
-    row.dataset.hostEventCursor = cursor.toString();
-    row.dataset.filterableRow = "true";
-    row.dataset.tableHostOrder = cursor.toString();
-    const rowHeader = document.createElement("th");
-    rowHeader.scope = "row";
-    row.appendChild(rowHeader);
-    for (let index = 1; index < 4; index += 1) {
-      row.appendChild(document.createElement("td"));
+    const matchingRows = [...body.querySelectorAll("tr")].filter(
+      (candidate) => candidate.dataset.hostEventCursor === cursorText);
+    if (matchingRows.length > 1) {
+      throw new Error("received host-event history contains a duplicate cursor");
     }
-    row.children[0].textContent = cursor.toString();
-    row.children[1].textContent = stateVersion.toString();
-    row.children[2].textContent = kind;
-    row.children[3].textContent = projectionText(payload);
-    body.prepend(row);
+    let row = matchingRows.length === 1 ? matchingRows[0] : null;
+    const expectedCells = [cursorText, stateVersionText, kind, payloadText];
+    if (row !== null) {
+      const renderedCells = [...row.cells].map((cell) => cell.textContent);
+      if (
+        row.dataset.tableHostOrder !== cursorText ||
+        row.dataset.selectionKey !== "event:" + cursorText ||
+        row.dataset.selectionExact !== "true" ||
+        renderedCells.length !== expectedCells.length ||
+        renderedCells.some((value, index) => value !== expectedCells[index])
+      ) {
+        throw new Error("host event cursor was reused with conflicting rendered content");
+      }
+    } else {
+      row = document.createElement("tr");
+      row.dataset.hostEventCursor = cursorText;
+      row.dataset.filterableRow = "true";
+      row.dataset.tableHostOrder = cursorText;
+      row.dataset.selectionKey = "event:" + cursorText;
+      row.dataset.selectionExact = "true";
+      const rowHeader = document.createElement("th");
+      rowHeader.scope = "row";
+      row.appendChild(rowHeader);
+      for (let index = 1; index < 4; index += 1) row.appendChild(document.createElement("td"));
+      row.children[0].textContent = cursorText;
+      row.children[1].textContent = stateVersionText;
+      row.children[2].textContent = kind;
+      row.children[3].textContent = payloadText;
+      body.prepend(row);
+    }
 
-    while (body.children.length > 100) {
-      body.lastElementChild.remove();
-    }
+    const retained = filterableRows(body)
+      .filter((candidate) => candidate.dataset.hostEventCursor !== undefined)
+      .sort((left, right) => {
+        const a = BigInt(left.dataset.hostEventCursor);
+        const b = BigInt(right.dataset.hostEventCursor);
+        return a === b ? 0 : (a > b ? -1 : 1);
+      });
+    for (const expired of retained.slice(100)) expired.remove();
     reapplyTableFilter("event-history-body");
   }
 
@@ -1544,7 +1576,10 @@
           }
         }
         if (MATERIAL_EVENTS.has(kind)) {
-          announce(eventMessage(event), URGENT_EVENTS.has(kind));
+          announce(
+            eventMessage(event),
+            URGENT_EVENTS.has(kind),
+            "event:" + cursor.toString());
         }
         renderHostEvent(event, cursor, version);
         // Commit the local event position only after every required side effect

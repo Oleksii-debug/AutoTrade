@@ -116,7 +116,10 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("row.children[1].textContent = stateVersion.toString()", js)
         self.assertIn("row.children[2].textContent = kind", js)
         self.assertIn("row.children[3].textContent = projectionText(payload)", js)
-        self.assertIn("while (body.children.length > 100)", js)
+        event = js[js.index("function renderHostEvent"):js.index("function resetNotificationsForScope")]
+        self.assertIn('const rowHeader = document.createElement("th")', event)
+        self.assertIn('rowHeader.scope = "row"', event)
+        self.assertIn("for (const expired of retained.slice(100)) expired.remove();", event)
         self.assertNotIn("innerHTML", js)
 
     def test_account_or_environment_scope_change_clears_history_and_counter_baseline(self):
@@ -273,6 +276,35 @@ class SemanticWebClientContractTests(unittest.TestCase):
             "the next poll retries\n        // the same cursor instead of silently acknowledging",
             js,
         )
+
+    def test_host_event_retry_is_cursor_idempotent_and_conflicting_reuse_fails_closed(self):
+        js = APP.read_text(encoding="utf-8")
+        render = js[
+            js.index("function renderHostEvent"):
+            js.index("function resetNotificationsForScope")
+        ]
+        self.assertIn("candidate.dataset.hostEventCursor === cursorText", render)
+        self.assertIn("matchingRows.length > 1", render)
+        self.assertIn("received host-event history contains a duplicate cursor", render)
+        self.assertIn("host event cursor was reused with conflicting rendered content", render)
+        self.assertIn('row.dataset.selectionKey !== "event:" + cursorText', render)
+        self.assertEqual(render.count("body.prepend(row)"), 1)
+        self.assertIn("BigInt(left.dataset.hostEventCursor)", render)
+        self.assertIn("retained.slice(100)", render)
+
+        announce = js[
+            js.index("function announce(message"):
+            js.index("async function jsonFetch")
+        ]
+        self.assertIn("historyKey = null", announce)
+        self.assertIn("item.dataset.notificationKey === normalizedHistoryKey", announce)
+        self.assertIn("item.dataset.notificationKey = normalizedHistoryKey", announce)
+
+        poll = js[
+            js.index("async function pollEvents()"):
+            js.index("function requiredPolicyInput")
+        ]
+        self.assertIn('"event:" + cursor.toString()', poll)
 
     def test_snapshot_counters_cannot_silently_regress(self):
         js = APP.read_text(encoding="utf-8")

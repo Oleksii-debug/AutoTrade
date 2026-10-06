@@ -1,6 +1,5 @@
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
 
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
@@ -32,6 +31,10 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
             prepared_lease_seconds=prepared_lease_seconds,
         )
 
+    @staticmethod
+    def _allow(_intent_hash, _now):
+        return True, "allowed"
+
     def _dispatch(
         self,
         dispatcher: GuardedDispatcher,
@@ -39,6 +42,7 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
         attempt_id: str,
         now: str,
         transport,
+        authority_check=None,
     ):
         return dispatcher.dispatch(
             attempt_id=attempt_id,
@@ -47,9 +51,21 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
             provider="provider",
             request={"side": "BUY", "quantity": "1"},
             now=now,
-            authority_check=lambda _intent_hash, _now: (True, "allowed"),
+            authority_check=authority_check or self._allow,
             transport_send=transport,
             submission_scope={"endpoint": "/orders"},
+        )
+
+    def _events(
+        self,
+        path: str,
+        dispatcher: GuardedDispatcher,
+        attempt_id: str,
+    ) -> list[dict]:
+        return JournalStore.load_events(
+            JournalStore(path),
+            "submission_attempt",
+            dispatcher._aggregate_id(attempt_id),
         )
 
     def _event_types(
@@ -58,40 +74,22 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
         dispatcher: GuardedDispatcher,
         attempt_id: str,
     ) -> list[str]:
-        events = JournalStore(path).load_events(
-            "submission_attempt",
-            dispatcher._aggregate_id(attempt_id),
-        )
-        return [event["event_type"] for event in events]
+        return [
+            event["event_type"]
+            for event in self._events(path, dispatcher, attempt_id)
+        ]
 
-    def _forbidden_transport(self, *_args):
+    @staticmethod
+    def _forbidden_transport(*_args):
         raise AssertionError("restart must not emit a blind provider request")
 
-    def test_death_before_prepared_commit_leaves_no_durable_send_authority(self):
+    def test_empty_prepared_cut_is_safe_for_one_fresh_send(self):
         with TemporaryDirectory() as directory:
             path = self._path(directory)
-            dispatcher = self._dispatcher(path)
-            real_append = JournalStore.append_event
-
-            def die_before_prepared(store, envelope, *, outbox_topic=None):
-                if envelope["event_type"] == "SubmissionPrepared":
-                    raise SimulatedProcessDeath("before Prepared commit")
-                return real_append(store, envelope, outbox_topic=outbox_topic)
-
-            with patch.object(JournalStore, "append_event", new=die_before_prepared):
-                with self.assertRaisesRegex(
-                    SimulatedProcessDeath,
-                    "before Prepared commit",
-                ):
-                    self._dispatch(
-                        dispatcher,
-                        attempt_id="crash-before-prepared",
-                        now="2026-10-06T16:30:00Z",
-                        transport=self._forbidden_transport,
-                    )
+            first_process = self._dispatcher(path)
 
             self.assertEqual(
-                self._event_types(path, dispatcher, "crash-before-prepared"),
+                self._event_types(path, first_process, "empty-cut"),
                 [],
             )
 
@@ -109,14 +107,14 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
             restarted = self._dispatcher(path, owner_token="owner-b")
             result = self._dispatch(
                 restarted,
-                attempt_id="crash-before-prepared",
+                attempt_id="empty-cut",
                 now="2026-10-06T16:30:01Z",
                 transport=transport,
             )
             self.assertEqual(result.status, "SENT")
             self.assertEqual(outbound, 1)
             self.assertEqual(
-                self._event_types(path, restarted, "crash-before-prepared"),
+                self._event_types(path, restarted, "empty-cut"),
                 [
                     "SubmissionPrepared",
                     "SubmissionSending",
@@ -128,25 +126,21 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = self._path(directory)
             dispatcher = self._dispatcher(path)
-            real_append = JournalStore.append_event
 
-            def die_after_prepared(store, envelope, *, outbox_topic=None):
-                result = real_append(store, envelope, outbox_topic=outbox_topic)
-                if envelope["event_type"] == "SubmissionPrepared":
-                    raise SimulatedProcessDeath("after Prepared commit")
-                return result
+            def die_after_prepared(_intent_hash, _now):
+                raise SimulatedProcessDeath("after Prepared commit")
 
-            with patch.object(JournalStore, "append_event", new=die_after_prepared):
-                with self.assertRaisesRegex(
-                    SimulatedProcessDeath,
-                    "after Prepared commit",
-                ):
-                    self._dispatch(
-                        dispatcher,
-                        attempt_id="crash-after-prepared",
-                        now="2026-10-06T16:31:00Z",
-                        transport=self._forbidden_transport,
-                    )
+            with self.assertRaisesRegex(
+                SimulatedProcessDeath,
+                "after Prepared commit",
+            ):
+                self._dispatch(
+                    dispatcher,
+                    attempt_id="crash-after-prepared",
+                    now="2026-10-06T16:31:00Z",
+                    transport=self._forbidden_transport,
+                    authority_check=die_after_prepared,
+                )
 
             self.assertEqual(
                 self._event_types(path, dispatcher, "crash-after-prepared"),
@@ -179,17 +173,19 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
                 ["SubmissionPrepared", "SubmissionBlocked"],
             )
 
-    def test_death_before_sending_commit_preserves_zero_wire_recovery(self):
+    def test_death_at_final_authority_check_stays_pre_sending_and_zero_wire(self):
         with TemporaryDirectory() as directory:
             path = self._path(directory)
             dispatcher = self._dispatcher(path)
-            real_append = JournalStore.append_event
+            authority_calls = 0
             outbound = 0
 
-            def die_before_sending(store, envelope, *, outbox_topic=None):
-                if envelope["event_type"] == "SubmissionSending":
-                    raise SimulatedProcessDeath("before Sending commit")
-                return real_append(store, envelope, outbox_topic=outbox_topic)
+            def authority(_intent_hash, _now):
+                nonlocal authority_calls
+                authority_calls += 1
+                if authority_calls == 2:
+                    raise SimulatedProcessDeath("during final authority check")
+                return True, "allowed"
 
             def transport(_client_order_id, _request, final_guard):
                 nonlocal outbound
@@ -197,28 +193,29 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
                 outbound += 1
                 raise AssertionError("wire must remain unreachable")
 
-            with patch.object(JournalStore, "append_event", new=die_before_sending):
-                with self.assertRaisesRegex(
-                    SimulatedProcessDeath,
-                    "before Sending commit",
-                ):
-                    self._dispatch(
-                        dispatcher,
-                        attempt_id="crash-before-sending",
-                        now="2026-10-06T16:33:00Z",
-                        transport=transport,
-                    )
+            with self.assertRaisesRegex(
+                SimulatedProcessDeath,
+                "during final authority check",
+            ):
+                self._dispatch(
+                    dispatcher,
+                    attempt_id="crash-final-authority",
+                    now="2026-10-06T16:33:00Z",
+                    transport=transport,
+                    authority_check=authority,
+                )
 
+            self.assertEqual(authority_calls, 2)
             self.assertEqual(outbound, 0)
             self.assertEqual(
-                self._event_types(path, dispatcher, "crash-before-sending"),
+                self._event_types(path, dispatcher, "crash-final-authority"),
                 ["SubmissionPrepared"],
             )
 
             restarted = self._dispatcher(path, owner_token="owner-b")
             recovered = self._dispatch(
                 restarted,
-                attempt_id="crash-before-sending",
+                attempt_id="crash-final-authority",
                 now="2026-10-06T16:34:01Z",
                 transport=self._forbidden_transport,
             )
@@ -227,41 +224,27 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
                 recovered.reason,
                 "prepared_owner_lease_expired_before_send",
             )
-            self.assertEqual(
-                self._event_types(path, restarted, "crash-before-sending"),
-                ["SubmissionPrepared", "SubmissionBlocked"],
-            )
 
-    def test_death_after_sending_commit_is_sticky_unknown_even_before_wire(self):
+    def test_death_after_sending_commit_before_wire_is_sticky_unknown(self):
         with TemporaryDirectory() as directory:
             path = self._path(directory)
             dispatcher = self._dispatcher(path)
-            real_append = JournalStore.append_event
             outbound = 0
 
-            def die_after_sending(store, envelope, *, outbox_topic=None):
-                result = real_append(store, envelope, outbox_topic=outbox_topic)
-                if envelope["event_type"] == "SubmissionSending":
-                    raise SimulatedProcessDeath("after Sending commit")
-                return result
-
             def transport(_client_order_id, _request, final_guard):
-                nonlocal outbound
                 final_guard()
-                outbound += 1
-                raise AssertionError("wire must remain unreachable")
+                raise SimulatedProcessDeath("after Sending commit before wire")
 
-            with patch.object(JournalStore, "append_event", new=die_after_sending):
-                with self.assertRaisesRegex(
-                    SimulatedProcessDeath,
-                    "after Sending commit",
-                ):
-                    self._dispatch(
-                        dispatcher,
-                        attempt_id="crash-after-sending",
-                        now="2026-10-06T16:35:00Z",
-                        transport=transport,
-                    )
+            with self.assertRaisesRegex(
+                SimulatedProcessDeath,
+                "after Sending commit before wire",
+            ):
+                self._dispatch(
+                    dispatcher,
+                    attempt_id="crash-after-sending",
+                    now="2026-10-06T16:35:00Z",
+                    transport=transport,
+                )
 
             self.assertEqual(outbound, 0)
             self.assertEqual(
@@ -291,18 +274,54 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
                 ],
             )
 
-    def test_death_after_sent_commit_replays_terminal_without_resend(self):
+    def test_death_after_wire_before_terminal_is_unknown_without_resend(self):
         with TemporaryDirectory() as directory:
             path = self._path(directory)
             dispatcher = self._dispatcher(path)
-            real_append = JournalStore.append_event
             outbound = 0
 
-            def die_after_sent(store, envelope, *, outbox_topic=None):
-                result = real_append(store, envelope, outbox_topic=outbox_topic)
-                if envelope["event_type"] == "SubmissionSent":
-                    raise SimulatedProcessDeath("after Sent commit")
-                return result
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                raise SimulatedProcessDeath("after wire before terminal")
+
+            with self.assertRaisesRegex(
+                SimulatedProcessDeath,
+                "after wire before terminal",
+            ):
+                self._dispatch(
+                    dispatcher,
+                    attempt_id="crash-after-wire",
+                    now="2026-10-06T16:36:00Z",
+                    transport=transport,
+                )
+
+            self.assertEqual(outbound, 1)
+            self.assertEqual(
+                self._event_types(path, dispatcher, "crash-after-wire"),
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
+            restarted = self._dispatcher(path, owner_token="owner-b")
+            recovered = self._dispatch(
+                restarted,
+                attempt_id="crash-after-wire",
+                now="2026-10-06T16:36:01Z",
+                transport=self._forbidden_transport,
+            )
+            self.assertEqual(recovered.status, "UNKNOWN")
+            self.assertEqual(
+                recovered.reason,
+                "recovered_after_send_barrier_without_terminal_result",
+            )
+            self.assertEqual(outbound, 1)
+
+    def test_committed_sent_replays_after_caller_result_loss_without_resend(self):
+        with TemporaryDirectory() as directory:
+            path = self._path(directory)
+            dispatcher = self._dispatcher(path)
+            outbound = 0
 
             def transport(_client_order_id, _request, final_guard):
                 nonlocal outbound
@@ -313,33 +332,20 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
                     http_status=200,
                 )
 
-            with patch.object(JournalStore, "append_event", new=die_after_sent):
-                with self.assertRaisesRegex(
-                    SimulatedProcessDeath,
-                    "after Sent commit",
-                ):
-                    self._dispatch(
-                        dispatcher,
-                        attempt_id="crash-after-sent",
-                        now="2026-10-06T16:36:00Z",
-                        transport=transport,
-                    )
-
-            self.assertEqual(outbound, 1)
-            self.assertEqual(
-                self._event_types(path, dispatcher, "crash-after-sent"),
-                [
-                    "SubmissionPrepared",
-                    "SubmissionSending",
-                    "SubmissionSent",
-                ],
+            committed = self._dispatch(
+                dispatcher,
+                attempt_id="lost-sent-result",
+                now="2026-10-06T16:37:00Z",
+                transport=transport,
             )
+            self.assertEqual(committed.status, "SENT")
+            self.assertEqual(outbound, 1)
 
             restarted = self._dispatcher(path, owner_token="owner-b")
             recovered = self._dispatch(
                 restarted,
-                attempt_id="crash-after-sent",
-                now="2026-10-06T16:36:01Z",
+                attempt_id="lost-sent-result",
+                now="2026-10-06T16:37:01Z",
                 transport=self._forbidden_transport,
             )
             self.assertEqual(recovered.status, "SENT")
@@ -347,7 +353,7 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
             self.assertEqual(recovered.response, {"accepted": True})
             self.assertEqual(outbound, 1)
             self.assertEqual(
-                self._event_types(path, restarted, "crash-after-sent"),
+                self._event_types(path, restarted, "lost-sent-result"),
                 [
                     "SubmissionPrepared",
                     "SubmissionSending",
@@ -355,18 +361,11 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
                 ],
             )
 
-    def test_death_after_timeout_unknown_commit_replays_without_resend(self):
+    def test_committed_timeout_unknown_replays_without_resend(self):
         with TemporaryDirectory() as directory:
             path = self._path(directory)
             dispatcher = self._dispatcher(path)
-            real_append = JournalStore.append_event
             outbound = 0
-
-            def die_after_unknown(store, envelope, *, outbox_topic=None):
-                result = real_append(store, envelope, outbox_topic=outbox_topic)
-                if envelope["event_type"] == "SubmissionUnknown":
-                    raise SimulatedProcessDeath("after Unknown commit")
-                return result
 
             def transport(_client_order_id, _request, final_guard):
                 nonlocal outbound
@@ -374,33 +373,20 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
                 outbound += 1
                 raise TimeoutError("reply lost after wire")
 
-            with patch.object(JournalStore, "append_event", new=die_after_unknown):
-                with self.assertRaisesRegex(
-                    SimulatedProcessDeath,
-                    "after Unknown commit",
-                ):
-                    self._dispatch(
-                        dispatcher,
-                        attempt_id="crash-after-unknown",
-                        now="2026-10-06T16:37:00Z",
-                        transport=transport,
-                    )
-
-            self.assertEqual(outbound, 1)
-            self.assertEqual(
-                self._event_types(path, dispatcher, "crash-after-unknown"),
-                [
-                    "SubmissionPrepared",
-                    "SubmissionSending",
-                    "SubmissionUnknown",
-                ],
+            committed = self._dispatch(
+                dispatcher,
+                attempt_id="lost-timeout-result",
+                now="2026-10-06T16:38:00Z",
+                transport=transport,
             )
+            self.assertEqual(committed.status, "UNKNOWN")
+            self.assertEqual(outbound, 1)
 
             restarted = self._dispatcher(path, owner_token="owner-b")
             recovered = self._dispatch(
                 restarted,
-                attempt_id="crash-after-unknown",
-                now="2026-10-06T16:37:01Z",
+                attempt_id="lost-timeout-result",
+                now="2026-10-06T16:38:01Z",
                 transport=self._forbidden_transport,
             )
             self.assertEqual(recovered.status, "UNKNOWN")
@@ -410,7 +396,7 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
             )
             self.assertEqual(outbound, 1)
             self.assertEqual(
-                self._event_types(path, restarted, "crash-after-unknown"),
+                self._event_types(path, restarted, "lost-timeout-result"),
                 [
                     "SubmissionPrepared",
                     "SubmissionSending",
@@ -418,12 +404,10 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
                 ],
             )
 
-
-    def test_death_after_exact_ambiguous_unknown_commit_replays_reason(self):
+    def test_committed_exact_ambiguous_unknown_replays_bound_reason_and_bytes(self):
         with TemporaryDirectory() as directory:
             path = self._path(directory)
             dispatcher = self._dispatcher(path)
-            real_append = JournalStore.append_event
             outbound = 0
             response = ExactJsonTransportResponse(
                 b'{"retCode":10000}',
@@ -432,42 +416,26 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
                 ambiguity_reason="provider_ack_ambiguous",
             )
 
-            def die_after_unknown(store, envelope, *, outbox_topic=None):
-                result = real_append(store, envelope, outbox_topic=outbox_topic)
-                if envelope["event_type"] == "SubmissionUnknown":
-                    raise SimulatedProcessDeath("after exact Unknown commit")
-                return result
-
             def transport(_client_order_id, _request, final_guard):
                 nonlocal outbound
                 final_guard()
                 outbound += 1
                 return response
 
-            with patch.object(JournalStore, "append_event", new=die_after_unknown):
-                with self.assertRaisesRegex(
-                    SimulatedProcessDeath,
-                    "after exact Unknown commit",
-                ):
-                    self._dispatch(
-                        dispatcher,
-                        attempt_id="crash-after-exact-unknown",
-                        now="2026-10-06T16:38:00Z",
-                        transport=transport,
-                    )
-
-            self.assertEqual(outbound, 1)
-            events = JournalStore(path).load_events(
-                "submission_attempt",
-                dispatcher._aggregate_id("crash-after-exact-unknown"),
+            committed = self._dispatch(
+                dispatcher,
+                attempt_id="lost-exact-unknown-result",
+                now="2026-10-06T16:39:00Z",
+                transport=transport,
             )
-            self.assertEqual(
-                [event["event_type"] for event in events],
-                [
-                    "SubmissionPrepared",
-                    "SubmissionSending",
-                    "SubmissionUnknown",
-                ],
+            self.assertEqual(committed.status, "UNKNOWN")
+            self.assertEqual(committed.reason, "provider_ack_ambiguous")
+            self.assertEqual(outbound, 1)
+
+            events = self._events(
+                path,
+                dispatcher,
+                "lost-exact-unknown-result",
             )
             terminal_payload = events[-1]["payload"]
             self.assertEqual(terminal_payload["reason"], "provider_ack_ambiguous")
@@ -484,13 +452,21 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
             restarted = self._dispatcher(path, owner_token="owner-b")
             recovered = self._dispatch(
                 restarted,
-                attempt_id="crash-after-exact-unknown",
-                now="2026-10-06T16:38:01Z",
+                attempt_id="lost-exact-unknown-result",
+                now="2026-10-06T16:39:01Z",
                 transport=self._forbidden_transport,
             )
             self.assertEqual(recovered.status, "UNKNOWN")
             self.assertEqual(recovered.reason, "provider_ack_ambiguous")
             self.assertEqual(outbound, 1)
+            self.assertEqual(
+                self._event_types(path, restarted, "lost-exact-unknown-result"),
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
 
 
 if __name__ == "__main__":

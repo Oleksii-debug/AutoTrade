@@ -3235,6 +3235,209 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             )
             self.assertEqual(restored.attempt_id, "binding-type-a1")
 
+    def test_binding_loader_rejects_transitive_decoder_rebinding_before_callbacks(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+
+            callbacks = 0
+
+            def forged(*_args, **_kwargs):
+                nonlocal callbacks
+                callbacks += 1
+                raise AssertionError("rebound decoder authority executed")
+
+            original_loads = dispatch_module.json.loads
+            original_decoder = dispatch_module.json.JSONDecoder
+            original_number_parser = dispatch_module.parse_bounded_json_number_token
+            original_integer_parser = dispatch_module.parse_bounded_json_integer_token
+            original_exact_error = dispatch_module.ExactDecimalError
+
+            class ForgedDecoder:
+                def __init__(self, **_kwargs):
+                    forged()
+
+            cases = (
+                (
+                    "json.loads",
+                    lambda: setattr(dispatch_module.json, "loads", forged),
+                    lambda: setattr(dispatch_module.json, "loads", original_loads),
+                ),
+                (
+                    "json.JSONDecoder",
+                    lambda: setattr(dispatch_module.json, "JSONDecoder", ForgedDecoder),
+                    lambda: setattr(dispatch_module.json, "JSONDecoder", original_decoder),
+                ),
+                (
+                    "parse_bounded_json_number_token",
+                    lambda: setattr(
+                        dispatch_module,
+                        "parse_bounded_json_number_token",
+                        forged,
+                    ),
+                    lambda: setattr(
+                        dispatch_module,
+                        "parse_bounded_json_number_token",
+                        original_number_parser,
+                    ),
+                ),
+                (
+                    "parse_bounded_json_integer_token",
+                    lambda: setattr(
+                        dispatch_module,
+                        "parse_bounded_json_integer_token",
+                        forged,
+                    ),
+                    lambda: setattr(
+                        dispatch_module,
+                        "parse_bounded_json_integer_token",
+                        original_integer_parser,
+                    ),
+                ),
+                (
+                    "ExactDecimalError",
+                    lambda: setattr(dispatch_module, "ExactDecimalError", RuntimeError),
+                    lambda: setattr(
+                        dispatch_module,
+                        "ExactDecimalError",
+                        original_exact_error,
+                    ),
+                ),
+            )
+            for surface, mutate, restore in cases:
+                try:
+                    mutate()
+                    with self.subTest(surface=surface), self.assertRaisesRegex(
+                        ValueError,
+                        "submission response binding authority is unavailable",
+                    ):
+                        load_submission_response_binding(
+                            JournalStore(path),
+                            environment="SIMULATION",
+                            account_id="acct",
+                            attempt_id="binding-type-a1",
+                        )
+                finally:
+                    restore()
+                self.assertEqual(callbacks, 0)
+
+            restored = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-type-a1",
+            )
+            self.assertEqual(restored.attempt_id, "binding-type-a1")
+
+    def test_binding_loader_rejects_in_place_json_loads_kwdefault_retarget(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            loads = dispatch_module.json.loads
+            kwdefaults = loads.__kwdefaults__
+            self.assertIs(type(kwdefaults), dict)
+            original_items = tuple(kwdefaults.items())
+
+            class ForgedDecoder:
+                calls = 0
+
+                def __init__(self, **_kwargs):
+                    type(self).calls += 1
+                    raise AssertionError("forged JSON decoder executed")
+
+            try:
+                kwdefaults["cls"] = ForgedDecoder
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "submission response binding authority is unavailable",
+                ):
+                    load_submission_response_binding(
+                        JournalStore(path),
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id="binding-type-a1",
+                    )
+            finally:
+                kwdefaults.clear()
+                kwdefaults.update(dict(original_items))
+
+            self.assertEqual(ForgedDecoder.calls, 0)
+            restored = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-type-a1",
+            )
+            self.assertEqual(restored.attempt_id, "binding-type-a1")
+
+    def test_binding_loader_rejects_in_place_json_decoder_and_scanner_mutation(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+
+            decoder = dispatch_module.json.JSONDecoder
+            decode = decoder.__dict__["decode"]
+            original_decode_code = decode.__code__
+
+            def forged_decode(self, text):
+                raise AssertionError("forged JSONDecoder.decode executed")
+
+            try:
+                decode.__code__ = forged_decode.__code__
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "submission response binding authority is unavailable",
+                ):
+                    load_submission_response_binding(
+                        JournalStore(path),
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id="binding-type-a1",
+                    )
+            finally:
+                decode.__code__ = original_decode_code
+
+            decoder_init = decoder.__dict__["__init__"]
+            scanner = decoder_init.__globals__["scanner"]
+            scanner_namespace = vars(scanner)
+            original_make_scanner = scanner_namespace["make_scanner"]
+            scanner_callbacks = 0
+
+            def forged_make_scanner(_context):
+                nonlocal scanner_callbacks
+                scanner_callbacks += 1
+                raise AssertionError("forged scanner executed")
+
+            try:
+                scanner_namespace["make_scanner"] = forged_make_scanner
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "submission response binding authority is unavailable",
+                ):
+                    load_submission_response_binding(
+                        JournalStore(path),
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id="binding-type-a1",
+                    )
+            finally:
+                scanner_namespace["make_scanner"] = original_make_scanner
+
+            self.assertEqual(scanner_callbacks, 0)
+            restored = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-type-a1",
+            )
+            self.assertEqual(restored.attempt_id, "binding-type-a1")
+
     def test_response_binding_constructor_rejects_polymorphic_authority_inputs(self):
         from mvp.autotrade_mvp import dispatch as dispatch_module
 

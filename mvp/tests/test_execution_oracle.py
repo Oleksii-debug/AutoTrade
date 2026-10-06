@@ -7,7 +7,7 @@ from mvp.autotrade_mvp.execution_oracle import (
     ExecutionOracleError,
     assert_conservative_execution,
 )
-from mvp.autotrade_mvp.instruments import InstrumentVersion
+from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
     ExecutionPriceGrid,
@@ -55,7 +55,12 @@ def instrument(*, instrument_id=INSTRUMENT_ID):
 
 
 def price_grid(instrument_value=None):
-    return ExecutionPriceGrid.from_instrument(instrument_value or instrument())
+    bound = instrument_value or instrument()
+    registry = InstrumentRegistry(versions=(bound,))
+    return ExecutionPriceGrid.from_registry(
+        registry,
+        f"{bound.instrument_id}@{bound.version}",
+    )
 
 
 def model(**overrides):

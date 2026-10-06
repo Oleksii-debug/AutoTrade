@@ -94,6 +94,7 @@ def _digest(value: str, *, name: str) -> str:
 
 
 _PRICE_GRID_AUTHORITY_TOKEN = object()
+_PRICE_GRID_REGISTRY_TOKEN = object()
 
 @dataclass(frozen=True, init=False)
 class ExecutionPriceGrid:
@@ -120,7 +121,7 @@ class ExecutionPriceGrid:
     ) -> None:
         if _authority_token is not _PRICE_GRID_AUTHORITY_TOKEN:
             raise TypeError(
-                "ExecutionPriceGrid must be issued by the canonical instrument factory"
+                "ExecutionPriceGrid must be issued by the canonical instrument registry"
             )
         object.__setattr__(self,"instrument_version",_text(instrument_version,name="price_grid_instrument_version"))
         object.__setattr__(self,"price_quantum",_positive(price_quantum,name="price_quantum"))
@@ -133,13 +134,36 @@ class ExecutionPriceGrid:
         object.__setattr__(self,"_authority_token",_PRICE_GRID_AUTHORITY_TOKEN)
 
     @classmethod
-    def from_instrument(
+    @classmethod
+    def from_registry(
         cls,
-        instrument: InstrumentVersion,
+        registry,
+        instrument_version: str,
         *,
         projection_policy_id: str = "ADVERSE_PRICE_GRID",
         projection_policy_version: int = 1,
     ) -> "ExecutionPriceGrid":
+        if type(registry) is not InstrumentRegistry:
+            raise TypeError("registry must be exact InstrumentRegistry")
+        instrument = registry.exact(instrument_version)
+        return cls._from_instrument(
+            instrument,
+            projection_policy_id=projection_policy_id,
+            projection_policy_version=projection_policy_version,
+            _registry_token=_PRICE_GRID_REGISTRY_TOKEN,
+        )
+
+    @classmethod
+    def _from_instrument(
+        cls,
+        instrument: InstrumentVersion,
+        *,
+        projection_policy_id: str,
+        projection_policy_version: int,
+        _registry_token: object | None = None,
+    ) -> "ExecutionPriceGrid":
+        if _registry_token is not _PRICE_GRID_REGISTRY_TOKEN:
+            raise TypeError("instrument price grid issuance requires InstrumentRegistry")
         if type(instrument) is not InstrumentVersion:
             raise TypeError("instrument must be exact InstrumentVersion")
         if not instrument.metadata_evidence:

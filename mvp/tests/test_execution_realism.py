@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import unittest
 
-from mvp.autotrade_mvp.instruments import InstrumentVersion
+from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
     ExecutionPriceGrid,
@@ -52,8 +52,10 @@ def instrument(*, instrument_id=INSTRUMENT_ID, price_tick=Decimal("0.01")):
 
 def price_grid(*, instrument_value=None, projection_policy_version=1):
     bound = instrument_value or instrument()
-    return ExecutionPriceGrid.from_instrument(
-        bound,
+    registry = InstrumentRegistry(versions=(bound,))
+    return ExecutionPriceGrid.from_registry(
+        registry,
+        f"{bound.instrument_id}@{bound.version}",
         projection_policy_version=projection_policy_version,
     )
 
@@ -189,7 +191,7 @@ class ExecutionRealismTests(unittest.TestCase):
         self.assertEqual(baseline[0], Decimal("101.10"))
 
     def test_price_grid_requires_canonical_instrument_issuance(self):
-        with self.assertRaisesRegex(TypeError, "issued by the canonical instrument factory"):
+        with self.assertRaisesRegex(TypeError, "issued by the canonical instrument registry"):
             ExecutionPriceGrid(
                 instrument_version=INSTRUMENT_REF,
                 price_quantum=Decimal("0.01"),

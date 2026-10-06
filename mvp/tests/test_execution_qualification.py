@@ -16,7 +16,7 @@ from mvp.autotrade_mvp.execution_qualification import (
     simulate_qualified_execution,
     validate_execution_qualification,
 )
-from mvp.autotrade_mvp.instruments import InstrumentVersion
+from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
     ExecutionPriceGrid,
@@ -65,7 +65,12 @@ def instrument():
 
 
 def price_grid():
-    return ExecutionPriceGrid.from_instrument(instrument())
+    bound = instrument()
+    registry = InstrumentRegistry(versions=(bound,))
+    return ExecutionPriceGrid.from_registry(
+        registry,
+        INSTRUMENT_REF,
+    )
 
 
 def model(**overrides):

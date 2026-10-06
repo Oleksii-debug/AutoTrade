@@ -27,6 +27,10 @@ def model(**overrides):
         impact_bps_at_max_participation="10",
         bar_half_spread_bps="0",
         scenario_cost_multiplier="1",
+        price_quantum="0.01",
+        price_projection_policy_id="ADVERSE_PRICE_GRID",
+        price_projection_policy_version=1,
+        price_grid_instrument_version="ABC@v1",
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -111,10 +115,78 @@ class ExecutionRealismTests(unittest.TestCase):
         result = simulate_execution(order(), top(), model())
         # Quantity 10 / volume 100 = 10% participation, i.e. 40% of the
         # configured 25% max. Impact = 4 bps; slippage = 5 bps.
-        expected = Decimal("101") * (Decimal("1") + Decimal("9") / Decimal("10000"))
+        expected = Decimal("101.10")
         self.assertEqual(result.status, "FILLED")
         self.assertEqual(result.fill_price, expected)
         self.assertEqual(result.fee, Decimal("10") * expected * Decimal("0.001"))
+
+    def test_market_projection_is_context_independent_and_grid_bound(self):
+        from decimal import localcontext, ROUND_CEILING, ROUND_FLOOR
+
+        baseline = None
+        for precision, rounding in (
+            (6, ROUND_CEILING),
+            (10, ROUND_FLOOR),
+            (28, ROUND_CEILING),
+            (80, ROUND_FLOOR),
+        ):
+            with localcontext() as context:
+                context.prec = precision
+                context.rounding = rounding
+                result = simulate_execution(order(), top(), model())
+            current = (result.fill_price, result.fee, result.model_fingerprint)
+            if baseline is None:
+                baseline = current
+            else:
+                self.assertEqual(current, baseline)
+
+        self.assertEqual(baseline[0], Decimal("101.10"))
+
+    def test_market_projection_requires_explicit_price_quantum(self):
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "complete price projection policy evidence",
+        ):
+            simulate_execution(order(), top(), model(price_quantum=None))
+
+    def test_market_projection_policy_identity_changes_model_fingerprint(self):
+        one = model(price_projection_policy_version=1)
+        two = model(price_projection_policy_version=2)
+        self.assertNotEqual(one.fingerprint, two.fingerprint)
+
+    def test_market_projection_requires_all_policy_evidence_fields(self):
+        for override in (
+            {"price_projection_policy_id": None},
+            {"price_projection_policy_version": None},
+            {"price_grid_instrument_version": None},
+        ):
+            with self.subTest(override=override):
+                with self.assertRaisesRegex(
+                    ExecutionRealismError,
+                    "complete price projection policy evidence",
+                ):
+                    simulate_execution(order(), top(), model(**override))
+
+    def test_market_price_grid_scope_must_match_order_instrument(self):
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "not bound to the order instrument_version",
+        ):
+            simulate_execution(
+                order(),
+                top(),
+                model(price_grid_instrument_version="OTHER@v1"),
+            )
+
+    def test_market_price_quantum_changes_model_identity(self):
+        one = model(price_quantum="0.01")
+        two = model(price_quantum="0.001")
+        self.assertNotEqual(one.fingerprint, two.fingerprint)
+
+    def test_market_price_grid_scope_changes_model_identity(self):
+        one = model(price_grid_instrument_version="ABC@v1")
+        two = model(price_grid_instrument_version="ABC@v2")
+        self.assertNotEqual(one.fingerprint, two.fingerprint)
 
     def test_available_volume_and_participation_create_partial_fill(self):
         result = simulate_execution(
@@ -265,6 +337,45 @@ class ExecutionRealismTests(unittest.TestCase):
         self.assertEqual(result.status, "FILLED")
         self.assertEqual(result.fill_price, Decimal("103"))
 
+    def test_market_non_terminating_ratios_are_context_independent(self):
+        from decimal import localcontext, ROUND_CEILING, ROUND_FLOOR
+
+        baseline = None
+        for precision, rounding in (
+            (6, ROUND_CEILING),
+            (10, ROUND_FLOOR),
+            (28, ROUND_CEILING),
+            (80, ROUND_FLOOR),
+        ):
+            with localcontext() as context:
+                context.prec = precision
+                context.rounding = rounding
+                result = simulate_execution(
+                    order(quantity="10"),
+                    top(available_volume="30"),
+                    model(max_participation="0.25"),
+                )
+            current = (result.filled_quantity, result.fill_price, result.fee)
+            if baseline is None:
+                baseline = current
+            else:
+                self.assertEqual(current, baseline)
+
+        # Capacity floors 7.5 to 7 lots, giving 7/30 and then 14/15 impact
+        # ratios. The exact rational price target is 101.144766..., projected
+        # adversely to the 0.01 instrument grid.
+        self.assertEqual(baseline, (Decimal("7"), Decimal("101.15"), Decimal("0.70805")))
+
+    def test_market_sell_projection_uses_adverse_floor_on_price_grid(self):
+        result = simulate_execution(
+            order(side="SELL"),
+            top(bid="99", ask="101"),
+            model(slippage_bps="5", impact_bps_at_max_participation="4"),
+        )
+        # 10% / 25% = 40% impact participation: 1.6 bps impact + 5 bps slippage.
+        # 99 * (1 - 6.6 / 10000) = 98.93466, so adverse SELL projection floors to 98.93.
+        self.assertEqual(result.fill_price, Decimal("98.93"))
+
     def test_bar_market_uses_adverse_extreme_plus_configured_costs(self):
         result = simulate_execution(
             order(side="SELL"),
@@ -285,7 +396,7 @@ class ExecutionRealismTests(unittest.TestCase):
                 bar_half_spread_bps="5",
             ),
         )
-        self.assertEqual(result.fill_price, Decimal("90") * (Decimal("1") - Decimal("15") / Decimal("10000")))
+        self.assertEqual(result.fill_price, Decimal("89.86"))
         self.assertIn("intrabar queue", " ".join(result.warnings))
 
     def test_base_scenario_cannot_hide_optimistic_cost_multiplier(self):

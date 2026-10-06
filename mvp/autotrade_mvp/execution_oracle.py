@@ -8,7 +8,10 @@ against optimistic quantity, price, fee and causal-time errors.
 from __future__ import annotations
 
 from datetime import timedelta
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
+from fractions import Fraction
+
+from .exact_decimal import as_fraction, bounded_fraction, exact_multiply, round_fraction_to_quantum
 
 from .execution_realism import (
     ExecutionModel,
@@ -25,8 +28,11 @@ class ExecutionOracleError(ValueError):
 
 
 def _round_down(quantity: Decimal, lot_size: Decimal) -> Decimal:
-    lots = (quantity / lot_size).to_integral_value(rounding=ROUND_DOWN)
-    return lots * lot_size
+    return round_fraction_to_quantum(
+        as_fraction(quantity),
+        lot_size,
+        mode="FLOOR",
+    )
 
 
 def assert_conservative_execution(
@@ -64,7 +70,7 @@ def assert_conservative_execution(
     independent_capacity = _round_down(
         min(
             order.quantity,
-            observation.available_volume * model.max_participation,
+            exact_multiply(observation.available_volume, model.max_participation),
         ),
         order.lot_size,
     )
@@ -101,6 +107,19 @@ def assert_conservative_execution(
             raise ExecutionOracleError("fee cannot be negative")
 
         if order.order_type == "MARKET":
+            if (
+                model.price_quantum is None
+                or model.price_projection_policy_id is None
+                or model.price_projection_policy_version is None
+                or model.price_grid_instrument_version is None
+            ):
+                raise ExecutionOracleError(
+                    "MARKET execution requires complete price projection policy evidence"
+                )
+            if model.price_grid_instrument_version != order.instrument_version:
+                raise ExecutionOracleError(
+                    "MARKET price grid is not bound to the order instrument_version"
+                )
             if model.data_fidelity == "BAR":
                 if observation.bar_high is None or observation.bar_low is None:
                     raise ExecutionOracleError("BAR market fill lacks price bounds")
@@ -125,6 +144,61 @@ def assert_conservative_execution(
                 raise ExecutionOracleError(
                     "market sell result is more favorable than executable reference"
                 )
+
+            participation = (
+                bounded_fraction(
+                    as_fraction(independent_capacity)
+                    / as_fraction(observation.available_volume)
+                )
+                if observation.available_volume > 0
+                else Fraction(0, 1)
+            )
+            max_participation = as_fraction(model.max_participation)
+            impact_fraction = (
+                bounded_fraction(participation / max_participation)
+                if max_participation > 0
+                else Fraction(0, 1)
+            )
+            impact_fraction = bounded_fraction(
+                min(impact_fraction, Fraction(1, 1))
+            )
+            impact_bps = bounded_fraction(
+                as_fraction(model.impact_bps_at_max_participation)
+                * impact_fraction
+            )
+            additional_spread = (
+                model.bar_half_spread_bps
+                if model.data_fidelity == "BAR"
+                else Decimal("0")
+            )
+            total_bps = bounded_fraction(
+                (
+                    as_fraction(additional_spread)
+                    + as_fraction(model.slippage_bps)
+                    + impact_bps
+                ) * as_fraction(model.scenario_cost_multiplier)
+            )
+            reference_fraction = as_fraction(reference)
+            target = bounded_fraction(
+                reference_fraction
+                + reference_fraction * total_bps / 10000
+                if order.side == "BUY"
+                else reference_fraction
+                - reference_fraction * total_bps / 10000
+            )
+            if target <= 0:
+                raise ExecutionOracleError(
+                    "configured adverse costs produce non-positive execution price"
+                )
+            projected = round_fraction_to_quantum(
+                target,
+                model.price_quantum,
+                mode="CEILING" if order.side == "BUY" else "FLOOR",
+            )
+            if result.fill_price != projected:
+                raise ExecutionOracleError(
+                    "market fill price does not match independent price-grid projection"
+                )
         else:
             if order.limit_price is None:
                 raise ExecutionOracleError("limit execution lacks order limit")
@@ -134,7 +208,10 @@ def assert_conservative_execution(
                 raise ExecutionOracleError("sell limit filled below limit")
 
         independent_min_fee = max(
-            result.filled_quantity * result.fill_price * model.fee_rate,
+            exact_multiply(
+                exact_multiply(result.filled_quantity, result.fill_price),
+                model.fee_rate,
+            ),
             model.minimum_fee,
         )
         if result.fee < independent_min_fee:

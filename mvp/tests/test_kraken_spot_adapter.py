@@ -613,6 +613,27 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "ACKNOWLEDGED")
         self.assertEqual(result["provider_order_id"], "prepared-callback-fence")
 
+    def test_submission_consumer_rejects_rebound_prepared_projection_without_callback(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {"error": [], "result": {"txid": ["prepared-helper-rebound"]}},
+            intent_id="kraken-spot-prepared-helper-rebound",
+        )
+        with patch(
+            "mvp.autotrade_mvp.kraken_spot._prepared_submission_projection",
+            side_effect=AssertionError("rebound prepared projector executed"),
+        ) as rebound:
+            with self.assertRaisesRegex(
+                KrakenSpotAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_spot_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    source_uri="https://api.kraken.com/0/private/AddOrder",
+                    observation=observation,
+                )
+        rebound.assert_not_called()
+
     def test_submission_consumer_rejects_prepared_subclass_before_virtual_callback(self):
         callbacks = []
 

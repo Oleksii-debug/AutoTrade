@@ -325,6 +325,23 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
             original,
         )
 
+    def test_preparation_constructor_same_function_code_mutation_fails_closed(self):
+        _material, prepared = canonical_case()
+        del prepared
+
+        constructor = bybit_module.BybitPreparedSubmission.__post_init__
+        original_code = constructor.__code__
+        forged_code = (lambda self: None).__code__
+        try:
+            constructor.__code__ = forged_code
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "prepared submission authority changed",
+            ):
+                canonical_case()
+        finally:
+            constructor.__code__ = original_code
+
     def test_shared_projection_pins_provenance_verifier(self):
         _material, prepared = canonical_case()
         calls = []

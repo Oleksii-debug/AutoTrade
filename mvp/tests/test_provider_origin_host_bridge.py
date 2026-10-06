@@ -79,6 +79,25 @@ class ProviderOriginHostBridgeTests(unittest.TestCase):
             transport_identity="UrllibJsonWireClient:v1",
         )
 
+    def test_tampered_authenticated_read_observation_fails_at_host_bridge_boundary(self):
+        query_binding = self._query_binding()
+        observation = observe_authenticated_json_response(
+            query_binding=query_binding,
+            http_status=200,
+            response_bytes=b'{"retCode":0,"result":{"list":[]}}',
+            observed_at=READ_AT + timedelta(seconds=1),
+        )
+        object.__setattr__(observation, "http_status", 201)
+        with self.assertRaisesRegex(
+            ProviderOriginHostBridgeError,
+            "lacks canonical direct-wire provenance",
+        ):
+            verify_bybit_direct_wire_observation_against_host_pins(
+                observation,
+                query_binding=query_binding,
+                pins=self._pins(),
+            )
+
     def test_plain_authenticated_read_observation_cannot_satisfy_direct_wire_host_pins(self):
         query_binding = self._query_binding()
         observation = observe_authenticated_json_response(

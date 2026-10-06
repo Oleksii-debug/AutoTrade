@@ -25,6 +25,7 @@ import binascii
 import hmac
 import json
 import os
+import re
 from threading import Lock
 from types import MappingProxyType
 from typing import Any, Callable, ContextManager, Mapping, Protocol
@@ -4481,7 +4482,7 @@ class IbkrWebBearerCredential:
             plaintext != plaintext.strip()
             or len(plaintext) > 16384
             or plaintext.lower().startswith("bearer ")
-            or any(ord(ch) < 33 or ord(ch) > 126 for ch in plaintext)
+            or re.fullmatch(r"[A-Za-z0-9\\-._~+/]+={0,}", plaintext) is None
         ):
             raise ProviderTransportScopeError(
                 "IBKR OAuth2 bearer credential is not canonical token text"

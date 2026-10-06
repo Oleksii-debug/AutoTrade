@@ -845,13 +845,23 @@ class AlpacaAdapterTests(unittest.TestCase):
         )
         object.__setattr__(prepared, "instrument_versions", (object(),))
 
-        with patch(
-            "builtins.any",
-            side_effect=AssertionError("mutable builtin any must not execute"),
-        ) as rebound_any, patch(
-            "mvp.autotrade_mvp.alpaca.AlpacaAdapterError",
-            side_effect=AssertionError("mutable module error class must not execute"),
-        ) as rebound_error:
+        callbacks = []
+
+        def rebound_any(*_args, **_kwargs):
+            callbacks.append("any")
+            raise AssertionError("mutable module any must not execute")
+
+        def rebound_error(*_args, **_kwargs):
+            callbacks.append("error")
+            raise AssertionError("mutable module error class must not execute")
+
+        with patch.dict(
+            parse_submission_response.__globals__,
+            {
+                "any": rebound_any,
+                "AlpacaAdapterError": rebound_error,
+            },
+        ):
             with self.assertRaisesRegex(
                 AlpacaAdapterError,
                 "prepared request authority changed",
@@ -862,8 +872,7 @@ class AlpacaAdapterTests(unittest.TestCase):
                     observation=None,
                     transport_ambiguous=True,
                 )
-        rebound_any.assert_not_called()
-        rebound_error.assert_not_called()
+        self.assertEqual(callbacks, [])
 
     def test_submission_consumer_rejects_subclass_before_virtual_callback(self):
         intent_id = "alpaca-hostile-observation"

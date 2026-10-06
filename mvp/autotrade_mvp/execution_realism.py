@@ -313,7 +313,11 @@ def _execution_price_grid_authority_operations():
 
         if type(registry) is not InstrumentRegistry:
             raise TypeError("registry must be exact InstrumentRegistry")
-        instrument = registry.exact(instrument_version)
+        # Exact registry type alone is insufficient: normal Python instances can
+        # shadow methods in __dict__.  Price-grid authority must read through
+        # the canonical class method so a caller-attached registry.exact cannot
+        # substitute a different tick/instrument at issuance time.
+        instrument = InstrumentRegistry.exact(registry, instrument_version)
         if type(instrument) is not InstrumentVersion:
             raise TypeError("registry returned non-canonical InstrumentVersion")
         return build(

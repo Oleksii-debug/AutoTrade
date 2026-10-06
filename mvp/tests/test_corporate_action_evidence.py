@@ -1323,6 +1323,65 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
 
         self.assertEqual(events, [])
 
+    def test_late_durable_identity_globals_do_not_rewrite_event_identity(self):
+        accepted = self._accepted()
+        calls = []
+
+        with TemporaryDirectory() as baseline_dir:
+            baseline_path = f"{baseline_dir}/journal.sqlite3"
+            _baseline_journal, baseline_store = self._store(baseline_path)
+            baseline = DurableCorporateActionEvidenceStore.record(
+                baseline_store,
+                accepted,
+            )
+
+        originals = {
+            "uuid5": corporate_action_evidence_module.uuid5,
+            "namespace": corporate_action_evidence_module.NAMESPACE_URL,
+            "payload_digest": corporate_action_evidence_module.payload_digest,
+            "utc_text": corporate_action_evidence_module._utc_text,
+        }
+
+        def decoy(name):
+            def fail(*_args, **_kwargs):
+                calls.append(name)
+                raise AssertionError(f"late durable {name} decoy must not execute")
+            return fail
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            aggregate_id = durable.aggregate_id
+            corporate_action_evidence_module.uuid5 = decoy("uuid5")
+            corporate_action_evidence_module.NAMESPACE_URL = object()
+            corporate_action_evidence_module.payload_digest = decoy("payload_digest")
+            corporate_action_evidence_module._utc_text = decoy("utc_text")
+            try:
+                result = DurableCorporateActionEvidenceStore.record(
+                    durable,
+                    accepted,
+                )
+            finally:
+                corporate_action_evidence_module.uuid5 = originals["uuid5"]
+                corporate_action_evidence_module.NAMESPACE_URL = originals["namespace"]
+                corporate_action_evidence_module.payload_digest = originals[
+                    "payload_digest"
+                ]
+                corporate_action_evidence_module._utc_text = originals["utc_text"]
+
+            events = journal.load_events(
+                "corporate_action_evidence",
+                aggregate_id,
+            )
+
+        self.assertEqual(calls, [])
+        self.assertEqual(result.event_id, baseline.event_id)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(
+            events[0]["payload"]["effective_at"],
+            accepted.event.effective_at.isoformat().replace("+00:00", "Z"),
+        )
+
     def test_manually_constructed_authoritative_action_cannot_reach_durable_store(self):
         issued = self._accepted()
         forged = AuthoritativeCorporateAction(**issued.__dict__)

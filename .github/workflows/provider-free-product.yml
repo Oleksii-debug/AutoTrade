@@ -100,6 +100,20 @@ jobs:
           Expand-Archive -LiteralPath artifacts/AutoTrade-ZERO-win-x64.zip -DestinationPath 'artifacts/installed candidate with spaces'
           dotnet run --project tests/Product/InventoryProbe/InventoryProbe.csproj -c Release -- 'artifacts/installed candidate with spaces/payload' --exercise
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Exercise packaged Desktop owned-runtime bootstrap
+        shell: pwsh
+        run: |
+          $desktopExe = (Resolve-Path 'artifacts/installed candidate with spaces/payload/AutoTrade.Desktop.exe').Path
+          $data = (Join-Path (Resolve-Path 'artifacts').Path 'desktop owned runtime state')
+          $start = [System.Diagnostics.ProcessStartInfo]::new($desktopExe)
+          $start.UseShellExecute = $false
+          $start.ArgumentList.Add('--owned-runtime-smoke')
+          $start.ArgumentList.Add($data)
+          $process = [System.Diagnostics.Process]::Start($start)
+          if ($null -eq $process) { throw 'Packaged Desktop smoke process did not start.' }
+          $process.WaitForExit()
+          if ($process.ExitCode -ne 0) { throw "Packaged Desktop owned-runtime bootstrap failed: $($process.ExitCode)" }
+          $process.Dispose()
       - name: Prove packaged Host fails closed before listener bind
         shell: pwsh
         run: |
@@ -117,7 +131,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dotnet run --project tests/Product/InventoryProbe/InventoryProbe.csproj -c Release -- 'artifacts/installed candidate with spaces/payload'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - run: python tools/write_ci_evidence.py --suite provider-free-packaged-windows-browser --command "embedded isolated Python + packaged Desktop + packaged fail-closed Host + keyboard + crash + restart + backup + restore" --output artifacts/product-packaged-Windows.json
+      - run: python tools/write_ci_evidence.py --suite provider-free-packaged-windows-browser --command "packaged Desktop owned-runtime bootstrap + embedded isolated Python + packaged fail-closed Host + keyboard + crash + restart + backup + restore" --output artifacts/product-packaged-Windows.json
       - uses: actions/upload-artifact@v4
         with:
           name: AutoTrade-ZERO-UNQUALIFIED-${{ env.AUTOTRADE_SOURCE_SHA }}

@@ -1989,8 +1989,74 @@ internal static class Program
         }
     }
 
-    public static async Task Main()
+    static async Task PackagedOwnedRuntimeBootstrapSmoke(
+        string payload,
+        string dataDirectory)
     {
+        Type runtimeType = typeof(App).Assembly.GetType(
+            "AutoTrade.Desktop.OwnedProviderFreeRuntime",
+            throwOnError: true)!;
+        var start = runtimeType.GetMethod(
+            "StartAsync",
+            System.Reflection.BindingFlags.Static
+                | System.Reflection.BindingFlags.NonPublic,
+            binder: null,
+            types: new[] { typeof(string), typeof(string) },
+            modifiers: null)
+            ?? throw new InvalidOperationException(
+                "installed owned-runtime bootstrap is missing");
+
+        object taskObject = start.Invoke(
+            null,
+            new object[] { payload, dataDirectory })
+            ?? throw new InvalidOperationException(
+                "installed owned-runtime bootstrap returned null");
+        await (Task)taskObject;
+        object runtime = taskObject.GetType().GetProperty("Result")!.GetValue(taskObject)
+            ?? throw new InvalidOperationException(
+                "installed owned-runtime bootstrap produced no runtime");
+
+        try
+        {
+            Uri origin = (Uri)(runtimeType.GetProperty("Origin")!.GetValue(runtime)
+                ?? throw new InvalidOperationException("owned runtime origin is missing"));
+            string actualData = (string)(runtimeType.GetProperty("DataDirectory")!.GetValue(runtime)
+                ?? throw new InvalidOperationException("owned runtime data directory is missing"));
+            Check.True(
+                origin.Scheme == Uri.UriSchemeHttp
+                    && origin.Host == "127.0.0.1"
+                    && origin.Port > 0
+                    && origin.AbsolutePath == "/"
+                    && string.IsNullOrEmpty(origin.UserInfo)
+                    && string.IsNullOrEmpty(origin.Query)
+                    && string.IsNullOrEmpty(origin.Fragment),
+                "packaged Desktop bootstrap did not bind a canonical loopback origin");
+            Check.True(
+                string.Equals(
+                    Path.GetFullPath(actualData),
+                    Path.GetFullPath(dataDirectory),
+                    StringComparison.OrdinalIgnoreCase),
+                "packaged Desktop bootstrap escaped its isolated data directory");
+        }
+        finally
+        {
+            await ((IAsyncDisposable)runtime).DisposeAsync();
+        }
+    }
+
+    public static async Task Main(string[] args)
+    {
+        if (args.Length != 0)
+        {
+            if (args.Length != 3 || args[0] != "--owned-runtime-smoke")
+            {
+                throw new ArgumentException(
+                    "Usage: Desktop.Client [--owned-runtime-smoke PAYLOAD DATA_DIRECTORY]");
+            }
+            await PackagedOwnedRuntimeBootstrapSmoke(args[1], args[2]);
+            Console.WriteLine("Packaged Desktop owned-runtime bootstrap passed.");
+            return;
+        }
         ExplicitExternalHostConfigurationNeverFallsBackTest();
         WebExperienceSecurityPolicyOriginAndNavigationTest();
         WebExperienceSecurityPolicyCredentialForwardingTest();

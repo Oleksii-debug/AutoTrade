@@ -76,7 +76,18 @@ def _snapshot():
     )
 
 
-def _reconciliation(*, local_cash: str = "900", provider_cash: str = "900"):
+def _reconciliation(
+    *,
+    local_cash: str = "900",
+    provider_cash: str = "900",
+    local_settled_cash=None,
+    provider_settled_cash=None,
+    local_unsettled_receivable=None,
+    provider_unsettled_receivable=None,
+    local_unsettled_payable=None,
+    provider_unsettled_payable=None,
+    settlement_activity_complete=None,
+):
     return reconcile_account(
         provider_id=PROVIDER,
         account_id=ACCOUNT,
@@ -94,6 +105,13 @@ def _reconciliation(*, local_cash: str = "900", provider_cash: str = "900"):
         pagination_complete=True,
         provider_activity_provider_id=PROVIDER,
         provider_activity_account_id=ACCOUNT,
+        local_settled_cash=local_settled_cash,
+        provider_settled_cash=provider_settled_cash,
+        local_unsettled_receivable=local_unsettled_receivable,
+        provider_unsettled_receivable=provider_unsettled_receivable,
+        local_unsettled_payable=local_unsettled_payable,
+        provider_unsettled_payable=provider_unsettled_payable,
+        settlement_activity_complete=settlement_activity_complete,
     )
 
 
@@ -363,6 +381,7 @@ class ScientificFinancialAccountingOwnerTests(unittest.TestCase):
             self.assertTrue(owner.owner_digest.startswith("sha256:"))
             self.assertTrue(owner.reconciled_cash_digest.startswith("sha256:"))
             self.assertTrue(owner.reconciled_position_digest.startswith("sha256:"))
+            self.assertTrue(owner.reconciled_settlement_digest.startswith("sha256:"))
 
     def test_owner_compares_decimal_value_not_checkpoint_scale_or_zero_keys(self):
         with TemporaryDirectory() as directory:
@@ -373,6 +392,7 @@ class ScientificFinancialAccountingOwnerTests(unittest.TestCase):
                 provider_id=PROVIDER,
                 account_id=ACCOUNT,
                 environment=ENVIRONMENT,
+                provider_environment=PROVIDER_ENVIRONMENT,
                 local_cash={"USD": "900.0", "JPY": "0.00"},
                 provider_cash={"USD": "900.0", "JPY": "0.00"},
                 local_positions={"ABC": "1.0", "ZERO": "0.000"},
@@ -440,6 +460,70 @@ class ScientificFinancialAccountingOwnerTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ScientificFinancialOwnerConflict,
                 "cash_differences is non-zero",
+            ):
+                resolve_scientific_financial_accounting_owner(
+                    store=store,
+                    financial_cut=cut,
+                    scientific_registry=registry,
+                    profile=gate_profile,
+                )
+
+    def test_settlement_difference_fails_financial_owner_even_when_cash_matches(self):
+        with TemporaryDirectory() as directory:
+            gate_profile, registry, registration = _science_owner(directory)
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            _book_matching_provider(store)
+            settlement_mismatch = _reconciliation(
+                local_settled_cash={"USD": "900"},
+                provider_settled_cash={"USD": "899"},
+                local_unsettled_receivable={},
+                provider_unsettled_receivable={},
+                local_unsettled_payable={},
+                provider_unsettled_payable={},
+                settlement_activity_complete=True,
+            )
+            _, cut = _checkpoint_and_cut(
+                store,
+                gate_profile=gate_profile,
+                registration=registration,
+                reconciliation=settlement_mismatch,
+            )
+
+            with self.assertRaisesRegex(
+                ScientificFinancialOwnerConflict,
+                "settlement_differences is non-zero",
+            ):
+                resolve_scientific_financial_accounting_owner(
+                    store=store,
+                    financial_cut=cut,
+                    scientific_registry=registry,
+                    profile=gate_profile,
+                )
+
+    def test_incomplete_settlement_activity_fails_financial_owner(self):
+        with TemporaryDirectory() as directory:
+            gate_profile, registry, registration = _science_owner(directory)
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            _book_matching_provider(store)
+            incomplete_settlement = _reconciliation(
+                local_settled_cash={"USD": "900"},
+                provider_settled_cash={"USD": "900"},
+                local_unsettled_receivable={},
+                provider_unsettled_receivable={},
+                local_unsettled_payable={},
+                provider_unsettled_payable={},
+                settlement_activity_complete=False,
+            )
+            _, cut = _checkpoint_and_cut(
+                store,
+                gate_profile=gate_profile,
+                registration=registration,
+                reconciliation=incomplete_settlement,
+            )
+
+            with self.assertRaisesRegex(
+                ScientificFinancialOwnerConflict,
+                "requires complete settlement activity",
             ):
                 resolve_scientific_financial_accounting_owner(
                     store=store,

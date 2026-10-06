@@ -33,7 +33,7 @@ from mvp.autotrade_mvp.futures_journal import (
 )
 from mvp.autotrade_mvp.instruments import InstrumentVersion
 from mvp.autotrade_mvp.settlement_convention import SettlementConvention
-from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
+from mvp.autotrade_mvp.persistence import (\n    JournalStore,\n    _event_envelope_digest,\n    canonical_json,\n    payload_digest,\n)
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 
@@ -402,7 +402,8 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             try:
                 row = connection.execute(
                     """
-                    SELECT event_id, payload, payload_hash
+                    SELECT event_id, payload_json, payload_hash,
+                           envelope_json, envelope_hash
                     FROM events
                     WHERE aggregate_type = ? AND aggregate_id = ?
                     ORDER BY aggregate_version
@@ -412,15 +413,24 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 self.assertIsNotNone(row)
                 payload = json.loads(row[1])
                 payload.pop("settlement_convention_id", None)
+                payload_json = canonical_json(payload)
+                payload_hash = payload_digest(payload)
+                envelope = json.loads(row[3])
+                envelope["payload"] = payload
+                envelope["payload_hash"] = payload_hash
+                envelope_json = canonical_json(envelope)
                 connection.execute(
                     """
                     UPDATE events
-                    SET payload = ?, payload_hash = ?
+                    SET payload_json = ?, payload_hash = ?,
+                        envelope_json = ?, envelope_hash = ?
                     WHERE event_id = ?
                     """,
                     (
-                        canonical_json(payload),
-                        payload_digest(payload),
+                        payload_json,
+                        payload_hash,
+                        envelope_json,
+                        _event_envelope_digest(envelope_json),
                         row[0],
                     ),
                 )

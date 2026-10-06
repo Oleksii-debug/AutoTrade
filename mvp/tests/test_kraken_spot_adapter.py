@@ -545,6 +545,22 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "REJECTED")
         self.assertEqual(result["retry_disposition"], "NEVER")
 
+    def test_provider_error_rejects_noncanonical_or_nontext_entries(self):
+        cases = (
+            [" EOrder:Insufficient funds "],
+            [123],
+            [{"code": "EOrder:Insufficient funds"}],
+        )
+        for errors in cases:
+            with self.subTest(errors=errors):
+                with self.assertRaisesRegex(
+                    KrakenSpotAdapterError,
+                    "error entries must be canonical exact text",
+                ):
+                    self._parse_submission(
+                        {"error": errors, "result": None}
+                    )
+
     def test_deadline_elapsed_is_unknown_after_durable_response_binding(self):
         result = self._parse_submission(
             {"error": ["EService:Deadline elapsed"], "result": None}

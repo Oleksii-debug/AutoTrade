@@ -119,6 +119,37 @@ class DispatchReconciliationAttemptIdentityTests(unittest.TestCase):
             self.assertEqual(recovered[0].attempt_id, "attempt-b")
             self.assertEqual(recovered[0].intent_id, "intent-b")
 
+    def test_scoped_lookup_recovers_modern_attempt_without_caller_mapping(self):
+        with TemporaryDirectory() as directory:
+            store, _aggregate_id = self._make_modern_unknown(
+                Path(directory) / "journal.sqlite3"
+            )
+
+            recovered = unknown_submissions_from_dispatch(
+                store,
+                attempt_ids=("attempt-b",),
+                environment="SIMULATION",
+                account_id="acct",
+            )
+            self.assertEqual(len(recovered), 1)
+            self.assertEqual(recovered[0].attempt_id, "attempt-b")
+            self.assertEqual(recovered[0].account_id, "acct")
+            self.assertEqual(recovered[0].environment, "SIMULATION")
+
+    def test_legacy_original_aggregate_identity_remains_readable(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            aggregate_id = "legacy-attempt"
+            self._append_legacy_unknown(store, aggregate_id)
+
+            recovered = unknown_submissions_from_dispatch(
+                store,
+                attempt_ids=(aggregate_id,),
+            )
+            self.assertEqual(len(recovered), 1)
+            self.assertEqual(recovered[0].attempt_id, aggregate_id)
+            self.assertEqual(recovered[0].intent_id, "legacy-intent")
+
     def test_legacy_aggregate_without_attempt_identity_cannot_be_remapped(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

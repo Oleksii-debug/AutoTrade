@@ -1232,6 +1232,8 @@ class RecoveryQualificationDecision:
             and self.release_artifact_sha256 == policy.release_artifact_sha256
             and self.evidence_schema_version == policy.evidence_schema_version
             and self.protocol_id == policy.protocol_id
+            and self.recovery_policy_requirement
+            == recovery_policy_subject_requirement(policy)
         )
 
 

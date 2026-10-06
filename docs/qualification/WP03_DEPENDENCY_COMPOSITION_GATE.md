@@ -6,6 +6,8 @@ This gate audits the checked source tree and deliberately refuses to call the re
 
 Current canonical blockers captured by the gate:
 
+- packaged qualification trust policy pin is intentionally unavailable (`None`); no independently reviewed production trust-policy bytes may be invented by this gate;
+
 - first-party Autosport and Nika reuse still has unresolved release/distribution rights records;
 - selected external components remain pending exact selected-composition, notice and advisory evidence;
 - exact release-composition-to-provenance identity mapping is still absent;
@@ -15,11 +17,11 @@ The gate also verifies that the current Python runtime test requirements are exa
 
 This is not an SBOM and does not approve any dependency. It is a deterministic blocker inventory that prevents a false WP-03 PASS and gives the remaining composition work a machine-checked boundary.
 
-## Resolved in the canonical #2202 lineage
+## Resolved in the canonical #2204 lineage
 
 The repository and both .NET qualification workflows select SDK `10.0.100` exactly, with `rollForward=disable`. The isolated research build backend is pinned to `setuptools==84.0.0`. Python workflow selection is exact `3.12.10` and GitHub-hosted runner images are explicit.
 
-The current convergence additionally binds the actual WebView2 lock graph into release provenance, keeps Desktop.Client transitive lock identity synchronized with Desktop, verifies the exact restored `.nupkg` SHA-512 against the lock, binds nuspec id/version plus reviewed license/notice to that exact artifact, and requires locked restore plus restored-rights verification in the same real Actions job under canonical `NUGET_PACKAGES`. These close source-side lock/restored-package-rights gaps; they do not manufacture external rights, advisory, SBOM or release qualification.
+The current convergence additionally binds the actual WebView2 lock graph into release provenance, keeps Desktop.Client transitive lock identity synchronized with Desktop, verifies the exact restored `.nupkg` SHA-512 against the lock, binds nuspec id/version plus reviewed license/notice to that exact artifact, and requires locked restore plus restored-rights verification in the same real Actions job under canonical `NUGET_PACKAGES`. These close source-side lock/restored-package-rights gaps. #2204 additionally converges the canonical detached WP-64 supply-chain proof/semantic-subject authority. They do not manufacture external rights, advisory, SBOM, trust-root or release qualification.
 
 
 ## Command modes

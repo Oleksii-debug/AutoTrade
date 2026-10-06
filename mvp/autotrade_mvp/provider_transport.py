@@ -548,23 +548,20 @@ _BYBIT_OPTION_DELIVERY_QUERY_FIELDS = frozenset(
 _BYBIT_OPTION_DELIVERY_CURSOR_RE = re.compile(
     r"^(?:[A-Za-z0-9._~-]|%[0-9A-F]{2})+$"
 )
-_BYBIT_OPTION_DELIVERY_MONTHS = frozenset(
-    {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"}
-)
-_BYBIT_OPTION_DELIVERY_MAX_DAY = MappingProxyType(
+_BYBIT_OPTION_DELIVERY_MONTH_NUMBER = MappingProxyType(
     {
-        "JAN": 31,
-        "FEB": 29,
-        "MAR": 31,
-        "APR": 30,
-        "MAY": 31,
-        "JUN": 30,
-        "JUL": 31,
-        "AUG": 31,
-        "SEP": 30,
-        "OCT": 31,
-        "NOV": 30,
-        "DEC": 31,
+        "JAN": 1,
+        "FEB": 2,
+        "MAR": 3,
+        "APR": 4,
+        "MAY": 5,
+        "JUN": 6,
+        "JUL": 7,
+        "AUG": 8,
+        "SEP": 9,
+        "OCT": 10,
+        "NOV": 11,
+        "DEC": 12,
     }
 )
 _BYBIT_OPTION_DELIVERY_MAX_RANGE_MS = 30 * 24 * 60 * 60 * 1000
@@ -650,14 +647,18 @@ def _validate_bybit_option_delivery_query(
             )
         day = int(exp_date[:2], 10)
         month = exp_date[2:5]
-        if (
-            day < 1
-            or month not in _BYBIT_OPTION_DELIVERY_MONTHS
-            or day > _BYBIT_OPTION_DELIVERY_MAX_DAY[month]
-        ):
+        year = 2000 + int(exp_date[5:7], 10)
+        month_number = _BYBIT_OPTION_DELIVERY_MONTH_NUMBER.get(month)
+        if day < 1 or month_number is None:
             raise ProviderTransportScopeError(
                 "Bybit option delivery expDate must use DDMMMYY"
             )
+        try:
+            datetime(year, month_number, day, tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise ProviderTransportScopeError(
+                "Bybit option delivery expDate must use DDMMMYY"
+            ) from exc
 
     if "limit" in query:
         _bybit_delivery_query_integer(

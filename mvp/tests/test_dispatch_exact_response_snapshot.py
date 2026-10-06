@@ -1,4 +1,5 @@
 from hashlib import sha256
+import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -440,6 +441,138 @@ class ExactResponseSnapshotCurrentTests(unittest.TestCase):
             )
             self.assertEqual(outbound, 1)
             self.assertEqual(callbacks, 0)
+
+
+    def test_verified_exact_response_survives_sent_persistence_failure(self):
+        raw = b'{"accepted":true,"providerOrderId":"p-1"}'
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+
+            # Exercise the real durable boundary without monkeypatching
+            # JournalStore/dispatcher authority: reject only the first intended
+            # definitive terminal event. The fallback UNKNOWN remains writable.
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TRIGGER fail_submission_sent
+                    BEFORE INSERT ON events
+                    WHEN NEW.event_type = 'SubmissionSent'
+                    BEGIN
+                        SELECT RAISE(ABORT, 'simulated terminal persistence failure');
+                    END
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            outbound = 0
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return ExactJsonTransportResponse(raw, http_status=201)
+
+            first = dispatcher.dispatch(
+                attempt_id="verified-response-persistence-fallback-a1",
+                intent_id="intent-verified-response-fallback",
+                intent_hash="sha256:" + "7" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T19:45:00Z",
+                authority_check=self._allow,
+                transport_send=transport,
+                submission_scope={"endpoint": "/orders"},
+            )
+
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(first.reason, "sent_response_persistence_failed")
+            self.assertEqual(outbound, 1)
+
+            events = JournalStore.load_events(
+                JournalStore(path),
+                "submission_attempt",
+                dispatcher._aggregate_id(
+                    "verified-response-persistence-fallback-a1"
+                ),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            terminal = events[-1]["payload"]
+            self.assertEqual(terminal["response_text"], raw.decode("utf-8"))
+            self.assertEqual(
+                terminal["response_sha256"],
+                "sha256:" + sha256(raw).hexdigest(),
+            )
+            self.assertEqual(terminal["response_encoding"], "utf-8-json")
+            self.assertEqual(terminal["http_status"], 201)
+            self.assertEqual(
+                terminal["reason"],
+                "sent_response_persistence_failed:IntegrityError",
+            )
+            self.assertEqual(
+                terminal["retry_disposition"],
+                "RECONCILE_FIRST",
+            )
+
+            binding = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="verified-response-persistence-fallback-a1",
+            )
+            self.assertEqual(binding.terminal_state, "UNKNOWN")
+            self.assertEqual(binding.response_bytes, raw)
+            self.assertEqual(binding.response_encoding, "utf-8-json")
+            self.assertEqual(binding.http_status, 201)
+            self.assertEqual(
+                binding.response_sha256,
+                "sha256:" + sha256(raw).hexdigest(),
+            )
+            self.assertEqual(
+                binding.retry_disposition,
+                "RECONCILE_FIRST",
+            )
+
+            restarted = self._dispatcher(path)
+            replay = restarted.dispatch(
+                attempt_id="verified-response-persistence-fallback-a1",
+                intent_id="intent-verified-response-fallback",
+                intent_hash="sha256:" + "7" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T19:45:01Z",
+                authority_check=lambda *_args: (
+                    _ for _ in ()
+                ).throw(
+                    AssertionError(
+                        "response-bearing UNKNOWN replay must not re-authorize"
+                    )
+                ),
+                transport_send=lambda *_args: (
+                    _ for _ in ()
+                ).throw(
+                    AssertionError(
+                        "response-bearing UNKNOWN replay must not resend"
+                    )
+                ),
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(replay.status, "UNKNOWN")
+            self.assertEqual(
+                replay.reason,
+                "sent_response_persistence_failed:IntegrityError",
+            )
+            self.assertEqual(outbound, 1)
 
 
 if __name__ == "__main__":

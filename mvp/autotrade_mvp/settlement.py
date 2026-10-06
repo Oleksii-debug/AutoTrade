@@ -368,8 +368,10 @@ class BuyingPowerEvidence:
                 "buying-power credit exceeds exact rendering authority"
             ) from error
         detail = {
+            "schema_version": "margin-buying-power-resource.v1",
             "resource_type": "MARGIN_BUYING_POWER",
             "credit_semantics": "ADDITIONAL_TO_SETTLED_CASH",
+            "evidence_id": self.evidence_id,
             "provider_id": self.scope.provider_id,
             "account_id": self.scope.account_id,
             "environment": self.scope.environment,
@@ -397,6 +399,8 @@ class BuyingPowerEvidence:
 
         if type(detail) is not dict:
             raise TypeError("margin-credit resource detail must use an exact dict")
+        if detail.get("schema_version") != "margin-buying-power-resource.v1":
+            raise ValueError("margin-credit resource detail schema is unsupported")
         if detail.get("resource_type") != "MARGIN_BUYING_POWER":
             raise ValueError("margin-credit resource detail has invalid resource_type")
         if detail.get("credit_semantics") != "ADDITIONAL_TO_SETTLED_CASH":
@@ -412,8 +416,10 @@ class BuyingPowerEvidence:
             raise ValueError("margin-credit evidence_ref_count is invalid")
 
         fixed = {
+            "schema_version",
             "resource_type",
             "credit_semantics",
+            "evidence_id",
             "provider_id",
             "account_id",
             "environment",
@@ -455,11 +461,7 @@ class BuyingPowerEvidence:
             provider_environment=exact_text("provider_environment"),
         )
         return cls(
-            evidence_id=(
-                f"resource:{exact_text('provider_id')}:{exact_text('account_id')}:"
-                f"{exact_text('provider_environment')}:{exact_text('currency')}:"
-                f"{exact_text('observed_at')}"
-            ),
+            evidence_id=exact_text("evidence_id"),
             scope=scope,
             currency=exact_text("currency"),
             additional_credit=exact_text("additional_credit"),

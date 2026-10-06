@@ -946,7 +946,14 @@ def _authority_service_capital_operations():
                 "effective_available": _canonical_decimal_text(effective),
             }
         return {
-            "schema_version": "settlement-capital-cut.v1",
+            "schema_version": (
+                "settlement-capital-cut.v2"
+                if any(
+                    resource.startswith("MARGIN_CREDIT:")
+                    for resource in capital_resources
+                )
+                else "settlement-capital-cut.v1"
+            ),
             "journal_sequence": after,
             "provider_id": scope.provider_id,
             "account_id": scope.account_id,
@@ -1010,7 +1017,11 @@ def _canonical_settlement_capital_adjustment(
     }
     if set(value) != expected_fields:
         raise AuthorityConflict("settlement capital adjustment is malformed")
-    if value.get("schema_version") != "settlement-capital-cut.v1":
+    schema_version = value.get("schema_version")
+    if schema_version not in {
+        "settlement-capital-cut.v1",
+        "settlement-capital-cut.v2",
+    }:
         raise AuthorityConflict("settlement capital schema is unsupported")
     journal_sequence = value.get("journal_sequence")
     if type(journal_sequence) is not int or journal_sequence < 0:
@@ -1108,6 +1119,18 @@ def _canonical_settlement_capital_adjustment(
             if resource.startswith(("CASH:", "MARGIN_CREDIT:"))
         )
     )
+    expected_schema = (
+        "settlement-capital-cut.v2"
+        if any(
+            resource.startswith("MARGIN_CREDIT:")
+            for resource in capital_resources
+        )
+        else "settlement-capital-cut.v1"
+    )
+    if schema_version != expected_schema:
+        raise AuthorityConflict(
+            "settlement capital schema does not match reservation resources"
+        )
     if set(raw_resources) != set(capital_resources):
         raise AuthorityConflict(
             "settlement capital resources do not match reservation requirements"
@@ -1163,7 +1186,7 @@ def _canonical_settlement_capital_adjustment(
         }
     return (
         {
-            "schema_version": "settlement-capital-cut.v1",
+            "schema_version": schema_version,
             "journal_sequence": journal_sequence,
             "provider_id": canonical_provider,
             "account_id": canonical_account,

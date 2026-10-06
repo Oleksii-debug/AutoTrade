@@ -963,6 +963,12 @@ class EconomicSettlementCapitalTests(unittest.TestCase):
         self.assertEqual(resources["CASH:USD"], Decimal("900"))
         self.assertEqual(resources["MARGIN_CREDIT:USD"], Decimal("250"))
         self.assertNotIn("BUYING_POWER:USD", resources)
+        self.assertEqual(
+            BuyingPowerEvidence.from_resource_detail(
+                buying_power.resource_detail()
+            ),
+            buying_power,
+        )
 
         stale = settlement.available_capital(
             scope=self.scope,

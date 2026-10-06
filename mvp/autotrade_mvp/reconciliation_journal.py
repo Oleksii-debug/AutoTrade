@@ -1368,8 +1368,8 @@ def unresolved_provider_activity_ids_from_checkpoint(
 def unknown_submissions_from_dispatch(
     store: JournalStore,
     *,
-    attempt_ids: Iterable[str],
-    aggregate_ids: Mapping[str, str] | None = None,
+    attempt_ids: list[str] | tuple[str, ...],
+    aggregate_ids: dict[str, str] | None = None,
     environment: str | None = None,
     account_id: str | None = None,
 ) -> tuple[UnknownSubmission, ...]:
@@ -1378,14 +1378,20 @@ def unknown_submissions_from_dispatch(
     SubmissionSending is ambiguous after a crash because the external request may
     already have crossed the final send barrier. SubmissionUnknown is explicitly
     ambiguous. Neither state is converted to retry authority here. `aggregate_ids`
-    lets callers bind a logical attempt id to the exact durable aggregate identity
-    used by a scoped dispatcher, without duplicating dispatch identity logic.
+    is only a locator for a durable aggregate; it cannot bind or relabel logical
+    attempt identity. Current rows prove that identity with SubmissionPrepared
+    attempt_id, while legacy rows may only use their original aggregate identity.
     """
 
     require_exact_journal_store_authority(
         store,
         subject="reconciliation JournalStore",
     )
+    # Recovery identity is financial authority.  Do not traverse an arbitrary
+    # caller iterable before its elements have been reduced to inert exact
+    # built-ins: an Iterable subclass may execute caller code from __iter__.
+    if type(attempt_ids) not in {list, tuple}:
+        raise TypeError("attempt_ids must be an exact list or tuple")
     normalized = tuple(_text(value, name="attempt_id") for value in attempt_ids)
     if len(normalized) != len(set(normalized)):
         raise ValueError("attempt_ids must be unique")
@@ -1410,9 +1416,12 @@ def unknown_submissions_from_dispatch(
                 attempt_id=attempt_key,
             )
     elif aggregate_ids is not None:
-        if not isinstance(aggregate_ids, Mapping):
-            raise TypeError("aggregate_ids must be a mapping")
-        for raw_attempt_id, raw_aggregate_id in aggregate_ids.items():
+        # A generic Mapping is executable caller input: __iter__/items/getitem
+        # can run before durable attempt identity is established.  Recovery
+        # accepts only a detached exact built-in dictionary at this boundary.
+        if type(aggregate_ids) is not dict:
+            raise TypeError("aggregate_ids must be an exact dict")
+        for raw_attempt_id, raw_aggregate_id in dict.items(aggregate_ids):
             attempt_key = _text(raw_attempt_id, name="aggregate_ids attempt_id")
             aggregate_id = _text(raw_aggregate_id, name="aggregate_id")
             if attempt_key in durable_ids and durable_ids[attempt_key] != aggregate_id:
@@ -1425,7 +1434,12 @@ def unknown_submissions_from_dispatch(
     recovered: list[UnknownSubmission] = []
     for attempt_id in normalized:
         aggregate_id = durable_ids.get(attempt_id, attempt_id)
-        events = _journal_store_call(store, "load_events", "submission_attempt", aggregate_id)
+        events = _journal_store_call(
+            store,
+            "load_events",
+            "submission_attempt",
+            aggregate_id,
+        )
         if not events:
             raise KeyError(f"Unknown submission attempt: {attempt_id}")
         first = events[0]
@@ -1436,27 +1450,102 @@ def unknown_submissions_from_dispatch(
         payload = first["payload"]
         if not isinstance(payload, Mapping):
             raise ValueError("SubmissionPrepared payload must be an object")
-        provider_id = _text(
-            payload.get("provider"), name="provider"
-        ).upper()
-        account_id = _text(
-            payload.get("account_id"), name="account_id"
+
+        event_types = tuple(
+            _text(event.get("event_type"), name="event_type")
+            for event in events
+        )
+        aggregate_versions = tuple(
+            event.get("aggregate_version")
+            for event in events
+        )
+        if (
+            any(type(version) is not int for version in aggregate_versions)
+            or aggregate_versions != tuple(range(1, len(events) + 1))
+        ):
+            raise ValueError(
+                "submission recovery history has noncanonical aggregate versions"
+            )
+        if event_types not in {
+            ("SubmissionPrepared",),
+            ("SubmissionPrepared", "SubmissionBlocked"),
+            ("SubmissionPrepared", "SubmissionUnknown"),
+            ("SubmissionPrepared", "SubmissionSending"),
+            ("SubmissionPrepared", "SubmissionBlocked", "SubmissionUnknown"),
+            ("SubmissionPrepared", "SubmissionSending", "SubmissionSent"),
+            ("SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"),
+        }:
+            raise ValueError("submission recovery history has invalid causal shape")
+
+        event_instants: list[str] = []
+        for event_type, event in zip(event_types, events):
+            canonical_fields = []
+            for field_name in ("occurred_at", "observed_at", "committed_at"):
+                raw_timestamp = _text(
+                    event.get(field_name),
+                    name=f"{event_type}.{field_name}",
+                )
+                canonical_timestamp = _instant(
+                    raw_timestamp,
+                    name=f"{event_type}.{field_name}",
+                )
+                if raw_timestamp != canonical_timestamp:
+                    raise ValueError(
+                        "submission recovery history timestamp is not canonical UTC"
+                    )
+                canonical_fields.append(canonical_timestamp)
+            if len(set(canonical_fields)) != 1:
+                raise ValueError(
+                    "submission recovery event timestamp authorities disagree"
+                )
+            event_instants.append(canonical_fields[0])
+        if any(
+            earlier > later
+            for earlier, later in zip(event_instants, event_instants[1:])
+        ):
+            raise ValueError("submission recovery history chronology is not monotonic")
+
+        # The caller-supplied aggregate map is a locator only. Modern dispatch
+        # rows carry the logical attempt identity in SubmissionPrepared and must
+        # agree exactly with the requested identity. Historical rows without
+        # that field remain readable only through their original aggregate id.
+        if "attempt_id" in payload:
+            durable_attempt_id = _text(
+                payload.get("attempt_id"),
+                name="SubmissionPrepared.attempt_id",
+            )
+            if durable_attempt_id != attempt_id:
+                raise ValueError(
+                    "SubmissionPrepared durable attempt_id does not match "
+                    "requested attempt identity"
+                )
+        elif aggregate_ids is not None and aggregate_id != attempt_id:
+            raise ValueError(
+                "legacy SubmissionPrepared without durable attempt_id "
+                "cannot be remapped"
+            )
+
+        provider_id = _text(payload.get("provider"), name="provider").upper()
+        durable_account_id = _text(
+            payload.get("account_id"),
+            name="account_id",
         )
         durable_environment = _text(
-            payload.get("environment"), name="environment"
+            payload.get("environment"),
+            name="environment",
         ).upper()
         if scoped_lookup and (
             durable_environment != lookup_environment
-            or account_id != lookup_account
+            or durable_account_id != lookup_account
         ):
             raise ValueError(
                 "SubmissionPrepared durable scope does not match requested scope"
             )
-        environment = durable_environment
-        intent_id = _text(
-            payload.get("intent_id"), name="intent_id"
-        )
-        if _text(first.get("environment"), name="event.environment").upper() != environment:
+        intent_id = _text(payload.get("intent_id"), name="intent_id")
+        if (
+            _text(first.get("environment"), name="event.environment").upper()
+            != durable_environment
+        ):
             raise ValueError(
                 "SubmissionPrepared envelope environment does not match payload"
             )
@@ -1464,6 +1553,113 @@ def unknown_submissions_from_dispatch(
             payload.get("client_order_id"),
             name="client_order_id",
         )
+
+        prepared_owner_token = payload.get("owner_token")
+        prepared_owner_epoch = payload.get("owner_epoch")
+        modern_owner_identity = (
+            prepared_owner_token is not None or prepared_owner_epoch is not None
+        )
+        if modern_owner_identity:
+            if (
+                type(prepared_owner_token) is not str
+                or not prepared_owner_token.strip()
+                or type(prepared_owner_epoch) is not int
+                or prepared_owner_epoch < 1
+            ):
+                raise ValueError(
+                    "SubmissionPrepared durable owner identity is invalid"
+                )
+            prepared_owner_token = prepared_owner_token.strip()
+
+        # Provider financial domain is durable submission authority.  In
+        # particular, runtime PAPER cannot distinguish BYBIT TESTNET from DEMO.
+        # Recover that axis only from the prepared submission scope; never from
+        # a caller hint or today's route selection.
+        submission_scope = payload.get("submission_scope")
+        provider_environment: str | None = None
+        if submission_scope is not None:
+            if not isinstance(submission_scope, Mapping):
+                raise ValueError("SubmissionPrepared submission_scope must be an object")
+            provider_environment_values = []
+            for field_name in (
+                "provider_environment",
+                "provider_route_provider_environment",
+            ):
+                if field_name in submission_scope:
+                    provider_environment_values.append(
+                        _text(
+                            submission_scope.get(field_name),
+                            name=f"submission_scope.{field_name}",
+                        ).upper()
+                    )
+            if provider_environment_values:
+                if len(set(provider_environment_values)) != 1:
+                    raise ValueError(
+                        "SubmissionPrepared provider_environment authorities disagree"
+                    )
+                provider_environment = provider_environment_values[0]
+        if provider_id == "BYBIT" and provider_environment is None:
+            raise ValueError(
+                "BYBIT SubmissionPrepared lacks durable provider_environment"
+            )
+        (
+            _scoped_provider,
+            _scoped_account,
+            _scoped_environment,
+            provider_environment,
+        ) = _scope(
+            provider_id=provider_id,
+            account_id=durable_account_id,
+            environment=durable_environment,
+            provider_environment=provider_environment,
+        )
+
+        # Every later possible-send event must remain on the same durable
+        # aggregate/environment/client-order identity as SubmissionPrepared.
+        # The last event alone is insufficient because an injected intermediate
+        # row must not disappear from the reconstruction authority chain.
+        for event in events[1:]:
+            event_type = _text(event.get("event_type"), name="event_type")
+            if (
+                _text(event.get("aggregate_id"), name="event.aggregate_id")
+                != aggregate_id
+            ):
+                raise ValueError(
+                    "submission event aggregate identity does not match selected attempt"
+                )
+            if (
+                _text(event.get("environment"), name="event.environment").upper()
+                != durable_environment
+            ):
+                raise ValueError(
+                    "submission event environment does not match SubmissionPrepared"
+                )
+            event_payload = event.get("payload")
+            if not isinstance(event_payload, Mapping):
+                raise ValueError(f"{event_type} payload must be an object")
+            if (
+                _text(
+                    event_payload.get("client_order_id"),
+                    name=f"{event_type}.client_order_id",
+                )
+                != client_order_id
+            ):
+                raise ValueError(
+                    "submission event client_order_id does not match SubmissionPrepared"
+                )
+            if event_type == "SubmissionSending" and modern_owner_identity:
+                sending_owner_token = event_payload.get("owner_token")
+                sending_owner_epoch = event_payload.get("owner_epoch")
+                if (
+                    type(sending_owner_token) is not str
+                    or sending_owner_token.strip() != prepared_owner_token
+                    or type(sending_owner_epoch) is not int
+                    or sending_owner_epoch != prepared_owner_epoch
+                ):
+                    raise ValueError(
+                        "SubmissionSending owner identity does not match SubmissionPrepared"
+                    )
+
         started_at = _instant(
             payload.get("prepared_at"),
             name="prepared_at",
@@ -1476,8 +1672,9 @@ def unknown_submissions_from_dispatch(
                     intent_id=intent_id,
                     client_order_id=client_order_id,
                     provider_id=provider_id,
-                    account_id=account_id,
-                    environment=environment,
+                    account_id=durable_account_id,
+                    environment=durable_environment,
+                    provider_environment=provider_environment,
                     started_at=started_at,
                 )
             )

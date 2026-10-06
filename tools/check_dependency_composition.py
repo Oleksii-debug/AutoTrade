@@ -251,6 +251,11 @@ def _python_blockers(root: Path) -> tuple[list[str], list[str]]:
             blockers.append("RESEARCH_TEST_REQUIREMENTS_DRIFT")
 
     workflow = root / ".github" / "workflows" / "research-primitives.yml"
+    expected_hash_install = (
+        'run: "python -m pip install --disable-pip-version-check '
+        "--force-reinstall --no-deps --only-binary=:all: --require-hashes "
+        '-r requirements-dev.txt"'
+    )
     try:
         workflow_text = workflow.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
@@ -258,11 +263,6 @@ def _python_blockers(root: Path) -> tuple[list[str], list[str]]:
     else:
         if '- "requirements-dev.txt"' not in workflow_text:
             blockers.append("RESEARCH_HASH_LOCK_WORKFLOW_PATH_MISSING")
-        expected_hash_install = (
-            'run: "python -m pip install --disable-pip-version-check '
-            "--force-reinstall --no-deps --only-binary=:all: --require-hashes "
-            '-r requirements-dev.txt"'
-        )
         if expected_hash_install not in workflow_text:
             blockers.append("RESEARCH_HASHED_INSTALL_COMMAND_MISSING")
         expected_editable_install = (
@@ -270,6 +270,25 @@ def _python_blockers(root: Path) -> tuple[list[str], list[str]]:
         )
         if expected_editable_install not in workflow_text:
             blockers.append("RESEARCH_EDITABLE_NO_BUILD_ISOLATION_MISSING")
+
+    workflows = root / ".github" / "workflows"
+    for workflow_path in sorted(workflows.glob("*.y*ml")):
+        try:
+            lines = workflow_path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            blockers.append(
+                f"UNREADABLE_PYTHON_INSTALL_WORKFLOW:{workflow_path.relative_to(root)}"
+            )
+            continue
+        for line_number, raw in enumerate(lines, start=1):
+            stripped = raw.strip()
+            if "pip install" not in stripped or "requirements-dev.txt" not in stripped:
+                continue
+            if stripped != expected_hash_install:
+                blockers.append(
+                    "PYTHON_REQUIREMENTS_INSTALL_NOT_HASH_ONLY:"
+                    f"{workflow_path.relative_to(root)}:{line_number}"
+                )
 
     return blockers, exact
 

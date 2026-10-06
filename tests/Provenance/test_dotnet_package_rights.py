@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import base64
 from hashlib import sha512
+import io
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import zipfile
 
 from tools.dotnet_package_rights import (
     ROOT,
@@ -14,12 +16,35 @@ from tools.dotnet_package_rights import (
 )
 
 
-_NUPKG_BYTES = b"canonical example nupkg payload\n"
-_HASH = base64.b64encode(sha512(_NUPKG_BYTES).digest()).decode("ascii")
 _LICENSE = """Copyright (C) Example Corporation. All rights reserved.
 
 Redistribution in binary form is permitted when this notice is retained.
 """
+_NOTICE = "required notice\n"
+_NUSPEC = (
+    "<?xml version=\"1.0\"?>\n"
+    "<package><metadata><id>Example.Package</id><version>1.2.3</version>"
+    "<license type=\"file\">LICENSE.txt</license></metadata></package>\n"
+)
+
+
+def _canonical_nupkg_bytes() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+        for name, payload in (
+            ("LICENSE.txt", _LICENSE.encode("utf-8")),
+            ("NOTICE.txt", _NOTICE.encode("utf-8")),
+            ("example.package.nuspec", _NUSPEC.encode("utf-8")),
+        ):
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED
+            info.external_attr = 0o100644 << 16
+            archive.writestr(info, payload)
+    return buffer.getvalue()
+
+
+_NUPKG_BYTES = _canonical_nupkg_bytes()
+_HASH = base64.b64encode(sha512(_NUPKG_BYTES).digest()).decode("ascii")
 
 
 def _write_project(root: Path) -> Path:
@@ -114,13 +139,8 @@ def _write_restored_package(root: Path, *, license_text: str = _LICENSE) -> Path
     )
     (package / "example.package.1.2.3.nupkg").write_bytes(_NUPKG_BYTES)
     (package / "LICENSE.txt").write_text(license_text, encoding="utf-8")
-    (package / "NOTICE.txt").write_text("required notice\n", encoding="utf-8")
-    (package / "example.package.nuspec").write_text(
-        "<?xml version=\"1.0\"?>\n"
-        "<package><metadata><id>Example.Package</id><version>1.2.3</version>"
-        "<license type=\"file\">LICENSE.txt</license></metadata></package>\n",
-        encoding="utf-8",
-    )
+    (package / "NOTICE.txt").write_text(_NOTICE, encoding="utf-8")
+    (package / "example.package.nuspec").write_text(_NUSPEC, encoding="utf-8")
     return packages
 
 
@@ -462,7 +482,9 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 "<license type=\"file\">LICENSE.txt</license></metadata></package>\n",
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(ValueError, "nuspec id mismatch"):
+            with self.assertRaisesRegex(
+                ValueError, "nuspec differs from locked nupkg payload"
+            ):
                 verify_restored_package_rights(
                     packages,
                     root=root,
@@ -478,13 +500,61 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 root,
                 license_text=_LICENSE + "extra restriction\n",
             )
-            with self.assertRaisesRegex(ValueError, "license differs from reviewed text"):
+            with self.assertRaisesRegex(
+                ValueError, "license differs from locked nupkg payload"
+            ):
                 verify_restored_package_rights(
                     packages,
                     root=root,
                     projects=[project],
                 )
 
+    def test_restored_notice_drift_fails_even_with_same_locked_package(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            packages = _write_restored_package(root)
+            notice = (
+                packages
+                / "example.package"
+                / "1.2.3"
+                / "NOTICE.txt"
+            )
+            notice.write_text("tampered notice\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError, "notice differs from locked nupkg payload"
+            ):
+                verify_restored_package_rights(
+                    packages,
+                    root=root,
+                    projects=[project],
+                )
+
+    def test_restored_nuspec_semantic_noop_drift_still_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            packages = _write_restored_package(root)
+            nuspec = (
+                packages
+                / "example.package"
+                / "1.2.3"
+                / "example.package.nuspec"
+            )
+            nuspec.write_text(
+                _NUSPEC.replace("<metadata>", "<metadata>\n"),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ValueError, "nuspec differs from locked nupkg payload"
+            ):
+                verify_restored_package_rights(
+                    packages,
+                    root=root,
+                    projects=[project],
+                )
 
     def test_desktop_client_lock_matches_desktop_webview_dependency(self):
         desktop_lock = json.loads(

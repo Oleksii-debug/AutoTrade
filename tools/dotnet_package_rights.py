@@ -8,6 +8,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import shlex
+import zipfile
 import xml.etree.ElementTree as ET
 
 if __package__:
@@ -539,6 +540,89 @@ def _package_regular_file(
     return resolved
 
 
+def _locked_nupkg_root_evidence(
+    nupkg_path: Path,
+    *,
+    license_file: str,
+    notice_file: str,
+) -> tuple[bytes, bytes, bytes]:
+    """Read exact root rights metadata from the already hash-verified nupkg.
+
+    NuGet's extracted global-packages directory is mutable state. The lock hash
+    authenticates the .nupkg payload, so the extracted LICENSE, NOTICE and
+    nuspec must be byte-identical to members in that exact archive before they
+    are allowed to support a rights decision.
+    """
+
+    if type(nupkg_path) is not Path:
+        raise TypeError("nupkg_path must be exact Path")
+    for value, label in (
+        (license_file, "license_file"),
+        (notice_file, "notice_file"),
+    ):
+        _canonical_text(value, field=label)
+        if PurePosixPath(value).name != value:
+            raise ValueError(f"{label} must be one package-root filename")
+
+    try:
+        with zipfile.ZipFile(nupkg_path) as archive:
+            root_entries: dict[str, tuple[str, zipfile.ZipInfo]] = {}
+            for entry in archive.infolist():
+                name = entry.filename
+                if type(name) is not str or entry.is_dir() or "\\" in name:
+                    continue
+                relative = PurePosixPath(name)
+                if relative.is_absolute() or len(relative.parts) != 1:
+                    continue
+                key = name.casefold()
+                if key in root_entries:
+                    raise ValueError(
+                        "locked NuGet package has ambiguous root filenames"
+                    )
+                root_entries[key] = (name, entry)
+
+            def exact_member(name: str, label: str) -> bytes:
+                selected = root_entries.get(name.casefold())
+                if selected is None or selected[0] != name:
+                    raise ValueError(
+                        f"locked NuGet package lacks exact root {label}: {name}"
+                    )
+                return archive.read(selected[1])
+
+            license_bytes = exact_member(license_file, "license")
+            notice_bytes = exact_member(notice_file, "notice")
+            nuspecs = [
+                selected
+                for selected in root_entries.values()
+                if selected[0].casefold().endswith(".nuspec")
+            ]
+            if len(nuspecs) != 1:
+                raise ValueError(
+                    "locked NuGet package must contain one root nuspec"
+                )
+            nuspec_bytes = archive.read(nuspecs[0][1])
+    except ValueError:
+        raise
+    except (
+        zipfile.BadZipFile,
+        KeyError,
+        RuntimeError,
+        OSError,
+        NotImplementedError,
+    ) as error:
+        raise ValueError(
+            "locked NuGet package archive is unreadable"
+        ) from error
+
+    if not license_bytes:
+        raise ValueError("locked NuGet package license is empty")
+    if not notice_bytes:
+        raise ValueError("locked NuGet package notice is empty")
+    if not nuspec_bytes:
+        raise ValueError("locked NuGet package nuspec is empty")
+    return license_bytes, notice_bytes, nuspec_bytes
+
+
 def verify_restored_package_rights(
     packages_root: Path,
     *,
@@ -627,6 +711,15 @@ def verify_restored_package_rights(
             raise ValueError(
                 f"restored NuGet package payload hash mismatch: {package_name}@{package_version}"
             )
+        (
+            locked_license_bytes,
+            locked_notice_bytes,
+            locked_nuspec_bytes,
+        ) = _locked_nupkg_root_evidence(
+            nupkg_path,
+            license_file=record["license_file"],
+            notice_file=record["notice_file"],
+        )
         license_candidate = package_dir / record["license_file"]
         notice_candidate = package_dir / record["notice_file"]
         if not license_candidate.is_file():
@@ -647,9 +740,21 @@ def verify_restored_package_rights(
             notice_candidate,
             label="notice",
         )
-        if not notice_path.read_bytes():
+        extracted_license_bytes = license_path.read_bytes()
+        extracted_notice_bytes = notice_path.read_bytes()
+        if not extracted_notice_bytes:
             raise ValueError(
                 f"restored NuGet package notice is empty: {artifact['name']}@{artifact['version']}"
+            )
+        if extracted_license_bytes != locked_license_bytes:
+            raise ValueError(
+                f"restored NuGet package license differs from locked nupkg payload: "
+                f"{artifact['name']}@{artifact['version']}"
+            )
+        if extracted_notice_bytes != locked_notice_bytes:
+            raise ValueError(
+                f"restored NuGet package notice differs from locked nupkg payload: "
+                f"{artifact['name']}@{artifact['version']}"
             )
         expected = _normalized_license_text(root / record["expected_license_text_path"])
         actual = _normalized_license_text(license_path)
@@ -667,13 +772,18 @@ def verify_restored_package_rights(
             nuspecs[0],
             label="nuspec",
         )
+        if nuspec_path.read_bytes() != locked_nuspec_bytes:
+            raise ValueError(
+                f"restored NuGet package nuspec differs from locked nupkg payload: "
+                f"{artifact['name']}@{artifact['version']}"
+            )
         try:
-            tree = ET.parse(nuspec_path)
-        except (OSError, ET.ParseError) as error:
-            raise ValueError("restored NuGet nuspec is invalid") from error
+            nuspec_root = ET.fromstring(locked_nuspec_bytes)
+        except ET.ParseError as error:
+            raise ValueError("locked NuGet nuspec is invalid") from error
         metadata_nodes = [
             node
-            for node in tree.iter()
+            for node in nuspec_root.iter()
             if isinstance(node.tag, str)
             and node.tag.rsplit("}", 1)[-1] == "metadata"
         ]

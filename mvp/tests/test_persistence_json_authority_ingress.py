@@ -415,6 +415,46 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
                     expected_envelope_hash=envelope_hash,
                 )
 
+    def test_outbox_reads_reject_blob_identity_and_timestamp(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(
+                _event("evt-outbox-blob-identity"),
+                outbox_topic="fills",
+            )
+            original = store.pending_outbox()
+            self.assertEqual(len(original), 1)
+            outbox_id = original[0]["outbox_id"]
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE outbox SET outbox_id = ?, created_at = ? WHERE outbox_id = ?",
+                    (
+                        sqlite3.Binary(outbox_id.encode("utf-8")),
+                        sqlite3.Binary(b"2026-10-06T13:00:00+00:00"),
+                        outbox_id,
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox_id must be canonical non-empty text",
+            ):
+                store.pending_outbox()
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox_id must be canonical non-empty text",
+            ):
+                store.outbox_delivery_state(
+                    "evt-outbox-blob-identity",
+                    topic="fills",
+                )
+
     def test_command_text_subclasses_cannot_dispatch_strip_or_upper(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

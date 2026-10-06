@@ -366,6 +366,10 @@ public partial class MainWindow : Window
         {
             return;
         }
+        catch (EmergencySnapshotBusyException)
+        {
+            ApplySnapshotBusyStatus(announce);
+        }
         catch (Exception)
         {
             ApplyHostStatus(
@@ -380,6 +384,42 @@ public partial class MainWindow : Window
             {
                 RefreshStatusButton.Focus();
             }
+        }
+    }
+
+    private void ApplySnapshotBusyStatus(bool announce)
+    {
+        const string message =
+            "Host snapshot is temporarily busy while durable state changes. "
+            + "No new host evidence was accepted. Retry is safe.";
+
+        if (_lastKnownConnectedStatus is { } lastConnected)
+        {
+            HostValue.Text = $"{lastConnected.HostId} (stale)";
+            AccountValue.Text = $"{lastConnected.AccountId} (stale)";
+            EnvironmentValue.Text = $"{lastConnected.Environment} (stale)";
+            StateVersionValue.Text = $"{lastConnected.StateVersion} (stale)";
+            LastEvidenceValue.Text = $"{lastConnected.ObservedAtUtc:O} (stale)";
+            ConnectionStatus.Text =
+                message
+                + " Last known host values are stale and are not current evidence.";
+        }
+        else
+        {
+            HostValue.Text = "Unavailable";
+            AccountValue.Text = "Unavailable";
+            EnvironmentValue.Text = "Unavailable";
+            StateVersionValue.Text = "Unavailable";
+            LastEvidenceValue.Text = "Unavailable";
+            ConnectionStatus.Text =
+                message + " No verified host snapshot is currently available.";
+        }
+
+        if (announce)
+        {
+            SetLiveRegionText(
+                HostStatusAnnouncement,
+                $"{ConnectionStatus.Text} No cancellation, flattening, provider outcome, or command acceptance is implied.");
         }
     }
 

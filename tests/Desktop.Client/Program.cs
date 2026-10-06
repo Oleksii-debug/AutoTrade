@@ -1713,6 +1713,98 @@ internal static class Program
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
+    static void SnapshotBusyKeepsLastVerifiedHostEvidenceStaleTest()
+    {
+        Exception? failure = null;
+        Thread thread = new(() =>
+        {
+            MainWindow? window = null;
+            try
+            {
+                const System.Reflection.BindingFlags flags =
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                SnapshotBusyStatusHostClient client = new();
+                window = (MainWindow)Activator.CreateInstance(
+                    typeof(MainWindow),
+                    flags,
+                    null,
+                    new object?[] { client, null },
+                    null)!;
+                var refresh =
+                    typeof(MainWindow).GetMethod("RefreshHostStatusAsync", flags)!;
+                var retainedConnected =
+                    typeof(MainWindow).GetField("_lastKnownConnectedStatus", flags)!;
+                var retainedCurrent =
+                    typeof(MainWindow).GetField("_lastKnownCurrentStatus", flags)!;
+                var host =
+                    (System.Windows.Controls.TextBox)window.FindName("HostValue");
+                var stateVersion =
+                    (System.Windows.Controls.TextBox)window.FindName("StateVersionValue");
+                var connection =
+                    (System.Windows.Controls.TextBlock)window.FindName("ConnectionStatus");
+                var announcement =
+                    (System.Windows.Controls.TextBlock)window.FindName("HostStatusAnnouncement");
+                var refreshButton =
+                    (System.Windows.Controls.Button)window.FindName("RefreshStatusButton");
+
+                ((Task)refresh.Invoke(window, new object[] { false, false })!)
+                    .GetAwaiter().GetResult();
+
+                object? connectedBefore = retainedConnected.GetValue(window);
+                object? currentBefore = retainedCurrent.GetValue(window);
+                Check.True(
+                    host.Text == "host-local-1"
+                        && stateVersion.Text == "17",
+                    "initial verified Desktop host evidence was not rendered");
+
+                ((Task)refresh.Invoke(window, new object[] { true, false })!)
+                    .GetAwaiter().GetResult();
+
+                Check.True(
+                    host.Text == "host-local-1 (stale)",
+                    "snapshot contention erased or fabricated the last verified host identity");
+                Check.True(
+                    stateVersion.Text == "17 (stale)",
+                    "snapshot contention advanced or discarded the last verified state version");
+                Check.True(
+                    connection.Text.Contains(
+                        "temporarily busy",
+                        StringComparison.Ordinal)
+                    && connection.Text.Contains(
+                        "Retry is safe.",
+                        StringComparison.Ordinal),
+                    "Desktop did not preserve explicit retryable snapshot-busy semantics");
+                Check.True(
+                    !connection.Text.Contains(
+                        "refresh failed",
+                        StringComparison.OrdinalIgnoreCase),
+                    "retryable snapshot contention was mislabeled as a generic host refresh failure");
+                Check.True(
+                    announcement.Text.Contains(
+                        "Retry is safe.",
+                        StringComparison.Ordinal)
+                    && announcement.Text.Contains(
+                        "No cancellation, flattening, provider outcome, or command acceptance is implied.",
+                        StringComparison.Ordinal),
+                    "snapshot contention did not produce bounded accessible retry guidance");
+                Check.True(
+                    ReferenceEquals(connectedBefore, retainedConnected.GetValue(window))
+                        && ReferenceEquals(currentBefore, retainedCurrent.GetValue(window)),
+                    "snapshot contention mutated the retained host authority evidence chain");
+                Check.True(
+                    refreshButton.IsEnabled,
+                    "snapshot contention left the focusable refresh control disabled");
+            }
+            catch (Exception error) { failure = error; }
+            finally { window?.Close(); }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
     public static async Task Main()
     {
         WebExperienceSecurityPolicyOriginAndNavigationTest();
@@ -1720,6 +1812,7 @@ internal static class Program
         WebExperienceSecurityPolicyDisablesPrivilegedBrowserSurfacesTest();
         WebViewProcessFailureRecoveryClassificationTest();
         WindowRetainsCurrentEvidenceFloorTest();
+        SnapshotBusyKeepsLastVerifiedHostEvidenceStaleTest();
         CanonicalOperationIdentityVectorTest();
         CredentialTargetIsOriginBoundTest();
         await PairedOriginMismatchFailsBeforeTransportTest();
@@ -1744,6 +1837,44 @@ internal static class Program
         await SnapshotBearerEchoFailsClosedTest();
         Console.WriteLine("Desktop authenticated host-client contract tests passed.");
     }
+}
+
+internal sealed class SnapshotBusyStatusHostClient : IEmergencyHostClient
+{
+    private int _calls;
+
+    public Task<EmergencyHostStatus> GetStatusAsync(
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        int call = Interlocked.Increment(ref _calls);
+        if (call == 1)
+        {
+            return Task.FromResult(
+                new EmergencyHostStatus(
+                    Connected: true,
+                    HostId: "host-local-1",
+                    AccountId: "paper-account-1",
+                    Environment: "PAPER",
+                    StateVersion: "17",
+                    ObservedAtUtc: DateTimeOffset.UtcNow.AddSeconds(-1),
+                    Message: "verified current host evidence")
+                {
+                    IsCurrent = true,
+                });
+        }
+
+        throw new EmergencySnapshotBusyException();
+    }
+
+    public Task<EmergencyCommandResult> BlockNewExposureAsync(
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+
+    public Task<EmergencyOperationStatus> GetOperationAsync(
+        string operationId,
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
 }
 
 internal static class Check

@@ -676,6 +676,46 @@ def parse_submission_response(
     }
 
 
+def _install_submission_response_parser(parser, prepared_projection):
+    """Pin the prepared-scope verifier across final response normalization."""
+
+    parser_code = parser.__code__
+    projection_code = prepared_projection.__code__
+    error_type = ProviderCoreError
+    canonical_getattr = getattr
+
+    def sealed_parse_submission_response(
+        *,
+        attempt_id: str,
+        prepared_request: KrakenFuturesPreparedRequest,
+        observation: ProviderSubmissionObservation | None = None,
+        transport_ambiguous: bool = False,
+    ) -> dict[str, Any]:
+        if (
+            _prepared_submission_projection is not prepared_projection
+            or canonical_getattr(prepared_projection, "__code__", None)
+            is not projection_code
+            or canonical_getattr(parser, "__code__", None) is not parser_code
+        ):
+            raise error_type(
+                "Kraken Futures prepared response authority is unavailable"
+            )
+        return parser(
+            attempt_id=attempt_id,
+            prepared_request=prepared_request,
+            observation=observation,
+            transport_ambiguous=transport_ambiguous,
+        )
+
+    return sealed_parse_submission_response
+
+
+parse_submission_response = _install_submission_response_parser(
+    parse_submission_response,
+    _prepared_submission_projection,
+)
+del _install_submission_response_parser
+
 def parse_position_executions(
     observation: ProviderResponseObservation,
     *,

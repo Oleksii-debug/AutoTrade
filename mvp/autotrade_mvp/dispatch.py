@@ -2906,7 +2906,7 @@ class GuardedDispatcher:
                 )
                 if not callable_kwdefaults_changed:
                     for current_key in current_kwdefaults:
-                        if snapshot_type(current_key) is not str:
+                        if snapshot_type(current_key) is not snapshot_str:
                             callable_kwdefaults_changed = True
                             break
                 if not callable_kwdefaults_changed:
@@ -2958,7 +2958,7 @@ class GuardedDispatcher:
             )
             if not kwdefaults_changed:
                 for current_key in current_json_loads_kwdefaults:
-                    if snapshot_type(current_key) is not str:
+                    if snapshot_type(current_key) is not snapshot_str:
                         kwdefaults_changed = True
                         break
             if not kwdefaults_changed:

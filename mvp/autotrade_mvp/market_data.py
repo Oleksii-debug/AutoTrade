@@ -9,7 +9,6 @@ from decimal import Decimal
 from hashlib import sha256
 import json
 import re
-from types import MappingProxyType
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5

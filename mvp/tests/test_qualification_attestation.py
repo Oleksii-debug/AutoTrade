@@ -1754,6 +1754,11 @@ class QualificationAttestationTests(unittest.TestCase):
         self.assertEqual(accepted.runner_id, value.runner_id)
         self.assertEqual(accepted.harness_version, value.harness_version)
         self.assertEqual(accepted.verification_method, value.verification_method)
+        self.assertEqual(accepted.signature_b64, receipt.signature_b64)
+        self.assertEqual(
+            json.loads(accepted.signed_attestation_payload_json),
+            value.canonical_payload(),
+        )
 
         object.__setattr__(value, "requirement_ids", ("forged-requirement",))
         object.__setattr__(value, "evidence_refs", ())

@@ -45,9 +45,12 @@ def _text(value: str, *, name: str) -> str:
 
 
 def _utc(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime):
-        raise TypeError(f"{name} must be a datetime")
-    if value.tzinfo is None or value.utcoffset() is None:
+    if type(value) is not datetime:
+        raise TypeError(f"{name} must be an exact datetime")
+    selected_timezone = value.tzinfo
+    if type(selected_timezone) is not type(timezone.utc):
+        raise TypeError(f"{name} must use an exact built-in timezone")
+    if value.utcoffset() is None:
         raise ValueError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc)
 

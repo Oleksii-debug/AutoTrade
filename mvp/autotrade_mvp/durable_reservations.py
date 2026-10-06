@@ -108,11 +108,14 @@ def _decimal_text(value: Decimal) -> str:
         ) from error
 
 
-def _amount_map(values: Mapping[str, object], *, allow_zero: bool) -> dict[str, str]:
-    if not isinstance(values, Mapping) or not values:
+def _amount_map(values: dict[str, object], *, allow_zero: bool) -> dict[str, str]:
+    if type(values) is not dict:
+        raise TypeError("resource amounts must use an exact dict")
+    items = tuple(dict.items(values))
+    if not items:
         raise ValueError("resource amounts are required")
     result: dict[str, str] = {}
-    for resource, raw in values.items():
+    for resource, raw in items:
         key = _text(resource, name="resource")
         if key in result:
             raise ValueError("resource names must be unique after normalization")
@@ -628,6 +631,14 @@ class DurableReservationBook:
             payload = event["payload"]
             if not isinstance(payload, dict):
                 raise ReservationConflict("reservation event payload must be an object")
+            if payload.get("environment") != self.environment:
+                raise ReservationConflict(
+                    "reservation journal event environment does not match book scope"
+                )
+            if payload.get("account_id") != self.account_id:
+                raise ReservationConflict(
+                    "reservation journal event account does not match book scope"
+                )
             operation = payload.get("operation")
             request = payload.get("request")
             expected_snapshot = payload.get("snapshot")
@@ -862,8 +873,8 @@ class DurableReservationBook:
         idempotency_key: str,
         reservation_id: str,
         intent_id: str,
-        requirements: Mapping[str, object],
-        available: Mapping[str, object],
+        requirements: dict[str, object],
+        available: dict[str, object],
         committed_at: str,
     ) -> PreparedReservationMutation:
         """Prepare, but do not commit, a worst-case reservation.
@@ -939,7 +950,7 @@ class DurableReservationBook:
         event_key: str,
         idempotency_key: str,
         reservation_id: str,
-        usage: Mapping[str, object],
+        usage: dict[str, object],
         committed_at: str,
         expected_snapshot_digest: str | None = None,
     ) -> PreparedReservationMutation:
@@ -1055,7 +1066,7 @@ class DurableReservationBook:
         event_key: str,
         idempotency_key: str,
         reservation_id: str,
-        usage: Mapping[str, object],
+        usage: dict[str, object],
         order_fill_event_id: str,
         order_fill_payload_hash: str,
         order_fill_snapshot_digest: str,
@@ -1238,7 +1249,7 @@ class DurableReservationBook:
         event_key: str,
         idempotency_key: str,
         reservation_id: str,
-        usage: Mapping[str, object],
+        usage: dict[str, object],
         committed_at: str,
         expected_snapshot_digest: str | None = None,
     ) -> PreparedReservationMutation:
@@ -1514,8 +1525,8 @@ class DurableReservationBook:
         idempotency_key: str,
         reservation_id: str,
         intent_id: str,
-        requirements: Mapping[str, object],
-        available: Mapping[str, object],
+        requirements: dict[str, object],
+        available: dict[str, object],
     ) -> ReservationSnapshot:
         request = {
             "reservation_id": _text(reservation_id, name="reservation_id"),
@@ -1536,7 +1547,7 @@ class DurableReservationBook:
         command_id: str,
         idempotency_key: str,
         reservation_id: str,
-        usage: Mapping[str, object],
+        usage: dict[str, object],
     ) -> ReservationSnapshot:
         request = {
             "reservation_id": _text(reservation_id, name="reservation_id"),

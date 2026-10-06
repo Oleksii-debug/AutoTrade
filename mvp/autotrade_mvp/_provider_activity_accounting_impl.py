@@ -184,6 +184,28 @@ def _provider_environment_payload(
     )
 
 
+def _provider_domain_identity_parts(
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    provider_environment: str | None = None,
+) -> tuple[str, ...]:
+    """Return backward-compatible financial identity parts for one provider domain."""
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    runtime = _environment(environment)
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=runtime,
+        provider_environment=provider_environment,
+    )
+    parts = [provider, account, runtime]
+    if provider_scope != runtime:
+        parts.append(provider_scope)
+    return tuple(parts)
+
+
 def _activity_identity(
     *,
     provider_id: str,
@@ -2722,9 +2744,12 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 "https://events.autotrade.local/economic-batch/"
                 + _scoped_identity(
                     "economic-batch",
-                    authority.provider_id,
-                    authority.account_id,
-                    authority.environment,
+                    *_provider_domain_identity_parts(
+                        provider_id=authority.provider_id,
+                        account_id=authority.account_id,
+                        environment=authority.environment,
+                        provider_environment=authority.provider_environment,
+                    ),
                     batch_digest,
                 ),
             )
@@ -2809,9 +2834,12 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 "https://commands.autotrade.local/economic-batch/"
                 + _scoped_identity(
                     "economic-batch-command",
-                    authority.provider_id,
-                    authority.account_id,
-                    authority.environment,
+                    *_provider_domain_identity_parts(
+                        provider_id=authority.provider_id,
+                        account_id=authority.account_id,
+                        environment=authority.environment,
+                        provider_environment=authority.provider_environment,
+                    ),
                     plan.batch_digest,
                 ),
             )
@@ -3000,16 +3028,22 @@ def commit_economic_batch_with_reservation_consumption(
     )
     reservation_component_key = _scoped_identity(
         "atomic-fill-reservation",
-        economic_book.provider_id,
-        economic_book.account_id,
-        economic_book.environment,
+                    *_provider_domain_identity_parts(
+                        provider_id=economic_book.provider_id,
+                        account_id=economic_book.account_id,
+                        environment=economic_book.environment,
+                        provider_environment=economic_book.provider_environment,
+                    ),
         idem,
     )
     reservation_event_key = _scoped_identity(
         "atomic-fill-reservation-event",
-        economic_book.provider_id,
-        economic_book.account_id,
-        economic_book.environment,
+                    *_provider_domain_identity_parts(
+                        provider_id=economic_book.provider_id,
+                        account_id=economic_book.account_id,
+                        environment=economic_book.environment,
+                        provider_environment=economic_book.provider_environment,
+                    ),
         cid,
     )
     if _order_fill_plan is not None and _order_fill_plan.snapshot.state == "FILLED":
@@ -3211,6 +3245,13 @@ def commit_economic_batch_with_reservation_consumption(
             else provider_fill_binding.request
         ),
     }
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=economic_book.provider_environment,
+        environment=economic_book.environment,
+    )
+    if provider_scope_payload is not None:
+        request["provider_environment"] = provider_scope_payload
+
     result = {
         "reservation": reservation_plan.snapshot_payload,
         "economic_batch": economic_plan.result,
@@ -3245,18 +3286,24 @@ def commit_economic_batch_with_reservation_consumption(
             "https://commands.autotrade.local/atomic-fill/"
             + _scoped_identity(
                 "atomic-fill-command",
-                economic_book.provider_id,
-                economic_book.account_id,
-                economic_book.environment,
+                    *_provider_domain_identity_parts(
+                        provider_id=economic_book.provider_id,
+                        account_id=economic_book.account_id,
+                        environment=economic_book.environment,
+                        provider_environment=economic_book.provider_environment,
+                    ),
                 cid,
             ),
         )
     )
     journal_idempotency_key = "atomic-fill:" + _scoped_identity(
         "atomic-fill-idempotency",
-        economic_book.provider_id,
-        economic_book.account_id,
-        economic_book.environment,
+                    *_provider_domain_identity_parts(
+                        provider_id=economic_book.provider_id,
+                        account_id=economic_book.account_id,
+                        environment=economic_book.environment,
+                        provider_environment=economic_book.provider_environment,
+                    ),
         idem,
     )
 
@@ -3683,16 +3730,22 @@ def commit_economic_correction_with_settlement_replacement(
             reservation_plan = reservation_book.prepare_consume_mutation(
                 event_key=_scoped_identity(
                     "atomic-correction-reservation-event",
-                    economic_book.provider_id,
-                    economic_book.account_id,
-                    economic_book.environment,
+                    *_provider_domain_identity_parts(
+                        provider_id=economic_book.provider_id,
+                        account_id=economic_book.account_id,
+                        environment=economic_book.environment,
+                        provider_environment=economic_book.provider_environment,
+                    ),
                     cid,
                 ),
                 idempotency_key=_scoped_identity(
                     "atomic-correction-reservation",
-                    economic_book.provider_id,
-                    economic_book.account_id,
-                    economic_book.environment,
+                    *_provider_domain_identity_parts(
+                        provider_id=economic_book.provider_id,
+                        account_id=economic_book.account_id,
+                        environment=economic_book.environment,
+                        provider_environment=economic_book.provider_environment,
+                    ),
                     idem,
                 ),
                 reservation_id=_text(reservation_id, name="reservation_id"),
@@ -3782,15 +3835,25 @@ def commit_economic_correction_with_settlement_replacement(
                 provider_fill_correction_binding.result
             ),
         }
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=economic_book.provider_environment,
+        environment=economic_book.environment,
+    )
+    if provider_scope_payload is not None:
+        request["provider_environment"] = provider_scope_payload
+
     command_identity = str(
         uuid5(
             NAMESPACE_URL,
             "https://commands.autotrade.local/atomic-settlement-correction/"
             + _scoped_identity(
                 "atomic-settlement-correction-command",
-                economic_book.provider_id,
-                economic_book.account_id,
-                economic_book.environment,
+                    *_provider_domain_identity_parts(
+                        provider_id=economic_book.provider_id,
+                        account_id=economic_book.account_id,
+                        environment=economic_book.environment,
+                        provider_environment=economic_book.provider_environment,
+                    ),
                 cid,
             ),
         )
@@ -3799,9 +3862,12 @@ def commit_economic_correction_with_settlement_replacement(
         "atomic-settlement-correction:"
         + _scoped_identity(
             "atomic-settlement-correction-idempotency",
-            economic_book.provider_id,
-            economic_book.account_id,
-            economic_book.environment,
+                    *_provider_domain_identity_parts(
+                        provider_id=economic_book.provider_id,
+                        account_id=economic_book.account_id,
+                        environment=economic_book.environment,
+                        provider_environment=economic_book.provider_environment,
+                    ),
             idem,
         )
     )
@@ -4413,16 +4479,22 @@ def commit_provider_fill_bust_with_economic_reversal(
         reservation_plan = reservation_book.prepare_restore_consumption_mutation(
             event_key=_scoped_identity(
                 "atomic-fill-bust-reservation-event",
-                economic_book.provider_id,
-                economic_book.account_id,
-                economic_book.environment,
+                    *_provider_domain_identity_parts(
+                        provider_id=economic_book.provider_id,
+                        account_id=economic_book.account_id,
+                        environment=economic_book.environment,
+                        provider_environment=economic_book.provider_environment,
+                    ),
                 cid,
             ),
             idempotency_key=_scoped_identity(
                 "atomic-fill-bust-reservation",
-                economic_book.provider_id,
-                economic_book.account_id,
-                economic_book.environment,
+                    *_provider_domain_identity_parts(
+                        provider_id=economic_book.provider_id,
+                        account_id=economic_book.account_id,
+                        environment=economic_book.environment,
+                        provider_environment=economic_book.provider_environment,
+                    ),
                 idem,
             ),
             reservation_id=rid,
@@ -4540,24 +4612,37 @@ def commit_provider_fill_bust_with_economic_reversal(
                 "snapshot": reservation_plan.snapshot_payload,
             },
         }
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=economic_book.provider_environment,
+        environment=economic_book.environment,
+    )
+    if provider_scope_payload is not None:
+        request["provider_environment"] = provider_scope_payload
+
     command_identity = str(
         uuid5(
             NAMESPACE_URL,
             "https://commands.autotrade.local/atomic-fill-bust/"
             + _scoped_identity(
                 "atomic-fill-bust-command",
-                economic_book.provider_id,
-                economic_book.account_id,
-                economic_book.environment,
+                    *_provider_domain_identity_parts(
+                        provider_id=economic_book.provider_id,
+                        account_id=economic_book.account_id,
+                        environment=economic_book.environment,
+                        provider_environment=economic_book.provider_environment,
+                    ),
                 cid,
             ),
         )
     )
     journal_idempotency_key = "atomic-fill-bust:" + _scoped_identity(
         "atomic-fill-bust-idempotency",
-        economic_book.provider_id,
-        economic_book.account_id,
-        economic_book.environment,
+                    *_provider_domain_identity_parts(
+                        provider_id=economic_book.provider_id,
+                        account_id=economic_book.account_id,
+                        environment=economic_book.environment,
+                        provider_environment=economic_book.provider_environment,
+                    ),
         idem,
     )
     actor = "atomic-fill-bust-financial-integration"

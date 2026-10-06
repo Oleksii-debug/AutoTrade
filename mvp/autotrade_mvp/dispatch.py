@@ -379,6 +379,15 @@ def load_submission_response_binding(
         raise ValueError(
             "durable exact response requires Prepared -> Sending -> Sent/Unknown"
         )
+    aggregate_versions = [event.get("aggregate_version") for event in events]
+    if (
+        any(type(version) is not int for version in aggregate_versions)
+        or aggregate_versions != [1, 2, 3]
+    ):
+        raise ValueError(
+            "durable exact response requires aggregate versions 1 -> 2 -> 3"
+        )
+
     prepared, sending, sent = events
     payload = prepared.get("payload")
     if not isinstance(payload, dict):

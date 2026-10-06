@@ -62,6 +62,41 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def _tamper_event_aggregate_version(
+        self,
+        path: str,
+        event_type: str,
+        aggregate_version: int,
+    ) -> None:
+        connection = sqlite3.connect(path)
+        try:
+            row = connection.execute(
+                "SELECT event_id, envelope_json "
+                "FROM events WHERE event_type = ?",
+                (event_type,),
+            ).fetchone()
+            self.assertIsNotNone(row)
+            event_id, envelope_json = row
+            envelope = json.loads(envelope_json)
+            envelope["aggregate_version"] = str(aggregate_version)
+            new_envelope_json = canonical_json(envelope)
+            new_envelope_hash = (
+                "sha256:" + sha256(new_envelope_json.encode("utf-8")).hexdigest()
+            )
+            connection.execute(
+                "UPDATE events SET aggregate_version = ?, envelope_json = ?, "
+                "envelope_hash = ? WHERE event_id = ?",
+                (
+                    aggregate_version,
+                    new_envelope_json,
+                    new_envelope_hash,
+                    event_id,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
     def _make_exact_response_attempt(self, path: str) -> None:
         store = JournalStore(path)
         dispatcher = GuardedDispatcher(
@@ -85,6 +120,28 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             submission_scope={"endpoint": "/orders"},
         )
         self.assertEqual(result.status, "SENT")
+
+    def test_restart_rejects_non_contiguous_aggregate_versions(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            self._tamper_event_aggregate_version(
+                path,
+                "SubmissionSent",
+                4,
+            )
+
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(
+                ValueError,
+                "durable exact response requires aggregate versions 1 -> 2 -> 3",
+            ):
+                load_submission_response_binding(
+                    reopened,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    attempt_id="binding-type-a1",
+                )
 
     def test_restart_rejects_coerced_identity_fields_in_durable_prepared_event(self):
         for field, bad_value in (

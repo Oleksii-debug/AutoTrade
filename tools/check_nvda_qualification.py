@@ -417,6 +417,7 @@ def validate_trusted_nvda_qualification(
         raise NvdaQualificationError(
             "signed NVDA attestation must resolve the exact raw NVDA evidence payload"
         )
+    evidence_artifact_id = exact_refs[0].artifact_id
 
     return {
         **result,
@@ -429,6 +430,7 @@ def validate_trusted_nvda_qualification(
         "release_artifact_id": release_artifact_id,
         "artifact_sha256": release_artifact_sha256,
         "evidence_sha256": evidence_sha256,
+        "evidence_artifact_id": evidence_artifact_id,
     }
 
 
@@ -540,6 +542,7 @@ def main() -> int:
                     "artifact_sha256",
                     "release_artifact_id",
                     "evidence_sha256",
+                    "evidence_artifact_id",
                     "attestation_id",
                     "attestation_digest",
                     "policy_id",

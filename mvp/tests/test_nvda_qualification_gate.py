@@ -179,6 +179,10 @@ class NvdaQualificationGateTests(unittest.TestCase):
             )
         self.assertTrue(result["qualified"])
         self.assertEqual(result["attestation_id"], accepted.attestation_id)
+        self.assertEqual(
+            result["evidence_artifact_id"],
+            accepted.evidence_refs[0].artifact_id,
+        )
         self.assertEqual(verify.call_count, len(requirement_ids))
 
         mismatched_accepted = SimpleNamespace(

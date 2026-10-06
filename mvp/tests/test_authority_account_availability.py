@@ -916,6 +916,37 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 evidence_name="test availability",
             )
 
+        legacy_snapshot = {
+            "provider_id": "TEST_PROVIDER",
+            "account_id": "legacy-account",
+            "environment": "SIMULATION",
+        }
+        legacy_evidence = dict(legacy_snapshot)
+        self.assertEqual(
+            authority_module._require_provider_scope_matches_authoritative_risk_snapshot(
+                legacy_snapshot,
+                legacy_evidence,
+                evidence_name="legacy availability",
+            ),
+            ("TEST_PROVIDER", "SIMULATION"),
+        )
+
+        incompatible_runtime_snapshot = {
+            "provider_id": "BYBIT",
+            "account_id": "bybit-account",
+            "environment": "PAPER",
+            "provider_environment": "MAINNET",
+        }
+        with self.assertRaisesRegex(
+            AuthorityConflict,
+            "provider domain does not match runtime",
+        ):
+            authority_module._require_provider_scope_matches_authoritative_risk_snapshot(
+                incompatible_runtime_snapshot,
+                matching,
+                evidence_name="test availability",
+            )
+
         missing_snapshot_domain = {
             "provider_id": "BYBIT",
             "account_id": "bybit-account",

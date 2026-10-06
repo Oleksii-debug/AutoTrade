@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import mvp.autotrade_mvp.reconciliation_journal as reconciliation_journal_module
 
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher
+from mvp.autotrade_mvp.dispatch import ExactJsonTransportResponse, GuardedDispatcher
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.reconciliation import (
     ProviderActivityEvidence,
@@ -2115,6 +2115,7 @@ class ReconciliationJournalTests(unittest.TestCase):
             store = JournalStore(path)
             aggregate_id = "submission-attempt:scoped-proof"
             prepared_payload = {
+                "attempt_id": "attempt-1",
                 "intent_id": "intent-scoped-1",
                 "provider": "TEST_PROVIDER",
                 "account_id": "test-account",
@@ -2167,6 +2168,62 @@ class ReconciliationJournalTests(unittest.TestCase):
                     reopened,
                     attempt_ids=["attempt-1"],
                 )
+
+    def test_exact_ambiguous_dispatch_restarts_into_wp20_unknown_without_resend(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="test-account",
+                owner_token="owner-a",
+            )
+            outbound = 0
+            attempt_id = "exact-ambiguous-wp20-a1"
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return ExactJsonTransportResponse(
+                    b"<opaque-gateway-response>",
+                    http_status=502,
+                    requires_reconciliation=True,
+                    ambiguity_reason="opaque_gateway_response_after_send",
+                )
+
+            result = dispatcher.dispatch(
+                attempt_id=attempt_id,
+                intent_id="intent-exact-ambiguous-wp20",
+                intent_hash="sha256:" + "a" * 64,
+                provider="TEST_PROVIDER",
+                request={"side": "BUY", "quantity": "1"},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda *_args: (True, "allowed"),
+                sender_check=lambda *_args: None,
+                transport_send=transport,
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(outbound, 1)
+
+            reopened = JournalStore(path)
+            recovered = unknown_submissions_from_dispatch(
+                reopened,
+                attempt_ids=[attempt_id],
+                environment="PAPER",
+                account_id="test-account",
+            )
+            self.assertEqual(len(recovered), 1)
+            self.assertEqual(recovered[0].attempt_id, attempt_id)
+            self.assertEqual(
+                recovered[0].client_order_id,
+                result.client_order_id,
+            )
+            self.assertEqual(recovered[0].provider_id, "TEST_PROVIDER")
+            self.assertEqual(recovered[0].environment, "PAPER")
+            self.assertEqual(outbound, 1)
 
     def test_checkpoint_recovers_unresolved_attempt_ids(self):
         with TemporaryDirectory() as directory:

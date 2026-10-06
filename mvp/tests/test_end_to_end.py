@@ -6,12 +6,23 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.pipeline import SimulatedProvider, run_multi_episode, run_vertical_slice, verify_replay
+from mvp.autotrade_mvp.persistence import JournalStore
 
 
 class VerticalSliceTests(unittest.TestCase):
     def test_full_path_and_restart_are_idempotent(self):
         with TemporaryDirectory() as directory:
             first = run_vertical_slice([100, 101, 102, 103], directory)
+            configuration_path = Path(directory) / "run-configuration.json"
+            configuration_before = configuration_path.read_bytes()
+            checkpoint_after_first = json.loads(
+                (Path(directory) / "checkpoint.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(checkpoint_after_first["schema_version"], 2)
+            self.assertEqual(
+                checkpoint_after_first["configuration_digest"],
+                json.loads(configuration_before)["configuration_digest"],
+            )
             self.assertEqual(first.status, "filled")
             self.assertEqual(first.decision, "BUY")
             self.assertEqual(first.position, 1)
@@ -26,6 +37,7 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertEqual(restarted.position, 1)
             self.assertEqual(restarted.cash, first.cash)
             self.assertEqual(restarted.evidence_count, 1)
+            self.assertEqual(configuration_path.read_bytes(), configuration_before)
             evidence_lines = (Path(directory) / "learning-evidence.jsonl").read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(evidence_lines), 1)
             self.assertTrue(json.loads(evidence_lines[0])["reconciled"])
@@ -50,6 +62,114 @@ class VerticalSliceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 run_vertical_slice([100, 101, 102], directory)
 
+    def test_restart_rejects_changed_financial_configuration_before_mutation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            prices = [100, 101, 102, 103]
+            run_vertical_slice(prices, directory)
+
+            checkpoint_path = root / "checkpoint.json"
+            configuration_path = root / "run-configuration.json"
+            evidence_path = root / "learning-evidence.jsonl"
+            journal_path = root / "journal.sqlite3"
+
+            checkpoint_before = checkpoint_path.read_bytes()
+            configuration_before = configuration_path.read_bytes()
+            evidence_before = evidence_path.read_bytes()
+            intents_before = {
+                path.name: path.read_bytes()
+                for path in (root / "order-intents").glob("*.json")
+            }
+            sequence_before = JournalStore(journal_path).current_journal_sequence()
+
+            cases = (
+                {"initial_cash": "9999"},
+                {"order_quantity": "2"},
+                {"max_abs_position": "9"},
+                {"max_notional": "4000"},
+                {"fee_rate": "0.002"},
+                {"symbol": "OTHER"},
+            )
+            for kwargs in cases:
+                with self.subTest(kwargs=kwargs):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "Run configuration is incompatible with existing durable state",
+                    ):
+                        run_vertical_slice(prices, directory, **kwargs)
+                    self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+                    self.assertEqual(
+                        configuration_path.read_bytes(),
+                        configuration_before,
+                    )
+                    self.assertEqual(evidence_path.read_bytes(), evidence_before)
+                    self.assertEqual(
+                        {
+                            path.name: path.read_bytes()
+                            for path in (root / "order-intents").glob("*.json")
+                        },
+                        intents_before,
+                    )
+                    self.assertEqual(
+                        JournalStore(journal_path).current_journal_sequence(),
+                        sequence_before,
+                    )
+
+    def test_legacy_checkpoint_requires_explicit_migration(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            prices = [100, 101, 102, 103]
+            run_vertical_slice(prices, directory)
+            checkpoint_path = root / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint["schema_version"] = 1
+            checkpoint.pop("configuration_digest")
+            checkpoint_path.write_text(
+                json.dumps(checkpoint, sort_keys=True),
+                encoding="utf-8",
+            )
+            legacy_bytes = checkpoint_path.read_bytes()
+            evidence_before = (root / "learning-evidence.jsonl").read_bytes()
+            sequence_before = JournalStore(
+                root / "journal.sqlite3"
+            ).current_journal_sequence()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Legacy checkpoint lacks configuration identity",
+            ):
+                run_vertical_slice(prices, directory)
+
+            self.assertEqual(checkpoint_path.read_bytes(), legacy_bytes)
+            self.assertEqual(
+                (root / "learning-evidence.jsonl").read_bytes(),
+                evidence_before,
+            )
+            self.assertEqual(
+                JournalStore(root / "journal.sqlite3").current_journal_sequence(),
+                sequence_before,
+            )
+
+    def test_missing_configuration_for_existing_state_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            prices = [100, 101, 102, 103]
+            run_vertical_slice(prices, directory)
+            (root / "run-configuration.json").unlink()
+            checkpoint_before = (root / "checkpoint.json").read_bytes()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Legacy durable run state lacks configuration identity",
+            ):
+                run_vertical_slice(prices, directory)
+
+            self.assertEqual(
+                (root / "checkpoint.json").read_bytes(),
+                checkpoint_before,
+            )
+            self.assertFalse((root / "run-configuration.json").exists())
+
     def test_multi_episode_buy_hold_sell_and_replay(self):
         with TemporaryDirectory() as directory:
             episodes = [[100, 101, 102, 103], [100, 100, 100], [103, 102, 101, 100]]
@@ -58,7 +178,7 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertEqual([item.status for item in results], ["filled", "hold", "filled"])
             self.assertEqual(results[-1].position, 0)
             self.assertEqual(results[-1].evidence_count, 3)
-            replay = run_multi_episode(episodes, directory, max_abs_position="1")
+            replay = run_multi_episode(episodes, directory)
             self.assertEqual(replay[-1].position, 0)
             self.assertEqual(replay[-1].evidence_count, 3)
             checkpoint = json.loads((Path(directory) / "checkpoint.json").read_text(encoding="utf-8"))
@@ -89,6 +209,27 @@ class VerticalSliceTests(unittest.TestCase):
                     run_vertical_slice([100, 101, 102, 103], directory)
             self.assertEqual(len(list((Path(directory) / "order-intents").glob("*.json"))), 1)
             self.assertFalse((Path(directory) / "checkpoint.json").exists())
+            configuration_path = Path(directory) / "run-configuration.json"
+            self.assertTrue(configuration_path.is_file())
+            configuration_before = configuration_path.read_bytes()
+            intent_before = next(
+                (Path(directory) / "order-intents").glob("*.json")
+            ).read_bytes()
+            with self.assertRaisesRegex(
+                ValueError,
+                "Run configuration is incompatible with existing durable state",
+            ):
+                run_vertical_slice(
+                    [100, 101, 102, 103],
+                    directory,
+                    fee_rate="0.002",
+                )
+            self.assertFalse((Path(directory) / "checkpoint.json").exists())
+            self.assertEqual(configuration_path.read_bytes(), configuration_before)
+            self.assertEqual(
+                next((Path(directory) / "order-intents").glob("*.json")).read_bytes(),
+                intent_before,
+            )
             recovered = run_vertical_slice([100, 101, 102, 103], directory)
             self.assertEqual(recovered.status, "filled")
             self.assertEqual(recovered.position, 1)

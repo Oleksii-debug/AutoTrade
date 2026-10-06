@@ -1405,6 +1405,162 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 [],
             )
 
+    def test_final_guard_rejects_callback_time_dispatcher_method_shadow(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            wire_calls = 0
+
+            def fake_append(**_kwargs):
+                raise AssertionError("callback-installed _append must not execute")
+
+            def transport(_client_order_id, _request, guard):
+                nonlocal wire_calls
+                dispatcher._append = fake_append
+                guard()
+                wire_calls += 1
+                return ExactJsonTransportResponse(b'{"accepted":true}')
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "dispatcher authority changed during dispatch",
+            ):
+                dispatcher.dispatch(
+                    attempt_id="method-shadow-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T14:00:00Z",
+                    authority_check=lambda *_args: (True, "allowed"),
+                    transport_send=transport,
+                    submission_scope={"endpoint": "/orders"},
+                )
+
+            self.assertEqual(wire_calls, 0)
+            self.assertNotIn("_append", vars(dispatcher))
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("method-shadow-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared"],
+            )
+
+    def test_final_guard_rejects_callback_time_dispatcher_class_rebind(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            wire_calls = 0
+            original_append = GuardedDispatcher._append
+
+            def fake_append(*_args, **_kwargs):
+                raise AssertionError("callback-rebound class _append must not execute")
+
+            def transport(_client_order_id, _request, guard):
+                nonlocal wire_calls
+                GuardedDispatcher._append = fake_append
+                guard()
+                wire_calls += 1
+                return ExactJsonTransportResponse(b'{"accepted":true}')
+
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "dispatcher authority changed during dispatch",
+                ):
+                    dispatcher.dispatch(
+                        attempt_id="class-rebind-a1",
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=lambda *_args: (True, "allowed"),
+                        transport_send=transport,
+                        submission_scope={"endpoint": "/orders"},
+                    )
+            finally:
+                GuardedDispatcher._append = original_append
+
+            self.assertEqual(wire_calls, 0)
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("class-rebind-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared"],
+            )
+
+    def test_sender_exception_cannot_retarget_expected_authority_before_block_record(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+                owner_epoch=1,
+            )
+
+            def sender_check(_owner_token, _owner_epoch):
+                dispatcher.owner_epoch = 2
+                dispatcher._dispatch_authority_state = (
+                    dispatcher.environment,
+                    dispatcher.account_id,
+                    dispatcher.scope_key,
+                    dispatcher.owner_token,
+                    dispatcher.owner_epoch,
+                    dispatcher.prepared_lease_seconds,
+                )
+                raise RuntimeError("sender failed after retarget")
+
+            def transport(_client_order_id, _request, guard):
+                guard()
+                raise AssertionError("wire must not execute")
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "dispatcher authority changed during dispatch",
+            ):
+                dispatcher.dispatch(
+                    attempt_id="sender-exception-retarget-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T14:00:00Z",
+                    authority_check=lambda *_args: (True, "allowed"),
+                    transport_send=transport,
+                    sender_check=sender_check,
+                    submission_scope={"endpoint": "/orders"},
+                )
+
+            self.assertEqual(dispatcher.owner_epoch, 1)
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("sender-exception-retarget-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared"],
+            )
+
     def test_terminal_reread_rejects_post_append_tamper(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

@@ -400,6 +400,7 @@ def _dependency_graph_component_identities(
     sections = (
         ("python_development_dependencies", "python", "==", ("name", "version")),
         ("python_runtime_dependencies", "python-runtime", "==", ("name", "version")),
+        ("ci_action_dependencies", "ci-action", "@", ("name", "revision")),
         ("dotnet_package_dependencies", "nuget", "@", ("name", "version")),
         ("inspected_components", "source", "@", ("repository", "revision")),
     )
@@ -958,6 +959,58 @@ def python_runtime_dependencies() -> list[dict[str, str]]:
     ]
 
 
+def ci_action_dependencies() -> list[dict[str, object]]:
+    """Record exact external GitHub Action/container identities used by CI."""
+
+    action_pattern = re.compile(
+        r"^(?P<name>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?)@"
+        r"(?P<revision>[0-9a-f]{40})$"
+    )
+    container_pattern = re.compile(
+        r"^(?P<name>docker://[^@\\s]+)@(?P<revision>sha256:[0-9a-f]{64})$"
+    )
+    uses: dict[tuple[str, str], set[str]] = {}
+    workflows = ROOT / ".github" / "workflows"
+    for path in sorted(workflows.glob("*.y*ml")):
+        relative = path.relative_to(ROOT).as_posix()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            raise ValueError(f"CI workflow is unreadable: {relative}") from error
+        for raw in text.splitlines():
+            stripped = raw.strip()
+            action_line = stripped[2:].strip() if stripped.startswith("- ") else stripped
+            if not action_line.startswith("uses:"):
+                continue
+            value = action_line.split(":", 1)[1].strip().strip("'\"")
+            if value.startswith("./"):
+                continue
+            match = action_pattern.fullmatch(value) or container_pattern.fullmatch(value)
+            if match is None:
+                raise ValueError(f"CI action is not immutable: {relative}:{value}")
+            uses.setdefault(
+                (match.group("name"), match.group("revision")),
+                set(),
+            ).add(relative)
+
+    result: list[dict[str, object]] = []
+    for (name, revision), workflow_paths in sorted(uses.items()):
+        result.append(
+            {
+                "name": name,
+                "revision": revision,
+                "workflow_blob_shas": [
+                    {
+                        "path": workflow_path,
+                        "blob_sha": git_blob_sha(ROOT / workflow_path),
+                    }
+                    for workflow_path in sorted(workflow_paths)
+                ],
+            }
+        )
+    return result
+
+
 def dotnet_package_dependencies() -> list[dict[str, str]]:
     packages: set[tuple[str, str]] = set()
     for project in sorted((ROOT / "src").rglob("*.csproj")):
@@ -1114,6 +1167,7 @@ def build_manifest() -> dict[str, object]:
 
     python_dependencies = python_dev_dependencies()
     python_runtime = python_runtime_dependencies()
+    ci_actions = ci_action_dependencies()
     dotnet_projects = dotnet_package_projects()
     try:
         dotnet_packages = dotnet_locked_dependency_graph(ROOT, dotnet_projects)
@@ -1144,6 +1198,7 @@ def build_manifest() -> dict[str, object]:
     dependency_graph = {
         "python_development_dependencies": python_dependencies,
         "python_runtime_dependencies": python_runtime,
+        "ci_action_dependencies": ci_actions,
         "dotnet_package_dependencies": dotnet_packages,
         "inspected_components": components,
     }
@@ -1369,6 +1424,7 @@ def build_manifest() -> dict[str, object]:
         "dotnet_sdk": str(global_doc["sdk"]["version"]),
         "python_development_dependencies": python_dependencies,
         "python_runtime_dependencies": python_runtime,
+        "ci_action_dependencies": ci_actions,
         "dotnet_package_dependencies": dotnet_packages,
         "dotnet_package_rights": dotnet_rights,
         "inspected_components": components,

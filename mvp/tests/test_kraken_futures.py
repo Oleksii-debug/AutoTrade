@@ -32,6 +32,7 @@ from mvp.autotrade_mvp.reconciliation import (
 )
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
+    ProviderSubmissionObservation,
     Surface,
     observe_authenticated_json_response,
     observe_submission_json_response,
@@ -549,6 +550,28 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 prepared_request=prepared,
                 observation={"result": "success"},
             )
+
+    def test_submission_observation_subclass_is_rejected_without_virtual_access(self):
+        calls = 0
+
+        class TrapObservation(ProviderSubmissionObservation):
+            def __getattribute__(self, name):
+                nonlocal calls
+                calls += 1
+                raise AssertionError(f"virtual observation access executed: {name}")
+
+        prepared = prepared_futures_request("hedge-subclass")
+        forged = object.__new__(TrapObservation)
+        with self.assertRaisesRegex(
+            TypeError,
+            "durable ProviderSubmissionObservation",
+        ):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=prepared,
+                observation=forged,
+            )
+        self.assertEqual(calls, 0)
 
     def test_position_history_maps_only_trade_execution_facts(self):
         fills = parse_position_executions(

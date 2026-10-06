@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
   "baseline_date": "2026-09-22",
-  "evidence_as_of": "2026-09-24T16:21:04Z",
+  "evidence_as_of": "2026-10-06T12:02:21Z",
   "overall_status": "IMPLEMENTATION_IN_PROGRESS_SIMULATED_VERTICAL_SLICE_AVAILABLE",
   "gates": {
     "engineering_baseline": "RECONCILED_00_16_WITH_GENERATED_BANK_AND_EXPORT_VALIDATION",
@@ -14,7 +14,7 @@
     "accessibility": "NOT_STARTED",
     "release": "NOT_STARTED",
     "quality_pipeline": "ACTIVE_WINDOWS_AND_LINUX_PR_VERIFICATION_OBSERVED_PASSING",
-    "canonical_contracts": "IN_PROGRESS_FULL_SCHEMA_SURFACE_AND_OPENAPI_COMMITTED",
+    "canonical_contracts": "IMPLEMENTATION_COMPLETE_PENDING_EXACT_HEAD_HOSTED_CI",
     "dependency_provenance": "IN_PROGRESS_EXACT_UPSTREAM_LICENSE_SNAPSHOT_RECORDED",
     "control_plane": "PARALLEL_ISOLATED_WORKTREES_ACTIVE_REGISTRY_SERVICE_UNQUALIFIED",
     "selected_first_party_reuse": "TRANSFER_COMPLETE_APPROVED_NEUTRAL_PRIMITIVES_AND_SWARM_INVARIANTS",
@@ -38,7 +38,8 @@
     "The current MVP economic ledger is a bounded demonstration, not completion of WP-14 through WP-20 or derivative/corporate-action accounting.",
     "Economic edge remains unproven. No backtest, paper result or simulated result is treated as evidence of expected profitability.",
     "PR head 4f5ed15d1afff0c20bc2e71672e152d78bef899e completed both repository verification and the Windows/Ubuntu baseline matrix successfully. This is useful cross-platform evidence but is not an exact-head qualification of the latest main commit.",
-    "Canonical contract generation/codegen, release dependency locks, provider qualification, Windows packaging, NVDA qualification, recovery release evidence and bounded-real qualification remain open.",
-    "The repository control mode is PARALLEL_ISOLATED_WORKTREES. The Git-backed registry primitive exists, but the deployed authenticated claim service and protected publication path remain unqualified."
+    "The repository control mode is PARALLEL_ISOLATED_WORKTREES. The Git-backed registry primitive exists, but the deployed authenticated claim service and protected publication path remain unqualified.",
+    "WP-01 canonical contracts are implementation-complete on PR #1440 exact head 68b20a2c462cdab9ef900cb04cd9da60b78f6b08, including contract v6, cross-language scalar/corpus parity, version governance, Decimal envelope, DatasetManifest universal evidence binding, installed-package identity and canonical Host event-cursor Sequence contract. Exact predecessor 713e0589f0e16d02cbd2834fecd4df2df2b52f0c was terminal green for contracts, dotnet-foundation, baseline and research-primitives; its full Verify failure was isolated to the old one-corpus tools/verify.py invocation. The successor changes only that invocation and its orchestration regression. Fresh exact-head hosted runs are queued, so canonical_contracts is not yet recorded COMPLETE.",
+    "WP-01 closure evidence is retained in docs/qualification/WP01_CANONICAL_CONTRACTS_CLOSURE_2026-10-06.md. WP-43 runtime Host event-cursor ingress remains a separate scope and is not claimed by WP-01."
   ]
 }

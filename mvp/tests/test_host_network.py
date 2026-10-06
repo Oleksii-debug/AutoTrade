@@ -389,8 +389,12 @@ class HostNetworkTests(unittest.TestCase):
         self.assertEqual(self.app.store.state_version, 0)
 
     def test_ui_command_contract_rejects_noncanonical_identity_and_sequence(self):
+        canonical_uuid = "11111111-1111-1111-1111-111111111111"
         invalid_commands = (
             self.command(command_id="not-a-uuid"),
+            self.command(command_id="{" + canonical_uuid + "}"),
+            self.command(command_id="urn:uuid:" + canonical_uuid),
+            self.command(command_id=canonical_uuid.replace("-", "")),
             self.command(expected_state_version="00"),
             self.command(expected_state_version="+0"),
             self.command(expected_state_version=" 0"),

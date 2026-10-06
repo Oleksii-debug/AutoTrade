@@ -85,6 +85,9 @@ _UI_COMMAND_FIELDS = frozenset(
     }
 )
 _SESSION_REFERENCE = re.compile(r"^sid-[0-9a-f]{64}$")
+_UUID_TEXT_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+)
 
 
 def _validate_ui_command_contract(command: Mapping[str, object]) -> None:
@@ -97,7 +100,7 @@ def _validate_ui_command_contract(command: Mapping[str, object]) -> None:
         raise ValueError("UiCommand fields do not match the canonical contract")
 
     command_id = command.get("command_id")
-    if type(command_id) is not str:
+    if type(command_id) is not str or _UUID_TEXT_RE.fullmatch(command_id) is None:
         raise ValueError("UiCommand command_id must be a UUID string")
     try:
         UUID(command_id)

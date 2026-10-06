@@ -242,6 +242,61 @@ class DurableProviderEconomicBookAuthorityTests(unittest.TestCase):
             self.assertEqual(reopened.transactions, (transaction,))
             self.assertEqual(reopened.audit_digest(), first_digest)
 
+    def test_bybit_provider_environment_binds_book_batch_and_restart(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            testnet = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            demo = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="DEMO",
+            )
+            self.assertNotEqual(testnet.book_id, demo.book_id)
+
+            transaction = cash_transaction()
+            testnet_plan = testnet.prepare_batch_mutation(
+                (transaction,),
+                committed_at="2026-10-06T08:20:00Z",
+            )
+            demo_plan = demo.prepare_batch_mutation(
+                (transaction,),
+                committed_at="2026-10-06T08:20:00Z",
+            )
+            self.assertNotEqual(testnet_plan.batch_digest, demo_plan.batch_digest)
+            self.assertEqual(
+                testnet_plan.request["provider_environment"],
+                "TESTNET",
+            )
+            self.assertEqual(
+                demo_plan.request["provider_environment"],
+                "DEMO",
+            )
+
+            self.assertTrue(
+                testnet.append_batch(
+                    (transaction,),
+                    committed_at="2026-10-06T08:20:00Z",
+                )
+            )
+            reopened = DurableProviderEconomicBook(
+                JournalStore(path),
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            self.assertEqual(reopened.transactions, (transaction,))
+            self.assertEqual(demo.transactions, ())
+
     def test_same_backing_generation_independent_handles_compose_atomically(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

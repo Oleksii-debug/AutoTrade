@@ -79,6 +79,26 @@ def _text(value: str, *, name: str) -> str:
     return value.strip()
 
 
+def _authority_text(value: object, *, name: str) -> str:
+    """Detach authority-bearing text without invoking polymorphic callbacks."""
+
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact text")
+    if not value.strip():
+        raise ValueError(f"{name} is required")
+    return value.strip()
+
+
+def _authority_decimal(value: object, *, name: str) -> Decimal:
+    """Parse financial authority scalars only after exact built-in admission."""
+
+    if type(value) not in {Decimal, str, int}:
+        raise TypeError(
+            f"{name} must use exact Decimal, string or integer input"
+        )
+    return _decimal(value, name=name)
+
+
 def _instant(value: str, *, name: str) -> datetime:
     text = _text(value, name=name)
     try:
@@ -703,12 +723,27 @@ def _authority_service_capital_operations():
         settlement_book, economic_book = binding(service, required=required)
         if settlement_book is None:
             return None
+        if (
+            type(provider_available) is not dict
+            or any(type(key) is not str for key in provider_available)
+        ):
+            raise AuthorityConflict(
+                "settlement capital provider availability is malformed"
+            )
+        if (
+            type(resources) is not tuple
+            or any(type(resource) is not str for resource in resources)
+        ):
+            raise AuthorityConflict("settlement capital resources are malformed")
         cash_resources = tuple(
             sorted(resource for resource in resources if resource.startswith("CASH:"))
         )
         if not cash_resources:
             return None
-        if not isinstance(provider_evidence, Mapping):
+        if (
+            type(provider_evidence) is not dict
+            or any(type(key) is not str for key in provider_evidence)
+        ):
             raise AuthorityConflict(
                 "settlement capital requires provider availability evidence"
             )
@@ -718,13 +753,14 @@ def _authority_service_capital_operations():
         # A writer between the causal history read and projection must not turn
         # newer cash into capital backed by the older provider snapshot.
         before = _authority_store_call(service, "current_journal_sequence")
-        checkpoint_event_id = _text(
+        checkpoint_event_id = _authority_text(
             provider_evidence.get("checkpoint_event_id"),
             name="checkpoint_event_id",
         )
         checkpoint = _authority_store_call(service, "get_event", checkpoint_event_id)
         if (
-            checkpoint is None
+            type(checkpoint) is not dict
+            or any(type(key) is not str for key in checkpoint)
             or checkpoint.get("event_type") != "AccountReconciled"
             or checkpoint.get("aggregate_type") != "account_reconciliation"
         ):
@@ -748,17 +784,26 @@ def _authority_service_capital_operations():
                 "settlement capital requires the exact current provider checkpoint"
             )
         checkpoint_payload = checkpoint.get("payload")
-        if not isinstance(checkpoint_payload, Mapping):
+        if (
+            type(checkpoint_payload) is not dict
+            or any(type(key) is not str for key in checkpoint_payload)
+        ):
             raise AuthorityConflict(
                 "settlement capital provider checkpoint is malformed"
             )
         resource_evidence = checkpoint_payload.get("resource_availability")
-        if not isinstance(resource_evidence, Mapping):
+        if (
+            type(resource_evidence) is not dict
+            or any(type(key) is not str for key in resource_evidence)
+        ):
             raise AuthorityConflict(
                 "settlement capital provider resource evidence is missing"
             )
         provider_query_started = _instant(
-            resource_evidence.get("query_started_at"),
+            _authority_text(
+                resource_evidence.get("query_started_at"),
+                name="resource_availability.query_started_at",
+            ),
             name="resource_availability.query_started_at",
         )
 
@@ -780,8 +825,18 @@ def _authority_service_capital_operations():
                     "provider availability predates local economic financial truth"
                 )
             for economic_event in economic_events:
+                if (
+                    type(economic_event) is not dict
+                    or any(type(key) is not str for key in economic_event)
+                ):
+                    raise AuthorityConflict(
+                        "settlement capital economic event is malformed"
+                    )
                 economic_committed_at = _instant(
-                    economic_event.get("committed_at"),
+                    _authority_text(
+                        economic_event.get("committed_at"),
+                        name="economic_book.committed_at",
+                    ),
                     name="economic_book.committed_at",
                 )
                 if economic_committed_at >= provider_query_started:
@@ -810,7 +865,7 @@ def _authority_service_capital_operations():
                 raise AuthorityConflict(
                     f"provider availability lacks required cash resource {resource}"
                 )
-            provider_amount = _decimal(
+            provider_amount = _authority_decimal(
                 raw_provider,
                 name=f"provider availability[{resource}]",
             )
@@ -865,8 +920,23 @@ def _canonical_settlement_capital_adjustment(
     risk_journal_sequence: int | None = None,
     expected_journal_sequence: int | None = None,
 ) -> tuple[dict[str, object], dict[str, Decimal]]:
-    if not isinstance(value, Mapping):
+    if (
+        type(value) is not dict
+        or any(type(key) is not str for key in value)
+    ):
         raise AuthorityConflict("settlement capital adjustment is malformed")
+    if (
+        type(provider_available) is not dict
+        or any(type(key) is not str for key in provider_available)
+    ):
+        raise AuthorityConflict(
+            "authoritative provider availability is malformed"
+        )
+    if (
+        type(required_resources) is not tuple
+        or any(type(resource) is not str for resource in required_resources)
+    ):
+        raise AuthorityConflict("required settlement resources are malformed")
     expected_fields = {
         "schema_version",
         "journal_sequence",
@@ -903,13 +973,26 @@ def _canonical_settlement_capital_adjustment(
         raise AuthorityConflict(
             "settlement capital cut must precede the durable risk decision"
         )
-    canonical_provider = _text(provider_id, name="provider_id").upper()
-    canonical_account = _text(account_id, name="account_id")
-    canonical_environment = _text(environment, name="environment").upper()
+    canonical_provider = _authority_text(
+        provider_id, name="provider_id"
+    ).upper()
+    canonical_account = _authority_text(account_id, name="account_id")
+    canonical_environment = _authority_text(
+        environment, name="environment"
+    ).upper()
+    value_provider = _authority_text(
+        value.get("provider_id"), name="capital.provider_id"
+    ).upper()
+    value_account = _authority_text(
+        value.get("account_id"), name="capital.account_id"
+    )
+    value_environment = _authority_text(
+        value.get("environment"), name="capital.environment"
+    ).upper()
     if (
-        value.get("provider_id") != canonical_provider
-        or value.get("account_id") != canonical_account
-        or value.get("environment") != canonical_environment
+        value_provider != canonical_provider
+        or value_account != canonical_account
+        or value_environment != canonical_environment
     ):
         raise AuthorityConflict("settlement capital scope is inconsistent")
     if canonical_provider == "BYBIT" and provider_environment is None:
@@ -919,7 +1002,7 @@ def _canonical_settlement_capital_adjustment(
     expected_provider_environment = (
         canonical_environment
         if provider_environment is None
-        else _text(
+        else _authority_text(
             provider_environment,
             name="expected_provider_environment",
         ).upper()
@@ -936,7 +1019,7 @@ def _canonical_settlement_capital_adjustment(
             raise AuthorityConflict(
                 "BYBIT settlement capital provider domain does not match runtime"
             )
-    provider_environment = _text(
+    provider_environment = _authority_text(
         value.get("provider_environment"),
         name="provider_environment",
     ).upper()
@@ -944,16 +1027,19 @@ def _canonical_settlement_capital_adjustment(
         raise AuthorityConflict(
             "settlement capital provider domain is inconsistent"
         )
-    settlement_scope_id = _text(
+    settlement_scope_id = _authority_text(
         value.get("settlement_scope_id"),
         name="settlement_scope_id",
     )
-    economic_book_id = _text(
+    economic_book_id = _authority_text(
         value.get("economic_book_id"),
         name="economic_book_id",
     )
     raw_resources = value.get("resources")
-    if not isinstance(raw_resources, Mapping):
+    if (
+        type(raw_resources) is not dict
+        or any(type(key) is not str for key in raw_resources)
+    ):
         raise AuthorityConflict("settlement capital resources are malformed")
     cash_resources = tuple(
         sorted(
@@ -971,27 +1057,31 @@ def _canonical_settlement_capital_adjustment(
     canonical_resources: dict[str, dict[str, str]] = {}
     for resource in cash_resources:
         raw = raw_resources.get(resource)
-        if not isinstance(raw, Mapping) or set(raw) != {
-            "provider_available",
-            "local_available",
-            "effective_available",
-        }:
+        if (
+            type(raw) is not dict
+            or any(type(key) is not str for key in raw)
+            or set(raw) != {
+                "provider_available",
+                "local_available",
+                "effective_available",
+            }
+        ):
             raise AuthorityConflict(
                 "settlement capital resource adjustment is malformed"
             )
-        provider_amount = _decimal(
+        provider_amount = _authority_decimal(
             raw.get("provider_available"),
             name=f"capital.provider_available[{resource}]",
         )
-        local_amount = _decimal(
+        local_amount = _authority_decimal(
             raw.get("local_available"),
             name=f"capital.local_available[{resource}]",
         )
-        effective_amount = _decimal(
+        effective_amount = _authority_decimal(
             raw.get("effective_available"),
             name=f"capital.effective_available[{resource}]",
         )
-        current_provider = _decimal(
+        current_provider = _authority_decimal(
             provider_available.get(resource),
             name=f"authoritative availability[{resource}]",
         )
@@ -1415,25 +1505,60 @@ class RiskAuthorityRequest:
 
     def __post_init__(self) -> None:
         canonical_intent = _canonical_risk_intent(self.risk_intent)
-        account = _text(self.account_id, name="risk authority account_id")
-        environment = _text(
+        account = _authority_text(
+            self.account_id, name="risk authority account_id"
+        )
+        environment = _authority_text(
             self.environment, name="risk authority environment"
         ).upper()
         if environment not in {"SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("risk authority environment is unsupported")
-        provider = _text(
+        provider = _authority_text(
             self.provider_id, name="risk authority provider_id"
         ).upper()
+        provider_environment = None
+        entity_policy_id = None
+        instrument_family = None
         if self.resolved_risk_policy is not None:
             resolved = require_registry_issued_resolved_policy(self.resolved_risk_policy)
             scope = resolved.identity.scope
-            if (scope.provider_id, scope.account_id, scope.environment,
-                scope.provider_environment, scope.entity_policy_id, scope.instrument_family) != (
-                provider, account, environment, self.provider_environment,
-                self.entity_policy_id, self.instrument_family):
-                raise AuthorityConflict("resolved RiskPolicy scope differs from financial cut")
+            raw_provider_environment = _authority_text(
+                self.provider_environment,
+                name="risk authority provider_environment",
+            )
+            raw_entity_policy_id = _authority_text(
+                self.entity_policy_id,
+                name="risk authority entity_policy_id",
+            )
+            raw_instrument_family = _authority_text(
+                self.instrument_family,
+                name="risk authority instrument_family",
+            )
+            if (
+                scope.provider_id,
+                scope.account_id,
+                scope.environment,
+                scope.provider_environment,
+                scope.entity_policy_id,
+                scope.instrument_family,
+            ) != (
+                provider,
+                account,
+                environment,
+                raw_provider_environment,
+                raw_entity_policy_id,
+                raw_instrument_family,
+            ):
+                raise AuthorityConflict(
+                    "resolved RiskPolicy scope differs from financial cut"
+                )
+            provider_environment = scope.provider_environment
+            entity_policy_id = scope.entity_policy_id
+            instrument_family = scope.instrument_family
             if resolved.resolved_journal_sequence_cut != self.journal_sequence_cut:
-                raise AuthorityConflict("resolved RiskPolicy journal cut differs from financial cut")
+                raise AuthorityConflict(
+                    "resolved RiskPolicy journal cut differs from financial cut"
+                )
         elif any(value is not None for value in (
             self.provider_environment, self.entity_policy_id, self.instrument_family)):
             raise AuthorityConflict("provider-domain dimensions require resolved RiskPolicy authority")
@@ -1446,12 +1571,19 @@ class RiskAuthorityRequest:
             or self.authority_policy_version < 1
         ):
             raise ValueError("authority_policy_version must be positive")
-        evaluated = _text(self.evaluated_at, name="risk authority evaluated_at")
+        evaluated = _authority_text(
+            self.evaluated_at, name="risk authority evaluated_at"
+        )
         _instant(evaluated, name="risk authority evaluated_at")
         object.__setattr__(self, "risk_intent", canonical_intent)
         object.__setattr__(self, "account_id", account)
         object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "provider_id", provider)
+        object.__setattr__(
+            self, "provider_environment", provider_environment
+        )
+        object.__setattr__(self, "entity_policy_id", entity_policy_id)
+        object.__setattr__(self, "instrument_family", instrument_family)
         object.__setattr__(
             self,
             "instrument_version",
@@ -1463,7 +1595,7 @@ class RiskAuthorityRequest:
         object.__setattr__(
             self,
             "capability_snapshot_id",
-            _text(
+            _authority_text(
                 self.capability_snapshot_id,
                 name="risk authority capability_snapshot_id",
             ),
@@ -1471,7 +1603,7 @@ class RiskAuthorityRequest:
         object.__setattr__(
             self,
             "reconciliation_checkpoint_event_id",
-            _text(
+            _authority_text(
                 self.reconciliation_checkpoint_event_id,
                 name="risk authority reconciliation_checkpoint_event_id",
             ),
@@ -1479,7 +1611,7 @@ class RiskAuthorityRequest:
         object.__setattr__(
             self,
             "reservation_state_digest",
-            _text(
+            _authority_text(
                 self.reservation_state_digest,
                 name="risk authority reservation_state_digest",
             ),
@@ -1487,7 +1619,7 @@ class RiskAuthorityRequest:
         object.__setattr__(
             self,
             "authority_policy_id",
-            _text(
+            _authority_text(
                 self.authority_policy_id,
                 name="risk authority policy_id",
             ),
@@ -1584,25 +1716,60 @@ class AuthoritativeRiskSnapshot:
     def __post_init__(self) -> None:
         normalized_context = _canonical_risk_context(self.context)
         canonical_policy = canonical_risk_policy(self.risk_policy)
-        account = _text(self.account_id, name="authoritative risk account_id")
-        environment = _text(
+        account = _authority_text(
+            self.account_id, name="authoritative risk account_id"
+        )
+        environment = _authority_text(
             self.environment, name="authoritative risk environment"
         ).upper()
         if environment not in {"SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("authoritative risk environment is unsupported")
-        provider = _text(
+        provider = _authority_text(
             self.provider_id, name="authoritative risk provider_id"
         ).upper()
+        provider_environment = None
+        entity_policy_id = None
+        instrument_family = None
         if self.resolved_risk_policy is not None:
             resolved = require_registry_issued_resolved_policy(self.resolved_risk_policy)
             scope = resolved.identity.scope
-            if (scope.provider_id, scope.account_id, scope.environment,
-                scope.provider_environment, scope.entity_policy_id, scope.instrument_family) != (
-                provider, account, environment, self.provider_environment,
-                self.entity_policy_id, self.instrument_family):
-                raise AuthorityConflict("resolved RiskPolicy scope differs from financial cut")
+            raw_provider_environment = _authority_text(
+                self.provider_environment,
+                name="authoritative risk provider_environment",
+            )
+            raw_entity_policy_id = _authority_text(
+                self.entity_policy_id,
+                name="authoritative risk entity_policy_id",
+            )
+            raw_instrument_family = _authority_text(
+                self.instrument_family,
+                name="authoritative risk instrument_family",
+            )
+            if (
+                scope.provider_id,
+                scope.account_id,
+                scope.environment,
+                scope.provider_environment,
+                scope.entity_policy_id,
+                scope.instrument_family,
+            ) != (
+                provider,
+                account,
+                environment,
+                raw_provider_environment,
+                raw_entity_policy_id,
+                raw_instrument_family,
+            ):
+                raise AuthorityConflict(
+                    "resolved RiskPolicy scope differs from financial cut"
+                )
+            provider_environment = scope.provider_environment
+            entity_policy_id = scope.entity_policy_id
+            instrument_family = scope.instrument_family
             if resolved.resolved_journal_sequence_cut != self.journal_sequence_cut:
-                raise AuthorityConflict("resolved RiskPolicy journal cut differs from financial cut")
+                raise AuthorityConflict(
+                    "resolved RiskPolicy journal cut differs from financial cut"
+                )
         elif any(value is not None for value in (
             self.provider_environment, self.entity_policy_id, self.instrument_family)):
             raise AuthorityConflict("provider-domain dimensions require resolved RiskPolicy authority")
@@ -1617,13 +1784,13 @@ class AuthoritativeRiskSnapshot:
             or self.authority_policy_version < 1
         ):
             raise ValueError("authority_policy_version must be positive")
-        evaluated = _text(
+        evaluated = _authority_text(
             self.evaluated_at, name="authoritative risk evaluated_at"
         )
         evaluated_instant = _instant(
             evaluated, name="authoritative risk evaluated_at"
         )
-        valid_until = _text(
+        valid_until = _authority_text(
             self.valid_until, name="authoritative risk valid_until"
         )
         valid_until_instant = _instant(
@@ -1705,6 +1872,11 @@ class AuthoritativeRiskSnapshot:
         object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "provider_id", provider)
         object.__setattr__(
+            self, "provider_environment", provider_environment
+        )
+        object.__setattr__(self, "entity_policy_id", entity_policy_id)
+        object.__setattr__(self, "instrument_family", instrument_family)
+        object.__setattr__(
             self,
             "instrument_version",
             _instrument_identity(
@@ -1715,7 +1887,7 @@ class AuthoritativeRiskSnapshot:
         object.__setattr__(
             self,
             "capability_snapshot_id",
-            _text(
+            _authority_text(
                 self.capability_snapshot_id,
                 name="authoritative risk capability_snapshot_id",
             ),
@@ -1723,7 +1895,7 @@ class AuthoritativeRiskSnapshot:
         object.__setattr__(
             self,
             "reconciliation_checkpoint_event_id",
-            _text(
+            _authority_text(
                 self.reconciliation_checkpoint_event_id,
                 name="authoritative risk reconciliation_checkpoint_event_id",
             ),
@@ -1731,7 +1903,7 @@ class AuthoritativeRiskSnapshot:
         object.__setattr__(
             self,
             "reservation_state_digest",
-            _text(
+            _authority_text(
                 self.reservation_state_digest,
                 name="authoritative risk reservation_state_digest",
             ),
@@ -1739,7 +1911,7 @@ class AuthoritativeRiskSnapshot:
         object.__setattr__(
             self,
             "authority_policy_id",
-            _text(
+            _authority_text(
                 self.authority_policy_id,
                 name="authoritative risk policy_id",
             ),
@@ -1813,13 +1985,13 @@ def _authoritative_risk_provider_scope(
 ) -> tuple[str, str]:
     """Resolve the exact provider domain already bound by the risk snapshot."""
 
-    if not isinstance(authoritative_snapshot, Mapping):
+    if type(authoritative_snapshot) is not dict:
         raise AuthorityConflict("authoritative risk snapshot is malformed")
-    provider = _text(
+    provider = _authority_text(
         authoritative_snapshot.get("provider_id"),
         name="authoritative risk provider_id",
     ).upper()
-    runtime = _text(
+    runtime = _authority_text(
         authoritative_snapshot.get("environment"),
         name="authoritative risk environment",
     ).upper()
@@ -1833,7 +2005,7 @@ def _authoritative_risk_provider_scope(
             )
         provider_environment = runtime
     else:
-        provider_environment = _text(
+        provider_environment = _authority_text(
             raw_provider_environment,
             name="authoritative risk provider_environment",
         ).upper()
@@ -1863,25 +2035,25 @@ def _require_provider_scope_matches_authoritative_risk_snapshot(
     expected_provider, expected_provider_environment = (
         _authoritative_risk_provider_scope(authoritative_snapshot)
     )
-    expected_account = _text(
+    expected_account = _authority_text(
         authoritative_snapshot.get("account_id"),
         name="authoritative risk account_id",
     )
-    expected_runtime = _text(
+    expected_runtime = _authority_text(
         authoritative_snapshot.get("environment"),
         name="authoritative risk environment",
     ).upper()
-    if not isinstance(evidence, Mapping):
+    if type(evidence) is not dict:
         raise AuthorityConflict(f"{evidence_name} is malformed")
-    evidence_provider = _text(
+    evidence_provider = _authority_text(
         evidence.get("provider_id"),
         name=f"{evidence_name} provider_id",
     ).upper()
-    evidence_account = _text(
+    evidence_account = _authority_text(
         evidence.get("account_id"),
         name=f"{evidence_name} account_id",
     )
-    evidence_runtime = _text(
+    evidence_runtime = _authority_text(
         evidence.get("environment"),
         name=f"{evidence_name} environment",
     ).upper()
@@ -1893,7 +2065,7 @@ def _require_provider_scope_matches_authoritative_risk_snapshot(
             )
         evidence_provider_environment = evidence_runtime
     else:
-        evidence_provider_environment = _text(
+        evidence_provider_environment = _authority_text(
             raw_provider_environment,
             name=f"{evidence_name} provider_environment",
         ).upper()
@@ -5682,7 +5854,7 @@ class AuthorityService:
                             instrument_version=borrow.instrument_version,
                             evidence_artifact_store=self.evidence_artifact_store,
                         )
-                        if projection.active_quantity > 0:
+                        if projection.active_quantity_at(now) > 0:
                             return False, "borrow_recall_active"
                 if (
                     _authority_store_call(self, "current_journal_sequence")

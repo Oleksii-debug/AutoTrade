@@ -429,6 +429,21 @@ def load_submission_response_binding(
         )
 
     prepared, sending, sent = events
+    prepared_instant = _canonical_submission_event_instant(
+        prepared,
+        event_name="SubmissionPrepared",
+    )
+    sending_instant = _canonical_submission_event_instant(
+        sending,
+        event_name="SubmissionSending",
+    )
+    terminal_instant = _canonical_submission_event_instant(
+        sent,
+        event_name="terminal",
+    )
+    if not (prepared_instant <= sending_instant <= terminal_instant):
+        raise ValueError("durable submission chronology is not monotonic")
+
     payload = prepared.get("payload")
     if not isinstance(payload, dict):
         raise ValueError("durable SubmissionPrepared payload is invalid")
@@ -487,6 +502,10 @@ def load_submission_response_binding(
     sent_at = sent.get("observed_at")
     if not isinstance(prepared_at, str) or not isinstance(sent_at, str):
         raise ValueError("durable submission timestamps are unavailable")
+    if prepared_at != prepared.get("committed_at"):
+        raise ValueError(
+            "durable SubmissionPrepared prepared_at mismatches event chronology"
+        )
     durable_text: dict[str, str] = {}
     for field_name in (
         "attempt_id",
@@ -632,6 +651,39 @@ def _instant(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("now must include a timezone")
     return parsed.astimezone(timezone.utc)
+
+
+def _canonical_submission_event_instant(
+    event: Mapping[str, Any],
+    *,
+    event_name: str,
+) -> datetime:
+    canonical_values: list[str] = []
+    instants: list[datetime] = []
+    for field_name in ("occurred_at", "observed_at", "committed_at"):
+        value = event.get(field_name)
+        if type(value) is not str:
+            raise ValueError(
+                f"durable {event_name} timestamp authority is invalid"
+            )
+        try:
+            point = _instant(value)
+        except ValueError as error:
+            raise ValueError(
+                f"durable {event_name} timestamp authority is invalid"
+            ) from error
+        canonical = point.isoformat().replace("+00:00", "Z")
+        if canonical != value:
+            raise ValueError(
+                f"durable {event_name} timestamp authority is invalid"
+            )
+        canonical_values.append(value)
+        instants.append(point)
+    if len(set(canonical_values)) != 1:
+        raise ValueError(
+            f"durable {event_name} timestamp authority is invalid"
+        )
+    return instants[0]
 
 
 
@@ -1092,6 +1144,7 @@ class GuardedDispatcher:
         aggregate_id = self._aggregate_id(attempt_id)
         versions: list[int] = []
         event_types: list[str] = []
+        event_instants: list[datetime] = []
         for event in events:
             if type(event) is not dict:
                 return False
@@ -1113,10 +1166,29 @@ class GuardedDispatcher:
                 or durable_client_order_id != client_order_id
             ):
                 return False
+            try:
+                event_instant = _canonical_submission_event_instant(
+                    event,
+                    event_name=event_type,
+                )
+            except ValueError:
+                return False
             versions.append(version)
             event_types.append(event_type)
+            event_instants.append(event_instant)
 
         if versions != list(range(1, len(events) + 1)):
+            return False
+        if any(
+            earlier > later
+            for earlier, later in zip(event_instants, event_instants[1:])
+        ):
+            return False
+        prepared_payload = events[0].get("payload")
+        if (
+            type(prepared_payload) is not dict
+            or prepared_payload.get("prepared_at") != events[0].get("committed_at")
+        ):
             return False
         return tuple(event_types) in {
             ("SubmissionPrepared",),

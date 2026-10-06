@@ -504,6 +504,10 @@ class DurableReservationBook:
         expected_version = 1
 
         for event in events:
+            if type(event) is not dict:
+                raise ReservationConflict(
+                    "reservation journal event must be an exact object"
+                )
             if event["aggregate_version"] != expected_version:
                 raise ReservationConflict(
                     "reservation journal aggregate versions are not contiguous"
@@ -513,13 +517,15 @@ class DurableReservationBook:
                 raise ReservationConflict(
                     "reservation journal contains an unsupported event type"
                 )
-            if payload_digest(event["payload"]) != event["payload_hash"]:
+            payload = event.get("payload")
+            if type(payload) is not dict:
+                raise ReservationConflict(
+                    "reservation event payload must be an exact object"
+                )
+            if payload_digest(payload) != event["payload_hash"]:
                 raise ReservationConflict(
                     "reservation journal payload hash does not match stored payload"
                 )
-            payload = event["payload"]
-            if not isinstance(payload, dict):
-                raise ReservationConflict("reservation event payload must be an object")
             if payload.get("environment") != self.environment:
                 raise ReservationConflict(
                     "reservation journal event environment does not match book scope"
@@ -533,10 +539,14 @@ class DurableReservationBook:
             expected_snapshot = payload.get("snapshot")
             idem = payload.get("idempotency_key")
             request_hash = payload.get("request_hash")
-            if not isinstance(request, dict):
-                raise ReservationConflict("reservation event request must be an object")
-            if not isinstance(expected_snapshot, dict):
-                raise ReservationConflict("reservation event snapshot must be an object")
+            if type(request) is not dict:
+                raise ReservationConflict(
+                    "reservation event request must be an exact object"
+                )
+            if type(expected_snapshot) is not dict:
+                raise ReservationConflict(
+                    "reservation event snapshot must be an exact object"
+                )
             idem = _text(idem, name="idempotency_key")
             request_hash = _text(request_hash, name="request_hash")
             if request_hash != payload_digest(request):

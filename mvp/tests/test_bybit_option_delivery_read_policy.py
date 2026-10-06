@@ -188,6 +188,7 @@ class BybitOptionDeliveryReadPolicyTests(unittest.TestCase):
             "BTC 29DEC22 16000 P",
             "-BTC-29DEC22-16000-P",
             "BTC-29DEC22-16000-P-",
+            "A" * 161,
         ):
             with self.subTest(symbol=symbol):
                 with self.assertRaisesRegex(

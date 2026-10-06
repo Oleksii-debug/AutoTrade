@@ -140,6 +140,33 @@ def _oracle_market_price_bound(
         ) from error
 
 
+def _oracle_limit_touched(
+    *,
+    order: SimulatedOrder,
+    observation: LiquidityObservation,
+    model: ExecutionModel,
+) -> bool:
+    """Independently prove that the frozen limit was executable."""
+
+    if order.limit_price is None:
+        raise ExecutionOracleError("limit execution lacks order limit")
+    if model.data_fidelity == "BAR":
+        if observation.bar_low is None or observation.bar_high is None:
+            raise ExecutionOracleError("BAR limit fill lacks price bounds")
+        return (
+            observation.bar_low <= order.limit_price
+            if order.side == "BUY"
+            else observation.bar_high >= order.limit_price
+        )
+    if observation.bid is None or observation.ask is None:
+        raise ExecutionOracleError("limit fill lacks bid/ask evidence")
+    return (
+        observation.ask <= order.limit_price
+        if order.side == "BUY"
+        else observation.bid >= order.limit_price
+    )
+
+
 def _round_down(quantity: Decimal, lot_size: Decimal) -> Decimal:
     try:
         return round_fraction_to_quantum(
@@ -378,10 +405,22 @@ def assert_conservative_execution(
         else:
             if order.limit_price is None:
                 raise ExecutionOracleError("limit execution lacks order limit")
-            if order.side == "BUY" and result.fill_price > order.limit_price:
-                raise ExecutionOracleError("buy limit filled above limit")
-            if order.side == "SELL" and result.fill_price < order.limit_price:
-                raise ExecutionOracleError("sell limit filled below limit")
+            if order.order_type == "STOP_LIMIT" and not order.already_triggered:
+                raise ExecutionOracleError(
+                    "stop-limit fill requires a previously triggered order"
+                )
+            if not _oracle_limit_touched(
+                order=order,
+                observation=observation,
+                model=model,
+            ):
+                raise ExecutionOracleError(
+                    "limit fill lacks independently executable price evidence"
+                )
+            if result.fill_price != order.limit_price:
+                raise ExecutionOracleError(
+                    "limit fill_price must equal the frozen order limit"
+                )
 
         independent_notional = _oracle_exact_product(
             result.filled_quantity,

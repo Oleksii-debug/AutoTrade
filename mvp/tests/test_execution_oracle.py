@@ -349,6 +349,78 @@ class ExecutionOracleTests(unittest.TestCase):
                         result=result,
                     )
 
+    def test_oracle_rejects_limit_fill_without_executable_price_evidence(self):
+        o = order(order_type="LIMIT", limit_price="100")
+        q = observation(ask="101")
+        m = model()
+        no_fill = simulate_execution(o, q, m)
+        self.assertEqual(no_fill.status, "NO_FILL")
+        forged = replace(
+            no_fill,
+            status="FILLED",
+            filled_quantity=Decimal("10"),
+            fill_price=Decimal("100"),
+            fee=Decimal("1"),
+            trade_time=q.market_time,
+        )
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "independently executable price evidence",
+        ):
+            assert_conservative_execution(order=o, observation=q, model=m, result=forged)
+
+    def test_oracle_rejects_limit_fill_better_than_frozen_limit(self):
+        o = order(order_type="LIMIT", limit_price="102")
+        q = observation(ask="101")
+        m = model()
+        result = simulate_execution(o, q, m)
+        self.assertEqual(result.fill_price, Decimal("102"))
+        forged = replace(result, fill_price=Decimal("101"))
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "frozen order limit",
+        ):
+            assert_conservative_execution(order=o, observation=q, model=m, result=forged)
+
+    def test_oracle_rejects_same_observation_stop_limit_fill_before_prior_trigger(self):
+        o = order(
+            order_type="STOP_LIMIT",
+            limit_price="102",
+            stop_price="100",
+        )
+        q = observation(ask="101")
+        m = model()
+        waiting = simulate_execution(o, q, m)
+        self.assertEqual(waiting.status, "NO_FILL")
+        self.assertTrue(waiting.triggered)
+        forged = replace(
+            waiting,
+            status="FILLED",
+            filled_quantity=Decimal("10"),
+            fill_price=Decimal("102"),
+            fee=Decimal("1.02"),
+            trade_time=q.market_time,
+        )
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "previously triggered order",
+        ):
+            assert_conservative_execution(order=o, observation=q, model=m, result=forged)
+
+    def test_oracle_accepts_pretriggered_stop_limit_with_executable_limit(self):
+        o = order(
+            order_type="STOP_LIMIT",
+            limit_price="102",
+            stop_price="100",
+            already_triggered=True,
+        )
+        q = observation(ask="101")
+        m = model()
+        result = simulate_execution(o, q, m)
+        self.assertIn(result.status, {"FILLED", "PARTIAL"})
+        self.assertTrue(result.triggered)
+        assert_conservative_execution(order=o, observation=q, model=m, result=result)
+
     def test_oracle_rejects_status_quantity_contradictions(self):
         o, q, m = order(), observation(), model()
         full = simulate_execution(o, q, m)

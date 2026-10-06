@@ -30,7 +30,7 @@ from .provider_core import (
     ProviderSubmissionObservation,
     Surface,
     _decode_exact_json,
-    submission_observation_projection,
+    provider_submission_observation_projection,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
@@ -164,7 +164,7 @@ def _response_evidence(
 ) -> dict[str, str]:
     """Bind one durable exact provider response to the guarded Futures request."""
 
-    projection = submission_observation_projection(observation)
+    projection = provider_submission_observation_projection(observation)
     if not isinstance(prepared_request, KrakenFuturesPreparedRequest):
         raise TypeError("prepared_request must be KrakenFuturesPreparedRequest")
     cid = _client_order_id(prepared_request.body.get("cliOrdId"))
@@ -427,7 +427,7 @@ def parse_submission_response(
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",
         }
-    projection = submission_observation_projection(observation)
+    projection = provider_submission_observation_projection(observation)
     if projection["attempt_id"] != aid:
         raise ProviderCoreError("Kraken Futures submission observation attempt_id mismatch")
     evidence = [

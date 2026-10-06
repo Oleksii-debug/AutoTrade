@@ -394,6 +394,7 @@ class ProviderCoreTests(unittest.TestCase):
         request_sha = "sha256:" + sha256(request_text.encode("utf-8")).hexdigest()
         scope = {
             "endpoint": "/v5/order/create",
+            "provider_environment": "TESTNET",
             "prepared_request_sha256": request_sha,
             "capability_snapshot_ids": list(capability_snapshot_ids),
             "instrument_versions": list(instrument_versions),
@@ -441,6 +442,10 @@ class ProviderCoreTests(unittest.TestCase):
             self.assertEqual(observation.response_sha256, binding.response_sha256)
             self.assertEqual(observation.observed_at, binding.sent_at)
             self.assertEqual(observation.request_sha256, request_sha)
+            self.assertEqual(
+                observation.submission_scope["provider_environment"],
+                "TESTNET",
+            )
             observation.require_scope(
                 provider_id="BYBIT",
                 endpoint="/v5/order/create",

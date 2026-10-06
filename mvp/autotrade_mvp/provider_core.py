@@ -1330,12 +1330,27 @@ def _install_provider_submission_observation_authority(binding_projection):
                 "prepared_request_sha256",
                 "capability_snapshot_ids",
                 "instrument_versions",
+                *(
+                    ("provider_environment",)
+                    if provider == "BYBIT"
+                    else ()
+                ),
             )
         )
         if canonical_frozenset(scope.keys()) != expected_keys:
             raise error_type(
                 "durable submission scope does not match prepared provider request"
             )
+        if provider == "BYBIT":
+            raw_provider_environment = scope["provider_environment"]
+            scoped_provider_environment = canonical_text(
+                raw_provider_environment,
+                "submission_scope.provider_environment",
+            )
+            if scoped_provider_environment != raw_provider_environment:
+                raise error_type(
+                    "durable submission provider environment is not canonical"
+                )
         if (
             scope["endpoint"] != normalized_endpoint
             or scope["prepared_request_sha256"] != request_sha

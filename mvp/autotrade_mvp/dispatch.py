@@ -2365,6 +2365,24 @@ class GuardedDispatcher:
             ("_journal_store_call", _journal_store_call),
             ("_envelope", _envelope),
             ("_detach_submission_json", _detach_submission_json),
+            ("submission_attempt_aggregate_id", submission_attempt_aggregate_id),
+            ("_event_id", _event_id),
+            ("_identity_digest", _identity_digest),
+            ("_instant", _instant),
+            ("payload_digest", payload_digest),
+            ("canonical_json", canonical_json),
+            (
+                "_canonical_submission_event_instant",
+                _canonical_submission_event_instant,
+            ),
+            (
+                "_exact_response_terminal_semantics_are_canonical",
+                _exact_response_terminal_semantics_are_canonical,
+            ),
+            ("_has_exact_response_markers", _has_exact_response_markers),
+            ("uuid5", uuid5),
+            ("NAMESPACE_URL", NAMESPACE_URL),
+            ("sha256", sha256),
         )
         dispatcher_class_surfaces = tuple(
             (base, tuple(base.__dict__.items()))

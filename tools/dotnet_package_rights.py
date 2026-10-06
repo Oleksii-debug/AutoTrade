@@ -28,7 +28,7 @@ _SCHEMA_VERSION = "1.0.0"
 _VERIFY_RESTORED_PREFIX = (
     "run: python tools/dotnet_package_rights.py --verify-restored "
 )
-_VERIFY_SHELL_CONTROL = re.compile(r"(?:&&|\\|\\||[;&|<>`]|[$][(])")
+_VERIFY_SHELL_CONTROL = re.compile(r"(?:&&|\|\||[;&|<>`]|[$][(])")
 _CANONICAL_NUGET_PACKAGES_AUTHORITY = (
     "NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages"
 )

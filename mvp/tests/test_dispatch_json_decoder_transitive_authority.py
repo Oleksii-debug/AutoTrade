@@ -390,5 +390,107 @@ class JsonDecoderTransitiveAuthorityTests(unittest.TestCase):
             )
 
 
+    def test_transport_cannot_replace_json_decoder_decode_defaults(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            decoder = dispatch_module.json.JSONDecoder
+            decode = decoder.__dict__["decode"]
+            original_defaults = decode.__defaults__
+            forged_calls = 0
+
+            class Match:
+                def end(self):
+                    return 0
+
+            def forged_match(_text, _index):
+                nonlocal forged_calls
+                forged_calls += 1
+                return Match()
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                decode.__defaults__ = (forged_match,)
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "json-decoder-decode-defaults-retarget",
+                    transport,
+                )
+                self.assertIs(decode.__defaults__, original_defaults)
+                self.assertEqual(forged_calls, 0)
+            finally:
+                decode.__defaults__ = original_defaults
+
+            self._assert_unknown_after_send(
+                path,
+                dispatcher,
+                "json-decoder-decode-defaults-retarget",
+                result,
+            )
+
+    def test_transport_cannot_mutate_json_decoder_init_kwdefaults(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            decoder = dispatch_module.json.JSONDecoder
+            decoder_init = decoder.__dict__["__init__"]
+            original_kwdefaults = decoder_init.__kwdefaults__
+            self.assertIs(type(original_kwdefaults), dict)
+            original_items = tuple(original_kwdefaults.items())
+            equality_calls = 0
+
+            class TrapStrict:
+                def __eq__(self, _other):
+                    nonlocal equality_calls
+                    equality_calls += 1
+                    raise AssertionError("kwdefault equality executed")
+
+                def __ne__(self, _other):
+                    nonlocal equality_calls
+                    equality_calls += 1
+                    raise AssertionError("kwdefault inequality executed")
+
+            trap = TrapStrict()
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                decoder_init.__kwdefaults__["strict"] = trap
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "json-decoder-init-kwdefaults-retarget",
+                    transport,
+                )
+                self.assertIs(decoder_init.__kwdefaults__, original_kwdefaults)
+                self.assertEqual(
+                    tuple(original_kwdefaults.items()),
+                    original_items,
+                )
+                self.assertEqual(equality_calls, 0)
+            finally:
+                decoder_init.__kwdefaults__.clear()
+                decoder_init.__kwdefaults__.update(dict(original_items))
+
+            self._assert_unknown_after_send(
+                path,
+                dispatcher,
+                "json-decoder-init-kwdefaults-retarget",
+                result,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,10 +22,11 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
         *,
         owner_token: str = "owner-a",
         prepared_lease_seconds: int = 60,
+        environment: str = "SIMULATION",
     ) -> GuardedDispatcher:
         return GuardedDispatcher(
             JournalStore(path),
-            environment="SIMULATION",
+            environment=environment,
             account_id="acct",
             owner_token=owner_token,
             prepared_lease_seconds=prepared_lease_seconds,
@@ -43,6 +44,7 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
         now: str,
         transport,
         authority_check=None,
+        sender_check=None,
     ):
         return dispatcher.dispatch(
             attempt_id=attempt_id,
@@ -53,6 +55,7 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
             now=now,
             authority_check=authority_check or self._allow,
             transport_send=transport,
+            sender_check=sender_check,
             submission_scope={"endpoint": "/orders"},
         )
 
@@ -224,6 +227,64 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
                 recovered.reason,
                 "prepared_owner_lease_expired_before_send",
             )
+
+    def test_paper_sender_fence_death_stays_pre_sending_and_zero_wire(self):
+        with TemporaryDirectory() as directory:
+            path = self._path(directory)
+            dispatcher = self._dispatcher(path, environment="PAPER")
+            sender_calls = 0
+            outbound = 0
+
+            def sender_check(_owner_token, _owner_epoch):
+                nonlocal sender_calls
+                sender_calls += 1
+                raise SimulatedProcessDeath("inside PAPER sender fence")
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                raise AssertionError("wire must remain unreachable")
+
+            with self.assertRaisesRegex(
+                SimulatedProcessDeath,
+                "inside PAPER sender fence",
+            ):
+                self._dispatch(
+                    dispatcher,
+                    attempt_id="crash-paper-sender",
+                    now="2026-10-06T16:34:00Z",
+                    transport=transport,
+                    sender_check=sender_check,
+                )
+
+            self.assertEqual(sender_calls, 1)
+            self.assertEqual(outbound, 0)
+            self.assertEqual(
+                self._event_types(path, dispatcher, "crash-paper-sender"),
+                ["SubmissionPrepared"],
+            )
+
+            restarted = self._dispatcher(
+                path,
+                owner_token="owner-b",
+                environment="PAPER",
+            )
+            recovered = self._dispatch(
+                restarted,
+                attempt_id="crash-paper-sender",
+                now="2026-10-06T16:35:01Z",
+                transport=self._forbidden_transport,
+                sender_check=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("recovery must not reacquire sender fence")),
+            )
+            self.assertEqual(recovered.status, "BLOCKED")
+            self.assertEqual(
+                recovered.reason,
+                "prepared_owner_lease_expired_before_send",
+            )
+            self.assertEqual(sender_calls, 1)
 
     def test_death_inside_transport_before_guard_stays_zero_wire(self):
         with TemporaryDirectory() as directory:

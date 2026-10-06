@@ -12,6 +12,7 @@ from mvp.autotrade_mvp.dispatch import (
     submission_attempt_aggregate_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.provider_response_limits import require_provider_response_bytes
 from mvp.autotrade_mvp.provider_transport import (
     AuthenticatedReadWireResponse,
     ProviderTransportError,
@@ -36,6 +37,16 @@ class EmptyPostSendResponseEvidenceTests(unittest.TestCase):
             body=b"{}",
             timeout_seconds=2,
         )
+
+    def test_shared_byte_authority_keeps_empty_opt_in_and_default_strict(self):
+        with self.assertRaisesRegex(ValueError, "nonempty"):
+            require_provider_response_bytes(b"")
+        self.assertEqual(
+            require_provider_response_bytes(b"", allow_empty=True),
+            b"",
+        )
+        with self.assertRaises(TypeError):
+            require_provider_response_bytes(b"", allow_empty=1)
 
     def test_typed_write_preserves_empty_body_but_authenticated_read_stays_strict(self):
         observed = TradingWireResponse(http_status=503, body=b"")

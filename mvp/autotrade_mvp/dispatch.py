@@ -136,14 +136,16 @@ class ExactJsonTransportResponse:
         raw = self.response_bytes
         if type(self.requires_reconciliation) is not bool:
             raise TypeError("requires_reconciliation must be boolean")
-        if (
-            type(raw) is not bytes
-            or len(raw) > HARD_MAX_PROVIDER_RESPONSE_BYTES
-            or (not raw and not self.requires_reconciliation)
-        ):
+        try:
+            require_provider_response_bytes(
+                raw,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=self.requires_reconciliation,
+            )
+        except (TypeError, ValueError) as error:
             raise ValueError(
                 "provider response bytes violate shared byte budget"
-            )
+            ) from error
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -233,27 +235,26 @@ class SubmissionResponseBinding:
         if re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None:
             raise ValueError("response_sha256 must be a canonical SHA-256 digest")
         if (
-            type(self.response_bytes) is not bytes
-            or len(self.response_bytes) > HARD_MAX_PROVIDER_RESPONSE_BYTES
+            type(self.response_encoding) is not str
+            or self.response_encoding not in {"utf-8-json", "hex"}
         ):
+            raise ValueError("durable provider response encoding is invalid")
+        try:
+            require_provider_response_bytes(
+                self.response_bytes,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=self.response_encoding == "hex",
+            )
+        except (TypeError, ValueError) as error:
             raise ValueError(
                 "durable provider response bytes violate shared byte budget"
-            )
+            ) from error
         if (
             "sha256:" + sha256(self.response_bytes).hexdigest()
             != self.response_sha256
         ):
             raise ValueError("durable provider response digest mismatch")
-        if (
-            type(self.response_encoding) is not str
-            or self.response_encoding not in {"utf-8-json", "hex"}
-        ):
-            raise ValueError("durable provider response encoding is invalid")
         if self.response_encoding == "utf-8-json":
-            if not self.response_bytes:
-                raise ValueError(
-                    "durable JSON provider response bytes must be non-empty"
-                )
             _decode_exact_json_bytes(self.response_bytes)
         if type(self.terminal_state) is not str:
             raise TypeError("terminal_state must be a string")
@@ -617,13 +618,16 @@ def load_submission_response_binding(
             raise ValueError(
                 "durable exact provider response bytes are unavailable"
             )
-        if (
-            type(response_bytes) is not bytes
-            or len(response_bytes) > HARD_MAX_PROVIDER_RESPONSE_BYTES
-        ):
+        try:
+            require_provider_response_bytes(
+                response_bytes,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
+            )
+        except (TypeError, ValueError) as error:
             raise ValueError(
                 "durable exact provider response bytes are unavailable"
-            )
+            ) from error
     else:
         raise ValueError(
             "durable exact provider response bytes are unavailable"

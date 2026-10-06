@@ -981,11 +981,14 @@ class TradingWireResponse:
             or self.http_status > 599
         ):
             raise ProviderTransportScopeError("HTTP status must be an integer 100..599")
-        if (
-            type(self.body) is not bytes
-            or len(self.body) > HARD_MAX_PROVIDER_RESPONSE_BYTES
-        ):
-            raise ProviderTransportError("invalid or oversized trading response")
+        try:
+            require_provider_response_bytes(
+                self.body,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
+            )
+        except (TypeError, ValueError) as error:
+            raise ProviderTransportError("invalid or oversized trading response") from error
 
 
 @dataclass(frozen=True)
@@ -1043,14 +1046,12 @@ class UrllibJsonWireClient:
     ) -> bytes:
         if type(allow_empty) is not bool:
             raise TypeError("allow_empty must be boolean")
-        if allow_empty:
-            if type(raw) is not bytes or len(raw) > max_bytes:
-                raise ProviderTransportError(
-                    "invalid or oversized provider HTTP response"
-                )
-            return raw
         try:
-            return require_provider_response_bytes(raw, max_bytes=max_bytes)
+            return require_provider_response_bytes(
+                raw,
+                max_bytes=max_bytes,
+                allow_empty=allow_empty,
+            )
         except (TypeError, ValueError) as error:
             raise ProviderTransportError("invalid or oversized provider HTTP response") from error
 
@@ -1191,18 +1192,28 @@ def _trading_response_evidence(
         status = value.http_status
         if type(status) is not int or not 100 <= status <= 599:
             raise ProviderTransportError("invalid trading HTTP response status")
-        raw = value.body
-        if type(raw) is not bytes or len(raw) > HARD_MAX_PROVIDER_RESPONSE_BYTES:
+        try:
+            raw = require_provider_response_bytes(
+                value.body,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
+            )
+        except (TypeError, ValueError) as error:
             raise ProviderTransportError(
                 "invalid or oversized trading response"
-            )
+            ) from error
         return raw, status
     if type(value) is bytes:
-        raw = value
-        if len(raw) > HARD_MAX_PROVIDER_RESPONSE_BYTES:
+        try:
+            raw = require_provider_response_bytes(
+                value,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
+            )
+        except (TypeError, ValueError) as error:
             raise ProviderTransportError(
                 "invalid or oversized trading response"
-            )
+            ) from error
         return raw, None
     raise ProviderTransportError(
         "trading wire client returned an unsupported response contract"

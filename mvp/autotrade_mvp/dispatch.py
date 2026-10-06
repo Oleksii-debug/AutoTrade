@@ -183,6 +183,69 @@ class ExactJsonTransportResponse:
         return _decode_exact_json_bytes(self.response_bytes)
 
 
+_EXACT_TRANSPORT_RESPONSE_STATE_FIELDS = frozenset(
+    {"response_bytes", "http_status", "requires_reconciliation", "ambiguity_reason"}
+)
+
+
+def _snapshot_exact_transport_response(
+    response: ExactJsonTransportResponse,
+) -> tuple[str, str, Any, int | None, bool, str | None]:
+    """Revalidate exact response state at the post-SEND consumption boundary."""
+
+    if type(response) is not ExactJsonTransportResponse:
+        raise TypeError("exact provider response must use the canonical response type")
+    # Frozen dataclasses can still be altered through object.__setattr__(). Read
+    # the raw instance dictionary through object.__getattribute__ so rebound
+    # response properties/__getattribute__ hooks are not response authority.
+    state = object.__getattribute__(response, "__dict__")
+    if (
+        type(state) is not dict
+        or set(state) != _EXACT_TRANSPORT_RESPONSE_STATE_FIELDS
+    ):
+        raise TypeError("exact provider response state is invalid")
+    raw = dict.__getitem__(state, "response_bytes")
+    http_status = dict.__getitem__(state, "http_status")
+    requires_reconciliation = dict.__getitem__(
+        state, "requires_reconciliation"
+    )
+    ambiguity_reason = dict.__getitem__(state, "ambiguity_reason")
+
+    if type(raw) is not bytes or not raw:
+        raise TypeError("exact provider response bytes are invalid")
+    payload = _decode_exact_json_bytes(raw)
+    if http_status is not None and (
+        type(http_status) is not int
+        or http_status < 100
+        or http_status > 599
+    ):
+        raise ValueError("exact provider HTTP status must be an integer 100..599")
+    if type(requires_reconciliation) is not bool:
+        raise TypeError("exact provider reconciliation flag must be boolean")
+    if requires_reconciliation:
+        if (
+            type(ambiguity_reason) is not str
+            or not ambiguity_reason.strip()
+            or ambiguity_reason.strip() != ambiguity_reason
+        ):
+            raise ValueError(
+                "ambiguous exact response requires canonical non-empty reason"
+            )
+    elif ambiguity_reason is not None:
+        raise ValueError(
+            "ambiguity reason is invalid without reconciliation requirement"
+        )
+
+    return (
+        raw.decode("utf-8"),
+        "sha256:" + sha256(raw).hexdigest(),
+        payload,
+        http_status,
+        requires_reconciliation,
+        ambiguity_reason,
+    )
+
+
 @dataclass(frozen=True)
 class SubmissionResponseBinding:
     """Journal-derived immutable binding between one send and exact response bytes."""
@@ -2110,24 +2173,28 @@ class GuardedDispatcher:
         terminal_reason = "sent_confirmed"
         try:
             if type(response) is ExactJsonTransportResponse:
-                # The exact raw bytes + digest are the durable source.
-                # The prior "response" JSON mirror could silently round
-                # decimals to float; persisting Decimal objects directly is
-                # not JSON-serializable and misclassified valid sends UNKNOWN.
-                # Keep the mirror out of exact response events altogether.
+                # Revalidate raw exact state now. Frozen dataclass construction
+                # is not sufficient authority because object.__setattr__ can
+                # alter fields after __post_init__ and before transport returns.
+                (
+                    response_text,
+                    response_sha256,
+                    outcome_response,
+                    response_http_status,
+                    terminal_requires_reconciliation,
+                    response_ambiguity_reason,
+                ) = _snapshot_exact_transport_response(response)
                 sent_payload = {
                     "client_order_id": client_order_id,
-                    "response_text": response.response_text,
-                    "response_sha256": response.response_sha256,
+                    "response_text": response_text,
+                    "response_sha256": response_sha256,
                     "response_encoding": "utf-8-json",
                 }
-                if response.http_status is not None:
-                    sent_payload["http_status"] = response.http_status
-                outcome_response = response.payload
-                terminal_requires_reconciliation = response.requires_reconciliation
+                if response_http_status is not None:
+                    sent_payload["http_status"] = response_http_status
                 if terminal_requires_reconciliation:
                     terminal_reason = (
-                        response.ambiguity_reason
+                        response_ambiguity_reason
                         or "provider_response_ambiguous"
                     )
                     sent_payload["reason"] = terminal_reason

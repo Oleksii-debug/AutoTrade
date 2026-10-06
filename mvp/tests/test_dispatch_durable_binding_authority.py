@@ -1894,6 +1894,79 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 ],
             )
 
+    def test_exact_response_post_construction_tamper_is_revalidated_without_callbacks(self):
+        class TrapBytes(bytes):
+            callbacks = 0
+
+            def decode(self, *args, **kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("tampered response bytes decode executed")
+
+        cases = (
+            ("response_bytes", TrapBytes(b'{"accepted":true}'), TypeError),
+            ("http_status", True, ValueError),
+            ("requires_reconciliation", 1, TypeError),
+        )
+        for field, forged_value, expected_error in cases:
+            with self.subTest(field=field), TemporaryDirectory() as directory:
+                TrapBytes.callbacks = 0
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+                wire_calls = 0
+
+                def transport(_client_order_id, _request, guard):
+                    nonlocal wire_calls
+                    guard()
+                    wire_calls += 1
+                    response = ExactJsonTransportResponse(
+                        b'{"accepted":true}',
+                        http_status=200,
+                    )
+                    object.__setattr__(response, field, forged_value)
+                    return response
+
+                result = dispatcher.dispatch(
+                    attempt_id=f"exact-response-tamper-{field}",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T14:00:00Z",
+                    authority_check=lambda *_args: (True, "allowed"),
+                    transport_send=transport,
+                    submission_scope={"endpoint": "/orders"},
+                )
+
+                self.assertEqual(wire_calls, 1)
+                self.assertEqual(TrapBytes.callbacks, 0)
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertEqual(result.reason, "sent_response_persistence_failed")
+                events = JournalStore.load_events(
+                    store,
+                    "submission_attempt",
+                    dispatcher._aggregate_id(
+                        f"exact-response-tamper-{field}"
+                    ),
+                )
+                self.assertEqual(
+                    [event["event_type"] for event in events],
+                    [
+                        "SubmissionPrepared",
+                        "SubmissionSending",
+                        "SubmissionUnknown",
+                    ],
+                )
+                self.assertEqual(
+                    events[-1]["payload"]["reason"],
+                    "sent_response_persistence_failed:"
+                    + expected_error.__name__,
+                )
+
     def test_legacy_response_subclass_is_rejected_without_callback_execution(self):
         class TrapDict(dict):
             callbacks = 0

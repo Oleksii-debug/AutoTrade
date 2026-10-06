@@ -242,11 +242,9 @@ def qualify_scientific_learning(
         else:
             signed_digest_set = frozenset(
                 item.sha256
-                for item in qualification_receipt.attestation.evidence_refs
+                for item in accepted.evidence_refs
             )
-            signed_requirement_set = frozenset(
-                qualification_receipt.attestation.requirement_ids
-            )
+            signed_requirement_set = frozenset(accepted.requirement_ids)
             if accepted.result == "FAIL":
                 trust_status = "FAIL"
                 reasons.append("SCIENCE.INDEPENDENT_ATTESTATION_RESULT_FAIL")

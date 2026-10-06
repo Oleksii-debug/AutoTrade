@@ -224,7 +224,7 @@ class AblationOwnedOperandPreflightTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 MemoryIntegrityError,
-                "missing-evidence set is not canonical",
+                "preflight digest does not match canonical material",
             ):
                 reverify_ablation_owned_operand_preflight(
                     authority,

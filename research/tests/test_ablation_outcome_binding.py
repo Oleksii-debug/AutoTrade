@@ -24,7 +24,13 @@ def payload() -> dict:
         "evidence_refs": ["artifact:canonical-reconciled-outcome"],
         "intended_action": {"side": "HOLD"},
         "actual_execution": {"fills": []},
-        "outcome": {\n            "class": "POSITIVE",\n            "label": "realized",\n            "label_mature": True,\n            "reconciliation_state": "RECONCILED",\n            "task_value_fact": "positive",\n        },
+        "outcome": {
+            "class": "POSITIVE",
+            "label": "realized",
+            "label_mature": True,
+            "reconciliation_state": "RECONCILED",
+            "task_value_fact": "positive",
+        },
         "costs": {"USD": "0"},
     }
 
@@ -58,7 +64,7 @@ class AblationOutcomeBindingTests(unittest.TestCase):
             instrument_family="equity",
         )
 
-    def _outcome(
+    def _canonical_outcome(
         self,
         utility_evidence_digest: str,
         *,

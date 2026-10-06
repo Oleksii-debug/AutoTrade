@@ -42,7 +42,12 @@ class ReconciledOutcomeExecutableAuthorityTests(unittest.TestCase):
                     "evidence_refs": ["artifact:source"],
                     "intended_action": {"side": "HOLD"},
                     "actual_execution": {"fills": []},
-                    "outcome": {\n                        "class": "POSITIVE",\n                        "label": "observed",\n                        "label_mature": True,\n                        "reconciliation_state": "RECONCILED",\n                    },
+                    "outcome": {
+                        "class": "POSITIVE",
+                        "label": "observed",
+                        "label_mature": True,
+                        "reconciliation_state": "RECONCILED",
+                    },
                     "costs": {"USD": "0"},
                 },
             )
@@ -58,7 +63,7 @@ class ReconciledOutcomeExecutableAuthorityTests(unittest.TestCase):
             instrument_family="EQUITY",
         )
 
-    def _outcome(self, fact) -> CanonicalAblationOutcomeEvidence:
+    def _canonical_outcome(self, fact) -> CanonicalAblationOutcomeEvidence:
         return CanonicalAblationOutcomeEvidence(
             case_id="case-exec",
             variant="FULL",

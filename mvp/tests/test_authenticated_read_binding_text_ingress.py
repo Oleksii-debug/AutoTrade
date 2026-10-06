@@ -17,6 +17,7 @@ from mvp.autotrade_mvp.provider_core import (
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
     provider_response_observation_projection,
+    provider_response_observation_require_scope,
 )
 from mvp.tests.capability_test_support import fresh_test_admission
 
@@ -226,6 +227,45 @@ class AuthenticatedReadTextIngressTests(unittest.TestCase):
         self.assertEqual(projection["permission_scope"], "ACCOUNT.READ")
         self.assertIs(projection["query_binding"], binding)
         self.assertIs(projection["payload"], observation.payload)
+
+    def test_authenticated_response_scope_gate_ignores_class_method_rebinding(self):
+        binding = prepare_authenticated_read_query(
+            capability=capability(),
+            surface=Surface.ACTIVITIES,
+            endpoint="/v5/account/transaction-log",
+            query={"category": "option"},
+            at=NOW,
+            permission_scope="ACCOUNT.READ",
+        )
+        observation = observe_authenticated_json_response(
+            query_binding=binding,
+            http_status=200,
+            response_bytes=b'{"result":{"list":[]}}',
+            observed_at=NOW,
+        )
+        with patch.object(
+            ProviderResponseObservation,
+            "require_scope",
+            lambda *_args, **_kwargs: None,
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "provider mismatch",
+            ):
+                provider_response_observation_require_scope(
+                    observation,
+                    provider_id="ALPACA",
+                    surface=Surface.ACTIVITIES,
+                    endpoint="/v5/account/transaction-log",
+                )
+            provider_response_observation_require_scope(
+                observation,
+                provider_id="BYBIT",
+                surface=Surface.ACTIVITIES,
+                endpoint="/v5/account/transaction-log",
+                account_id="test-account",
+                environment="PAPER",
+            )
 
     def test_authenticated_response_projection_rejects_post_mint_response_retargeting(self):
         binding = prepare_authenticated_read_query(

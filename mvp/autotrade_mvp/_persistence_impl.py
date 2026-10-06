@@ -751,7 +751,15 @@ class JournalStore:
                             JOIN events ON events.event_id = outbox.event_id
                             """
                         ):
-                            raw_outbox_payload = str(row["outbox_payload_json"])
+                            raw_outbox_payload = row["outbox_payload_json"]
+                            if type(raw_outbox_payload) is not str:
+                                raise ValueError(
+                                    "legacy outbox payload authority is not exact text"
+                                )
+                            topic = _require_canonical_durable_text(
+                                row["topic"],
+                                name="legacy outbox topic",
+                            )
                             try:
                                 outbox_payload = json.loads(raw_outbox_payload)
                             except (json.JSONDecodeError, TypeError) as error:
@@ -819,7 +827,7 @@ class JournalStore:
                                 ),
                             )
                             envelope_hash = _outbox_envelope_digest(
-                                str(row["topic"]),
+                                topic,
                                 raw_outbox_payload,
                             )
                             connection.execute(
@@ -1989,9 +1997,15 @@ class JournalStore:
             ).fetchall()
         pending: list[dict[str, Any]] = []
         for row in rows:
-            raw_outbox_payload = str(row["outbox_payload_json"])
+            raw_outbox_payload = row["outbox_payload_json"]
+            if type(raw_outbox_payload) is not str:
+                raise ValueError("outbox payload authority is not exact text")
+            topic = _require_canonical_durable_text(
+                row["topic"],
+                name="outbox topic",
+            )
             actual_outbox_hash = _outbox_envelope_digest(
-                str(row["topic"]),
+                topic,
                 raw_outbox_payload,
             )
             if row["envelope_hash"] != actual_outbox_hash:
@@ -2121,9 +2135,15 @@ class JournalStore:
                 if row is None:
                     raise KeyError(outbox_id)
 
-                raw_outbox_payload = str(row["outbox_payload_json"])
+                raw_outbox_payload = row["outbox_payload_json"]
+                if type(raw_outbox_payload) is not str:
+                    raise ValueError("outbox payload authority is not exact text")
+                topic = _require_canonical_durable_text(
+                    row["topic"],
+                    name="outbox topic",
+                )
                 actual_outbox_hash = _outbox_envelope_digest(
-                    str(row["topic"]),
+                    topic,
                     raw_outbox_payload,
                 )
                 if row["envelope_hash"] != actual_outbox_hash:

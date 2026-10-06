@@ -23,6 +23,7 @@ from .exact_decimal import (
     canonical_decimal_text,
     is_exact_decimal_multiple,
 )
+from .settlement_convention import SettlementConvention
 
 
 class InstrumentRegistryError(ValueError):
@@ -323,6 +324,7 @@ class InstrumentVersion:
     exercise_cash_per_contract: Decimal | None = None
     margin_model_id: str | None = None
     metadata_evidence: tuple[Mapping[str, object], ...] = ()
+    settlement_convention: SettlementConvention | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -417,6 +419,47 @@ class InstrumentVersion:
         object.__setattr__(self, "deliverable", tuple(canonical_deliverable))
         frozen_evidence = tuple(_evidence_ref(item) for item in self.metadata_evidence)
         object.__setattr__(self, "metadata_evidence", frozen_evidence)
+
+        convention = self.settlement_convention
+        if self.asset_class == "FUTURE" and self.payoff == "INVERSE" and convention is None:
+            raise InstrumentRegistryError("INVERSE future requires a settlement convention")
+        if convention is not None:
+            if type(convention) is not SettlementConvention:
+                raise InstrumentRegistryError(
+                    "settlement_convention must be exact SettlementConvention"
+                )
+            if self.asset_class != "FUTURE" or self.payoff != "INVERSE":
+                raise InstrumentRegistryError(
+                    "settlement convention requires an INVERSE future"
+                )
+            convention = SettlementConvention(
+                provider_id=convention.provider_id,
+                instrument_id=convention.instrument_id,
+                instrument_version=convention.instrument_version,
+                settlement_currency=convention.settlement_currency,
+                quantum=convention.quantum,
+                rounding=convention.rounding,
+                evidence_artifact_id=convention.evidence_artifact_id,
+                evidence_sha256=convention.evidence_sha256,
+            )
+            if (
+                convention.provider_id != self.provider_id.upper()
+                or convention.instrument_id != self.instrument_id
+                or convention.instrument_version != self.version
+                or convention.settlement_currency != self.settlement_currency.upper()
+            ):
+                raise InstrumentRegistryError(
+                    "settlement convention scope must match InstrumentVersion"
+                )
+            if not any(
+                evidence["artifact_id"] == convention.evidence_artifact_id
+                and evidence["sha256"] == convention.evidence_sha256
+                for evidence in frozen_evidence
+            ):
+                raise InstrumentRegistryError(
+                    "settlement convention evidence must be covered by metadata_evidence"
+                )
+            object.__setattr__(self, "settlement_convention", convention)
 
         derivative = self.asset_class in {"FUTURE", "PERPETUAL", "OPTION"}
         if derivative:
@@ -596,6 +639,11 @@ class InstrumentVersion:
             "last_trade_at": _utc_text(self.last_trade_at) if self.last_trade_at else None,
             "delivery_cutoff": _utc_text(self.delivery_cutoff) if self.delivery_cutoff else None,
             "settlement_method": self.settlement_method,
+            "settlement_convention": (
+                self.settlement_convention.payload()
+                if self.settlement_convention is not None
+                else None
+            ),
             "funding_schedule": (
                 _thaw_jsonish(self.funding_schedule)
                 if self.funding_schedule is not None

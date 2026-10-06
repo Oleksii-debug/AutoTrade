@@ -706,8 +706,8 @@
         "Exclusive mutation key: FINANCE / reservations",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Conservative reservation foundation implemented in mvp/autotrade_mvp/reservations.py with multi-resource availability, duplicate-safe immutable reservations, partial consumption, UNKNOWN retention, evidenced terminal release and overlap protection. Additional invariants prohibit FILLED from releasing unconsumed remainder and prohibit REJECTED/PROVEN_ABSENT from erasing consumed exposure. Remaining WP-15 work: bind reservations atomically to accounting/admission transactions, provider fill quantities and fee/slippage bounds; add persistence/restart/concurrency stress and exact-head cross-platform qualification."
+      "proposed_status": "DONE",
+      "status_note": "DONE for Section 12 reservation conservation. Current main already contains the canonical Section-12 lineage (#1624/#1872) plus later #2035 ingress/replay hardening, while historical #501 and #649 close atomic risk/admission/reservation and provider-fill/accounting/reservation transaction boundaries with exact-head qualification evidence. Current source/tests cover concurrent intent double-spend prevention, partial/full fill consumption, terminalization, cancel/UNKNOWN/overlapping replacement conservation, exact retry/restart, fill corrections, FILLED/CANCELED bust restoration, hostile ingress, cross-scope replay rejection and callback-free reservation-authority lifetime cleanup. Provider/PAPER/LIVE qualification, independent production risk authority, release readiness and economic-edge evidence remain separate gates."
     },
     {
       "id": "WP-16",

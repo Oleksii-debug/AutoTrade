@@ -547,7 +547,20 @@ def load_submission_response_binding(
     elif (
         response_encoding == "hex"
         and sent.get("event_type") == "SubmissionUnknown"
+        and sent_payload.get("retry_disposition") == "RECONCILE_FIRST"
+        and type(sent_payload.get("reason")) is str
+        and bool(sent_payload["reason"])
     ):
+        # Fence attacker/corruption-controlled journal text before bytes.fromhex
+        # can allocate the decoded opaque response. The canonical lowercase
+        # round-trip below rejects whitespace and alternate hex spellings.
+        if (
+            len(response_text) > HARD_MAX_PROVIDER_RESPONSE_BYTES * 2
+            or len(response_text) % 2
+        ):
+            raise ValueError(
+                "durable exact provider response bytes are unavailable"
+            )
         try:
             response_bytes = bytes.fromhex(response_text)
         except ValueError as error:
@@ -558,6 +571,10 @@ def load_submission_response_binding(
             raise ValueError(
                 "durable exact provider response bytes are unavailable"
             )
+        require_provider_response_bytes(
+            response_bytes,
+            max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+        )
     else:
         raise ValueError(
             "durable exact provider response bytes are unavailable"
@@ -630,6 +647,9 @@ def _install_submission_response_binding_authority(loader):
     attempt_id_code = canonical_attempt_id.__code__
     canonical_decode = _decode_exact_json_bytes
     decode_code = canonical_decode.__code__
+    canonical_require_response_bytes = require_provider_response_bytes
+    require_response_bytes_code = canonical_require_response_bytes.__code__
+    canonical_hard_response_bytes = HARD_MAX_PROVIDER_RESPONSE_BYTES
     canonical_freeze = _freeze_json
     freeze_code = canonical_freeze.__code__
     canonical_instant = _instant
@@ -722,6 +742,10 @@ def _install_submission_response_binding_authority(loader):
             or _decode_exact_json_bytes is not canonical_decode
             or canonical_getattr(canonical_decode, "__code__", None)
             is not decode_code
+            or require_provider_response_bytes is not canonical_require_response_bytes
+            or canonical_getattr(canonical_require_response_bytes, "__code__", None)
+            is not require_response_bytes_code
+            or HARD_MAX_PROVIDER_RESPONSE_BYTES != canonical_hard_response_bytes
             or _freeze_json is not canonical_freeze
             or canonical_getattr(canonical_freeze, "__code__", None)
             is not freeze_code

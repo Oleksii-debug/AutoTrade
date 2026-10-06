@@ -25,6 +25,11 @@ from .store_identity import (
     JournalStoreIdentity,
     require_exact_journal_store_identity,
 )
+from .recovery_clock_incident import (
+    append_clock_trust_transition,
+    clock_incident_generation as durable_clock_incident_generation,
+    clock_trusted_after_replay,
+)
 from .reconciliation_journal import load_reconciliation_checkpoint_for_readiness
 
 
@@ -179,7 +184,14 @@ class RecoveryController:
             tuple[str, str, str, str, str],
         ] = {}
         self.storage_writable = True
-        self.clock_trusted = True
+        self.clock_trusted = (
+            True
+            if owner_store is None
+            else clock_trusted_after_replay(
+                owner_store,
+                owner_scope=self._owner_scope,
+            )
+        )
         self.provider_reconciled = False
 
     @staticmethod
@@ -230,6 +242,17 @@ class RecoveryController:
             return None
         self._journal_store_authority()
         return Path(self._selected_journal_identity().canonical_path)
+
+    @property
+    def clock_incident_generation(self) -> int:
+        """Return the durable clock invalidation generation, not UTC authority."""
+
+        if self._owner_store is None:
+            return 0
+        return durable_clock_incident_generation(
+            self._journal_store_authority(),
+            owner_scope=self._owner_scope,
+        )
 
     def durable_owner_chain(self) -> tuple[OwnerFence, ...]:
         """Read and validate the complete monotonic sender-fence chain.

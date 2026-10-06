@@ -56,6 +56,7 @@ DEPTH_EVIDENCE = {
     "sha256": "sha256:" + "b" * 64,
     "observed_at": "2026-09-24T20:00:00.100000Z",
 }
+BINANCE_SPOT_TEST_ADAPTER_VERSION = "autotrade.binance-spot-test@1"
 
 
 def depth_registry():
@@ -99,6 +100,7 @@ def depth_raw(
         provider_id="BINANCE",
         venue_id="SPOT",
         provider_symbol="BTCUSDT",
+        adapter_version=BINANCE_SPOT_TEST_ADAPTER_VERSION,
         kind=kind,
         source_event_at=NOW,
         available_at=NOW + timedelta(milliseconds=available_ms),
@@ -796,6 +798,7 @@ class BinanceSpotDepthContinuityTests(unittest.TestCase):
                 provider_id="BINANCE",
                 venue_id="SPOT",
                 provider_symbol="BTCUSDT",
+                adapter_version=BINANCE_SPOT_TEST_ADAPTER_VERSION,
                 kind="BOOK_DELTA",
                 source_event_at=NOW,
                 available_at=NOW + timedelta(milliseconds=300),

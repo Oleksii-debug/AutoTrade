@@ -34,6 +34,13 @@ class VerticalSliceTests(unittest.TestCase):
                 checkpoint["financial_configuration_hash"],
             )
 
+            evidence_path = Path(directory) / "learning-evidence.jsonl"
+            evidence_before = evidence_path.read_bytes()
+            self.assertEqual(
+                json.loads(evidence_before)["risk_outcome"],
+                "admitted",
+            )
+
             restarted = run_vertical_slice([100, 101, 102, 103], directory)
             self.assertTrue(restarted.resumed)
             self.assertEqual(restarted.order_id, first.order_id)
@@ -41,7 +48,8 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertEqual(restarted.position, 1)
             self.assertEqual(restarted.cash, first.cash)
             self.assertEqual(restarted.evidence_count, 1)
-            evidence_lines = (Path(directory) / "learning-evidence.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(evidence_path.read_bytes(), evidence_before)
+            evidence_lines = evidence_path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(evidence_lines), 1)
             self.assertTrue(json.loads(evidence_lines[0])["reconciled"])
 

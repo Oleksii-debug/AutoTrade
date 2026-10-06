@@ -337,6 +337,28 @@ def workflow_restored_rights_projects(
     return projects, invalid_lines
 
 
+def _workflow_job_name(lines: list[str], line_number: int) -> str | None:
+    """Return the enclosing top-level GitHub Actions job for one 1-based line."""
+
+    if type(line_number) is not int or not 1 <= line_number <= len(lines):
+        raise ValueError("workflow line_number is outside the document")
+    for index in range(line_number - 1, -1, -1):
+        raw = lines[index]
+        if not raw.strip():
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        stripped = raw.strip()
+        if indent == 0 and stripped == "jobs:":
+            return None
+        if (
+            indent == 2
+            and stripped.endswith(":")
+            and not stripped.startswith("- ")
+        ):
+            return stripped[:-1]
+    return None
+
+
 def _workflow_rights_blockers(
     root: Path,
     package_projects: list[Path],
@@ -427,13 +449,21 @@ def _workflow_rights_blockers(
                 f"DOTNET_PACKAGE_RIGHTS_VERIFY_ORDER_INVALID:{relative}"
             )
             continue
-        if restore_lines[0] >= verify_lines[0]:
+        restore_job = _workflow_job_name(workflow_lines, restore_lines[0])
+        verify_job = _workflow_job_name(workflow_lines, verify_lines[0])
+        if (
+            restore_job is None
+            or verify_job is None
+            or restore_job != verify_job
+            or restore_lines[0] >= verify_lines[0]
+        ):
             blockers.append(
                 f"DOTNET_PACKAGE_RIGHTS_VERIFY_ORDER_INVALID:{relative}"
             )
             continue
         later_restore = any(
             index > verify_lines[0]
+            and _workflow_job_name(workflow_lines, index) == verify_job
             and raw.strip().removeprefix("- ").strip()
             == f"run: {restore_command}"
             for index, raw in enumerate(workflow_lines, start=1)

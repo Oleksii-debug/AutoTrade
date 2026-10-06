@@ -324,6 +324,49 @@ class ReconciliationTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "unexpected state fields"):
             self.base(provider_fills=[injected])
 
+    def test_provider_environment_snapshot_normalization_fails_closed(self):
+        mutated_fill = fill()
+        object.__setattr__(mutated_fill, "provider_environment", "paper")
+        with self.assertRaisesRegex(
+            ValueError,
+            "provider fill evidence changed from canonical normalized state",
+        ):
+            self.base(provider_fills=[mutated_fill])
+
+        mutated_order = ProviderWorkingOrderEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            provider_order_id="provider-working-scope",
+            client_order_id="client-working-scope",
+            instrument="ABC",
+            remaining_quantity="1",
+        )
+        object.__setattr__(mutated_order, "provider_environment", "paper")
+        with self.assertRaisesRegex(
+            ValueError,
+            "provider working-order evidence changed from canonical normalized state",
+        ):
+            self.base(provider_working_orders=[mutated_order])
+
+        mutated_activity = ProviderActivityEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            activity_id="activity-scope",
+            activity_type="DEPOSIT",
+            origin="EXTERNAL",
+            occurred_at="2026-09-24T18:00:00Z",
+            currency="USD",
+            signed_amount="1",
+        )
+        object.__setattr__(mutated_activity, "provider_environment", "paper")
+        with self.assertRaisesRegex(
+            ValueError,
+            "provider activity evidence changed from canonical normalized state",
+        ):
+            self.base(provider_activities=[mutated_activity])
+
     def test_incomplete_provider_fill_cannot_match_complete_or_resolve_unknown(self):
         unknown = UnknownSubmission.create(
             attempt_id="a-diagnostic-fill",

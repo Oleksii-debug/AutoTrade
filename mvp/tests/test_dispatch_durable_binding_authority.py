@@ -1561,6 +1561,165 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 ["SubmissionPrepared"],
             )
 
+    def test_post_guard_store_retarget_terminalizes_unknown_on_original_journal(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            other_store = JournalStore(f"{directory}/other.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            wire_calls = 0
+
+            def transport(_client_order_id, _request, guard):
+                nonlocal wire_calls
+                guard()
+                wire_calls += 1
+                dispatcher.store = other_store
+                dispatcher._journal_store_path = other_store.path
+                dispatcher._journal_store_identity = other_store.store_identity
+                return ExactJsonTransportResponse(b'{"accepted":true}')
+
+            result = dispatcher.dispatch(
+                attempt_id="post-guard-store-retarget-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda *_args: (True, "allowed"),
+                transport_send=transport,
+                submission_scope={"endpoint": "/orders"},
+            )
+
+            self.assertEqual(wire_calls, 1)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(
+                result.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            self.assertIs(dispatcher.store, store)
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("post-guard-store-retarget-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            self.assertEqual(
+                JournalStore.load_events(
+                    other_store,
+                    "submission_attempt",
+                    dispatcher._aggregate_id("post-guard-store-retarget-a1"),
+                ),
+                [],
+            )
+
+            redispatch_wire_calls = 0
+
+            def must_not_resend(*_args):
+                nonlocal redispatch_wire_calls
+                redispatch_wire_calls += 1
+                raise AssertionError("durable UNKNOWN must not resend")
+
+            recovered = dispatcher.dispatch(
+                attempt_id="post-guard-store-retarget-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:01Z",
+                authority_check=lambda *_args: (
+                    (_ for _ in ()).throw(
+                        AssertionError("durable UNKNOWN must not rerun authority")
+                    )
+                ),
+                transport_send=must_not_resend,
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(redispatch_wire_calls, 0)
+            self.assertEqual(recovered.status, "UNKNOWN")
+            self.assertEqual(
+                recovered.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+
+    def test_post_guard_store_retarget_then_transport_error_stays_on_original_journal(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            other_store = JournalStore(f"{directory}/other.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            wire_calls = 0
+
+            def transport(_client_order_id, _request, guard):
+                nonlocal wire_calls
+                guard()
+                wire_calls += 1
+                dispatcher.store = other_store
+                dispatcher._journal_store_path = other_store.path
+                dispatcher._journal_store_identity = other_store.store_identity
+                raise RuntimeError("transport failed after retarget")
+
+            result = dispatcher.dispatch(
+                attempt_id="post-guard-store-error-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda *_args: (True, "allowed"),
+                transport_send=transport,
+                submission_scope={"endpoint": "/orders"},
+            )
+
+            self.assertEqual(wire_calls, 1)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(
+                result.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            self.assertIs(dispatcher.store, store)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        store,
+                        "submission_attempt",
+                        dispatcher._aggregate_id("post-guard-store-error-a1"),
+                    )
+                ],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                JournalStore.load_events(
+                    other_store,
+                    "submission_attempt",
+                    dispatcher._aggregate_id("post-guard-store-error-a1"),
+                ),
+                [],
+            )
+
     def test_terminal_reread_rejects_post_append_tamper(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

@@ -258,6 +258,15 @@ def _restore_checkpoint_fill(
         raise ValueError(
             "Corrupt checkpoint fill: map key does not match client_order_id"
         )
+    intent_suffix = client_order_id.removeprefix("intent-")
+    if (
+        len(intent_suffix) != 20
+        or client_order_id != "intent-" + intent_suffix
+        or any(character not in "0123456789abcdef" for character in intent_suffix)
+    ):
+        raise ValueError(
+            "Corrupt checkpoint fill: client_order_id is not canonical simulated identity"
+        )
     if symbol != expected_symbol:
         raise ValueError("Corrupt checkpoint fill: symbol does not match run scope")
     if side not in {"BUY", "SELL"}:
@@ -520,6 +529,29 @@ def _persist_intent(path: Path, intent: OrderIntent) -> None:
     _atomic_json(path, payload)
 
 
+def _require_restored_fill_intent(root: Path, fill: Fill) -> None:
+    """Cross-bind a recovered fill to the durable pre-execution intent."""
+
+    intent_path = root / "order-intents" / f"{fill.client_order_id}.json"
+    try:
+        persisted = json.loads(intent_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(
+            "Corrupt checkpoint fill: durable order intent is unavailable"
+        ) from error
+    expected = {
+        "client_order_id": fill.client_order_id,
+        "symbol": fill.symbol,
+        "side": fill.side,
+        "quantity": str(fill.quantity),
+        "price": str(fill.price),
+    }
+    if type(persisted) is not dict or persisted != expected:
+        raise ValueError(
+            "Corrupt checkpoint fill: durable order intent does not match fill"
+        )
+
+
 def _reconcile(provider: SimulatedProvider, ledger: EconomicLedger) -> bool:
     postings = {row["fill_id"]: row for row in ledger.postings}
     if len(postings) != len(ledger.postings) or len(postings) != len(provider.fills):
@@ -631,6 +663,8 @@ def run_vertical_slice(
         )
         for key, value in dict.items(fills)
     }
+    for restored_fill in restored_fills.values():
+        _require_restored_fill_intent(root, restored_fill)
     provider = SimulatedProvider(restored_fills)
     _reconcile(provider, ledger)
     normalized = handle_market_data(prices)

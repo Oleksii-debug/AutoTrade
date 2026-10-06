@@ -198,5 +198,121 @@ class ExactResponseSnapshotCurrentTests(unittest.TestCase):
             ExactJsonTransportResponse(b"\xff\x00not-json")
 
 
+    def test_post_send_response_type_rebind_unknown_replays_without_resend(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        callbacks = 0
+
+        class HostileMeta(type):
+            def __instancecheck__(cls, _instance):
+                nonlocal callbacks
+                callbacks += 1
+                raise AssertionError(
+                    "rebound response class __instancecheck__ executed"
+                )
+
+        class HostileResponse(metaclass=HostileMeta):
+            pass
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            response = ExactJsonTransportResponse(
+                b'{"accepted":true}',
+                http_status=200,
+            )
+            original_response_type = dispatch_module.ExactJsonTransportResponse
+            outbound = 0
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                dispatch_module.ExactJsonTransportResponse = HostileResponse
+                return response
+
+            try:
+                first = dispatcher.dispatch(
+                    attempt_id="snapshot-type-rebind-a1",
+                    intent_id="intent-type-rebind",
+                    intent_hash="sha256:" + "3" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T17:22:00Z",
+                    authority_check=self._allow,
+                    transport_send=transport,
+                    submission_scope={"endpoint": "/orders"},
+                )
+            finally:
+                dispatch_module.ExactJsonTransportResponse = original_response_type
+
+            self.assertEqual(callbacks, 0)
+            self.assertEqual(outbound, 1)
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(first.reason, "sent_response_persistence_failed")
+
+            events = JournalStore.load_events(
+                JournalStore(path),
+                "submission_attempt",
+                dispatcher._aggregate_id("snapshot-type-rebind-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:ValueError",
+            )
+
+            restarted = GuardedDispatcher(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner-b",
+            )
+            replay = restarted.dispatch(
+                attempt_id="snapshot-type-rebind-a1",
+                intent_id="intent-type-rebind",
+                intent_hash="sha256:" + "3" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T17:22:01Z",
+                authority_check=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("terminal replay must not re-authorize")),
+                transport_send=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("terminal replay must not resend")),
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(replay.status, "UNKNOWN")
+            self.assertEqual(
+                replay.reason,
+                "sent_response_persistence_failed:ValueError",
+            )
+            self.assertEqual(callbacks, 0)
+            self.assertEqual(outbound, 1)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        JournalStore(path),
+                        "submission_attempt",
+                        restarted._aggregate_id("snapshot-type-rebind-a1"),
+                    )
+                ],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

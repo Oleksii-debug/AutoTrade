@@ -543,6 +543,20 @@ BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS: Mapping[
 )
 
 
+IBKR_WEB_AUTHENTICATED_READ_ENDPOINTS: Mapping[
+    str, AuthenticatedReadEndpointRule
+] = MappingProxyType(
+    {
+        "/iserver/accounts": AuthenticatedReadEndpointRule(
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="ORDER.READ",
+            data_entitlement="ACCOUNT",
+            success_statuses=frozenset({200}),
+        ),
+    }
+)
+
+
 _BYBIT_OPTION_DELIVERY_ENDPOINT = "/v5/asset/delivery-record"
 _BYBIT_OPTION_DELIVERY_QUERY_FIELDS = frozenset(
     {"category", "symbol", "startTime", "endTime", "expDate", "limit", "cursor"}

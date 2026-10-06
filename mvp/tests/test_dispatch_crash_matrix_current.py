@@ -4,6 +4,7 @@ import unittest
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
+    load_submission_response_binding,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 
@@ -903,6 +904,108 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
                     "SubmissionPrepared",
                     "SubmissionSending",
                     "SubmissionSent",
+                ],
+            )
+
+
+    def test_opaque_reconciliation_response_survives_restart_without_resend(self):
+        with TemporaryDirectory() as directory:
+            path = self._path(directory)
+            dispatcher = self._dispatcher(path)
+            outbound = 0
+            response_bytes = b"\xff\x00provider-ambiguous"
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return ExactJsonTransportResponse(
+                    response_bytes,
+                    http_status=503,
+                    requires_reconciliation=True,
+                    ambiguity_reason="provider_execution_unknown",
+                )
+
+            first = self._dispatch(
+                dispatcher,
+                attempt_id="opaque-reconcile-restart",
+                now="2026-10-06T16:50:00Z",
+                transport=transport,
+            )
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(first.reason, "provider_execution_unknown")
+            self.assertEqual(outbound, 1)
+
+            events = self._events(
+                path,
+                dispatcher,
+                "opaque-reconcile-restart",
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            terminal = events[-1]["payload"]
+            self.assertEqual(terminal["response_encoding"], "hex")
+            self.assertEqual(terminal["response_text"], response_bytes.hex())
+            self.assertEqual(
+                terminal["retry_disposition"],
+                "RECONCILE_FIRST",
+            )
+            self.assertEqual(
+                terminal["reason"],
+                "provider_execution_unknown",
+            )
+
+            binding = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="opaque-reconcile-restart",
+            )
+            self.assertEqual(binding.response_bytes, response_bytes)
+            self.assertEqual(binding.response_encoding, "hex")
+            self.assertEqual(binding.terminal_state, "UNKNOWN")
+            self.assertEqual(
+                binding.retry_disposition,
+                "RECONCILE_FIRST",
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "opaque provider response has no JSON payload",
+            ):
+                _ = binding.payload
+
+            restarted = self._dispatcher(path, owner_token="owner-b")
+            replay = self._dispatch(
+                restarted,
+                attempt_id="opaque-reconcile-restart",
+                now="2026-10-06T16:50:01Z",
+                transport=self._forbidden_transport,
+                authority_check=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not re-authorize")),
+                final_barrier_clock=lambda: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not call barrier clock")),
+            )
+            self.assertEqual(replay.status, "UNKNOWN")
+            self.assertEqual(replay.reason, "provider_execution_unknown")
+            self.assertEqual(outbound, 1)
+            self.assertEqual(
+                self._event_types(
+                    path,
+                    restarted,
+                    "opaque-reconcile-restart",
+                ),
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
                 ],
             )
 

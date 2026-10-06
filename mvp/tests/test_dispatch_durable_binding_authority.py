@@ -1850,6 +1850,50 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 ["SubmissionPrepared", "SubmissionSending"],
             )
 
+            recovery_wire_calls = 0
+
+            def must_not_resend(*_args):
+                nonlocal recovery_wire_calls
+                recovery_wire_calls += 1
+                raise AssertionError(
+                    "post-guard class rebind must recover without resend"
+                )
+
+            recovered = dispatcher.dispatch(
+                attempt_id="post-guard-class-rebind-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:01Z",
+                authority_check=lambda *_args: (
+                    (_ for _ in ()).throw(
+                        AssertionError("Sending recovery must not rerun authority")
+                    )
+                ),
+                transport_send=must_not_resend,
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(recovery_wire_calls, 0)
+            self.assertEqual(recovered.status, "UNKNOWN")
+            self.assertEqual(
+                recovered.reason,
+                "recovered_after_send_barrier_without_terminal_result",
+            )
+            recovered_events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("post-guard-class-rebind-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in recovered_events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+
     def test_terminal_reread_rejects_post_append_tamper(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

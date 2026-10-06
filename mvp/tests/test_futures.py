@@ -1,10 +1,10 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 from fractions import Fraction
 import unittest
 
 from mvp.autotrade_mvp.accounting import EconomicBook
-from mvp.autotrade_mvp.instruments import InstrumentVersion
+from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.settlement_convention import SettlementConvention
 from mvp.autotrade_mvp.futures import (
     FuturesContract,
@@ -35,6 +35,33 @@ def utc(day: int, hour: int = 0):
 
 
 class FuturesLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self._lifecycle_registries = {}
+
+    def _contract_from_selected_version(self, version):
+        registry = InstrumentRegistry(versions=(version,))
+        selected = InstrumentRegistry.exact(
+            registry,
+            f"{version.instrument_id}@{version.version}",
+        )
+        contract = FuturesContract.from_instrument_version(selected)
+        self._lifecycle_registries[id(contract)] = registry
+        return contract
+
+    def _lifecycle_state(self, contract, at):
+        return lifecycle_gate(
+            contract,
+            at,
+            instrument_registry=self._lifecycle_registries.get(id(contract)),
+        )
+
+    def _require_lifecycle_open(self, contract, at):
+        return require_open_for_new_exposure(
+            contract,
+            at,
+            instrument_registry=self._lifecycle_registries.get(id(contract)),
+        )
+
     def _instrument_version(
         self,
         *,
@@ -88,12 +115,12 @@ class FuturesLifecycleTests(unittest.TestCase):
         )
 
     def _linear_contract(self, settlement_method="CASH"):
-        return FuturesContract.from_instrument_version(
+        return self._contract_from_selected_version(
             self._instrument_version(settlement_method=settlement_method)
         )
 
     def _inverse_contract(self):
-        return FuturesContract.from_instrument_version(
+        return self._contract_from_selected_version(
             self._instrument_version(payoff="INVERSE")
         )
 
@@ -694,23 +721,59 @@ class FuturesLifecycleTests(unittest.TestCase):
         self.assertEqual(first.cause_event_id, retry.cause_event_id)
         self.assertIn("sha256:", first.transaction_id)
 
-    def test_physical_delivery_is_fail_closed_without_explicit_authority(self):
-        contract = self._linear_contract(settlement_method="PHYSICAL")
-        self.assertEqual(lifecycle_gate(contract, utc(29, 11)), "OPEN")
-        self.assertEqual(lifecycle_gate(contract, utc(29, 12)), "DELIVERY_BLOCKED")
-        with self.assertRaises(FuturesError):
-            require_open_for_new_exposure(contract, utc(29, 12))
-        self.assertEqual(
-            lifecycle_gate(contract, utc(29, 12), physical_delivery_authorized=True),
-            "OPEN",
+    def test_lifecycle_gate_rejects_unbound_self_authored_contract(self):
+        unbound = FuturesContract(
+            instrument="caller-authored-future",
+            payoff="LINEAR",
+            multiplier=Decimal("10"),
+            quote_currency="USD",
+            settlement_currency="USD",
+            last_trade_at=utc(30, 20),
+            delivery_cutoff=utc(29, 12),
+            expiry=utc(30, 21),
+            settlement_method="CASH",
         )
+        with self.assertRaisesRegex(
+            FuturesError,
+            "requires exact canonical InstrumentVersion",
+        ):
+            lifecycle_gate(unbound, utc(29, 11))
+        with self.assertRaisesRegex(
+            FuturesError,
+            "requires exact canonical InstrumentVersion",
+        ):
+            require_open_for_new_exposure(unbound, utc(29, 11))
+
+    def test_caller_cannot_remove_canonical_instrument_after_construction(self):
+        contract = self._linear_contract(settlement_method="PHYSICAL")
+        object.__setattr__(contract, "canonical_instrument", None)
+        with self.assertRaisesRegex(
+            FuturesError,
+            "requires exact canonical InstrumentVersion",
+        ):
+            self._lifecycle_state(contract, utc(29, 11))
+        with self.assertRaisesRegex(
+            FuturesError,
+            "requires exact canonical InstrumentVersion",
+        ):
+            self._require_lifecycle_open(contract, utc(29, 11))
+
+    def test_physical_delivery_cutoff_is_hard_fail_closed_boundary(self):
+        contract = self._linear_contract(settlement_method="PHYSICAL")
+        self.assertEqual(self._lifecycle_state(contract, utc(29, 11)), "OPEN")
+        self.assertEqual(
+            self._lifecycle_state(contract, utc(29, 12)),
+            "DELIVERY_BLOCKED",
+        )
+        with self.assertRaisesRegex(FuturesError, "DELIVERY_BLOCKED"):
+            self._require_lifecycle_open(contract, utc(29, 12))
 
     def test_last_trade_and_expiry_are_hard_gates(self):
         contract = self._linear_contract()
-        self.assertEqual(lifecycle_gate(contract, utc(30, 20)), "TRADING_ENDED")
-        self.assertEqual(lifecycle_gate(contract, utc(30, 21)), "EXPIRED")
+        self.assertEqual(self._lifecycle_state(contract, utc(30, 20)), "TRADING_ENDED")
+        self.assertEqual(self._lifecycle_state(contract, utc(30, 21)), "EXPIRED")
         with self.assertRaises(FuturesError):
-            require_open_for_new_exposure(contract, utc(30, 20))
+            self._require_lifecycle_open(contract, utc(30, 20))
 
     def test_float_inputs_are_rejected(self):
         with self.assertRaises(FuturesError):
@@ -721,18 +784,220 @@ class FuturesLifecycleTests(unittest.TestCase):
                 exit_price=101,
             )
 
-    def test_physical_delivery_authority_is_strict_boolean(self):
+    def test_caller_cannot_supply_legacy_boolean_delivery_bypass(self):
         contract = self._linear_contract(settlement_method="PHYSICAL")
-        for unsafe in (1, "yes", object()):
-            with self.subTest(unsafe=unsafe):
-                with self.assertRaisesRegex(
-                    FuturesError, "physical_delivery_authorized must be boolean"
-                ):
-                    lifecycle_gate(
-                        contract,
-                        utc(29, 12),
-                        physical_delivery_authorized=unsafe,
-                    )
+        with self.assertRaises(TypeError):
+            lifecycle_gate(
+                contract,
+                utc(29, 12),
+                physical_delivery_authorized=True,
+            )
+        with self.assertRaises(TypeError):
+            require_open_for_new_exposure(
+                contract,
+                utc(29, 12),
+                physical_delivery_authorized=True,
+            )
+
+    def test_lifecycle_gate_rejects_contract_subclasses_before_field_access(self):
+        class HostileContract(FuturesContract):
+            def __getattribute__(self, name):
+                raise AssertionError("hostile contract attribute access executed")
+
+        hostile = object.__new__(HostileContract)
+        with self.assertRaisesRegex(FuturesError, "exact FuturesContract"):
+            lifecycle_gate(hostile, utc(29, 12))
+
+    def test_nested_hostile_timezone_is_rejected_without_callback_dispatch(self):
+        calls = []
+
+        class HostileTimezone(tzinfo):
+            def utcoffset(self, _dt):
+                calls.append("utcoffset")
+                raise AssertionError("hostile timezone callback executed")
+
+            def dst(self, _dt):
+                calls.append("dst")
+                raise AssertionError("hostile timezone callback executed")
+
+            def tzname(self, _dt):
+                calls.append("tzname")
+                raise AssertionError("hostile timezone callback executed")
+
+        contract = self._linear_contract(settlement_method="PHYSICAL")
+        hostile_expiry = datetime(2026, 9, 30, 21, tzinfo=HostileTimezone())
+        object.__setattr__(contract, "expiry", hostile_expiry)
+
+        with self.assertRaisesRegex(FuturesError, "exact UTC datetime"):
+            self._lifecycle_state(contract, utc(29, 11))
+        self.assertEqual(calls, [])
+
+    def test_nested_hostile_timezone_on_bound_version_is_rejected_without_callback_dispatch(self):
+        calls = []
+
+        class HostileTimezone(tzinfo):
+            def utcoffset(self, _dt):
+                calls.append("utcoffset")
+                raise AssertionError("hostile timezone callback executed")
+
+            def dst(self, _dt):
+                calls.append("dst")
+                raise AssertionError("hostile timezone callback executed")
+
+            def tzname(self, _dt):
+                calls.append("tzname")
+                raise AssertionError("hostile timezone callback executed")
+
+        contract = self._linear_contract(settlement_method="PHYSICAL")
+        version = contract.canonical_instrument
+        self.assertIsNotNone(version)
+        hostile_expiry = datetime(2026, 9, 30, 21, tzinfo=HostileTimezone())
+        object.__setattr__(version, "expiry", hostile_expiry)
+
+        with self.assertRaisesRegex(FuturesError, "exact UTC types"):
+            self._lifecycle_state(contract, utc(29, 11))
+        self.assertEqual(calls, [])
+
+    def test_post_construction_contract_mutation_cannot_reopen_physical_delivery(self):
+        contract = self._linear_contract(settlement_method="PHYSICAL")
+        object.__setattr__(contract, "settlement_method", "CASH")
+        with self.assertRaisesRegex(
+            FuturesError, "no longer matches canonical InstrumentVersion"
+        ):
+            self._lifecycle_state(contract, utc(29, 12))
+        with self.assertRaisesRegex(
+            FuturesError, "no longer matches canonical InstrumentVersion"
+        ):
+            self._require_lifecycle_open(contract, utc(29, 12))
+
+    def test_post_construction_instrument_mutation_cannot_reopen_physical_delivery(self):
+        contract = self._linear_contract(settlement_method="PHYSICAL")
+        self.assertIsNotNone(contract.canonical_instrument)
+        object.__setattr__(
+            contract.canonical_instrument,
+            "settlement_method",
+            "CASH",
+        )
+        with self.assertRaisesRegex(
+            FuturesError, "no longer matches canonical InstrumentVersion"
+        ):
+            self._lifecycle_state(contract, utc(29, 12))
+
+    def test_coordinated_contract_and_instrument_mutation_cannot_reopen_delivery(self):
+        contract = self._linear_contract(settlement_method="PHYSICAL")
+        version = contract.canonical_instrument
+        self.assertIsNotNone(version)
+
+        object.__setattr__(contract, "settlement_method", "CASH")
+        object.__setattr__(version, "settlement_method", "CASH")
+        object.__setattr__(
+            contract,
+            "_lifecycle_authority_snapshot",
+            (
+                contract.instrument,
+                contract.settlement_method,
+                contract.expiry,
+                contract.last_trade_at,
+                contract.delivery_cutoff,
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            FuturesError, "no longer matches construction authority"
+        ):
+            self._lifecycle_state(contract, utc(29, 12))
+        with self.assertRaisesRegex(
+            FuturesError, "no longer matches construction authority"
+        ):
+            self._require_lifecycle_open(contract, utc(29, 12))
+
+    def test_standalone_contract_cannot_establish_lifecycle_authority(self):
+        source = self._linear_contract(settlement_method="PHYSICAL")
+        contract = FuturesContract(
+            instrument=source.instrument,
+            payoff=source.payoff,
+            multiplier=source.multiplier,
+            quote_currency=source.quote_currency,
+            settlement_currency=source.settlement_currency,
+            last_trade_at=source.last_trade_at,
+            delivery_cutoff=source.delivery_cutoff,
+            expiry=source.expiry,
+            settlement_method=source.settlement_method,
+            price_base_currency=source.price_base_currency,
+        )
+
+        with self.assertRaisesRegex(
+            FuturesError, "requires exact canonical InstrumentVersion"
+        ):
+            self._lifecycle_state(contract, utc(29, 12))
+
+        object.__setattr__(contract, "settlement_method", "CASH")
+        object.__setattr__(
+            contract,
+            "_lifecycle_authority_snapshot",
+            (
+                contract.instrument,
+                contract.settlement_method,
+                contract.expiry,
+                contract.last_trade_at,
+                contract.delivery_cutoff,
+            ),
+        )
+        with self.assertRaisesRegex(
+            FuturesError, "requires exact canonical InstrumentVersion"
+        ):
+            self._lifecycle_state(contract, utc(29, 12))
+
+    def test_forged_exact_contract_cannot_self_establish_lifecycle_authority(self):
+        forged = object.__new__(FuturesContract)
+        object.__setattr__(forged, "instrument", "forged")
+        object.__setattr__(forged, "settlement_method", "CASH")
+        object.__setattr__(forged, "expiry", utc(30, 21))
+        object.__setattr__(forged, "last_trade_at", utc(30, 20))
+        object.__setattr__(forged, "delivery_cutoff", utc(29, 12))
+        object.__setattr__(forged, "canonical_instrument", None)
+        object.__setattr__(
+            forged,
+            "_lifecycle_authority_snapshot",
+            (
+                forged.instrument,
+                forged.settlement_method,
+                forged.expiry,
+                forged.last_trade_at,
+                forged.delivery_cutoff,
+            ),
+        )
+        with self.assertRaisesRegex(
+            FuturesError, "requires exact canonical InstrumentVersion"
+        ):
+            lifecycle_gate(forged, utc(29, 12))
+
+    def test_manual_init_cannot_mint_forged_lifecycle_authority(self):
+        source = self._linear_contract(settlement_method="PHYSICAL")
+        forged = object.__new__(FuturesContract)
+        FuturesContract.__init__(
+            forged,
+            instrument=source.instrument,
+            payoff=source.payoff,
+            multiplier=source.multiplier,
+            quote_currency=source.quote_currency,
+            settlement_currency=source.settlement_currency,
+            last_trade_at=source.last_trade_at,
+            delivery_cutoff=source.delivery_cutoff,
+            expiry=source.expiry,
+            settlement_method=source.settlement_method,
+            price_base_currency=source.price_base_currency,
+            canonical_instrument=source.canonical_instrument,
+        )
+
+        with self.assertRaisesRegex(
+            FuturesError, "lifecycle authority is not established"
+        ):
+            lifecycle_gate(forged, utc(29, 12))
+        with self.assertRaisesRegex(
+            FuturesError, "lifecycle authority is not established"
+        ):
+            require_open_for_new_exposure(forged, utc(29, 12))
 
     def test_physical_delivery_cutoff_cannot_follow_last_trade(self):
         with self.assertRaisesRegex(

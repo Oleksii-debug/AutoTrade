@@ -7,7 +7,9 @@ It is a development fallback surface, not NVDA release qualification.
 
 from __future__ import annotations
 
+import math
 from typing import Any
+import unicodedata
 
 
 STATE_TEXT = {
@@ -31,13 +33,16 @@ def _plain_text(value: Any, default: str = "Unavailable") -> str:
     """
 
     if type(value) is str:
-        if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        if not value or any(
+            unicodedata.category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+            for char in value
+        ):
             return default
         return value
     if type(value) is int:
         return str(value)
     if type(value) is float:
-        return str(value)
+        return str(value) if math.isfinite(value) else default
     if type(value) is bool:
         return "true" if value else "false"
     return default

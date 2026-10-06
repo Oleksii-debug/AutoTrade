@@ -32,6 +32,11 @@ from autotrade_runtime.artifacts import ArtifactIntegrityError, ArtifactStore
 from .durable_capabilities import DurableCapabilityRegistry
 from .durable_provider_qualification import DurableProviderQualificationRegistry
 from .persistence import JournalStore, payload_digest
+from .provider_account_acquisition import (
+    DurableProviderAccountAcquisitionAuthority,
+    ProviderAccountAcquisitionError,
+    SerializedProviderAccountAcquisition,
+)
 from .provider_route_reads import (
     ProviderRouteReadError,
     QualifiedProviderReadQueryBinding,
@@ -70,6 +75,10 @@ _OBSERVATION_TOKEN = object()
 _AGGREGATE_TYPE = "qualified_authenticated_provider_read"
 _WIRE_EXECUTION_AGGREGATE_TYPE = "qualified_authenticated_provider_wire_execution"
 _WIRE_EXECUTION_EVENT = "AuthenticatedReadWireExecutionClaimed"
+_ACCOUNT_ACQUISITION_BINDING_AGGREGATE_TYPE = (
+    "provider_origin_account_acquisition_binding"
+)
+_ACCOUNT_ACQUISITION_BINDING_EVENT = "ProviderOriginAccountAcquisitionBound.v1"
 _PREPARED_EVENT = "AuthenticatedReadPrepared"
 _RETAINED_EVENT = "AuthenticatedReadRetained"
 _OBSERVED_EVENT = "AuthenticatedReadObserved"
@@ -79,6 +88,12 @@ _TEST_EXECUTION_CLASS = "TEST_INJECTED"
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _QID_RE = re.compile(r"^provider-qualification:sha256:[0-9a-f]{64}$")
 _ORIGIN_REF_RE = re.compile(r"^provider-origin:sha256:[0-9a-f]{64}$")
+_ACCOUNT_ACQUISITION_ID_RE = re.compile(
+    r"^provider-account-acquisition:sha256:[0-9a-f]{64}$"
+)
+_PROVIDER_SCOPE_DIGEST_RE = re.compile(
+    r"^provider-financial-scope:sha256:[0-9a-f]{64}$"
+)
 
 _EVENT_KEYS = frozenset(
     {
@@ -99,6 +114,15 @@ _PREPARED_PAYLOAD_KEYS = frozenset(
         "qualified_query",
         "transport_identity",
         "network_policy_identity",
+    }
+)
+_ACCOUNT_ACQUISITION_BINDING_PAYLOAD_KEYS = frozenset(
+    {
+        "schema_version",
+        "attempt_id",
+        "qualified_query_digest",
+        "qualification_id",
+        "account_acquisition",
     }
 )
 _RETAINED_PAYLOAD_KEYS = frozenset(
@@ -268,6 +292,280 @@ def _qualified_query_snapshot(
         raise ProviderOriginError("qualified provider-read authority cut is invalid")
     _parse_utc_text(material["base_query"]["prepared_at"], name="prepared_at")
     return material
+
+
+def _account_acquisition_snapshot(
+    *,
+    authority: object | None,
+    acquisition: object | None,
+    store: JournalStore,
+    query_binding: QualifiedProviderReadQueryBinding,
+) -> dict[str, object] | None:
+    """Bind one exact current serialized account acquisition to a provider read."""
+
+    if authority is None and acquisition is None:
+        return None
+    if type(authority) is not DurableProviderAccountAcquisitionAuthority:
+        raise ProviderOriginError(
+            "account provider read requires exact DurableProviderAccountAcquisitionAuthority"
+        )
+    if type(acquisition) is not SerializedProviderAccountAcquisition:
+        raise ProviderOriginError(
+            "account provider read requires exact SerializedProviderAccountAcquisition"
+        )
+    if authority.store is not store:
+        raise ProviderOriginError(
+            "provider-origin and account acquisition must share one JournalStore instance"
+        )
+    try:
+        current = authority.require_current(acquisition)
+    except ProviderAccountAcquisitionError as error:
+        raise ProviderOriginError(
+            "provider-origin account acquisition is not exact current authority"
+        ) from error
+    base = query_binding.query_binding
+    scope = current.provider_scope
+    if (
+        current.account_id != base.account_id
+        or scope.provider_id != base.provider_id
+        or scope.runtime_environment != base.environment
+        or scope.provider_environment != query_binding.provider_environment
+    ):
+        raise ProviderOriginError(
+            "provider-origin account acquisition scope differs from qualified read"
+        )
+    return {
+        "acquisition_id": current.acquisition_id,
+        "acquisition_generation": current.acquisition_generation,
+        "acquisition_journal_sequence_cut": current.acquisition_journal_sequence_cut,
+        "issued_journal_sequence": current.issued_journal_sequence,
+        "provider_scope_digest": current.provider_scope.content_digest,
+        "account_id": current.account_id,
+    }
+
+
+def _require_account_acquisition_snapshot(
+    value: object,
+    *,
+    query_binding: QualifiedProviderReadQueryBinding,
+) -> dict[str, object] | None:
+    if value is None:
+        return None
+    if type(value) is not dict or set(value) != {
+        "acquisition_id",
+        "acquisition_generation",
+        "acquisition_journal_sequence_cut",
+        "issued_journal_sequence",
+        "provider_scope_digest",
+        "account_id",
+    }:
+        raise ProviderOriginError(
+            "durable provider-origin account acquisition binding is non-canonical"
+        )
+    acquisition_id = value["acquisition_id"]
+    scope_digest = value["provider_scope_digest"]
+    account_id = value["account_id"]
+    generation = value["acquisition_generation"]
+    cut = value["acquisition_journal_sequence_cut"]
+    issued = value["issued_journal_sequence"]
+    if (
+        type(acquisition_id) is not str
+        or _ACCOUNT_ACQUISITION_ID_RE.fullmatch(acquisition_id) is None
+        or type(scope_digest) is not str
+        or _PROVIDER_SCOPE_DIGEST_RE.fullmatch(scope_digest) is None
+        or type(account_id) is not str
+        or not account_id
+        or account_id != query_binding.query_binding.account_id
+        or type(generation) is not int
+        or generation < 1
+        or type(cut) is not int
+        or cut < 0
+        or type(issued) is not int
+        or issued != cut + 1
+    ):
+        raise ProviderOriginError(
+            "durable provider-origin account acquisition binding is invalid"
+        )
+    return dict(value)
+
+
+def _account_acquisition_binding_payload(
+    *,
+    attempt_id: str,
+    query_binding: QualifiedProviderReadQueryBinding,
+    account_acquisition: dict[str, object],
+) -> dict[str, object]:
+    attempt = _exact_text(attempt_id, name="account acquisition attempt_id")
+    snapshot = _qualified_query_snapshot(query_binding)
+    acquisition = _require_account_acquisition_snapshot(
+        account_acquisition,
+        query_binding=query_binding,
+    )
+    if acquisition is None:
+        raise ProviderOriginError(
+            "provider-origin account acquisition binding cannot be empty"
+        )
+    return {
+        "schema_version": "1.0.0",
+        "attempt_id": attempt,
+        "qualified_query_digest": snapshot["qualified_query_digest"],
+        "qualification_id": snapshot["qualification_id"],
+        "account_acquisition": acquisition,
+    }
+
+
+def _account_acquisition_binding_event(
+    *,
+    payload: dict[str, object],
+    committed_at: str,
+) -> dict[str, object]:
+    attempt = _exact_text(
+        payload.get("attempt_id"),
+        name="account acquisition attempt_id",
+    )
+    committed = _exact_text(
+        committed_at,
+        name="account acquisition committed_at",
+    )
+    _parse_utc_text(committed, name="account acquisition committed_at")
+    return {
+        "event_id": attempt + ":account-acquisition-bound",
+        "event_type": _ACCOUNT_ACQUISITION_BINDING_EVENT,
+        "aggregate_type": _ACCOUNT_ACQUISITION_BINDING_AGGREGATE_TYPE,
+        "aggregate_id": attempt,
+        "aggregate_version": "1",
+        "payload": payload,
+        "payload_hash": payload_digest(payload),
+        "committed_at": committed,
+    }
+
+
+def _load_provider_origin_account_acquisition_binding(
+    store: JournalStore,
+    *,
+    attempt_id: str,
+    query_binding: QualifiedProviderReadQueryBinding,
+    prepared_event: dict[str, object] | None = None,
+) -> dict[str, object] | None:
+    attempt = _exact_text(attempt_id, name="account acquisition attempt_id")
+    events = JournalStore.load_events(
+        store,
+        _ACCOUNT_ACQUISITION_BINDING_AGGREGATE_TYPE,
+        attempt,
+    )
+    if not events:
+        return None
+    if len(events) != 1:
+        raise ProviderOriginError(
+            "provider-origin account acquisition binding is ambiguous"
+        )
+    event = events[0]
+    if type(event) is not dict or set(event) != _EVENT_KEYS:
+        raise ProviderOriginError(
+            "provider-origin account acquisition binding event is invalid"
+        )
+    payload = event.get("payload")
+    if (
+        type(payload) is not dict
+        or set(payload) != _ACCOUNT_ACQUISITION_BINDING_PAYLOAD_KEYS
+        or payload.get("schema_version") != "1.0.0"
+    ):
+        raise ProviderOriginError(
+            "provider-origin account acquisition binding payload is invalid"
+        )
+    expected = _account_acquisition_binding_payload(
+        attempt_id=attempt,
+        query_binding=query_binding,
+        account_acquisition=payload.get("account_acquisition"),
+    )
+    if (
+        payload != expected
+        or event.get("event_id") != attempt + ":account-acquisition-bound"
+        or event.get("event_type") != _ACCOUNT_ACQUISITION_BINDING_EVENT
+        or event.get("aggregate_type")
+        != _ACCOUNT_ACQUISITION_BINDING_AGGREGATE_TYPE
+        or event.get("aggregate_id") != attempt
+        or event.get("aggregate_version") != 1
+        or event.get("payload_hash") != payload_digest(expected)
+    ):
+        raise ProviderOriginError(
+            "provider-origin account acquisition binding is corrupt"
+        )
+    committed = _exact_text(
+        event.get("committed_at"),
+        name="account acquisition committed_at",
+    )
+    _parse_utc_text(committed, name="account acquisition committed_at")
+    sequence = event.get("journal_sequence")
+    if type(sequence) is not int or sequence < 1:
+        raise ProviderOriginError(
+            "provider-origin account acquisition binding sequence is invalid"
+        )
+    acquisition = expected["account_acquisition"]
+    if sequence <= acquisition["issued_journal_sequence"]:
+        raise ProviderOriginError(
+            "provider-origin account acquisition binding does not follow acquisition issuance"
+        )
+    if prepared_event is not None:
+        if type(prepared_event) is not dict:
+            raise ProviderOriginError(
+                "provider-origin Prepared event is unavailable for acquisition binding"
+            )
+        prepared_sequence = prepared_event.get("journal_sequence")
+        if (
+            type(prepared_sequence) is not int
+            or prepared_sequence < 1
+            or sequence >= prepared_sequence
+        ):
+            raise ProviderOriginError(
+                "provider-origin account acquisition binding must precede Prepared"
+            )
+        prepared_committed = _exact_text(
+            prepared_event.get("committed_at"),
+            name="provider-origin Prepared committed_at",
+        )
+        if _parse_utc_text(
+            committed,
+            name="account acquisition committed_at",
+        ) > _parse_utc_text(
+            prepared_committed,
+            name="provider-origin Prepared committed_at",
+        ):
+            raise ProviderOriginError(
+                "provider-origin account acquisition binding follows Prepared time"
+            )
+    return dict(acquisition)
+
+
+def _append_provider_origin_account_acquisition_binding(
+    store: JournalStore,
+    *,
+    attempt_id: str,
+    query_binding: QualifiedProviderReadQueryBinding,
+    account_acquisition: dict[str, object],
+    committed_at: str,
+) -> None:
+    payload = _account_acquisition_binding_payload(
+        attempt_id=attempt_id,
+        query_binding=query_binding,
+        account_acquisition=account_acquisition,
+    )
+    JournalStore.append_event(
+        store,
+        _account_acquisition_binding_event(
+            payload=payload,
+            committed_at=committed_at,
+        ),
+    )
+    loaded = _load_provider_origin_account_acquisition_binding(
+        store,
+        attempt_id=attempt_id,
+        query_binding=query_binding,
+    )
+    if loaded != payload["account_acquisition"]:
+        raise ProviderOriginError(
+            "provider-origin account acquisition binding readback mismatch"
+        )
 
 
 def _require_provider_origin_causal_chronology(
@@ -698,6 +996,10 @@ def _origin_ref(
     wire_request_semantics_sha256: str,
     terminal_authority_journal_sequence_cut: int,
     terminal_authority_verified_at: str,
+    account_acquisition_id: str | None,
+    account_acquisition_generation: int | None,
+    account_acquisition_journal_sequence_cut: int | None,
+    account_acquisition_scope_digest: str | None,
 ) -> str:
     material = {
         "attempt_id": attempt_id,
@@ -713,6 +1015,11 @@ def _origin_ref(
         "wire_request_semantics_sha256": wire_request_semantics_sha256,
         "terminal_authority_journal_sequence_cut": terminal_authority_journal_sequence_cut,
         "terminal_authority_verified_at": terminal_authority_verified_at,
+        "account_acquisition_id": account_acquisition_id,
+        "account_acquisition_generation": account_acquisition_generation,
+        "account_acquisition_journal_sequence_cut":
+            account_acquisition_journal_sequence_cut,
+        "account_acquisition_scope_digest": account_acquisition_scope_digest,
     }
     return "provider-origin:sha256:" + sha256(
         json.dumps(
@@ -756,6 +1063,10 @@ class AuthenticatedReadResponseBinding:
     wire_request_semantics_sha256: str
     terminal_authority_journal_sequence_cut: int
     terminal_authority_verified_at: str
+    account_acquisition_id: str | None = None
+    account_acquisition_generation: int | None = None
+    account_acquisition_journal_sequence_cut: int | None = None
+    account_acquisition_scope_digest: str | None = None
     _binding_token: InitVar[object | None] = None
 
     def __post_init__(self, _binding_token: object | None) -> None:
@@ -822,6 +1133,30 @@ class AuthenticatedReadResponseBinding:
             self.terminal_authority_verified_at,
             name="terminal_authority_verified_at",
         )
+        acquisition_values = (
+            self.account_acquisition_id,
+            self.account_acquisition_generation,
+            self.account_acquisition_journal_sequence_cut,
+            self.account_acquisition_scope_digest,
+        )
+        if any(value is not None for value in acquisition_values):
+            if (
+                type(self.account_acquisition_id) is not str
+                or _ACCOUNT_ACQUISITION_ID_RE.fullmatch(
+                    self.account_acquisition_id
+                ) is None
+                or type(self.account_acquisition_generation) is not int
+                or self.account_acquisition_generation < 1
+                or type(self.account_acquisition_journal_sequence_cut) is not int
+                or self.account_acquisition_journal_sequence_cut < 0
+                or type(self.account_acquisition_scope_digest) is not str
+                or _PROVIDER_SCOPE_DIGEST_RE.fullmatch(
+                    self.account_acquisition_scope_digest
+                ) is None
+            ):
+                raise ProviderOriginError(
+                    "provider-origin account acquisition binding is partial or invalid"
+                )
         if type(self.response_bytes) is not bytes or not self.response_bytes:
             raise ProviderOriginError("provider-origin response bytes are missing")
         if "sha256:" + sha256(self.response_bytes).hexdigest() != self.response_sha256:
@@ -923,8 +1258,16 @@ class ProviderOriginJournal:
         transport_identity: str,
         network_policy_identity: str,
         recorded_at: datetime,
+        account_acquisition_authority: object | None = None,
+        account_acquisition: object | None = None,
     ) -> str:
         snapshot = _qualified_query_snapshot(query_binding)
+        account_acquisition_snapshot = _account_acquisition_snapshot(
+            authority=account_acquisition_authority,
+            acquisition=account_acquisition,
+            store=self._require_store(),
+            query_binding=query_binding,
+        )
         transport = _exact_text(transport_identity, name="transport_identity")
         policy = _exact_text(network_policy_identity, name="network_policy_identity")
         if _SHA256_RE.fullmatch(policy) is None:
@@ -936,6 +1279,15 @@ class ProviderOriginJournal:
         if _parse_utc_text(committed_at, name="recorded_at") < prepared_at:
             raise ProviderOriginError("provider-origin prepare cannot precede query preparation")
         attempt_id = "provider-read:" + uuid4().hex
+        store = self._require_store()
+        if account_acquisition_snapshot is not None:
+            _append_provider_origin_account_acquisition_binding(
+                store,
+                attempt_id=attempt_id,
+                query_binding=query_binding,
+                account_acquisition=account_acquisition_snapshot,
+                committed_at=committed_at,
+            )
         payload = {
             "origin_kind": _ORIGIN_KIND,
             "qualified_query": snapshot,
@@ -943,7 +1295,7 @@ class ProviderOriginJournal:
             "network_policy_identity": policy,
         }
         JournalStore.append_event(
-            self._require_store(),
+            store,
             _event(
                 event_id=attempt_id + ":prepared",
                 event_type=_PREPARED_EVENT,
@@ -960,6 +1312,8 @@ class ProviderOriginJournal:
         query_binding: QualifiedProviderReadQueryBinding,
         *,
         recorded_at: datetime,
+        account_acquisition_authority: object | None = None,
+        account_acquisition: object | None = None,
     ) -> str:
         """Persist Prepared under the canonical direct-network identity only."""
 
@@ -968,6 +1322,8 @@ class ProviderOriginJournal:
             transport_identity=direct_authenticated_read_transport_identity(),
             network_policy_identity=direct_authenticated_read_network_policy_identity(),
             recorded_at=recorded_at,
+            account_acquisition_authority=account_acquisition_authority,
+            account_acquisition=account_acquisition,
         )
 
     def record_direct_provider_origin_observation(
@@ -1746,6 +2102,12 @@ class ProviderOriginJournal:
         )
         if prepared_payload.get("qualified_query") != snapshot:
             raise ProviderOriginError("durable provider-origin query does not match exact qualified binding")
+        account_acquisition = _load_provider_origin_account_acquisition_binding(
+            self._require_store(),
+            attempt_id=attempt,
+            query_binding=query_binding,
+            prepared_event=prepared,
+        )
         retained_payload = _require_event(
             retained,
             attempt_id=attempt,
@@ -1928,6 +2290,22 @@ class ProviderOriginJournal:
             wire_request_semantics_sha256=wire_request_semantics_sha256,
             terminal_authority_journal_sequence_cut=terminal_cut,
             terminal_authority_verified_at=terminal_verified_at,
+            account_acquisition_id=(
+                account_acquisition["acquisition_id"]
+                if account_acquisition is not None else None
+            ),
+            account_acquisition_generation=(
+                account_acquisition["acquisition_generation"]
+                if account_acquisition is not None else None
+            ),
+            account_acquisition_journal_sequence_cut=(
+                account_acquisition["acquisition_journal_sequence_cut"]
+                if account_acquisition is not None else None
+            ),
+            account_acquisition_scope_digest=(
+                account_acquisition["provider_scope_digest"]
+                if account_acquisition is not None else None
+            ),
         )
         return AuthenticatedReadResponseBinding(
             attempt_id=attempt,
@@ -1957,6 +2335,22 @@ class ProviderOriginJournal:
             wire_request_semantics_sha256=wire_request_semantics_sha256,
             terminal_authority_journal_sequence_cut=terminal_cut,
             terminal_authority_verified_at=terminal_verified_at,
+            account_acquisition_id=(
+                account_acquisition["acquisition_id"]
+                if account_acquisition is not None else None
+            ),
+            account_acquisition_generation=(
+                account_acquisition["acquisition_generation"]
+                if account_acquisition is not None else None
+            ),
+            account_acquisition_journal_sequence_cut=(
+                account_acquisition["acquisition_journal_sequence_cut"]
+                if account_acquisition is not None else None
+            ),
+            account_acquisition_scope_digest=(
+                account_acquisition["provider_scope_digest"]
+                if account_acquisition is not None else None
+            ),
             _binding_token=_BINDING_TOKEN,
         )
 
@@ -1964,7 +2358,15 @@ class ProviderOriginJournal:
 
 
 def _install_provider_origin_response_binding_authority():
-    states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+    states: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            tuple[object, ...],
+            JournalStore,
+            object,
+        ],
+    ] = {}
     field_names = (
         "attempt_id",
         "provider_id",
@@ -1993,6 +2395,10 @@ def _install_provider_origin_response_binding_authority():
         "wire_request_semantics_sha256",
         "terminal_authority_journal_sequence_cut",
         "terminal_authority_verified_at",
+        "account_acquisition_id",
+        "account_acquisition_generation",
+        "account_acquisition_journal_sequence_cut",
+        "account_acquisition_scope_digest",
     )
 
     def prune() -> None:
@@ -2007,18 +2413,36 @@ def _install_provider_origin_response_binding_authority():
             )
         return tuple(getattr(value, name) for name in field_names)
 
-    def register(value: AuthenticatedReadResponseBinding) -> None:
+    def register(
+        value: AuthenticatedReadResponseBinding,
+        store: JournalStore,
+    ) -> None:
+        if type(store) is not JournalStore:
+            raise ProviderOriginError(
+                "provider-origin response binding requires exact JournalStore"
+            )
         snapshot = material(value)
+        store_identity = store.store_identity
         prune()
         object_id = id(value)
         current = states.get(object_id)
         if current is not None and current[0]() is not None:
-            if current[0]() is value and current[1] == snapshot:
+            if (
+                current[0]() is value
+                and current[1] == snapshot
+                and current[2] is store
+                and current[3] == store_identity
+            ):
                 return
             raise ProviderOriginError(
                 "provider-origin response binding authority identity collision"
             )
-        states[object_id] = (weakref.ref(value), snapshot)
+        states[object_id] = (
+            weakref.ref(value),
+            snapshot,
+            store,
+            store_identity,
+        )
 
     def require(value: AuthenticatedReadResponseBinding) -> AuthenticatedReadResponseBinding:
         snapshot = material(value)
@@ -2032,14 +2456,44 @@ def _install_provider_origin_response_binding_authority():
             raise ProviderOriginError(
                 "provider-origin response binding changed after durable journal load"
             )
+        if (
+            type(state[2]) is not JournalStore
+            or state[2].store_identity != state[3]
+        ):
+            raise ProviderOriginError(
+                "provider-origin response binding JournalStore generation changed"
+            )
         return value
 
-    return register, require
+    def require_store(
+        value: AuthenticatedReadResponseBinding,
+        store: JournalStore,
+    ) -> AuthenticatedReadResponseBinding:
+        require(value)
+        if type(store) is not JournalStore:
+            raise ProviderOriginError(
+                "provider-origin account consumer requires exact JournalStore"
+            )
+        state = states.get(id(value))
+        if (
+            state is None
+            or state[0]() is not value
+            or state[2] is not store
+            or store.store_identity != state[3]
+        ):
+            raise ProviderOriginError(
+                "provider-origin response and account authority must share "
+                "the same exact JournalStore generation"
+            )
+        return value
+
+    return register, require, require_store
 
 
 (
     _register_provider_origin_response_binding_authority,
     require_provider_origin_response_binding_authority,
+    require_provider_origin_response_binding_store,
 ) = _install_provider_origin_response_binding_authority()
 del _install_provider_origin_response_binding_authority
 
@@ -2047,7 +2501,7 @@ del _install_provider_origin_response_binding_authority
 def _bind_provider_origin_response_load(load_impl, register_authority):
     def load_response_binding(self, attempt_id, query_binding):
         value = load_impl(self, attempt_id, query_binding)
-        register_authority(value)
+        register_authority(value, self._require_store())
         return value
 
     return load_response_binding
@@ -2131,6 +2585,8 @@ def _execute_direct_provider_origin_read_impl(
     qualification_registry: object,
     query_binding: QualifiedProviderReadQueryBinding,
     transport: object,
+    account_acquisition_authority: object | None,
+    account_acquisition: object | None,
     _record_direct_provider_origin,
 ) -> AuthenticatedReadResponseBinding:
     """Execute one qualified read through the canonical direct provider wire.
@@ -2163,6 +2619,23 @@ def _execute_direct_provider_origin_read_impl(
         raise ProviderOriginError(
             "provider-origin authority must share exact C/Q JournalStore instance"
         )
+    account_snapshot = _account_acquisition_snapshot(
+        authority=account_acquisition_authority,
+        acquisition=account_acquisition,
+        store=authority_store,
+        query_binding=query_binding,
+    )
+    if account_snapshot is not None:
+        qualification = qualification_registry.qualification(
+            query_binding.qualification_id,
+            journal_sequence_cut=query_binding.authority_journal_sequence_cut,
+        )
+        if qualification.scope.provider_scope.content_digest != (
+            account_snapshot["provider_scope_digest"]
+        ):
+            raise ProviderOriginError(
+                "provider-origin acquisition scope differs from accepted provider Q"
+            )
     if type(transport) not in {
         BinanceSpotAuthenticatedReadTransport,
         BybitV5AuthenticatedReadTransport,
@@ -2222,12 +2695,21 @@ def _execute_direct_provider_origin_read_impl(
     attempt_id = origin.prepare_direct(
         query_binding,
         recorded_at=prepared_at,
+        account_acquisition_authority=account_acquisition_authority,
+        account_acquisition=account_acquisition,
     )
 
     def terminal_authority_factory(received_query):
         if received_query is not base:
             raise ProviderOriginError(
                 "terminal transport query differs from exact qualified read"
+            )
+        if account_snapshot is not None:
+            _account_acquisition_snapshot(
+                authority=account_acquisition_authority,
+                acquisition=account_acquisition,
+                store=authority_store,
+                query_binding=query_binding,
             )
         return issue_terminal_qualified_provider_read_authority(
             route,
@@ -2241,6 +2723,13 @@ def _execute_direct_provider_origin_read_impl(
         base,
         terminal_authority_factory=terminal_authority_factory,
     )
+    if account_snapshot is not None:
+        _account_acquisition_snapshot(
+            authority=account_acquisition_authority,
+            acquisition=account_acquisition,
+            store=authority_store,
+            query_binding=query_binding,
+        )
     return _record_direct_provider_origin(
         origin,
         attempt_id,
@@ -2258,6 +2747,8 @@ def _bind_execute_direct_provider_origin_read(execute_impl, record_direct):
         qualification_registry: object,
         query_binding: QualifiedProviderReadQueryBinding,
         transport: object,
+        account_acquisition_authority: object | None = None,
+        account_acquisition: object | None = None,
     ) -> AuthenticatedReadResponseBinding:
         return execute_impl(
             origin=origin,
@@ -2266,6 +2757,8 @@ def _bind_execute_direct_provider_origin_read(execute_impl, record_direct):
             qualification_registry=qualification_registry,
             query_binding=query_binding,
             transport=transport,
+            account_acquisition_authority=account_acquisition_authority,
+            account_acquisition=account_acquisition,
             _record_direct_provider_origin=record_direct,
         )
 
@@ -2279,6 +2772,95 @@ execute_direct_provider_origin_read = _bind_execute_direct_provider_origin_read(
 del _bind_execute_direct_provider_origin_read
 del _execute_direct_provider_origin_read_impl
 del _record_direct_provider_origin_from_execute
+
+def require_current_provider_origin_account_acquisition(
+    *,
+    response_binding: AuthenticatedReadResponseBinding,
+    account_acquisition_authority: DurableProviderAccountAcquisitionAuthority,
+    account_acquisition: SerializedProviderAccountAcquisition,
+) -> SerializedProviderAccountAcquisition:
+    """Require one provider-origin response to belong to exact current acquisition."""
+
+    require_provider_origin_response_binding_authority(response_binding)
+    if type(account_acquisition_authority) is not DurableProviderAccountAcquisitionAuthority:
+        raise TypeError(
+            "account_acquisition_authority must be exact DurableProviderAccountAcquisitionAuthority"
+        )
+    if type(account_acquisition) is not SerializedProviderAccountAcquisition:
+        raise TypeError(
+            "account_acquisition must be exact SerializedProviderAccountAcquisition"
+        )
+    require_provider_origin_response_binding_store(
+        response_binding,
+        account_acquisition_authority.store,
+    )
+    try:
+        current = account_acquisition_authority.require_current(account_acquisition)
+    except ProviderAccountAcquisitionError as error:
+        raise ProviderOriginError(
+            "provider-origin account acquisition is no longer current"
+        ) from error
+    if (
+        response_binding.account_acquisition_id is None
+        or response_binding.account_acquisition_generation is None
+        or response_binding.account_acquisition_journal_sequence_cut is None
+        or response_binding.account_acquisition_scope_digest is None
+    ):
+        raise ProviderOriginError(
+            "provider-origin response is not bound to account acquisition authority"
+        )
+    if (
+        response_binding.account_id != current.account_id
+        or response_binding.provider_id != current.provider_scope.provider_id
+        or response_binding.environment != current.provider_scope.runtime_environment
+        or response_binding.provider_environment
+        != current.provider_scope.provider_environment
+        or response_binding.account_acquisition_id != current.acquisition_id
+        or response_binding.account_acquisition_generation
+        != current.acquisition_generation
+        or response_binding.account_acquisition_journal_sequence_cut
+        != current.acquisition_journal_sequence_cut
+        or response_binding.account_acquisition_scope_digest
+        != current.provider_scope.content_digest
+    ):
+        raise ProviderOriginError(
+            "provider-origin response belongs to another account acquisition"
+        )
+    return current
+
+
+def execute_direct_provider_origin_account_read(
+    *,
+    origin: ProviderOriginJournal,
+    route: object,
+    capability_registry: object,
+    qualification_registry: object,
+    query_binding: QualifiedProviderReadQueryBinding,
+    transport: object,
+    account_acquisition_authority: DurableProviderAccountAcquisitionAuthority,
+    account_acquisition: SerializedProviderAccountAcquisition,
+) -> AuthenticatedReadResponseBinding:
+    """Canonical direct-wire entry point for acquisition-bound account reads."""
+
+    if type(account_acquisition_authority) is not DurableProviderAccountAcquisitionAuthority:
+        raise TypeError(
+            "account_acquisition_authority must be exact DurableProviderAccountAcquisitionAuthority"
+        )
+    if type(account_acquisition) is not SerializedProviderAccountAcquisition:
+        raise TypeError(
+            "account_acquisition must be exact SerializedProviderAccountAcquisition"
+        )
+    return execute_direct_provider_origin_read(
+        origin=origin,
+        route=route,
+        capability_registry=capability_registry,
+        qualification_registry=qualification_registry,
+        query_binding=query_binding,
+        transport=transport,
+        account_acquisition_authority=account_acquisition_authority,
+        account_acquisition=account_acquisition,
+    )
+
 
 def observe_provider_origin_json_response(
     *,

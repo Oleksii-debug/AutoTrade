@@ -673,6 +673,39 @@ class ExecutionQualificationTests(unittest.TestCase):
         ):
             qualification(exec_model, evidence_artifact_id="not-a-uuid")
 
+    def test_qualified_path_rejects_omitted_observed_stop_trigger(self):
+        exec_model = model()
+        simulated_order = order(
+            order_type="STOP_LIMIT",
+            limit_price="102",
+            stop_price="100",
+        )
+        liquidity = observation(ask="101")
+        valid = simulate_execution(simulated_order, liquidity, exec_model)
+        self.assertEqual(valid.filled_quantity, Decimal("0"))
+        self.assertTrue(valid.triggered)
+        forged = replace(valid, triggered=False)
+        with patch(
+            "mvp.autotrade_mvp.execution_qualification.simulate_execution",
+            return_value=forged,
+        ):
+            with self.assertRaisesRegex(
+                ExecutionOracleError,
+                "observed stop trigger cannot be omitted",
+            ):
+                simulate_qualified_execution(
+                    order=simulated_order,
+                    observation=liquidity,
+                    model=exec_model,
+                    qualification=qualification(exec_model),
+                    instrument=instrument(),
+                    asset_class="CASH_EQUITY",
+                    protocol_sha256=PROTOCOL,
+                    artifact_store=self.store,
+                    evidence_artifact_id=ARTIFACT_ID,
+                    purpose="REPLAY",
+                )
+
     def test_qualified_path_rejects_stop_trigger_state_regression(self):
         exec_model = model()
         simulated_order = order(

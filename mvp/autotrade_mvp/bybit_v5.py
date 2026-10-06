@@ -1423,6 +1423,19 @@ def parse_executions(
         surface=Surface.AUTHENTICATED_READ,
         endpoint=BYBIT_DOCUMENTED_ENDPOINTS["EXECUTIONS"],
     )
+    binding = observation.query_binding
+    if binding.permission_scope != "ORDER.READ":
+        raise ProviderCoreError(
+            "Bybit execution evidence requires ORDER.READ permission scope"
+        )
+    query_category = binding.query.get("category")
+    if (
+        type(query_category) is not str
+        or query_category not in {"spot", "linear", "inverse", "option"}
+    ):
+        raise ProviderCoreError(
+            "Bybit execution query requires exact documented category"
+        )
     response = observation.payload
     account_id = observation.account_id
     environment = observation.environment
@@ -1435,6 +1448,14 @@ def parse_executions(
     if ret_code != 0:
         raise ProviderCoreError("Bybit execution response was not successful")
     result = _mapping(envelope.get("result"), name="result")
+    response_category = result.get("category")
+    if (
+        type(response_category) is not str
+        or response_category != query_category
+    ):
+        raise ProviderCoreError(
+            "Bybit execution response category must match exact queried category"
+        )
     rows = result.get("list")
     if not isinstance(rows, (list, tuple)):
         raise ProviderCoreError("result.list must be an array")

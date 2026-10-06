@@ -141,6 +141,7 @@ def ibkr_session_observation(
     endpoint="/iserver/auth/status",
     query=None,
     permission_scope="ORDER.READ",
+    documented_envelope=True,
 ):
     point = NOW - timedelta(seconds=1) if observed_at is None else observed_at
     binding = prepare_authenticated_read_query(
@@ -158,7 +159,11 @@ def ibkr_session_observation(
         query_binding=binding,
         http_status=200,
         response_bytes=json.dumps(
-            payload,
+            (
+                {"success": {"value": payload}}
+                if documented_envelope
+                else payload
+            ),
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8"),
@@ -273,6 +278,28 @@ class IbkrWebAdapterTests(unittest.TestCase):
             "endpoint mismatch",
         ):
             brokerage_session_status_from_observation(observation)
+
+    def test_brokerage_status_requires_documented_success_value_envelope(self):
+        payload = {
+            "connected": True,
+            "authenticated": True,
+            "established": True,
+            "competing": False,
+        }
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "documented success envelope",
+        ):
+            brokerage_session_status_from_observation(
+                ibkr_session_observation(
+                    payload,
+                    documented_envelope=False,
+                )
+            )
+
+        observation = ibkr_session_observation(payload)
+        session = brokerage_session_status_from_observation(observation)
+        self.assertTrue(session.trade_ready)
 
     def test_brokerage_status_requires_empty_query_and_read_scope(self):
         payload = {

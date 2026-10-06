@@ -178,18 +178,18 @@ class ExactJsonTransportResponse:
 
     @property
     def response_text(self) -> str:
-        _require_canonical_exact_transport_response(self)
-        return self.response_bytes.decode("utf-8")
+        snapshot = _require_canonical_exact_transport_response(self)
+        return snapshot[0].decode("utf-8")
 
     @property
     def response_sha256(self) -> str:
-        _require_canonical_exact_transport_response(self)
-        return "sha256:" + sha256(self.response_bytes).hexdigest()
+        snapshot = _require_canonical_exact_transport_response(self)
+        return "sha256:" + sha256(snapshot[0]).hexdigest()
 
     @property
     def payload(self) -> Any:
-        _require_canonical_exact_transport_response(self)
-        return _decode_exact_json_bytes(self.response_bytes)
+        snapshot = _require_canonical_exact_transport_response(self)
+        return _decode_exact_json_bytes(snapshot[0])
 
 
 def _install_exact_transport_response_authority():
@@ -199,6 +199,9 @@ def _install_exact_transport_response_authority():
     canonical_type = type
     canonical_id = id
     canonical_tuple = tuple
+    canonical_frozenset = frozenset
+    canonical_len = len
+    canonical_dict = dict
     canonical_bool = bool
     canonical_int = int
     canonical_str = str
@@ -223,6 +226,9 @@ def _install_exact_transport_response_authority():
             or type is not canonical_type
             or id is not canonical_id
             or tuple is not canonical_tuple
+            or frozenset is not canonical_frozenset
+            or len is not canonical_len
+            or dict is not canonical_dict
             or bool is not canonical_bool
             or int is not canonical_int
             or str is not canonical_str
@@ -235,19 +241,27 @@ def _install_exact_transport_response_authority():
             or canonical_decode.__code__ is not decode_code
             or type(HARD_MAX_PROVIDER_RESPONSE_BYTES) is not canonical_int
             or HARD_MAX_PROVIDER_RESPONSE_BYTES != canonical_hard_response_bytes
-            or len(installed) != 2
+            or canonical_len(installed) != 2
             or _register_exact_transport_response is not installed[0]
             or _require_canonical_exact_transport_response is not installed[1]
         ):
             authority_changed()
 
+    field_names = (
+        "response_bytes",
+        "http_status",
+        "requires_reconciliation",
+        "ambiguity_reason",
+    )
+    exact_field_names = canonical_frozenset(field_names)
+
     def raw_snapshot(value):
-        return (
-            object_getattribute(value, "response_bytes"),
-            object_getattribute(value, "http_status"),
-            object_getattribute(value, "requires_reconciliation"),
-            object_getattribute(value, "ambiguity_reason"),
-        )
+        state = object_getattribute(value, "__dict__")
+        if canonical_type(state) is not canonical_dict:
+            authority_changed()
+        if canonical_frozenset(state) != exact_field_names:
+            authority_changed()
+        return canonical_tuple(state[name] for name in field_names)
 
     def prune():
         for object_id, (value_ref, _snapshot) in canonical_tuple(states.items()):
@@ -303,9 +317,7 @@ def _install_exact_transport_response_authority():
             max_bytes=canonical_hard_response_bytes,
             allow_empty=current[2],
         )
-        if not current[2]:
-            canonical_decode(current[0])
-        return value
+        return expected
 
     installed.extend((register, require))
     return register, require
@@ -1820,6 +1832,8 @@ class GuardedDispatcher:
 
         exact_response_type = ExactJsonTransportResponse
         exact_response_authority = _require_canonical_exact_transport_response
+        exact_response_decoder = _decode_exact_json_bytes
+        exact_response_sha256 = sha256
         response_type_builtin = type
         response_isinstance_builtin = isinstance
 
@@ -1935,36 +1949,44 @@ class GuardedDispatcher:
                 ExactJsonTransportResponse is not exact_response_type
                 or _require_canonical_exact_transport_response
                 is not exact_response_authority
+                or _decode_exact_json_bytes is not exact_response_decoder
+                or sha256 is not exact_response_sha256
             ):
                 raise ValueError("exact transport response authority changed after send")
             if response_type_builtin(response) is exact_response_type:
-                exact_response_authority(response)
-                terminal_requires_reconciliation = response.requires_reconciliation
+                (
+                    response_bytes,
+                    response_http_status,
+                    terminal_requires_reconciliation,
+                    response_ambiguity_reason,
+                ) = exact_response_authority(response)
                 if terminal_requires_reconciliation:
                     try:
-                        response.payload
+                        exact_response_decoder(response_bytes)
                     except (TypeError, ValueError):
-                        response_text = response.response_bytes.hex()
+                        response_text = response_bytes.hex()
                         response_encoding = "hex"
                     else:
-                        response_text = response.response_text
+                        response_text = response_bytes.decode("utf-8")
                         response_encoding = "utf-8-json"
                     outcome_response = None
                 else:
-                    response_text = response.response_text
+                    response_text = response_bytes.decode("utf-8")
                     response_encoding = "utf-8-json"
-                    outcome_response = response.payload
+                    outcome_response = exact_response_decoder(response_bytes)
                 sent_payload = {
                     "client_order_id": client_order_id,
                     "response_text": response_text,
-                    "response_sha256": response.response_sha256,
+                    "response_sha256": (
+                        "sha256:" + exact_response_sha256(response_bytes).hexdigest()
+                    ),
                     "response_encoding": response_encoding,
                 }
-                if response.http_status is not None:
-                    sent_payload["http_status"] = response.http_status
+                if response_http_status is not None:
+                    sent_payload["http_status"] = response_http_status
                 if terminal_requires_reconciliation:
                     terminal_reason = (
-                        response.ambiguity_reason or "provider_response_ambiguous"
+                        response_ambiguity_reason or "provider_response_ambiguous"
                     )
                     sent_payload["reason"] = terminal_reason
                     sent_payload["retry_disposition"] = "RECONCILE_FIRST"

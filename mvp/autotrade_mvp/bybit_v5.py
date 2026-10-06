@@ -2245,7 +2245,7 @@ def parse_option_delivery_page(
         side = row.get("side")
         if type(side) is not str or side not in {"Buy", "Sell"}:
             raise ProviderCoreError(
-                "Bybit option delivery side must be exact Buy or Sell text"
+                "Bybit option delivery side must be Buy or Sell exact text"
             )
         delivery_time_value = row.get("deliveryTime")
         if (

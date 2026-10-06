@@ -1917,6 +1917,42 @@ class AblationTests(unittest.TestCase):
                 task="ablation-qualification",
                 instrument_family="EQUITY",
             )
+            incomplete_population, resolved_outcomes = authority.resolve(
+                cases,
+                outcome_refs=refs,
+            )
+            self.assertFalse(incomplete_population.complete)
+            self.assertEqual(len(resolved_outcomes), 4)
+            self.assertEqual(
+                science.trial_completeness_evidence(
+                    registration.protocol_id
+                ).remaining_trial_budget,
+                2,
+            )
+
+            science.record_trial(
+                registration.protocol_id,
+                trial_id="55555555-5555-4555-8555-555555555555",
+                status="COMPLETED",
+                payload={"case_id": cases[0].full.case_id},
+            )
+            science.record_trial(
+                registration.protocol_id,
+                trial_id="66666666-6666-4666-8666-666666666666",
+                status="FAILED",
+                payload={"case_id": cases[1].full.case_id},
+            )
+            complete_population, resolved_outcomes = authority.resolve(
+                cases,
+                outcome_refs=refs,
+            )
+            self.assertTrue(complete_population.complete)
+            self.assertEqual(
+                complete_population.population_unit_ids,
+                tuple(sorted(units)),
+            )
+            self.assertEqual(len(resolved_outcomes), 4)
+
             result = evaluate_qualified_incremental_value(
                 "agent",
                 cases,

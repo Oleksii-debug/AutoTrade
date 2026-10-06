@@ -1205,6 +1205,81 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
             "CorporateActionEvidenceAccepted",
         )
 
+    def test_late_binding_retarget_cannot_move_existing_store_authority(self):
+        accepted = self._accepted()
+        calls = []
+        original_binding = (
+            corporate_action_evidence_module._durable_corporate_action_store_binding
+        )
+
+        with TemporaryDirectory() as first, TemporaryDirectory() as second:
+            first_path = f"{first}/journal.sqlite3"
+            second_path = f"{second}/journal.sqlite3"
+            first_journal, durable = self._store(first_path)
+            second_journal, alternate = self._store(second_path)
+            (
+                alternate_store,
+                alternate_identity,
+                alternate_provider,
+                alternate_account,
+                alternate_environment,
+                alternate_aggregate,
+            ) = DurableCorporateActionEvidenceStore._composition(alternate)
+
+            def forged_binding(_value):
+                calls.append("binding")
+                return (
+                    alternate_store,
+                    alternate_identity,
+                    alternate_provider,
+                    alternate_account,
+                    alternate_environment,
+                    alternate_aggregate,
+                )
+
+            corporate_action_evidence_module._durable_corporate_action_store_binding = (
+                forged_binding
+            )
+            durable.store = alternate_store
+            durable._store_identity = alternate_identity
+            durable.provider_id = alternate_provider
+            durable.account_id = alternate_account
+            durable.environment = alternate_environment
+            durable.aggregate_id = alternate_aggregate
+            try:
+                with self.assertRaisesRegex(
+                    CorporateActionEvidenceConflict,
+                    "composition was modified",
+                ):
+                    DurableCorporateActionEvidenceStore.record(
+                        durable,
+                        accepted,
+                    )
+            finally:
+                corporate_action_evidence_module._durable_corporate_action_store_binding = (
+                    original_binding
+                )
+
+            first_events = first_journal.load_events(
+                "corporate_action_evidence",
+                DurableCorporateActionEvidenceStore._composition(
+                    DurableCorporateActionEvidenceStore(
+                        first_journal,
+                        provider_id="BINANCE",
+                        account_id="acct-1",
+                        environment="SIMULATION",
+                    )
+                )[5],
+            )
+            second_events = second_journal.load_events(
+                "corporate_action_evidence",
+                alternate_aggregate,
+            )
+
+        self.assertEqual(calls, [])
+        self.assertEqual(first_events, [])
+        self.assertEqual(second_events, [])
+
     def test_manually_constructed_authoritative_action_cannot_reach_durable_store(self):
         issued = self._accepted()
         forged = AuthoritativeCorporateAction(**issued.__dict__)

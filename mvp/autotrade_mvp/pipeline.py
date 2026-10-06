@@ -544,6 +544,78 @@ def _append_evidence(path: Path, evidence: dict) -> bool:
     return True
 
 
+_REPLAY_EVIDENCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "evidence_id",
+        "input_hash",
+        "decision",
+        "decision_reason",
+        "risk_outcome",
+        "order_id",
+        "fill_id",
+        "cash",
+        "position",
+        "equity",
+        "reconciled",
+        "financial_configuration_hash",
+        "recorded_at",
+    }
+)
+
+
+def _require_replay_evidence_record(
+    record: object,
+    *,
+    evidence_id: str,
+    financial_configuration_hash: str,
+) -> datetime:
+    """Authenticate one checkpoint evidence row before any replay repair write."""
+
+    if (
+        type(record) is not dict
+        or set(record) != _REPLAY_EVIDENCE_FIELDS
+        or record.get("schema_version") != 1
+        or record.get("evidence_id") != evidence_id
+        or type(record.get("input_hash")) is not str
+        or len(record["input_hash"]) != 64
+        or any(char not in "0123456789abcdef" for char in record["input_hash"])
+        or record.get("decision") not in {"BUY", "SELL", "HOLD"}
+        or type(record.get("decision_reason")) is not str
+        or type(record.get("risk_outcome")) is not str
+        or (
+            record.get("order_id") is not None
+            and type(record.get("order_id")) is not str
+        )
+        or (
+            record.get("fill_id") is not None
+            and type(record.get("fill_id")) is not str
+        )
+        or (record.get("order_id") is None) != (record.get("fill_id") is None)
+        or type(record.get("cash")) is not str
+        or type(record.get("position")) is not str
+        or type(record.get("equity")) is not str
+        or record.get("reconciled") is not True
+        or record.get("financial_configuration_hash")
+        != financial_configuration_hash
+    ):
+        raise ValueError("Corrupt checkpoint replay evidence")
+    try:
+        for field in ("cash", "position", "equity"):
+            value = _checkpoint_decimal(
+                record[field],
+                name=f"evidence {field}",
+            )
+            if str(value) != record[field]:
+                raise ValueError("non-canonical evidence decimal")
+        timestamp = datetime.fromisoformat(
+            _utc_z(record["recorded_at"]).replace("Z", "+00:00")
+        )
+    except (KeyError, TypeError, ValueError, ArithmeticError) as error:
+        raise ValueError("Corrupt checkpoint replay evidence") from error
+    return timestamp
+
+
 def _repair_interrupted_replay(
     root: Path,
     state: dict,
@@ -567,21 +639,13 @@ def _repair_interrupted_replay(
     ordered: list[tuple[datetime, str, dict]] = []
     for evidence_id in ids:
         record = records.get(evidence_id)
-        if (
-            type(evidence_id) is not str
-            or not evidence_id
-            or type(record) is not dict
-            or record.get("evidence_id") != evidence_id
-            or record.get("financial_configuration_hash")
-            != financial_configuration_hash
-        ):
-            raise ValueError("Corrupt checkpoint replay evidence")
-        try:
-            timestamp = datetime.fromisoformat(
-                _utc_z(record["recorded_at"]).replace("Z", "+00:00")
-            )
-        except (KeyError, TypeError, ValueError) as error:
-            raise ValueError("Corrupt checkpoint replay chronology") from error
+        if type(evidence_id) is not str or not evidence_id:
+            raise ValueError("Corrupt checkpoint replay evidence identity")
+        timestamp = _require_replay_evidence_record(
+            record,
+            evidence_id=evidence_id,
+            financial_configuration_hash=financial_configuration_hash,
+        )
         ordered.append((timestamp, evidence_id, record))
 
     latest_instant = max(item[0] for item in ordered)

@@ -616,6 +616,64 @@ def _require_replay_evidence_record(
     return timestamp
 
 
+def _require_checkpoint_evidence_financial_state(
+    state: dict,
+    *,
+    financial_configuration_hash: str,
+    restored_fills: dict[str, Fill],
+    ledger: EconomicLedger,
+) -> None:
+    """Bind checkpoint evidence to the already authenticated final financial state."""
+
+    ids = state.get("evidence_ids", [])
+    records = state.get("evidence_records", {})
+    if type(ids) is not list or type(records) is not dict:
+        raise ValueError("Corrupt checkpoint replay authority")
+    if len(ids) != len(set(ids)) or set(ids) != set(records):
+        raise ValueError("Corrupt checkpoint replay evidence identity")
+    if not ids:
+        if restored_fills or ledger.postings:
+            raise ValueError("Checkpoint financial state lacks replay evidence")
+        return
+
+    observed_order_ids: set[str] = set()
+    ordered: list[tuple[datetime, str, dict]] = []
+    for evidence_id in ids:
+        if type(evidence_id) is not str or not evidence_id:
+            raise ValueError("Corrupt checkpoint replay evidence identity")
+        record = records.get(evidence_id)
+        timestamp = _require_replay_evidence_record(
+            record,
+            evidence_id=evidence_id,
+            financial_configuration_hash=financial_configuration_hash,
+        )
+        order_id = record["order_id"]
+        if order_id is not None:
+            if order_id in observed_order_ids:
+                raise ValueError("Checkpoint replay reuses one durable order identity")
+            fill = restored_fills.get(order_id)
+            if fill is None or fill.fill_id != record["fill_id"]:
+                raise ValueError("Checkpoint replay evidence conflicts with restored fill")
+            observed_order_ids.add(order_id)
+        ordered.append((timestamp, evidence_id, record))
+
+    if observed_order_ids != set(restored_fills):
+        raise ValueError("Checkpoint replay evidence does not cover restored fills")
+
+    latest_instant = max(item[0] for item in ordered)
+    latest = [item for item in ordered if item[0] == latest_instant]
+    if len(latest) != 1:
+        raise ValueError("Checkpoint replay chronology is ambiguous")
+    latest_record = latest[0][2]
+    if (
+        latest_record["cash"] != str(ledger.cash)
+        or latest_record["position"] != str(ledger.position)
+    ):
+        raise ValueError(
+            "Checkpoint replay evidence does not match final financial state"
+        )
+
+
 def _repair_interrupted_replay(
     root: Path,
     state: dict,
@@ -1253,6 +1311,12 @@ def run_vertical_slice(
             fee_rate=rate,
         )
         _reconcile(SimulatedProvider(preflight_fills), preflight_ledger)
+        _require_checkpoint_evidence_financial_state(
+            state,
+            financial_configuration_hash=financial_configuration_hash,
+            restored_fills=preflight_fills,
+            ledger=preflight_ledger,
+        )
         _repair_interrupted_replay(
             root,
             state,

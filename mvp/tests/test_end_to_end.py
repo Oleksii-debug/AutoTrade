@@ -492,6 +492,48 @@ class VerticalSliceTests(unittest.TestCase):
             )
 
 
+    def test_resume_rejects_latest_evidence_financial_tamper_before_repair(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            checkpoint_path = root / "checkpoint.json"
+            evidence_path = root / "learning-evidence.jsonl"
+
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            evidence_id = checkpoint["evidence_ids"][-1]
+            checkpoint["evidence_records"][evidence_id]["cash"] = "1"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+            evidence_path.unlink()
+            for journal_path in root.glob("journal.sqlite3*"):
+                journal_path.unlink()
+
+            checkpoint_before = checkpoint_path.read_bytes()
+            intents_before = {
+                path.name: path.read_bytes()
+                for path in (root / "order-intents").glob("*.json")
+            }
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "does not match final financial state",
+            ):
+                run_vertical_slice(
+                    [103, 102, 101, 100],
+                    directory,
+                )
+
+            self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertFalse(evidence_path.exists())
+            self.assertEqual(list(root.glob("journal.sqlite3*")), [])
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in (root / "order-intents").glob("*.json")
+                },
+                intents_before,
+            )
+
+
     def test_checkpoint_ledger_mismatch_is_rejected(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

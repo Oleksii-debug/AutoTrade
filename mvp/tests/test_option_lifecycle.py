@@ -17,6 +17,7 @@ from mvp.autotrade_mvp.instruments import (
     InstrumentRegistry,
     InstrumentVersion,
 )
+import mvp.autotrade_mvp.option_lifecycle as option_lifecycle_module
 from mvp.autotrade_mvp.option_lifecycle import (
     DurableOptionLifecycleAuthority,
     OptionLifecycleConflict,
@@ -632,6 +633,87 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                     ),
                     before_lifecycle,
                 )
+
+    def test_simulation_resolver_cannot_rebind_lifecycle_observation_parser(self):
+        reference = self.evidence(
+            external_event_id="resolver-parser-rebind-life",
+        )
+        original_parser = (
+            option_lifecycle_module._canonical_observation_from_sealed_response
+        )
+
+        def rebind_parser_then_resolve(evidence_ref):
+            option_lifecycle_module._canonical_observation_from_sealed_response = (
+                lambda _source: self.forged_observation()
+            )
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=rebind_parser_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", authority.aggregate_id)
+        )
+        try:
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "evidence authority changed during resolution",
+            ):
+                authority.apply(reference)
+        finally:
+            option_lifecycle_module._canonical_observation_from_sealed_response = (
+                original_parser
+            )
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            before_lifecycle,
+        )
+
+    def test_simulation_resolver_cannot_rebind_response_scope_validator(self):
+        reference = self.evidence(
+            external_event_id="resolver-scope-rebind-life",
+        )
+        source_type = type(self._evidence[reference])
+        original_require_scope = source_type.require_scope
+
+        def rebind_scope_validator_then_resolve(evidence_ref):
+            source_type.require_scope = lambda *_args, **_kwargs: None
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=rebind_scope_validator_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", authority.aggregate_id)
+        )
+        try:
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "evidence authority changed during resolution",
+            ):
+                authority.apply(reference)
+        finally:
+            source_type.require_scope = original_require_scope
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            before_lifecycle,
+        )
 
     def forged_observation(self) -> OptionLifecycleObservation:
         return OptionLifecycleObservation(

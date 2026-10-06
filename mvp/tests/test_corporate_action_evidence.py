@@ -21,6 +21,7 @@ from mvp.autotrade_mvp.corporate_actions import CorporateEvent
 from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
+    ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
@@ -249,6 +250,65 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         second = resolve(source)
         self.assertEqual(first, second)
         self.assertEqual(first.event, second.event)
+
+    def test_provider_observation_subclass_is_rejected_before_attribute_access(self):
+        class ForgedObservation(ProviderResponseObservation):
+            @property
+            def evidence_ref(self):
+                raise AssertionError("subclass evidence_ref must not execute")
+
+            def require_scope(self, **_kwargs):
+                raise AssertionError("subclass require_scope must not execute")
+
+        forged = object.__new__(ForgedObservation)
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "exact sealed ProviderResponseObservation",
+        ):
+            resolve_authoritative_corporate_action(
+                "evidence:forged",
+                evidence_resolver=lambda _reference: forged,
+                instrument_registry=canonical_registry(),
+                expected_provider_id="BINANCE",
+                expected_account_id="acct-1",
+                expected_environment="SIMULATION",
+                allowed_endpoints=frozenset({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
+
+    def test_instrument_registry_subclass_is_rejected_before_registry_dispatch(self):
+        class ForgedRegistry(InstrumentRegistry):
+            def exact(self, _version_ref):
+                raise AssertionError("subclass exact must not execute")
+
+            def at(self, _instrument_id, _at):
+                raise AssertionError("subclass at must not execute")
+
+        source = sealed_dividend()
+        forged = ForgedRegistry(versions=(canonical_instrument(),))
+        with self.assertRaisesRegex(TypeError, "exact InstrumentRegistry"):
+            resolve(
+                source,
+                instrument_registry=forged,
+            )
+
+    def test_allowed_endpoints_subclass_is_rejected_before_iteration(self):
+        class ForgedEndpoints(frozenset):
+            def __iter__(self):
+                raise AssertionError("subclass iteration must not execute")
+
+        source = sealed_dividend()
+        with self.assertRaisesRegex(TypeError, "exact non-empty frozenset"):
+            resolve_authoritative_corporate_action(
+                source.evidence_ref,
+                evidence_resolver={source.evidence_ref: source}.__getitem__,
+                instrument_registry=canonical_registry(),
+                expected_provider_id="BINANCE",
+                expected_account_id="acct-1",
+                expected_environment="SIMULATION",
+                allowed_endpoints=ForgedEndpoints({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
 
     def test_locally_constructed_event_is_not_provider_evidence(self):
         local = CorporateEvent.create(

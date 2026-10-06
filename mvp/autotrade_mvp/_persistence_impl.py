@@ -169,6 +169,10 @@ _SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _UUID_TEXT_RE = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
 )
+_URI_TEXT_RE = re.compile(
+    r"^[A-Za-z][A-Za-z0-9+.\\-]*:[A-Za-z0-9\\-._~:/?#\\[\\]@!$&'()*+,;=%]*$"
+)
+_BAD_PERCENT_ENCODING_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _UTC_INSTANT_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
 )
@@ -223,6 +227,25 @@ def _require_uuid_text(value: object, *, name: str) -> None:
         raise ValueError(f"{name} must be a UUID string") from error
 
 
+def _require_absolute_uri(value: object, *, name: str) -> None:
+    # JSON Schema uses RFC3986 URI (not IRI) lexical semantics. urlsplit()
+    # alone is intentionally permissive and can retain spaces or malformed
+    # percent escapes, so validate the ASCII grammar before parsing.
+    if (
+        type(value) is not str
+        or not value
+        or _URI_TEXT_RE.fullmatch(value) is None
+        or _BAD_PERCENT_ENCODING_RE.search(value) is not None
+    ):
+        raise ValueError(f"{name} must be an absolute URI")
+    try:
+        parsed = urlsplit(value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an absolute URI") from error
+    if not parsed.scheme:
+        raise ValueError(f"{name} must be an absolute URI")
+
+
 def _require_utc_instant(value: object, *, name: str) -> None:
     if type(value) is not str or _UTC_INSTANT_RE.fullmatch(value) is None:
         raise ValueError(f"{name} must be an RFC3339 UTC instant ending Z")
@@ -248,11 +271,7 @@ def _validate_evidence_ref(value: object) -> None:
     _require_utc_instant(value.get("observed_at"), name="EvidenceRef observed_at")
     source_uri = value.get("source_uri")
     if source_uri is not None:
-        if type(source_uri) is not str or not source_uri:
-            raise ValueError("EvidenceRef source_uri must be a URI")
-        parsed = urlsplit(source_uri)
-        if not parsed.scheme:
-            raise ValueError("EvidenceRef source_uri must be an absolute URI")
+        _require_absolute_uri(source_uri, name="EvidenceRef source_uri")
     rights_id = value.get("rights_id")
     if rights_id is not None and (type(rights_id) is not str or not rights_id):
         raise ValueError("EvidenceRef rights_id must be non-empty text")

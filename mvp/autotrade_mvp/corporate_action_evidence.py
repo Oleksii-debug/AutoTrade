@@ -1083,31 +1083,33 @@ class DurableCorporateActionEvidenceStore:
     _EVENT_TYPE = "CorporateActionEvidenceAccepted"
     _ACTOR = "corporate-action-evidence"
 
-    def __init__(
+    def _initialize(
         self,
         store: JournalStore,
         *,
         provider_id: str,
         account_id: str,
         environment: str,
+        _require_unbound,
+        _require_store_authority,
+        _text_fn,
+        _environments,
+        _payload_digest_fn,
+        _register_binding,
     ) -> None:
-        if type(self) is not DurableCorporateActionEvidenceStore:
-            raise TypeError(
-                "durable corporate-action evidence store must be exact canonical type"
-            )
-        _require_unbound_durable_corporate_action_store(self)
-        store_identity = require_exact_journal_store_authority(
+        _require_unbound(self)
+        store_identity = _require_store_authority(
             store,
             subject="corporate-action evidence JournalStore",
         )
-        provider = _text(provider_id, "provider_id").upper()
-        account = _text(account_id, "account_id")
-        environment_value = _text(environment, "environment").upper()
-        if environment_value not in _ENVIRONMENTS:
+        provider = _text_fn(provider_id, "provider_id").upper()
+        account = _text_fn(account_id, "account_id")
+        environment_value = _text_fn(environment, "environment").upper()
+        if environment_value not in _environments:
             raise CorporateActionEvidenceError("environment must be canonical")
         aggregate_id = (
             "corporate-action-evidence:"
-            + payload_digest(
+            + _payload_digest_fn(
                 {
                     "provider_id": provider,
                     "account_id": account,
@@ -1115,7 +1117,7 @@ class DurableCorporateActionEvidenceStore:
                 }
             )[7:]
         )
-        _register_durable_corporate_action_store(
+        _register_binding(
             self,
             store=store,
             store_identity=store_identity,
@@ -1501,6 +1503,61 @@ class DurableCorporateActionEvidenceStore:
             corrects_external_event_id=accepted.corrects_external_event_id,
         )
 
+def _bind_durable_corporate_action_initializer(
+    initialize,
+    canonical_type,
+    require_unbound,
+    require_store_authority,
+    text_fn,
+    environments,
+    payload_digest_fn,
+    register_binding,
+):
+    def canonical_init(
+        self,
+        store: JournalStore,
+        *,
+        provider_id: str,
+        account_id: str,
+        environment: str,
+    ) -> None:
+        if type(self) is not canonical_type:
+            raise TypeError(
+                "durable corporate-action evidence store must be exact canonical type"
+            )
+        return initialize(
+            self,
+            store,
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            _require_unbound=require_unbound,
+            _require_store_authority=require_store_authority,
+            _text_fn=text_fn,
+            _environments=environments,
+            _payload_digest_fn=payload_digest_fn,
+            _register_binding=register_binding,
+        )
+
+    return canonical_init
+
+
+DurableCorporateActionEvidenceStore.__init__ = (
+    _bind_durable_corporate_action_initializer(
+        DurableCorporateActionEvidenceStore._initialize,
+        DurableCorporateActionEvidenceStore,
+        _require_unbound_durable_corporate_action_store,
+        require_exact_journal_store_authority,
+        _text,
+        _ENVIRONMENTS,
+        payload_digest,
+        _register_durable_corporate_action_store,
+    )
+)
+del DurableCorporateActionEvidenceStore._initialize
+del _bind_durable_corporate_action_initializer
+
+
 def _bind_durable_corporate_action_composition(
     composition,
     binding,
@@ -1524,6 +1581,9 @@ DurableCorporateActionEvidenceStore._composition = (
     )
 )
 del _bind_durable_corporate_action_composition
+del _require_unbound_durable_corporate_action_store
+del _register_durable_corporate_action_store
+del _durable_corporate_action_store_binding
 
 
 def _bind_durable_corporate_action_verifier(

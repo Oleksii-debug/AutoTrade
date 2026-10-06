@@ -352,6 +352,37 @@ def assert_conservative_execution(
     market_time = _instant(observation.market_time, name="market_time")
     canonical_arrival = arrival.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
+    if (
+        order.order_type == "STOP_LIMIT"
+        and not order.already_triggered
+        and market_time > arrival
+        and independent_capacity > zero
+    ):
+        causal_stop_evidence = True
+        if model.data_fidelity == "BAR":
+            if observation.interval_start is None:
+                causal_stop_evidence = False
+            else:
+                causal_stop_evidence = (
+                    _instant(
+                        observation.interval_start,
+                        name="interval_start",
+                    )
+                    >= arrival
+                )
+        if (
+            causal_stop_evidence
+            and _oracle_stop_touched(
+                order=order,
+                observation=observation,
+                model=model,
+            )
+            and not result.triggered
+        ):
+            raise ExecutionOracleError(
+                "observed stop trigger cannot be omitted from result state"
+            )
+
     if order.already_triggered and not result.triggered:
         raise ExecutionOracleError(
             "triggered state cannot regress after prior STOP_LIMIT trigger"

@@ -1112,9 +1112,9 @@ class AuthenticatedReadHttpRequest:
                 raise ProviderTransportScopeError(
                     "authenticated GET requires an exact signed query and no body"
                 )
-        elif parsed.query or not self.body:
+        elif parsed.query:
             raise ProviderTransportScopeError(
-                "authenticated POST requires an exact body and no URL query"
+                "authenticated POST requires no URL query"
             )
         if not isinstance(self.headers, Mapping):
             raise ProviderTransportScopeError("headers must be a mapping")

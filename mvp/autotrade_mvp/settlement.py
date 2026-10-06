@@ -39,7 +39,9 @@ def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact text")
+    if not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
@@ -119,8 +121,8 @@ class SettlementRuleBinding:
         object.__setattr__(
             self, "rule_version", _text(self.rule_version, name="rule_version")
         )
-        if not isinstance(self.scope, SettlementAccountScope):
-            raise TypeError("scope must be SettlementAccountScope")
+        if type(self.scope) is not SettlementAccountScope:
+            raise TypeError("scope must be exact SettlementAccountScope")
         object.__setattr__(
             self,
             "instrument_version",
@@ -138,8 +140,12 @@ class SettlementRuleBinding:
                 raise TypeError("effective_to must be a date value")
             if self.effective_to <= self.effective_from:
                 raise ValueError("effective_to must be after effective_from")
-        if not isinstance(self.evidence_refs, tuple) or not self.evidence_refs:
+        if type(self.evidence_refs) is not tuple:
+            raise TypeError("evidence_refs must use an exact tuple")
+        if not self.evidence_refs:
             raise ValueError("evidence_refs must be a non-empty tuple")
+        if any(type(item) is not str for item in self.evidence_refs):
+            raise TypeError("evidence_refs must contain exact text")
         refs = tuple(_text(item, name="evidence_ref") for item in self.evidence_refs)
         if len(refs) != len(set(refs)):
             raise ValueError("evidence_refs must be unique")
@@ -210,8 +216,8 @@ class SettlementObligation:
                 _text(self.source_transaction_id, name="source_transaction_id"),
             )
         if self.rule_binding is not None:
-            if not isinstance(self.rule_binding, SettlementRuleBinding):
-                raise TypeError("rule_binding must be SettlementRuleBinding")
+            if type(self.rule_binding) is not SettlementRuleBinding:
+                raise TypeError("rule_binding must be exact SettlementRuleBinding")
             if self.rule_binding.settlement_currency != currency:
                 raise SettlementConflict(
                     "settlement rule currency does not match obligation currency"

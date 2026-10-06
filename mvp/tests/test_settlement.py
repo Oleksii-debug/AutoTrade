@@ -40,6 +40,86 @@ def evidence(
 
 
 class SettlementBookTests(unittest.TestCase):
+    def test_scope_and_rule_reject_polymorphic_ingress_before_callbacks(self):
+        class HostileText(str):
+            calls = 0
+
+            def _explode(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("settlement authority invoked polymorphic text")
+
+            strip = _explode
+            upper = _explode
+
+        class HostileTuple(tuple):
+            calls = 0
+
+            def __iter__(self):
+                type(self).calls += 1
+                raise AssertionError("settlement authority invoked polymorphic tuple")
+
+        HostileText.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact text"):
+            SettlementAccountScope(
+                provider_id=HostileText("TEST_PROVIDER"),
+                account_id="cash-1",
+                environment="PAPER",
+            )
+        self.assertEqual(HostileText.calls, 0)
+
+        scope = SettlementAccountScope(
+            provider_id="TEST_PROVIDER",
+            account_id="cash-1",
+            environment="PAPER",
+        )
+        HostileTuple.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact tuple"):
+            SettlementRuleBinding(
+                rule_id="rule",
+                rule_version="1",
+                scope=scope,
+                instrument_version="ABC",
+                settlement_currency="USD",
+                effective_from=date(2026, 9, 1),
+                effective_to=None,
+                evidence_refs=HostileTuple(("provider:rule",)),
+            )
+        self.assertEqual(HostileTuple.calls, 0)
+
+        HostileText.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact text"):
+            SettlementRuleBinding(
+                rule_id="rule",
+                rule_version="1",
+                scope=scope,
+                instrument_version="ABC",
+                settlement_currency="USD",
+                effective_from=date(2026, 9, 1),
+                effective_to=None,
+                evidence_refs=(HostileText("provider:rule"),),
+            )
+        self.assertEqual(HostileText.calls, 0)
+
+        class ScopeSubclass(SettlementAccountScope):
+            pass
+
+        subclass_scope = ScopeSubclass(
+            provider_id="TEST_PROVIDER",
+            account_id="cash-1",
+            environment="PAPER",
+        )
+        with self.assertRaisesRegex(TypeError, "exact SettlementAccountScope"):
+            SettlementRuleBinding(
+                rule_id="rule",
+                rule_version="1",
+                scope=subclass_scope,
+                instrument_version="ABC",
+                settlement_currency="USD",
+                effective_from=date(2026, 9, 1),
+                effective_to=None,
+                evidence_refs=("provider:rule",),
+            )
+
     def test_obligation_constructor_canonicalizes_financial_fields(self):
         obligation = SettlementObligation(
             " obligation-1 ",

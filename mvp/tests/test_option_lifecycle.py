@@ -782,6 +782,46 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             before_lifecycle,
         )
 
+    def test_simulation_resolver_cannot_mutate_registry_method_code_in_place(self):
+        reference = self.evidence(
+            external_event_id="resolver-registry-code-rebind-life",
+        )
+        original_code = InstrumentRegistry.exact.__code__
+
+        def forged_exact(_registry, _key):
+            return None
+
+        def mutate_registry_code_then_resolve(evidence_ref):
+            InstrumentRegistry.exact.__code__ = forged_exact.__code__
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=mutate_registry_code_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", authority.aggregate_id)
+        )
+        try:
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "financial authority changed during evidence resolution",
+            ):
+                authority.apply(reference)
+        finally:
+            InstrumentRegistry.exact.__code__ = original_code
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            before_lifecycle,
+        )
+
     def test_simulation_resolver_cannot_rebind_economic_read_authority(self):
         reference = self.evidence(
             external_event_id="resolver-economic-read-rebind-life",

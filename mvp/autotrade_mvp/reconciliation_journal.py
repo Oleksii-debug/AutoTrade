@@ -14,6 +14,7 @@ from uuid import NAMESPACE_URL, uuid5
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .dispatch import submission_attempt_aggregate_id
+from .exact_decimal import ExactDecimalError, parse_bounded_exact_decimal
 from .persistence import (
     JournalStore,
     canonical_json,
@@ -946,7 +947,7 @@ def load_account_resource_availability_evidence(
         raise ValueError("availability checkpoint is stale")
 
     resource_evidence = payload.get("resource_availability")
-    if not isinstance(resource_evidence, Mapping):
+    if type(resource_evidence) is not dict:
         raise ValueError(
             "availability checkpoint lacks explicit provider resource availability"
         )
@@ -995,7 +996,7 @@ def load_account_resource_availability_evidence(
         raise ValueError("resource availability evidence is expired")
 
     raw_available = resource_evidence.get("available_resources")
-    if not isinstance(raw_available, Mapping) or not raw_available:
+    if type(raw_available) is not dict or not raw_available:
         raise ValueError(
             "availability checkpoint lacks explicit available resources"
         )
@@ -1009,22 +1010,30 @@ def load_account_resource_availability_evidence(
             raise ValueError(
                 "resource availability keys must be unique after normalization"
             )
-        if isinstance(raw_amount, bool) or isinstance(raw_amount, float):
+        if type(raw_amount) is not str:
             raise TypeError(
-                "resource availability must use exact decimal encoding"
+                "persisted resource availability must use exact decimal text"
             )
         try:
-            amount = Decimal(raw_amount)
-        except Exception as error:
+            amount = parse_bounded_exact_decimal(raw_amount)
+        except ExactDecimalError as error:
             raise ValueError(
-                "resource availability must be a finite decimal"
+                "persisted resource availability must use bounded decimal text"
             ) from error
-        if not amount.is_finite() or amount < 0:
+        if str(amount) != raw_amount:
+            raise ValueError(
+                "persisted resource availability must use canonical decimal text"
+            )
+        if amount < 0:
             raise ValueError(
                 "resource availability must be a non-negative finite decimal"
             )
         canonical_available[resource] = amount
 
+    if type(resources) not in {tuple, list}:
+        raise TypeError("resources must use an exact tuple or list")
+    if any(type(value) is not str for value in resources):
+        raise TypeError("resources must contain exact text")
     requested = tuple(_text(value, name="resource") for value in resources)
     if not requested or len(requested) != len(set(requested)):
         raise ValueError("resources must be non-empty and unique")
@@ -1152,8 +1161,8 @@ def load_account_resource_availability_evidence(
         )
 
     raw_details = resource_evidence.get("resource_details", {})
-    if not isinstance(raw_details, Mapping):
-        raise ValueError("resource availability details must be an object")
+    if type(raw_details) is not dict:
+        raise ValueError("resource availability details must use an exact object")
 
     availability: dict[str, Decimal] = {}
     selected_details: dict[str, dict[str, str]] = {}
@@ -1260,9 +1269,13 @@ def load_account_resource_availability_evidence(
         }
 
     raw_evidence_refs = resource_evidence.get("evidence_refs")
-    if not isinstance(raw_evidence_refs, list) or not raw_evidence_refs:
+    if type(raw_evidence_refs) is not list or not raw_evidence_refs:
         raise ValueError(
-            "resource availability evidence_refs must be a non-empty list"
+            "resource availability evidence_refs must be a non-empty exact list"
+        )
+    if any(type(value) is not str for value in raw_evidence_refs):
+        raise TypeError(
+            "resource availability evidence_refs must contain exact text"
         )
     normalized_evidence_refs = tuple(
         _text(value, name="resource_availability.evidence_ref")

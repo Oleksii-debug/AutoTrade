@@ -355,10 +355,22 @@ class ReconciliationJournalTests(unittest.TestCase):
                 "MARGIN_CREDIT:USD"
             ]["evidence_ref_0"] = "provider:margin-credit:detached"
 
+            original_call = reconciliation_journal_module._journal_store_call
+
+            def tampered_call(selected_store, operation_name, *args, **kwargs):
+                if operation_name == "get_event":
+                    return deepcopy(tampered)
+                return original_call(
+                    selected_store,
+                    operation_name,
+                    *args,
+                    **kwargs,
+                )
+
             with patch.object(
-                JournalStore,
-                "get_event",
-                return_value=tampered,
+                reconciliation_journal_module,
+                "_journal_store_call",
+                new=tampered_call,
             ):
                 with self.assertRaisesRegex(
                     ValueError,
@@ -374,6 +386,89 @@ class ReconciliationJournalTests(unittest.TestCase):
                         now="2026-09-24T19:01:00Z",
                         max_age_seconds="120",
                     )
+
+    def test_persisted_resource_availability_requires_canonical_decimal_text(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="resource-decimal-encoding",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            original_call = reconciliation_journal_module._journal_store_call
+
+            for forged, error_type, message in (
+                (850, TypeError, "exact decimal text"),
+                ("0850", ValueError, "canonical decimal text"),
+                ("9" * 10_000, ValueError, "bounded decimal text"),
+            ):
+                with self.subTest(forged_type=type(forged).__name__):
+                    tampered = deepcopy(checkpoint)
+                    tampered["payload"]["resource_availability"][
+                        "available_resources"
+                    ]["CASH:USD"] = forged
+
+                    def tampered_call(selected_store, operation_name, *args, **kwargs):
+                        if operation_name == "get_event":
+                            return deepcopy(tampered)
+                        return original_call(
+                            selected_store,
+                            operation_name,
+                            *args,
+                            **kwargs,
+                        )
+
+                    with patch.object(
+                        reconciliation_journal_module,
+                        "_journal_store_call",
+                        new=tampered_call,
+                    ):
+                        with self.assertRaisesRegex(error_type, message):
+                            load_account_resource_availability_evidence(
+                                store,
+                                checkpoint_event_id=checkpoint["event_id"],
+                                provider_id="TEST_PROVIDER",
+                                account_id="test-account",
+                                environment="PAPER",
+                                resources=("CASH:USD",),
+                                now="2026-09-24T19:00:30Z",
+                                max_age_seconds="60",
+                            )
+
+    def test_resource_request_rejects_polymorphic_sequence_before_callbacks(self):
+        class HostileList(list):
+            calls = 0
+
+            def __iter__(self):
+                type(self).calls += 1
+                raise AssertionError("availability loader invoked polymorphic resources")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="hostile-resource-sequence",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            HostileList.calls = 0
+            with self.assertRaisesRegex(TypeError, "exact tuple or list"):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=HostileList(("CASH:USD",)),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                )
+            self.assertEqual(HostileList.calls, 0)
 
     def test_checkpoint_writer_rejects_journal_store_subclass_before_callbacks(self):
         class ExplosiveJournalStore(JournalStore):

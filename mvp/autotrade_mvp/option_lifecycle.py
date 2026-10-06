@@ -1119,7 +1119,7 @@ class DurableOptionLifecycleAuthority:
             )
         observation = observation_parser(source)
         observed_at = datetime.fromisoformat(
-            source.observed_at.replace("Z", "+00:00")
+            object.__getattribute__(source, "observed_at").replace("Z", "+00:00")
         ).astimezone(timezone.utc)
         if (
             observation.provider_id
@@ -1173,8 +1173,13 @@ class DurableOptionLifecycleAuthority:
             "capability_snapshot_id": (
                 object.__getattribute__(object.__getattribute__(provider_evidence, "query_binding"), "capability_snapshot_id")
             ),
-            "instrument_version": provider_evidence.query_binding.instrument_version,
-            "observed_at": provider_evidence.observed_at,
+            "instrument_version": object.__getattribute__(
+                object.__getattribute__(provider_evidence, "query_binding"),
+                "instrument_version",
+            ),
+            "observed_at": object.__getattribute__(
+                provider_evidence, "observed_at"
+            ),
             "parser_id": _OPTION_LIFECYCLE_PARSER_ID,
             "parser_version": _OPTION_LIFECYCLE_PARSER_VERSION,
             "parser_contract_digest": _OPTION_LIFECYCLE_PARSER_CONTRACT_DIGEST,

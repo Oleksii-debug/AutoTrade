@@ -1902,6 +1902,18 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             "_journal_store_call",
             "_envelope",
             "_detach_submission_json",
+            "submission_attempt_aggregate_id",
+            "_event_id",
+            "_identity_digest",
+            "_instant",
+            "payload_digest",
+            "canonical_json",
+            "_canonical_submission_event_instant",
+            "_exact_response_terminal_semantics_are_canonical",
+            "_has_exact_response_markers",
+            "uuid5",
+            "NAMESPACE_URL",
+            "sha256",
         )
         for surface in surfaces:
             with self.subTest(surface=surface), TemporaryDirectory() as directory:
@@ -1924,9 +1936,10 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 def transport(_client_order_id, _request, guard):
                     nonlocal wire_calls
                     guard()
+                    response = ExactJsonTransportResponse(b'{"accepted":true}')
                     wire_calls += 1
                     setattr(dispatch_module, surface, forged)
-                    return ExactJsonTransportResponse(b'{"accepted":true}')
+                    return response
 
                 attempt_id = f"post-send-module-helper-{surface}"
                 try:

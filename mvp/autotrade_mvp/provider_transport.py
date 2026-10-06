@@ -619,6 +619,8 @@ def _validate_bybit_option_delivery_query(
     if symbol is not None:
         if (
             type(symbol) is not str
+            or not symbol
+            or len(symbol) > 160
             or re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", symbol) is None
         ):
             raise ProviderTransportScopeError(

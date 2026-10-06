@@ -720,6 +720,44 @@ def _require_physical_delivery_borrow_safety(
             )
 
 
+def _callback_financial_authority_fingerprint() -> tuple[tuple[object, object], ...]:
+    """Capture downstream financial code that an arbitrary resolver must not retarget."""
+
+    authorities = (
+        InstrumentRegistry.exact,
+        InstrumentRegistry.at,
+        InstrumentVersion.to_contract_dict,
+        DurableProviderEconomicBook.read_cut,
+        DurableProviderEconomicBook.prepare_batch_mutation,
+        DurableProviderEconomicBook.refresh,
+        JournalStore.load_events,
+        JournalStore.commit_command,
+        canonical_option_lifecycle_observation,
+        _bind_version,
+        _require_consumable_option_position,
+        _require_physical_delivery_borrow_safety,
+        _economic_transaction,
+        _identity,
+        _provider_domain_identity,
+        _utc_text,
+        payload_digest,
+        posting,
+        reverse_transaction,
+        exact_abs,
+        exact_add,
+        exact_multiply,
+        exact_subtract,
+        is_exact_decimal_multiple,
+        physical_exercise_obligation,
+        book_cash_option_settlement,
+        book_physical_option_settlement,
+    )
+    return tuple(
+        (authority, getattr(authority, "__code__", None))
+        for authority in authorities
+    )
+
+
 class DurableOptionLifecycleAuthority:
     """Exactly-once lifecycle-to-economics bridge over canonical authorities."""
 
@@ -865,6 +903,13 @@ class DurableOptionLifecycleAuthority:
         require_scope_code = getattr(require_scope, "__code__", None)
         observation_parser = _canonical_observation_from_sealed_response
         observation_parser_code = getattr(observation_parser, "__code__", None)
+        financial_authority_fingerprint = _callback_financial_authority_fingerprint
+        financial_authority_fingerprint_code = getattr(
+            financial_authority_fingerprint,
+            "__code__",
+            None,
+        )
+        expected_financial_authority = financial_authority_fingerprint()
 
         # Snapshot every caller-reachable lifecycle owner/config value locally.
         # Instance-level "_expected_*" fields are not sufficient across an
@@ -884,6 +929,18 @@ class DurableOptionLifecycleAuthority:
         expected_provider_environment = self.provider_environment
         expected_provider_environment_authority = self._expected_provider_environment
         expected_resolver = self.evidence_resolver
+        expected_aggregate_id = self.aggregate_id
+        expected_actor = self._ACTOR
+        expected_aggregate_type = self._AGGREGATE_TYPE
+        lifecycle_methods = (
+            type(self)._require_canonical_authorities,
+            type(self)._events,
+            type(self)._payload,
+        )
+        expected_lifecycle_methods = tuple(
+            (method, getattr(method, "__code__", None))
+            for method in lifecycle_methods
+        )
         try:
             source = expected_resolver(reference)
         except Exception as error:
@@ -909,7 +966,21 @@ class DurableOptionLifecycleAuthority:
             or self.provider_environment != expected_provider_environment
             or self._expected_provider_environment != expected_provider_environment_authority
             or self.evidence_resolver is not expected_resolver
-            or "_require_canonical_authorities" in vars(self)
+            or self.aggregate_id != expected_aggregate_id
+            or self._ACTOR != expected_actor
+            or self._AGGREGATE_TYPE != expected_aggregate_type
+            or {"_require_canonical_authorities", "_events", "_payload"}.intersection(
+                vars(self)
+            )
+            or tuple(
+                (method, getattr(method, "__code__", None))
+                for method in (
+                    type(self)._require_canonical_authorities,
+                    type(self)._events,
+                    type(self)._payload,
+                )
+            )
+            != expected_lifecycle_methods
         ):
             raise OptionLifecycleError(
                 "option lifecycle authority changed during evidence resolution"
@@ -930,6 +1001,19 @@ class DurableOptionLifecycleAuthority:
         ):
             raise OptionLifecycleError(
                 "provider lifecycle evidence authority changed during resolution"
+            )
+        if (
+            _callback_financial_authority_fingerprint
+            is not financial_authority_fingerprint
+            or (
+                financial_authority_fingerprint_code is not None
+                and getattr(financial_authority_fingerprint, "__code__", None)
+                is not financial_authority_fingerprint_code
+            )
+            or financial_authority_fingerprint() != expected_financial_authority
+        ):
+            raise OptionLifecycleError(
+                "financial authority changed during evidence resolution"
             )
         if type(source) is not ProviderResponseObservation:
             raise OptionLifecycleError(

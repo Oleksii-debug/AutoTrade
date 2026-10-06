@@ -1511,6 +1511,26 @@ class BybitV5AdapterTests(unittest.TestCase):
                     observation.response_sha256,
                 )
 
+    def test_unclassified_nonzero_response_remains_reconciliation_first(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 199999,
+                "retMsg": "unclassified provider response",
+                "result": {},
+                "retExtInfo": {},
+                "time": 1790280000123,
+            },
+            intent_id="bybit-unclassified-response",
+        )
+        result = parse_submission_response(
+            attempt_id=attempt,
+            prepared_request=prepared,
+            observation=observation,
+        )
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertEqual(result["reason_code"], "BYBIT_199999")
+        self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
+
     def test_explicit_parameter_error_is_rejected(self):
         attempt, prepared, observation = self._durable_write_observation(
             {

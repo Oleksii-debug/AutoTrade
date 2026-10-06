@@ -8,12 +8,14 @@ not create a second journal, API server, authentication authority or trading pat
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
 import ssl
 from threading import Condition, RLock, Thread, current_thread
 from typing import Callable
 from urllib.parse import urlsplit
+from uuid import UUID, uuid4
 from weakref import WeakKeyDictionary
 
 from research.autotrade_research.artifacts.resource_lock import (
@@ -29,7 +31,12 @@ from .host_network import (
     SnapshotProvider,
     TransportResponse,
 )
-from .persistence import JournalStore
+from .persistence import (
+    JournalStore,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .store_identity import JournalStoreIdentity, require_database_identity
 from .security import SecurityBoundary, _authenticated_origin
 
@@ -53,6 +60,53 @@ _CONFIG_FIELDS = frozenset(
 )
 _TERMINAL_STATES = frozenset({"CLOSED", "FAILED"})
 _STOPPING_STATES = frozenset({"CLOSING", "CLOSED", "FAILED"})
+_RUNTIME_OCCURRENCE_SCHEMA_VERSION = "1.0.0"
+_RUNTIME_OCCURRENCE_AGGREGATE_TYPE = "production_host_runtime"
+_RUNTIME_OCCURRENCE_EVENT_TYPE = "ProductionHostRuntimeOccurrenceIssued"
+
+
+def _runtime_occurrence_binding_authority():
+    """Create one process-private runtime-object occurrence selector authority."""
+
+    bindings = WeakKeyDictionary()
+    lock = RLock()
+
+    def bind(runtime: object, occurrence_id: str) -> None:
+        if type(occurrence_id) is not str or not occurrence_id:
+            raise TypeError("runtime occurrence binding id must be exact non-empty str")
+        with lock:
+            if runtime in bindings:
+                raise RuntimeError("production host runtime occurrence is already bound")
+            bindings[runtime] = occurrence_id
+
+    def read(runtime: object) -> str | None:
+        with lock:
+            return bindings.get(runtime)
+
+    return bind, read
+
+
+_RUNTIME_OCCURRENCE_BIND, _RUNTIME_OCCURRENCE_READ = (
+    _runtime_occurrence_binding_authority()
+)
+
+_RUNTIME_OCCURRENCE_PAYLOAD_FIELDS = frozenset(
+    {
+        "account_id",
+        "environment",
+        "host_id",
+        "runtime_occurrence_id",
+        "schema_version",
+    }
+)
+
+
+def _product_artifact_root(journal_path: Path) -> Path:
+    """Select the product artifact root independently from caller publication stores."""
+
+    if not isinstance(journal_path, Path) or not journal_path.is_absolute():
+        raise ValueError("product artifact root requires canonical absolute journal path")
+    return Path(str(journal_path) + ".artifacts")
 _RUNTIME_CONFIG_BINDINGS = WeakKeyDictionary()
 _RUNTIME_CONFIG_BINDINGS_LOCK = RLock()
 _RUNTIME_ISSUANCE_TOKEN = object()
@@ -230,6 +284,287 @@ def load_production_host_config(path: str | Path) -> ProductionHostConfig:
         raise ValueError("production host config exceeds maximum size")
     return parse_production_host_config(payload)
 
+
+@dataclass(frozen=True, slots=True)
+class ProductionHostRuntimeOccurrence:
+    """One durable product-host process/bootstrap occurrence.
+
+    This is an occurrence selector only. Journal committed_at is storage metadata,
+    not independent UTC chronology authority, and this object grants no readiness,
+    provider, release, or trading authority.
+    """
+
+    runtime_occurrence_id: str
+    host_id: str
+    account_id: str
+    environment: str
+    aggregate_version: int
+    journal_sequence: int
+
+    def __post_init__(self) -> None:
+        for field in (
+            "runtime_occurrence_id",
+            "host_id",
+            "account_id",
+            "environment",
+        ):
+            value = getattr(self, field)
+            if type(value) is not str or not value or value != value.strip():
+                raise TypeError(f"{field} must be exact canonical non-empty str")
+        try:
+            parsed = UUID(self.runtime_occurrence_id)
+        except (ValueError, AttributeError, TypeError) as error:
+            raise ValueError("runtime_occurrence_id must be a canonical UUID") from error
+        if str(parsed) != self.runtime_occurrence_id:
+            raise ValueError("runtime_occurrence_id must be a canonical lowercase UUID")
+        for field in ("aggregate_version", "journal_sequence"):
+            value = getattr(self, field)
+            if type(value) is not int or value <= 0:
+                raise TypeError(f"{field} must be a positive exact int")
+
+
+def _runtime_occurrence_from_scoped_event(
+    event: object,
+    *,
+    host_id: str,
+    account_id: str,
+    environment: str,
+    expected_version: int,
+) -> ProductionHostRuntimeOccurrence:
+    if type(event) is not dict:
+        raise RuntimeError("production host runtime occurrence row is non-canonical")
+    if event.get("event_type") != _RUNTIME_OCCURRENCE_EVENT_TYPE:
+        raise RuntimeError("production host runtime occurrence event type is invalid")
+    if event.get("aggregate_type") != _RUNTIME_OCCURRENCE_AGGREGATE_TYPE:
+        raise RuntimeError("production host runtime occurrence aggregate type is invalid")
+    if event.get("aggregate_id") != host_id:
+        raise RuntimeError("production host runtime occurrence host identity is invalid")
+    if event.get("aggregate_version") != expected_version:
+        raise RuntimeError("production host runtime occurrence version chain is invalid")
+    journal_sequence = event.get("journal_sequence")
+    if type(journal_sequence) is not int or journal_sequence <= 0:
+        raise RuntimeError("production host runtime occurrence journal sequence is invalid")
+    payload = event.get("payload")
+    if type(payload) is not dict or frozenset(payload) != _RUNTIME_OCCURRENCE_PAYLOAD_FIELDS:
+        raise RuntimeError("production host runtime occurrence payload is non-canonical")
+    if payload.get("schema_version") != _RUNTIME_OCCURRENCE_SCHEMA_VERSION:
+        raise RuntimeError("production host runtime occurrence schema version is invalid")
+    for field, expected in (
+        ("host_id", host_id),
+        ("account_id", account_id),
+        ("environment", environment),
+    ):
+        value = payload.get(field)
+        if type(value) is not str or value != expected:
+            raise RuntimeError(
+                f"production host runtime occurrence {field} changed for installed host"
+            )
+    occurrence_id = payload.get("runtime_occurrence_id")
+    if type(occurrence_id) is not str:
+        raise RuntimeError("production host runtime occurrence id is non-canonical")
+    if event.get("event_id") != occurrence_id:
+        raise RuntimeError("production host runtime occurrence event/id binding is invalid")
+    try:
+        return ProductionHostRuntimeOccurrence(
+            runtime_occurrence_id=occurrence_id,
+            host_id=host_id,
+            account_id=account_id,
+            environment=environment,
+            aggregate_version=expected_version,
+            journal_sequence=journal_sequence,
+        )
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("production host runtime occurrence payload is invalid") from error
+
+
+def _runtime_occurrence_from_event(
+    event: object,
+    *,
+    config: ProductionHostConfig,
+    expected_version: int,
+) -> ProductionHostRuntimeOccurrence:
+    return _runtime_occurrence_from_scoped_event(
+        event,
+        host_id=config.host_id,
+        account_id=config.account_id,
+        environment=config.environment,
+        expected_version=expected_version,
+    )
+
+def _load_production_host_runtime_occurrences(
+    journal: JournalStore,
+    config: ProductionHostConfig,
+) -> tuple[ProductionHostRuntimeOccurrence, ...]:
+    config = _readmit_production_host_config(config)
+    identity = require_exact_journal_store_authority(
+        journal,
+        subject="production host runtime occurrence JournalStore",
+    )
+    with journal_store_authority_scope(journal, identity):
+        events = JournalStore.load_events(
+            journal,
+            _RUNTIME_OCCURRENCE_AGGREGATE_TYPE,
+            config.host_id,
+        )
+    occurrences: list[ProductionHostRuntimeOccurrence] = []
+    seen: set[str] = set()
+    previous_sequence = 0
+    for expected_version, event in enumerate(events, start=1):
+        occurrence = _runtime_occurrence_from_event(
+            event,
+            config=config,
+            expected_version=expected_version,
+        )
+        if occurrence.runtime_occurrence_id in seen:
+            raise RuntimeError("production host runtime occurrence id is duplicated")
+        if occurrence.journal_sequence <= previous_sequence:
+            raise RuntimeError(
+                "production host runtime occurrence journal order is invalid"
+            )
+        seen.add(occurrence.runtime_occurrence_id)
+        previous_sequence = occurrence.journal_sequence
+        occurrences.append(occurrence)
+    return tuple(occurrences)
+
+
+
+def require_current_production_host_runtime_occurrence(
+    *,
+    journal: JournalStore,
+    occurrence: ProductionHostRuntimeOccurrence,
+) -> ProductionHostRuntimeOccurrence:
+    """Return a detached exact snapshot only if occurrence is current in journal.
+
+    This proves durable runtime-occurrence identity and ordering only. It does not
+    prove UTC chronology, release authenticity, readiness, or trading authority.
+    """
+
+    if type(occurrence) is not ProductionHostRuntimeOccurrence:
+        raise TypeError(
+            "occurrence must be exact ProductionHostRuntimeOccurrence"
+        )
+    snapshot = ProductionHostRuntimeOccurrence(
+        runtime_occurrence_id=occurrence.runtime_occurrence_id,
+        host_id=occurrence.host_id,
+        account_id=occurrence.account_id,
+        environment=occurrence.environment,
+        aggregate_version=occurrence.aggregate_version,
+        journal_sequence=occurrence.journal_sequence,
+    )
+    identity = require_exact_journal_store_authority(
+        journal,
+        subject="production host runtime occurrence JournalStore",
+    )
+    with journal_store_authority_scope(journal, identity):
+        events = JournalStore.load_events(
+            journal,
+            _RUNTIME_OCCURRENCE_AGGREGATE_TYPE,
+            snapshot.host_id,
+        )
+
+    if not events:
+        raise PermissionError("production host runtime occurrence is not durable")
+    seen: set[str] = set()
+    previous_sequence = 0
+    current: ProductionHostRuntimeOccurrence | None = None
+    for expected_version, event in enumerate(events, start=1):
+        item = _runtime_occurrence_from_scoped_event(
+            event,
+            host_id=snapshot.host_id,
+            account_id=snapshot.account_id,
+            environment=snapshot.environment,
+            expected_version=expected_version,
+        )
+        if item.runtime_occurrence_id in seen:
+            raise RuntimeError("production host runtime occurrence id is duplicated")
+        if item.journal_sequence <= previous_sequence:
+            raise RuntimeError(
+                "production host runtime occurrence journal order is invalid"
+            )
+        seen.add(item.runtime_occurrence_id)
+        previous_sequence = item.journal_sequence
+        current = item
+
+    if current != snapshot:
+        raise PermissionError(
+            "production host runtime occurrence is no longer current"
+        )
+    return snapshot
+
+def _issue_production_host_runtime_occurrence(
+    journal: JournalStore,
+    config: ProductionHostConfig,
+) -> ProductionHostRuntimeOccurrence:
+    """Append one durable restart-distinguishing host occurrence.
+
+    The timestamp required by the generic journal envelope remains storage
+    metadata only. Independent UTC chronology is owned by WP-48/#1018.
+    """
+
+    config = _readmit_production_host_config(config)
+    identity = require_exact_journal_store_authority(
+        journal,
+        subject="production host runtime occurrence JournalStore",
+    )
+    with journal_store_authority_scope(journal, identity):
+        existing_events = JournalStore.load_events(
+            journal,
+            _RUNTIME_OCCURRENCE_AGGREGATE_TYPE,
+            config.host_id,
+        )
+        existing = tuple(
+            _runtime_occurrence_from_event(
+                event,
+                config=config,
+                expected_version=index,
+            )
+            for index, event in enumerate(existing_events, start=1)
+        )
+        if len({item.runtime_occurrence_id for item in existing}) != len(existing):
+            raise RuntimeError("production host runtime occurrence id is duplicated")
+        occurrence_id = str(uuid4())
+        payload = {
+            "account_id": config.account_id,
+            "environment": config.environment,
+            "host_id": config.host_id,
+            "runtime_occurrence_id": occurrence_id,
+            "schema_version": _RUNTIME_OCCURRENCE_SCHEMA_VERSION,
+        }
+        next_version = len(existing) + 1
+        JournalStore.append_event(
+            journal,
+            {
+                "event_id": occurrence_id,
+                "event_type": _RUNTIME_OCCURRENCE_EVENT_TYPE,
+                "aggregate_type": _RUNTIME_OCCURRENCE_AGGREGATE_TYPE,
+                "aggregate_id": config.host_id,
+                "aggregate_version": str(next_version),
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": datetime.now(timezone.utc).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+            },
+        )
+        final_events = JournalStore.load_events(
+            journal,
+            _RUNTIME_OCCURRENCE_AGGREGATE_TYPE,
+            config.host_id,
+        )
+        if len(final_events) != next_version:
+            raise RuntimeError(
+                "production host runtime occurrence chain changed during issuance"
+            )
+        issued = _runtime_occurrence_from_event(
+            final_events[-1],
+            config=config,
+            expected_version=next_version,
+        )
+        if issued.runtime_occurrence_id != occurrence_id:
+            raise RuntimeError(
+                "production host runtime occurrence round-trip identity mismatch"
+            )
+        return issued
 
 class _InstanceFence:
     """Process-lifetime bootstrap exclusion using the shared ResourceLock TCB.
@@ -440,6 +775,23 @@ class ProductionHostRuntime:
         if type(bound) is not ProductionHostConfig:
             raise RuntimeError("production host config authority is not bound")
         return _readmit_production_host_config(bound)
+
+    def _bind_runtime_occurrence(
+        self,
+        occurrence: ProductionHostRuntimeOccurrence,
+        *,
+        _bind=_RUNTIME_OCCURRENCE_BIND,
+    ) -> None:
+        if type(occurrence) is not ProductionHostRuntimeOccurrence:
+            raise TypeError(
+                "runtime occurrence must be exact ProductionHostRuntimeOccurrence"
+            )
+        # Keep the selector outside both caller-writable runtime instance state
+        # and replaceable module-global container state. The captured closure
+        # owns the one-shot runtime-object binding for this process.
+        _bind(self, occurrence.runtime_occurrence_id)
+
+    @property
 
     @property
     def closed(self) -> bool:
@@ -688,7 +1040,7 @@ def build_production_host(
         )
         server.daemon_threads = False
         server.block_on_close = True
-        return ProductionHostRuntime(
+        runtime = ProductionHostRuntime(
             config=config,
             journal=journal,
             application=application,
@@ -697,6 +1049,12 @@ def build_production_host(
             admission_gate=admission_gate,
             issuance_token=_RUNTIME_ISSUANCE_TOKEN,
         )
+        runtime_occurrence = _issue_production_host_runtime_occurrence(
+            journal,
+            config,
+        )
+        runtime._bind_runtime_occurrence(runtime_occurrence)
+        return runtime
     except BaseException as error:
         cleanup_errors: list[tuple[str, BaseException]] = []
         if server is not None:

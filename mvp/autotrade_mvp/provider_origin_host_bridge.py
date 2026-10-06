@@ -22,6 +22,7 @@ from .persistence import (
 from .provider_core import (
     AuthenticatedReadQueryBinding,
     _require_authenticated_read_query_binding_authority,
+    ProviderCoreError,
     ProviderResponseObservation,
     provider_response_observation_projection,
 )
@@ -278,7 +279,7 @@ def verify_bybit_direct_wire_observation_against_host_pins(
         projection = _projection(observation)
         receipt = _receipt_reader(observation)
         receipt_values = _receipt_snapshot(receipt)
-    except (ProviderTransportError, TypeError, ValueError) as error:
+    except (ProviderCoreError, ProviderTransportError, TypeError, ValueError) as error:
         raise ProviderOriginHostBridgeError(
             "authenticated read lacks canonical direct-wire provenance"
         ) from error

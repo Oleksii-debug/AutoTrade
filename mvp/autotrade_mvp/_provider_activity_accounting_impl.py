@@ -2013,7 +2013,7 @@ def _install_durable_provider_economic_book_authority():
     store_authority_scope = journal_store_authority_scope
     store_load_events = JournalStore.load_events
     exact_type = type
-    identity = id
+    object_identity = id
     getattribute = object.__getattribute__
     setattr_exact = object.__setattr__
     tuple_factory = tuple
@@ -2040,7 +2040,7 @@ def _install_durable_provider_economic_book_authority():
     def registered_authority(
         value: object,
     ) -> _DurableProviderEconomicBookAuthority | None:
-        entry = authorities.get(identity(value))
+        entry = authorities.get(object_identity(value))
         if entry is None:
             return None
         value_ref, authority = entry
@@ -2048,7 +2048,7 @@ def _install_durable_provider_economic_book_authority():
         if current is value:
             return authority
         if current is None:
-            authorities.pop(identity(value), None)
+            authorities.pop(object_identity(value), None)
             return None
         raise conflict_type(
             "durable economic-book binding identity collision"
@@ -2058,7 +2058,7 @@ def _install_durable_provider_economic_book_authority():
         try:
             prune_dead()
             return registered_authority(value) is not None
-        except TypeError:
+        except type_error:
             return False
 
     def bound_authority(
@@ -2208,7 +2208,7 @@ def _install_durable_provider_economic_book_authority():
             scoped_book_id=getattribute(value, "book_id"),
         )
         state = getattribute(value, "__dict__")
-        object_id = identity(value)
+        object_id = object_identity(value)
         authorities[object_id] = (
             weakref_ref(value),
             authority_type(

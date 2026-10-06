@@ -6,7 +6,16 @@ import unittest
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher, load_submission_response_binding
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_transport import (
+    BINANCE_SPOT_ENDPOINT_POLICIES,
+    BinanceSpotCredential,
+    BinanceSpotSigner,
+    BybitV5Credential,
+    KrakenFuturesCredential,
+    KrakenSpotCredential,
+    AlpacaTradingCredential,
+    ProviderTransportScopeError,
     TradingWireResponse,
+    WhiteBitCredential,
     _alpaca_exact_trading_response,
     _binance_exact_trading_response,
     _bybit_exact_trading_response,

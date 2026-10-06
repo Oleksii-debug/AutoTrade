@@ -985,6 +985,23 @@ class InstrumentIngressAuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(InstrumentRegistryError, "provider_symbol is required"):
             spot(symbol=_TrapText("ABC"))
 
+
+    def test_instrument_id_subclass_is_rejected_before_uuid_parser(self):
+        with self.assertRaisesRegex(InstrumentRegistryError, "instrument_id is required"):
+            spot(instrument_id=_TrapText(A))
+
+    def test_decimal_text_subclass_is_rejected_before_decimal_parser(self):
+        with self.assertRaisesRegex(
+            InstrumentRegistryError,
+            "contract_multiplier must use exact decimal input",
+        ):
+            InstrumentVersion(
+                **{
+                    **spot().__dict__,
+                    "contract_multiplier": _TrapText("1"),
+                }
+            )
+
     def test_metadata_mapping_subclass_is_rejected_before_iteration(self):
         evidence = _TrapMapping(
             {

@@ -14,6 +14,7 @@ from uuid import NAMESPACE_URL, uuid5
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .dispatch import submission_attempt_aggregate_id
+from .exact_decimal import ExactDecimalError, as_fraction, parse_bounded_exact_decimal
 from .persistence import (
     JournalStore,
     canonical_json,
@@ -30,6 +31,7 @@ from .securities_borrow import (
     BorrowAvailabilityEvidence,
     verify_provider_borrow_evidence,
 )
+from .settlement import BuyingPowerEvidence
 
 def _install_journal_store_call():
     """Freeze reconciliation journal dispatch to canonical store operations."""
@@ -926,26 +928,39 @@ def load_account_resource_availability_evidence(
     if isinstance(max_age_seconds, Decimal) and type(max_age_seconds) is not Decimal:
         raise TypeError("max_age_seconds must be an exact built-in Decimal")
     try:
-        max_age = (
-            max_age_seconds
-            if type(max_age_seconds) is Decimal
-            else Decimal(max_age_seconds)
-        )
-    except Exception as error:
-        raise ValueError("max_age_seconds must be a finite decimal") from error
-    if not max_age.is_finite() or max_age < 0:
+        max_age = parse_bounded_exact_decimal(max_age_seconds)
+        max_age_fraction = as_fraction(max_age)
+    except ExactDecimalError as error:
+        raise ValueError(
+            "max_age_seconds must be a finite decimal within the exact resource envelope"
+        ) from error
+    if max_age < 0:
         raise ValueError("max_age_seconds must be a non-negative finite decimal")
     delta = current - completed
     age_microseconds = (
         (delta.days * 86400 + delta.seconds) * 1_000_000
         + delta.microseconds
     )
-    age_seconds = Decimal(age_microseconds) / Decimal(1_000_000)
-    if age_seconds > max_age:
+    if (
+        age_microseconds * max_age_fraction.denominator
+        > 1_000_000 * max_age_fraction.numerator
+    ):
         raise ValueError("availability checkpoint is stale")
 
+    # Hard freshness is exact integer/rational arithmetic.  Diagnostic rendering
+    # is derived separately so ambient Decimal precision/rounding has no authority.
+    age_whole_seconds, age_fractional_microseconds = divmod(
+        age_microseconds,
+        1_000_000,
+    )
+    age_seconds_text = str(age_whole_seconds)
+    if age_fractional_microseconds:
+        age_seconds_text += (
+            "." + f"{age_fractional_microseconds:06d}".rstrip("0")
+        )
+
     resource_evidence = payload.get("resource_availability")
-    if not isinstance(resource_evidence, Mapping):
+    if type(resource_evidence) is not dict:
         raise ValueError(
             "availability checkpoint lacks explicit provider resource availability"
         )
@@ -994,7 +1009,7 @@ def load_account_resource_availability_evidence(
         raise ValueError("resource availability evidence is expired")
 
     raw_available = resource_evidence.get("available_resources")
-    if not isinstance(raw_available, Mapping) or not raw_available:
+    if type(raw_available) is not dict or not raw_available:
         raise ValueError(
             "availability checkpoint lacks explicit available resources"
         )
@@ -1008,22 +1023,30 @@ def load_account_resource_availability_evidence(
             raise ValueError(
                 "resource availability keys must be unique after normalization"
             )
-        if isinstance(raw_amount, bool) or isinstance(raw_amount, float):
+        if type(raw_amount) is not str:
             raise TypeError(
-                "resource availability must use exact decimal encoding"
+                "persisted resource availability must use exact decimal text"
             )
         try:
-            amount = Decimal(raw_amount)
-        except Exception as error:
+            amount = parse_bounded_exact_decimal(raw_amount)
+        except ExactDecimalError as error:
             raise ValueError(
-                "resource availability must be a finite decimal"
+                "persisted resource availability must use bounded decimal text"
             ) from error
-        if not amount.is_finite() or amount < 0:
+        if str(amount) != raw_amount:
+            raise ValueError(
+                "persisted resource availability must use canonical decimal text"
+            )
+        if amount < 0:
             raise ValueError(
                 "resource availability must be a non-negative finite decimal"
             )
         canonical_available[resource] = amount
 
+    if type(resources) not in {tuple, list}:
+        raise TypeError("resources must use an exact tuple or list")
+    if any(type(value) is not str for value in resources):
+        raise TypeError("resources must contain exact text")
     requested = tuple(_text(value, name="resource") for value in resources)
     if not requested or len(requested) != len(set(requested)):
         raise ValueError("resources must be non-empty and unique")
@@ -1036,7 +1059,10 @@ def load_account_resource_availability_evidence(
     #   2. its provider resource query must have started after the settlement
     #      fact became available. Merely wrapping an old provider snapshot in a
     #      newer reconciliation event must never restore reservation authority.
-    if any(resource.startswith("CASH:") for resource in requested):
+    if any(
+        resource.startswith(("CASH:", "MARGIN_CREDIT:"))
+        for resource in requested
+    ):
         checkpoint_sequence = checkpoint.get("journal_sequence")
         if type(checkpoint_sequence) is not int or checkpoint_sequence <= 0:
             raise ValueError(
@@ -1148,8 +1174,8 @@ def load_account_resource_availability_evidence(
         )
 
     raw_details = resource_evidence.get("resource_details", {})
-    if not isinstance(raw_details, Mapping):
-        raise ValueError("resource availability details must be an object")
+    if type(raw_details) is not dict:
+        raise ValueError("resource availability details must use an exact object")
 
     availability: dict[str, Decimal] = {}
     selected_details: dict[str, dict[str, str]] = {}
@@ -1163,6 +1189,47 @@ def load_account_resource_availability_evidence(
             )
         if resource.startswith("CASH:"):
             availability[resource] = canonical_available[resource]
+            continue
+        if resource.startswith("MARGIN_CREDIT:"):
+            detail = raw_details.get(resource)
+            if type(detail) is not dict:
+                raise ValueError(
+                    "MARGIN_CREDIT resource lacks typed buying-power evidence"
+                )
+            buying_power = BuyingPowerEvidence.from_resource_detail(detail)
+            if buying_power.resource_detail() != detail:
+                raise ValueError(
+                    "margin-credit resource detail must use canonical encoding"
+                )
+            if (
+                buying_power.resource_key != resource
+                or buying_power.scope.provider_id != provider
+                or buying_power.scope.account_id != account
+                or buying_power.scope.environment != scope
+                or buying_power.scope.provider_environment != provider_scope
+            ):
+                raise ValueError("margin-credit availability evidence scope mismatch")
+            if buying_power.additional_credit != canonical_available[resource]:
+                raise ValueError(
+                    "margin-credit amount differs from available resource amount"
+                )
+            if (
+                buying_power.observed_at < snapshot_started
+                or buying_power.observed_at > completed
+            ):
+                raise ValueError(
+                    "margin-credit availability observation is outside snapshot cut"
+                )
+            if valid_until > buying_power.valid_until or current >= buying_power.valid_until:
+                raise ValueError("margin-credit availability evidence is expired")
+            availability[resource] = canonical_available[resource]
+            selected_details[resource] = {
+                _text(key, name="margin-credit detail key"): _text(
+                    value,
+                    name=f"margin-credit detail {key}",
+                )
+                for key, value in detail.items()
+            }
             continue
         if not resource.startswith("BORROW:"):
             raise ValueError(
@@ -1215,9 +1282,13 @@ def load_account_resource_availability_evidence(
         }
 
     raw_evidence_refs = resource_evidence.get("evidence_refs")
-    if not isinstance(raw_evidence_refs, list) or not raw_evidence_refs:
+    if type(raw_evidence_refs) is not list or not raw_evidence_refs:
         raise ValueError(
-            "resource availability evidence_refs must be a non-empty list"
+            "resource availability evidence_refs must be a non-empty exact list"
+        )
+    if any(type(value) is not str for value in raw_evidence_refs):
+        raise TypeError(
+            "resource availability evidence_refs must contain exact text"
         )
     normalized_evidence_refs = tuple(
         _text(value, name="resource_availability.evidence_ref")
@@ -1225,6 +1296,18 @@ def load_account_resource_availability_evidence(
     )
     if len(normalized_evidence_refs) != len(set(normalized_evidence_refs)):
         raise ValueError("resource availability evidence_refs must be unique")
+    provider_ref_set = frozenset(normalized_evidence_refs)
+    for resource, detail in selected_details.items():
+        if not resource.startswith("MARGIN_CREDIT:"):
+            continue
+        buying_power = BuyingPowerEvidence.from_resource_detail(detail)
+        if any(
+            reference not in provider_ref_set
+            for reference in buying_power.evidence_refs
+        ):
+            raise ValueError(
+                "margin-credit evidence_refs are not bound to provider snapshot"
+            )
 
     aggregate_version = checkpoint.get("aggregate_version")
     if type(aggregate_version) is not int or aggregate_version <= 0:
@@ -1258,7 +1341,7 @@ def load_account_resource_availability_evidence(
         # risk/admission events and must compare identically after restart.
         "resource_evidence_refs": list(normalized_evidence_refs),
         "observed_at": _instant(payload.get("observed_at"), name="observed_at"),
-        "age_seconds": str(age_seconds),
+        "age_seconds": age_seconds_text,
         "availability": {
             resource: str(amount)
             for resource, amount in sorted(availability.items())

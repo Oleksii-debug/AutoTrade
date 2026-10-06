@@ -15,6 +15,7 @@ from .exact_decimal import (
     parse_bounded_exact_decimal,
 )
 from .securities_borrow import BorrowAvailabilityEvidence
+from .settlement import BuyingPowerEvidence
 
 
 _REQUIRED_ABSENCE_SURFACES = frozenset(
@@ -272,14 +273,14 @@ class ResourceAvailabilityEvidence:
             raise ValueError("valid_until must be after query_completed_at")
         if self.provider_as_of is not None:
             _instant(self.provider_as_of, name="provider_as_of")
-        if not isinstance(self.available_resources, Mapping):
-            raise TypeError("available_resources must be a mapping")
+        if type(self.available_resources) is not dict:
+            raise TypeError("available_resources must use an exact dict")
         if not self.available_resources:
             raise ValueError("available_resources must not be empty")
         normalized: dict[str, Decimal] = {}
         for resource, raw in self.available_resources.items():
-            if not isinstance(resource, str):
-                raise TypeError("available_resources keys must be strings")
+            if type(resource) is not str:
+                raise TypeError("available_resources keys must use exact strings")
             key = _text(resource, name="available_resources key")
             if key in normalized:
                 raise ValueError(
@@ -296,8 +297,8 @@ class ResourceAvailabilityEvidence:
         )
 
         raw_details = {} if self.resource_details is None else self.resource_details
-        if not isinstance(raw_details, Mapping):
-            raise TypeError("resource_details must be a mapping")
+        if type(raw_details) is not dict:
+            raise TypeError("resource_details must use an exact dict")
         normalized_details: dict[str, Mapping[str, str]] = {}
         for raw_resource, raw_detail in raw_details.items():
             resource = _text(raw_resource, name="resource_details key")
@@ -305,13 +306,13 @@ class ResourceAvailabilityEvidence:
                 raise ValueError(
                     "resource_details may only describe available_resources"
                 )
-            if not isinstance(raw_detail, Mapping):
-                raise TypeError("resource detail must be a mapping")
+            if type(raw_detail) is not dict:
+                raise TypeError("resource detail must use an exact dict")
             detail: dict[str, str] = {}
             for raw_key, raw_value in raw_detail.items():
                 key = _text(raw_key, name="resource detail key")
-                if not isinstance(raw_value, str):
-                    raise TypeError("resource detail values must be strings")
+                if type(raw_value) is not str:
+                    raise TypeError("resource detail values must use exact strings")
                 if key in detail:
                     raise ValueError(
                         "resource detail keys must be unique after normalization"
@@ -351,6 +352,39 @@ class ResourceAvailabilityEvidence:
                     raise ValueError(
                         "resource availability outlives borrow evidence"
                     )
+            if resource.startswith("MARGIN_CREDIT:"):
+                buying_power = BuyingPowerEvidence.from_resource_detail(detail)
+                if buying_power.resource_detail() != detail:
+                    raise ValueError(
+                        "margin-credit resource detail must use canonical encoding"
+                    )
+                if buying_power.resource_key != resource:
+                    raise ValueError(
+                        "margin-credit resource identity does not match evidence scope"
+                    )
+                if (
+                    buying_power.scope.provider_id != self.provider_id
+                    or buying_power.scope.account_id != self.account_id
+                    or buying_power.scope.environment != self.environment
+                    or buying_power.scope.provider_environment
+                    != self.provider_environment
+                ):
+                    raise ValueError("margin-credit availability scope mismatch")
+                if buying_power.additional_credit != normalized[resource]:
+                    raise ValueError(
+                        "margin-credit amount differs from available resource amount"
+                    )
+                if (
+                    buying_power.observed_at < started
+                    or buying_power.observed_at > completed
+                ):
+                    raise ValueError(
+                        "margin-credit observation is outside snapshot cut"
+                    )
+                if valid > buying_power.valid_until:
+                    raise ValueError(
+                        "resource availability outlives margin-credit evidence"
+                    )
             normalized_details[resource] = MappingProxyType(
                 dict(sorted(detail.items()))
             )
@@ -365,14 +399,26 @@ class ResourceAvailabilityEvidence:
             raise ValueError(
                 "BORROW resources require typed securities-borrow evidence"
             )
+        missing_margin_details = [
+            resource
+            for resource in normalized
+            if resource.startswith("MARGIN_CREDIT:")
+            and resource not in normalized_details
+        ]
+        if missing_margin_details:
+            raise ValueError(
+                "MARGIN_CREDIT resources require typed buying-power evidence"
+            )
         object.__setattr__(
             self,
             "resource_details",
             MappingProxyType(dict(sorted(normalized_details.items()))),
         )
 
-        if not isinstance(self.evidence_refs, tuple):
-            raise TypeError("evidence_refs must be a tuple of strings")
+        if type(self.evidence_refs) is not tuple:
+            raise TypeError("evidence_refs must use an exact tuple of strings")
+        if any(type(reference) is not str for reference in self.evidence_refs):
+            raise TypeError("evidence_refs must contain exact strings")
         if not self.evidence_refs:
             raise ValueError(
                 "resource availability requires at least one evidence_ref"
@@ -384,7 +430,15 @@ class ResourceAvailabilityEvidence:
                 raise ValueError("evidence_refs must be unique")
             refs.append(ref)
         object.__setattr__(self, "evidence_refs", tuple(refs))
-
+        ref_set = frozenset(refs)
+        for resource, detail in normalized_details.items():
+            if not resource.startswith("MARGIN_CREDIT:"):
+                continue
+            buying_power = BuyingPowerEvidence.from_resource_detail(dict(detail))
+            if any(reference not in ref_set for reference in buying_power.evidence_refs):
+                raise ValueError(
+                    "margin-credit evidence_refs must be bound to provider snapshot evidence"
+                )
 
 
 @dataclass(frozen=True)

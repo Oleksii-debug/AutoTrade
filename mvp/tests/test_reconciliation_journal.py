@@ -1,4 +1,12 @@
-from decimal import Decimal
+from copy import deepcopy
+from datetime import datetime, timezone
+from decimal import (
+    Decimal,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -15,6 +23,10 @@ from mvp.autotrade_mvp.reconciliation import (
     SnapshotConsistencyEvidence,
     UnknownSubmission,
     reconcile_account,
+)
+from mvp.autotrade_mvp.settlement import (
+    BuyingPowerEvidence,
+    SettlementAccountScope,
 )
 from mvp.autotrade_mvp.reconciliation_journal import (
     _reconciliation_aggregate_id,
@@ -122,6 +134,348 @@ def reconciliation(**overrides):
 
 
 class ReconciliationJournalTests(unittest.TestCase):
+
+    def test_resource_availability_rejects_polymorphic_mappings_before_callbacks(self):
+        class ExplosiveDict(dict):
+            calls = 0
+
+            def _explode(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("provider availability mapping callback executed")
+
+            items = _explode
+            __iter__ = _explode
+            __len__ = _explode
+            __bool__ = _explode
+
+        common = dict(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            snapshot_id="hostile-capacity",
+            query_started_at="2026-09-24T17:00:00Z",
+            query_completed_at="2026-09-24T19:00:00Z",
+            provider_as_of="2026-09-24T18:59:59Z",
+            valid_until="2026-09-24T19:05:00Z",
+            evidence_refs=("provider:hostile-capacity",),
+        )
+
+        ExplosiveDict.calls = 0
+        with self.assertRaisesRegex(TypeError, "available_resources must use an exact dict"):
+            ResourceAvailabilityEvidence(
+                **common,
+                available_resources=ExplosiveDict({"CASH:USD": "850"}),
+            )
+        self.assertEqual(ExplosiveDict.calls, 0)
+
+        ExplosiveDict.calls = 0
+        with self.assertRaisesRegex(TypeError, "resource_details must use an exact dict"):
+            ResourceAvailabilityEvidence(
+                **common,
+                available_resources={"CASH:USD": "850"},
+                resource_details=ExplosiveDict({}),
+            )
+        self.assertEqual(ExplosiveDict.calls, 0)
+
+    def test_resource_availability_rejects_polymorphic_nested_detail_before_callbacks(self):
+        class ExplosiveDetail(dict):
+            calls = 0
+
+            def _explode(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("provider resource detail callback executed")
+
+            items = _explode
+            __iter__ = _explode
+            __len__ = _explode
+            __bool__ = _explode
+
+        ExplosiveDetail.calls = 0
+        with self.assertRaisesRegex(TypeError, "resource detail must use an exact dict"):
+            ResourceAvailabilityEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                snapshot_id="hostile-detail",
+                query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+                provider_as_of="2026-09-24T18:59:59Z",
+                valid_until="2026-09-24T19:05:00Z",
+                available_resources={"MARGIN_CREDIT:USD": "250"},
+                evidence_refs=("provider:hostile-detail",),
+                resource_details={
+                    "MARGIN_CREDIT:USD": ExplosiveDetail(
+                        {"schema_version": "margin-buying-power-resource.v1"}
+                    ),
+                },
+            )
+        self.assertEqual(ExplosiveDetail.calls, 0)
+
+    def test_margin_credit_requires_typed_buying_power_evidence(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "MARGIN_CREDIT resources require typed buying-power evidence",
+        ):
+            ResourceAvailabilityEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                snapshot_id="margin-credit-missing-detail",
+                query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+                provider_as_of="2026-09-24T18:59:59Z",
+                valid_until="2026-09-24T19:05:00Z",
+                available_resources={"MARGIN_CREDIT:USD": "250"},
+                evidence_refs=("provider:margin-credit-missing-detail",),
+            )
+
+
+    def test_margin_credit_refs_must_be_bound_to_provider_snapshot(self):
+        buying_power = BuyingPowerEvidence(
+            evidence_id="margin-credit-boundary",
+            scope=SettlementAccountScope(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            ),
+            currency="USD",
+            additional_credit="250",
+            observed_at=datetime(
+                2026, 9, 24, 18, 59, 30, tzinfo=timezone.utc
+            ),
+            valid_until=datetime(
+                2026, 9, 24, 19, 5, 0, tzinfo=timezone.utc
+            ),
+            evidence_refs=("provider:margin-credit:typed",),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "margin-credit evidence_refs must be bound",
+        ):
+            ResourceAvailabilityEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                snapshot_id="margin-credit-unbound-ref",
+                query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+                provider_as_of="2026-09-24T18:59:59Z",
+                valid_until="2026-09-24T19:05:00Z",
+                available_resources={"MARGIN_CREDIT:USD": "250"},
+                resource_details={
+                    buying_power.resource_key: buying_power.resource_detail(),
+                },
+                evidence_refs=("provider:snapshot-only",),
+            )
+
+
+    def test_margin_credit_detail_requires_canonical_encoding(self):
+        buying_power = BuyingPowerEvidence(
+            evidence_id="margin-credit-canonical",
+            scope=SettlementAccountScope(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            ),
+            currency="USD",
+            additional_credit="250",
+            observed_at=datetime(
+                2026, 9, 24, 18, 59, 30, tzinfo=timezone.utc
+            ),
+            valid_until=datetime(
+                2026, 9, 24, 19, 5, 0, tzinfo=timezone.utc
+            ),
+            evidence_refs=("provider:margin-credit:canonical",),
+        )
+        detail = buying_power.resource_detail()
+        detail["additional_credit"] = "250.0"
+        with self.assertRaisesRegex(
+            ValueError,
+            "must use canonical encoding",
+        ):
+            ResourceAvailabilityEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                snapshot_id="margin-credit-noncanonical",
+                query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+                provider_as_of="2026-09-24T18:59:59Z",
+                valid_until="2026-09-24T19:05:00Z",
+                available_resources={"MARGIN_CREDIT:USD": "250"},
+                resource_details={"MARGIN_CREDIT:USD": detail},
+                evidence_refs=(
+                    "provider:snapshot:canonical",
+                    "provider:margin-credit:canonical",
+                ),
+            )
+
+    def test_persisted_margin_credit_ref_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            buying_power = BuyingPowerEvidence(
+                evidence_id="margin-credit-persisted",
+                scope=SettlementAccountScope(
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                ),
+                currency="USD",
+                additional_credit="250",
+                observed_at=datetime(
+                    2026, 9, 24, 18, 59, 30, tzinfo=timezone.utc
+                ),
+                valid_until=datetime(
+                    2026, 9, 24, 19, 5, 0, tzinfo=timezone.utc
+                ),
+                evidence_refs=("provider:margin-credit:persisted",),
+            )
+            resource = ResourceAvailabilityEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                snapshot_id="margin-credit-persisted",
+                query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+                provider_as_of="2026-09-24T18:59:59Z",
+                valid_until="2026-09-24T19:05:00Z",
+                available_resources={"MARGIN_CREDIT:USD": "250"},
+                resource_details={
+                    buying_power.resource_key: buying_power.resource_detail(),
+                },
+                evidence_refs=(
+                    "provider:snapshot:persisted",
+                    "provider:margin-credit:persisted",
+                ),
+            )
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="margin-credit-ref-tamper",
+                result=reconciliation(resource_availability=resource),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            tampered = deepcopy(checkpoint)
+            tampered["payload"]["resource_availability"]["resource_details"][
+                "MARGIN_CREDIT:USD"
+            ]["evidence_ref_0"] = "provider:margin-credit:detached"
+
+            original_call = reconciliation_journal_module._journal_store_call
+
+            def tampered_call(selected_store, operation_name, *args, **kwargs):
+                if operation_name == "get_event":
+                    return deepcopy(tampered)
+                return original_call(
+                    selected_store,
+                    operation_name,
+                    *args,
+                    **kwargs,
+                )
+
+            with patch.object(
+                reconciliation_journal_module,
+                "_journal_store_call",
+                new=tampered_call,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "not bound to provider snapshot",
+                ):
+                    load_account_resource_availability_evidence(
+                        store,
+                        checkpoint_event_id=checkpoint["event_id"],
+                        provider_id="TEST_PROVIDER",
+                        account_id="test-account",
+                        environment="PAPER",
+                        resources=("MARGIN_CREDIT:USD",),
+                        now="2026-09-24T19:01:00Z",
+                        max_age_seconds="120",
+                    )
+
+    def test_persisted_resource_availability_requires_canonical_decimal_text(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="resource-decimal-encoding",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            original_call = reconciliation_journal_module._journal_store_call
+
+            for forged, error_type, message in (
+                (850, TypeError, "exact decimal text"),
+                ("0850", ValueError, "canonical decimal text"),
+                ("9" * 10_000, ValueError, "bounded decimal text"),
+            ):
+                with self.subTest(forged_type=type(forged).__name__):
+                    tampered = deepcopy(checkpoint)
+                    tampered["payload"]["resource_availability"][
+                        "available_resources"
+                    ]["CASH:USD"] = forged
+
+                    def tampered_call(selected_store, operation_name, *args, **kwargs):
+                        if operation_name == "get_event":
+                            return deepcopy(tampered)
+                        return original_call(
+                            selected_store,
+                            operation_name,
+                            *args,
+                            **kwargs,
+                        )
+
+                    with patch.object(
+                        reconciliation_journal_module,
+                        "_journal_store_call",
+                        new=tampered_call,
+                    ):
+                        with self.assertRaisesRegex(error_type, message):
+                            load_account_resource_availability_evidence(
+                                store,
+                                checkpoint_event_id=checkpoint["event_id"],
+                                provider_id="TEST_PROVIDER",
+                                account_id="test-account",
+                                environment="PAPER",
+                                resources=("CASH:USD",),
+                                now="2026-09-24T19:00:30Z",
+                                max_age_seconds="60",
+                            )
+
+    def test_resource_request_rejects_polymorphic_sequence_before_callbacks(self):
+        class HostileList(list):
+            calls = 0
+
+            def __iter__(self):
+                type(self).calls += 1
+                raise AssertionError("availability loader invoked polymorphic resources")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="hostile-resource-sequence",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            HostileList.calls = 0
+            with self.assertRaisesRegex(TypeError, "exact tuple or list"):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=HostileList(("CASH:USD",)),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                )
+            self.assertEqual(HostileList.calls, 0)
+
     def test_checkpoint_writer_rejects_journal_store_subclass_before_callbacks(self):
         class ExplosiveJournalStore(JournalStore):
             calls = 0
@@ -2051,6 +2405,98 @@ class ReconciliationJournalTests(unittest.TestCase):
                 environment="PAPER",
             )
 
+
+    def test_availability_max_age_is_exact_across_decimal_contexts(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="exact-freshness",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            contexts = (
+                (6, ROUND_FLOOR),
+                (6, ROUND_CEILING),
+                (6, ROUND_HALF_EVEN),
+                (10, ROUND_FLOOR),
+                (28, ROUND_HALF_EVEN),
+                (80, ROUND_HALF_EVEN),
+            )
+            for precision, rounding in contexts:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        evidence = load_account_resource_availability_evidence(
+                            store,
+                            checkpoint_event_id=checkpoint["event_id"],
+                            provider_id="TEST_PROVIDER",
+                            account_id="test-account",
+                            environment="PAPER",
+                            resources=("CASH:USD",),
+                            now="2026-09-24T19:02:03.456789Z",
+                            max_age_seconds="123.4568",
+                        )
+                    self.assertEqual(
+                        evidence["availability"]["CASH:USD"],
+                        "850",
+                    )
+                    self.assertEqual(
+                        evidence["age_seconds"],
+                        "123.456789",
+                    )
+
+            boundary = load_account_resource_availability_evidence(
+                store,
+                checkpoint_event_id=checkpoint["event_id"],
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                resources=("CASH:USD",),
+                now="2026-09-24T19:02:03.456800Z",
+                max_age_seconds=Decimal("123.4568"),
+            )
+            self.assertEqual(boundary["age_seconds"], "123.4568")
+
+            with self.assertRaisesRegex(ValueError, "checkpoint is stale"):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:02:03.456801Z",
+                    max_age_seconds=Decimal("123.4568"),
+                )
+
+    def test_availability_max_age_rejects_oversized_text_at_public_boundary(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="oversized-max-age",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            with self.assertRaisesRegex(ValueError, "exact resource envelope"):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="9" * 10_000,
+                )
 
     def test_availability_max_age_rejects_decimal_subclass_before_virtual_dispatch(self):
         class HostileDecimal(Decimal):

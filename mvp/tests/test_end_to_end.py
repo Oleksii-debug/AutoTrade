@@ -1375,6 +1375,77 @@ class VerticalSliceTests(unittest.TestCase):
                 intents_before,
             )
 
+    def test_checkpoint_initial_issue_is_create_once(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "checkpoint.json"
+            first = {"schema_version": 6, "winner": "first"}
+            second = {"schema_version": 6, "winner": "second"}
+
+            self.assertTrue(pipeline_module._create_json_once(path, first))
+            first_bytes = path.read_bytes()
+            self.assertFalse(pipeline_module._create_json_once(path, second))
+            self.assertEqual(path.read_bytes(), first_bytes)
+            self.assertEqual(json.loads(first_bytes), first)
+
+    def test_concurrent_same_configuration_first_writer_blocks_second_before_mutation(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def lose_first_writer_race(path, payload):
+                pipeline_module._atomic_json(path, payload)
+                return False
+
+            with patch.object(
+                pipeline_module,
+                "_create_json_once",
+                side_effect=lose_first_writer_race,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Concurrent durable run already owns this state directory",
+                ):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
+            self.assertTrue((root / "checkpoint.json").is_file())
+            self.assertFalse((root / "learning-evidence.jsonl").exists())
+            self.assertFalse((root / "order-intents").exists())
+            self.assertEqual(list(root.glob("journal.sqlite3*")), [])
+
+    def test_concurrent_different_configuration_first_writer_fails_closed_before_mutation(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def competing_configuration_wins(path, payload):
+                competing = json.loads(json.dumps(payload))
+                competing["financial_configuration"]["max_notional"] = "4999.00000000"
+                competing["financial_configuration_hash"] = pipeline_module._stable_hash(
+                    competing["financial_configuration"]
+                )
+                pipeline_module._atomic_json(path, competing)
+                return False
+
+            with patch.object(
+                pipeline_module,
+                "_create_json_once",
+                side_effect=competing_configuration_wins,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "financial configuration changed",
+                ):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
+            self.assertTrue((root / "checkpoint.json").is_file())
+            self.assertFalse((root / "learning-evidence.jsonl").exists())
+            self.assertFalse((root / "order-intents").exists())
+            self.assertEqual(list(root.glob("journal.sqlite3*")), [])
+
     def test_checkpoint_state_cannot_diverge_from_bound_financial_configuration(self):
         cases = (
             ("initial_cash", "9999", "initial cash does not match"),

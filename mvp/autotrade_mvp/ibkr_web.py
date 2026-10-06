@@ -719,6 +719,137 @@ class IbkrAbsenceEvidence:
 
 
 @dataclass(frozen=True)
+class IbkrCancelRequest:
+    """One provider-relative cancel request; this object grants no send authority."""
+
+    endpoint: str
+    query: Mapping[str, str]
+    account_id: str
+    provider_order_id: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.account_id) is not str
+            or not self.account_id
+            or self.account_id != self.account_id.strip()
+            or re.fullmatch(r"[A-Za-z0-9._~-]+", self.account_id) is None
+            or self.account_id in {".", ".."}
+        ):
+            raise IbkrWebAdapterError(
+                "cancel account_id must be a canonical URI path segment"
+            )
+        account = self.account_id
+        if (
+            type(self.provider_order_id) is not str
+            or re.fullmatch(r"[1-9][0-9]*", self.provider_order_id) is None
+        ):
+            raise IbkrWebAdapterError(
+                "cancel provider_order_id must be canonical positive integer text"
+            )
+        order_id = self.provider_order_id
+        if type(self.endpoint) is not str:
+            raise TypeError("cancel endpoint must be exact text")
+        expected_endpoint = f"/iserver/account/{account}/order/{order_id}"
+        if self.endpoint != expected_endpoint:
+            raise IbkrWebAdapterError(
+                "cancel endpoint does not match account/order identity"
+            )
+        if type(self.query) is not dict:
+            raise TypeError("cancel query must be an exact dict")
+        allowed = {"manualIndicator", "extOperator"}
+        if not set(self.query).issubset(allowed):
+            raise IbkrWebAdapterError("cancel query contains unsupported fields")
+        normalized: dict[str, str] = {}
+        for key, value in self.query.items():
+            if type(key) is not str or type(value) is not str:
+                raise IbkrWebAdapterError("cancel query must use exact text")
+            if not value or value != value.strip():
+                raise IbkrWebAdapterError("cancel query must use canonical text")
+            normalized[key] = value
+        if "manualIndicator" in normalized and normalized["manualIndicator"] not in {
+            "true",
+            "false",
+        }:
+            raise IbkrWebAdapterError(
+                "cancel manualIndicator must be true or false"
+            )
+        if ("manualIndicator" in normalized) != ("extOperator" in normalized):
+            raise IbkrWebAdapterError(
+                "regulated cancel metadata must contain "
+                "manualIndicator and extOperator together"
+            )
+        object.__setattr__(self, "query", MappingProxyType(normalized))
+
+
+def prepare_cancel_request(
+    *,
+    account_id: str,
+    provider_order_id: str,
+    regulatory_manual_indicator_required: bool,
+    manual_indicator: bool | None = None,
+    ext_operator: str | None = None,
+) -> IbkrCancelRequest:
+    """Prepare an exact single-order cancel without granting outbound authority.
+
+    IBKR's special order id -1 means cancel all open orders and is deliberately
+    outside this adapter. FUT/FOP cancellation metadata is only admitted when
+    the caller explicitly supplies the regulatory requirement. The returned
+    request must still cross the canonical guarded dispatcher.
+    """
+
+    if type(regulatory_manual_indicator_required) is not bool:
+        raise TypeError(
+            "regulatory_manual_indicator_required must be boolean"
+        )
+    if (
+        type(account_id) is not str
+        or not account_id
+        or account_id != account_id.strip()
+        or re.fullmatch(r"[A-Za-z0-9._~-]+", account_id) is None
+        or account_id in {".", ".."}
+    ):
+        raise IbkrWebAdapterError(
+            "cancel account_id must be a canonical URI path segment"
+        )
+    if (
+        type(provider_order_id) is not str
+        or re.fullmatch(r"[1-9][0-9]*", provider_order_id) is None
+    ):
+        raise IbkrWebAdapterError(
+            "single-order cancel requires canonical positive provider order id"
+        )
+
+    query: dict[str, str] = {}
+    if regulatory_manual_indicator_required:
+        if type(manual_indicator) is not bool:
+            raise IbkrWebAdapterError(
+                "regulated IBKR cancel requires exact manual_indicator evidence"
+            )
+        if (
+            type(ext_operator) is not str
+            or not ext_operator
+            or ext_operator != ext_operator.strip()
+        ):
+            raise IbkrWebAdapterError(
+                "regulated IBKR cancel requires canonical ext_operator evidence"
+            )
+        query["manualIndicator"] = "true" if manual_indicator else "false"
+        query["extOperator"] = ext_operator
+    elif manual_indicator is not None or ext_operator is not None:
+        raise IbkrWebAdapterError(
+            "unqualified cancel metadata is not accepted "
+            "for non-regulated request"
+        )
+
+    return IbkrCancelRequest(
+        endpoint=f"/iserver/account/{account_id}/order/{provider_order_id}",
+        query=query,
+        account_id=account_id,
+        provider_order_id=provider_order_id,
+    )
+
+
+@dataclass(frozen=True)
 class IbkrCancelOutcome:
     """Cancel endpoint acknowledgement; never proof of terminal cancellation."""
 
@@ -770,6 +901,8 @@ def parse_cancel_response(
 
     error = _optional_provider_text(payload.get("error"), name="error")
     if error is not None:
+        if any(key in payload for key in ("order_id", "msg", "conid", "account")):
+            raise IbkrWebAdapterError("cancel response shape is ambiguous")
         return IbkrCancelOutcome(
             provider_order_id=order_id,
             acknowledged=False,

@@ -1,6 +1,7 @@
 from functools import partial
 from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
+from types import MappingProxyType
 import json
 import unittest
 from uuid import uuid4
@@ -21,6 +22,7 @@ from mvp.autotrade_mvp.ibkr_web import (
     IBKR_WEB_DOCS,
     IbkrAbsenceEvidence,
     IbkrBrokerageSessionStatus,
+    IbkrCancelRequest,
     IbkrContractIdentity,
     IbkrExecutionEvidence,
     IbkrNormalizedOrder,
@@ -30,6 +32,7 @@ from mvp.autotrade_mvp.ibkr_web import (
     execution_to_reconciliation_fill,
     parse_cancel_response,
     parse_order_submission_response,
+    prepare_cancel_request,
     parse_web_api_trades,
     prepare_normalized_order,
     prepare_reply_confirmation,
@@ -650,6 +653,113 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 order_found=True,
             )
 
+    def test_cancel_request_is_single_ticket_and_dispatch_neutral(self):
+        request = prepare_cancel_request(
+            account_id="U1234567",
+            provider_order_id="123456789",
+            regulatory_manual_indicator_required=False,
+        )
+        self.assertIsInstance(request, IbkrCancelRequest)
+        self.assertEqual(
+            request.endpoint,
+            "/iserver/account/U1234567/order/123456789",
+        )
+        self.assertEqual(dict(request.query), {})
+
+        for unsafe_order_id in ("-1", "0", "01", " 123", "123 ", "", None, 123):
+            with self.subTest(provider_order_id=unsafe_order_id):
+                with self.assertRaises((IbkrWebAdapterError, TypeError)):
+                    prepare_cancel_request(
+                        account_id="U1234567",
+                        provider_order_id=unsafe_order_id,
+                        regulatory_manual_indicator_required=False,
+                    )
+
+        for unsafe_account in (
+            " U1234567",
+            "U1234567 ",
+            "../U1234567",
+            "U123/4567",
+            "",
+        ):
+            with self.subTest(account_id=unsafe_account):
+                with self.assertRaises(IbkrWebAdapterError):
+                    prepare_cancel_request(
+                        account_id=unsafe_account,
+                        provider_order_id="123456789",
+                        regulatory_manual_indicator_required=False,
+                    )
+
+    def test_regulated_cancel_requires_exact_manual_metadata(self):
+        request = prepare_cancel_request(
+            account_id="U1234567",
+            provider_order_id="123456789",
+            regulatory_manual_indicator_required=True,
+            manual_indicator=False,
+            ext_operator="operator-1",
+        )
+        self.assertEqual(
+            dict(request.query),
+            {"manualIndicator": "false", "extOperator": "operator-1"},
+        )
+
+        for manual_indicator, ext_operator in (
+            (None, "operator-1"),
+            (False, None),
+            (1, "operator-1"),
+            (False, " operator-1"),
+        ):
+            with self.subTest(
+                manual_indicator=manual_indicator,
+                ext_operator=ext_operator,
+            ):
+                with self.assertRaises((IbkrWebAdapterError, TypeError)):
+                    prepare_cancel_request(
+                        account_id="U1234567",
+                        provider_order_id="123456789",
+                        regulatory_manual_indicator_required=True,
+                        manual_indicator=manual_indicator,
+                        ext_operator=ext_operator,
+                    )
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError, "unqualified cancel metadata"
+        ):
+            prepare_cancel_request(
+                account_id="U1234567",
+                provider_order_id="123456789",
+                regulatory_manual_indicator_required=False,
+                manual_indicator=False,
+                ext_operator="operator-1",
+            )
+
+    def test_cancel_request_direct_constructor_cannot_widen_scope(self):
+        base = {
+            "endpoint": "/iserver/account/U1234567/order/123456789",
+            "query": {},
+            "account_id": "U1234567",
+            "provider_order_id": "123456789",
+        }
+        with self.assertRaisesRegex(IbkrWebAdapterError, "positive integer"):
+            IbkrCancelRequest(**{**base, "provider_order_id": "-1"})
+        with self.assertRaisesRegex(IbkrWebAdapterError, "endpoint"):
+            IbkrCancelRequest(
+                **{
+                    **base,
+                    "endpoint": "/iserver/account/U1234567/order/-1",
+                }
+            )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "unsupported"):
+            IbkrCancelRequest(**{**base, "query": {"all": "true"}})
+        with self.assertRaisesRegex(IbkrWebAdapterError, "together"):
+            IbkrCancelRequest(
+                **{**base, "query": {"manualIndicator": "false"}}
+            )
+        with self.assertRaisesRegex(TypeError, "exact dict"):
+            IbkrCancelRequest(
+                **{**base, "query": MappingProxyType({})}
+            )
+
     def test_cancel_acknowledgement_never_proves_terminal_cancel(self):
         outcome = parse_cancel_response(
             provider_order_id="123456789",
@@ -672,6 +782,16 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertFalse(outcome.acknowledged)
         self.assertFalse(outcome.terminal_cancel_proven)
         self.assertEqual(outcome.message, "Order cannot be cancelled")
+
+        with self.assertRaisesRegex(IbkrWebAdapterError, "ambiguous"):
+            parse_cancel_response(
+                provider_order_id="123456789",
+                payload={
+                    "error": "Order cannot be cancelled",
+                    "order_id": 123456789,
+                    "msg": "Request was submitted",
+                },
+            )
 
     def test_acknowledgement_is_not_fill_or_retry_permission(self):
         outcome = parse_order_submission_response(

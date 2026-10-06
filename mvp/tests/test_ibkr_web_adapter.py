@@ -379,6 +379,118 @@ class IbkrWebAdapterTests(unittest.TestCase):
             )
         self.assertFalse(ExecutableSession.readiness_called)
 
+    def test_order_preparation_uses_class_owned_capability_and_session_checks(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        cap = capability()
+        session = ready_session()
+        callbacks: list[str] = []
+
+        def hostile_admits(**_kwargs):
+            callbacks.append("capability")
+            raise AssertionError("instance capability shadow executed")
+
+        def hostile_ready():
+            callbacks.append("session")
+            raise AssertionError("instance session shadow executed")
+
+        object.__setattr__(cap, "admits", hostile_admits)
+        object.__setattr__(session, "require_trade_ready", hostile_ready)
+
+        prepared = prepare_normalized_order(
+            intent,
+            client_order_id="at-instance-shadow-fence",
+            capability=cap,
+            session=session,
+            at=NOW,
+            maximum_session_age_seconds=30,
+        )
+
+        self.assertEqual(callbacks, [])
+        self.assertEqual(prepared.fields["acctId"], "U1234567")
+
+    def test_order_preparation_rejects_mutated_capability_text_before_callback(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        cap = capability()
+        _HostileText.strip_called = False
+        object.__setattr__(cap, "provider_id", _HostileText("IBKR"))
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "capability.provider_id is required",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-mutated-capability-text",
+                capability=cap,
+                session=ready_session(),
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+        self.assertFalse(_HostileText.strip_called)
+
+    def test_order_preparation_rejects_mutated_session_fields_before_callbacks(self):
+        class HostileTruth:
+            called = False
+
+            def __bool__(self):
+                type(self).called = True
+                raise AssertionError("hostile truth callback executed")
+
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        session = ready_session()
+        object.__setattr__(session, "connected", HostileTruth())
+
+        with self.assertRaisesRegex(TypeError, "session connected.*exact boolean"):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-mutated-session-bool",
+                capability=capability(),
+                session=session,
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+        self.assertFalse(HostileTruth.called)
+
+        hostile_time = _HostileDatetime(2026, 9, 24, 19, 59, tzinfo=timezone.utc)
+        session = ready_session()
+        object.__setattr__(session, "observed_at", hostile_time)
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "exact timezone-aware datetime",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-mutated-session-time",
+                capability=capability(),
+                session=session,
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+
     def test_order_intent_rejects_contract_subclass_before_polymorphic_state(self):
         class ExecutableContract(IbkrContractIdentity):
             pass

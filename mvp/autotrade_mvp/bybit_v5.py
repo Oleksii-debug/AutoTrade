@@ -893,18 +893,6 @@ def _install_guarded_order_projection(verifier):
     mapping_proxy_type = MappingProxyType
     canonical_getattr = getattr
 
-    def _install_guarded_order_projection(verifier):
-    """Capture the final prepared-request projection TCB outside module aliases."""
-
-    verifier_code = verifier.__code__
-    prepared_type = BybitPreparedSubmission
-    error_type = ProviderCoreError
-    canonical_object = object
-    object_getattribute = canonical_object.__getattribute__
-    canonical_dict = dict
-    mapping_proxy_type = MappingProxyType
-    canonical_getattr = getattr
-
     def guarded_order_projection(
         prepared_request: BybitPreparedSubmission,
     ) -> Mapping[str, object]:
@@ -964,6 +952,7 @@ guarded_order_projection = _install_guarded_order_projection(
     require_canonical_bybit_prepared_submission
 )
 del _install_guarded_order_projection
+
 
 def _install_submission_response_parser(
     prepared_projection,

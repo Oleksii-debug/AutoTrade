@@ -119,6 +119,70 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertEqual(replay.evidence_count, 1)
             self.assertEqual(len(evidence.read_text(encoding="utf-8").splitlines()), 1)
 
+    def test_restart_rejects_duplicate_evidence_ids_before_checkpoint_write(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint["evidence_ids"].append(checkpoint["evidence_ids"][0])
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with patch(
+                "mvp.autotrade_mvp.pipeline._atomic_json",
+                side_effect=AssertionError("checkpoint write attempted"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "checkpoint evidence IDs: duplicates",
+                ):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_rejects_foreign_jsonl_row_before_checkpoint_write(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            evidence_path = Path(directory) / "learning-evidence.jsonl"
+            original = json.loads(evidence_path.read_text(encoding="utf-8"))
+            forged = dict(original)
+            forged["evidence_id"] = "evidence-forged"
+            evidence_path.write_text(
+                json.dumps(original, sort_keys=True)
+                + "\n"
+                + json.dumps(forged, sort_keys=True)
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch(
+                "mvp.autotrade_mvp.pipeline._atomic_json",
+                side_effect=AssertionError("checkpoint write attempted"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Learning evidence conflicts with checkpoint",
+                ):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_rejects_checkpoint_jsonl_disagreement_before_write(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            evidence_path = Path(directory) / "learning-evidence.jsonl"
+            row = json.loads(evidence_path.read_text(encoding="utf-8"))
+            row["cash"] = "999999.99"
+            evidence_path.write_text(
+                json.dumps(row, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with patch(
+                "mvp.autotrade_mvp.pipeline._atomic_json",
+                side_effect=AssertionError("checkpoint write attempted"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Learning evidence conflicts with checkpoint",
+                ):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
     def test_replay_rejects_jointly_tampered_checkpoint_and_jsonl_economics(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

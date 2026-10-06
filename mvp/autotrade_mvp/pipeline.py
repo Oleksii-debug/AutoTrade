@@ -528,6 +528,78 @@ def _append_evidence(path: Path, evidence: dict) -> bool:
     return True
 
 
+def _restore_evidence_graph(
+    state: dict,
+    evidence_path: Path,
+) -> tuple[set[str], dict[str, dict]]:
+    """Validate recovered learning evidence before any new durable mutation.
+
+    A crash may leave the append-only JSONL row missing after the checkpoint
+    commit, and legacy checkpoints may omit the record map. Existing JSONL rows
+    may therefore hydrate only missing checkpoint records. Duplicate identities,
+    foreign rows, or checkpoint/JSONL disagreement are corruption and must fail
+    before a new checkpoint, evidence row, or journal event is written.
+    """
+
+    raw_ids = state.get("evidence_ids", [])
+    if type(raw_ids) is not list:
+        raise ValueError("Corrupt checkpoint evidence IDs")
+    ordered_ids = tuple(
+        _checkpoint_text(value, name="evidence id")
+        for value in raw_ids
+    )
+    if len(set(ordered_ids)) != len(ordered_ids):
+        raise ValueError("Corrupt checkpoint evidence IDs: duplicates")
+    expected_ids = set(ordered_ids)
+
+    raw_records = state.get("evidence_records", {})
+    if type(raw_records) is not dict:
+        raise ValueError("Corrupt checkpoint evidence records")
+    records: dict[str, dict] = {}
+    for key, value in dict.items(raw_records):
+        evidence_id = _checkpoint_text(key, name="evidence record key")
+        if type(value) is not dict:
+            raise ValueError("Corrupt checkpoint evidence record")
+        record_id = _checkpoint_text(
+            value.get("evidence_id"),
+            name="evidence record id",
+        )
+        if record_id != evidence_id:
+            raise ValueError("Corrupt checkpoint evidence record identity")
+        records[evidence_id] = value
+    if not set(records).issubset(expected_ids):
+        raise ValueError("Corrupt checkpoint evidence records do not match IDs")
+
+    observed: dict[str, dict] = {}
+    if evidence_path.exists():
+        try:
+            for line in evidence_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if type(row) is not dict:
+                    raise ValueError("Corrupt learning evidence")
+                evidence_id = _checkpoint_text(
+                    row.get("evidence_id"),
+                    name="learning evidence id",
+                )
+                if evidence_id in observed:
+                    raise ValueError("Duplicate learning evidence ID")
+                observed[evidence_id] = row
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError("Corrupt learning evidence") from error
+
+    if not set(observed).issubset(expected_ids):
+        raise ValueError("Learning evidence conflicts with checkpoint")
+    for evidence_id, row in observed.items():
+        checkpoint_row = records.get(evidence_id)
+        if checkpoint_row is not None and checkpoint_row != row:
+            raise ValueError("Learning evidence conflicts with checkpoint")
+        records[evidence_id] = row
+
+    return expected_ids, records
+
+
 def _persist_intent(path: Path, intent: OrderIntent) -> None:
     payload = {**asdict(intent), "quantity": str(intent.quantity), "price": str(intent.price)}
     if path.exists():
@@ -659,6 +731,10 @@ def run_vertical_slice(
         )
         if stored_symbol != symbol:
             raise ValueError("Checkpoint belongs to another symbol")
+    evidence_ids, evidence_records = _restore_evidence_graph(
+        state,
+        evidence_path,
+    )
     postings = state.get("postings", [])
     fills = state.get("fills", {})
     if type(postings) is not list or type(fills) is not dict:
@@ -710,8 +786,6 @@ def run_vertical_slice(
     last_price = normalized[-1]
     reconciled = handle_reconciliation(provider, ledger)
     equity = handle_portfolio(ledger, last_price)
-    evidence_ids = set(state.get("evidence_ids", []))
-    evidence_records = dict(state.get("evidence_records", {}))
     evidence_id = "evidence-" + _stable_hash({
         "symbol": symbol, "input": [str(x) for x in normalized],
         "intent": intent.client_order_id if intent else None,

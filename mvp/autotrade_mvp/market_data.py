@@ -92,12 +92,18 @@ def _book_causal_text(value: object, field: str) -> str:
 
 
 def _admission_instant(value: object, field: str) -> datetime:
-    """Normalize one exact datetime without retaining caller timezone authority."""
+    """Normalize one exact datetime without executing caller timezone code."""
 
-    if type(value) is not datetime or value.tzinfo is None:
+    if type(value) is not datetime:
         raise MarketDataError(f"{field} must be an exact timezone-aware datetime")
+    if type(value.tzinfo) is not timezone:
+        raise MarketDataError(
+            f"{field} must use an exact datetime with a built-in timezone"
+        )
+    if datetime.utcoffset(value) is None:
+        raise MarketDataError(f"{field} must be timezone-aware")
     try:
-        normalized = value.astimezone(timezone.utc)
+        normalized = datetime.astimezone(value, timezone.utc)
     except (OverflowError, ValueError, TypeError) as error:
         raise MarketDataError(
             f"{field} must have a deterministic timezone"
@@ -118,9 +124,7 @@ def _admission_sequence(value: object, field: str) -> int | None:
 
 
 def _instant(value: datetime, field: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
-        raise MarketDataError(f"{field} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return _admission_instant(value, field)
 
 
 def _sequence(value: int | None, field: str) -> int | None:
@@ -155,7 +159,7 @@ def _decimal_text(value: Decimal) -> str:
 
 
 def _utc_text(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return _admission_instant(value, "timestamp").isoformat().replace("+00:00", "Z")
 
 
 def _canonical(value: Any) -> str:

@@ -388,6 +388,18 @@ class IbkrNormalizedOrder:
                 name="fields.extOperator",
             )
 
+        if type(self.exact_quantity_text) is not str:
+            raise TypeError("exact_quantity_text must be exact text")
+        if (
+            self.exact_limit_price_text is not None
+            and type(self.exact_limit_price_text) is not str
+        ):
+            raise TypeError("exact_limit_price_text must be exact text when present")
+        if (
+            self.exact_stop_price_text is not None
+            and type(self.exact_stop_price_text) is not str
+        ):
+            raise TypeError("exact_stop_price_text must be exact text when present")
         quantity = _decimal(
             self.exact_quantity_text,
             name="exact_quantity_text",

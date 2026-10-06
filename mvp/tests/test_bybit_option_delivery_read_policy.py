@@ -189,7 +189,15 @@ class BybitOptionDeliveryReadPolicyTests(unittest.TestCase):
                     sign({"category": "option", "limit": limit})
 
     def test_expiry_date_requires_documented_ddmmmyy_shape(self):
-        for exp_date in ("00DEC22", "29dec22", "29XYZ22", "29DEC2022", "DEC29"):
+        for exp_date in (
+            "00DEC22",
+            "31APR22",
+            "30FEB22",
+            "29dec22",
+            "29XYZ22",
+            "29DEC2022",
+            "DEC29",
+        ):
             with self.subTest(exp_date=exp_date):
                 with self.assertRaisesRegex(
                     ProviderTransportScopeError,

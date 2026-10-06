@@ -27,6 +27,21 @@ _DOTNET_RESTORE_ENVIRONMENT_AUTHORITY = (
 )
 
 
+def _nuget_identity_component_is_path_safe(value: object) -> bool:
+    """Reject package identity text that can escape a restored package directory."""
+
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip()
+        and value not in {".", ".."}
+        and "/" not in value
+        and "\\" not in value
+        and ":" not in value
+        and all(ord(character) >= 32 and ord(character) != 127 for character in value)
+    )
+
+
 def _strict_json(text: str):
     def reject_duplicates(pairs):
         result = {}
@@ -387,8 +402,13 @@ def _package_references(project: Path) -> dict[str, str]:
     """
     refs: dict[str, tuple[str, str]] = {}
     for name, version in dotnet_project_package_references(project):
-        if not name or not version:
-            raise ValueError('PackageReference must have canonical name and exact version')
+        if (
+            not _nuget_identity_component_is_path_safe(name)
+            or not _nuget_identity_component_is_path_safe(version)
+        ):
+            raise ValueError(
+                'PackageReference must have path-safe canonical name and exact version'
+            )
         folded = name.casefold()
         if folded in refs:
             previous_name, previous_version = refs[folded]
@@ -437,6 +457,7 @@ def _lock_dependency_edges(
             not isinstance(dependency_name, str)
             or not dependency_name
             or dependency_name != dependency_name.strip()
+            or not _nuget_identity_component_is_path_safe(dependency_name)
         ):
             raise ValueError(
                 f'invalid NuGet dependency edge name for '
@@ -511,6 +532,7 @@ def dotnet_lock_content_blockers(root: Path, project: Path) -> list[str]:
                 not isinstance(package_name, str)
                 or not package_name
                 or package_name != package_name.strip()
+                or not _nuget_identity_component_is_path_safe(package_name)
                 or not isinstance(record, dict)
             ):
                 blockers.append(f'DOTNET_PROJECT_LOCK_RECORD_INVALID:{relative}:{target_name}')
@@ -537,11 +559,7 @@ def dotnet_lock_content_blockers(root: Path, project: Path) -> list[str]:
 
             resolved = record.get('resolved')
             content_hash = record.get('contentHash')
-            if (
-                not isinstance(resolved, str)
-                or not resolved
-                or resolved != resolved.strip()
-            ):
+            if not _nuget_identity_component_is_path_safe(resolved):
                 blockers.append(
                     f'DOTNET_PROJECT_LOCK_RESOLVED_INVALID:'
                     f'{relative}:{target_name}:{package_name}'

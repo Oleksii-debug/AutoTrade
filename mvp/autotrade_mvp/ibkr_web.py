@@ -575,19 +575,47 @@ def prepare_normalized_order(
         raise IbkrWebAdapterError(
             "maximum_session_age_seconds must be a non-negative integer"
         )
-    if session.observed_at > point:
+    for field in ("connected", "authenticated", "established", "competing"):
+        if type(getattr(session, field)) is not bool:
+            raise TypeError(f"session {field} must remain exact boolean")
+    session_observed_at = _instant(
+        session.observed_at,
+        name="session.observed_at",
+    )
+    if session_observed_at > point:
         raise IbkrWebAdapterError("session evidence is from the future")
-    if point - session.observed_at > timedelta(seconds=maximum_session_age_seconds):
+    if point - session_observed_at > timedelta(
+        seconds=maximum_session_age_seconds
+    ):
         raise IbkrWebAdapterError("brokerage session evidence is stale")
-    session.require_trade_ready()
-    coid = validate_coid(client_order_id)
-    if capability.provider_id.upper() != "IBKR":
+    IbkrBrokerageSessionStatus.require_trade_ready(session)
+
+    capability_provider_id = _text(
+        capability.provider_id,
+        name="capability.provider_id",
+    ).upper()
+    capability_account_id = _text(
+        capability.account_id,
+        name="capability.account_id",
+    )
+    capability_instrument_version = _text(
+        capability.instrument_version,
+        name="capability.instrument_version",
+    )
+    for field in ("supported_order_types", "time_in_force", "permission_scopes"):
+        values = getattr(capability, field)
+        if type(values) is not frozenset or any(
+            type(value) is not str for value in values
+        ):
+            raise TypeError(f"capability {field} must remain an exact text frozenset")
+    if capability_provider_id != "IBKR":
         raise IbkrWebAdapterError("capability belongs to another provider")
-    if capability.account_id != intent.account_id:
+    if capability_account_id != intent.account_id:
         raise IbkrWebAdapterError("capability account does not match intent account")
-    if capability.instrument_version != intent.instrument_version:
+    if capability_instrument_version != intent.instrument_version:
         raise IbkrWebAdapterError("capability instrument version does not match intent")
-    if not capability.admits(
+    if not CapabilitySnapshot.admits(
+        capability,
         at=point,
         order_type=intent.order_type,
         time_in_force=intent.time_in_force,

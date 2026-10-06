@@ -167,11 +167,21 @@ class MarketNormalizationTests(unittest.TestCase):
         self.assertEqual(first.to_contract_dict()["adapter_version"], TEST_ADAPTER_V1)
         self.assertNotEqual(first.event_id, other_build.event_id)
 
+    def test_adapter_build_token_accepts_full_canonical_punctuation(self):
+        token = "Adapter._:+@/-9"
+        admitted = raw(
+            "TRADE",
+            {"price": "100.01", "quantity": "1"},
+            adapter_version=token,
+        )
+        self.assertEqual(admitted.adapter_version, token)
+
     def test_adapter_build_token_is_exact_and_bounded(self):
         for invalid in (
             "",
             " trailing ",
             "contains space",
+            r"adapter\build",
             "x" * 129,
         ):
             with self.subTest(adapter_version=invalid):

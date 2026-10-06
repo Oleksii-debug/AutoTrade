@@ -865,6 +865,7 @@ class GuardedDispatcher:
         events: list[dict[str, Any]],
         attempt_id: str,
         client_order_id: str,
+        expected_prepared: dict[str, Any],
     ) -> bool:
         aggregate_id = self._aggregate_id(attempt_id)
         versions: list[int] = []
@@ -913,6 +914,11 @@ class GuardedDispatcher:
         if (
             type(prepared_payload) is not dict
             or prepared_payload.get("prepared_at") != events[0].get("committed_at")
+            or type(expected_prepared) is not dict
+            or any(
+                prepared_payload.get(key) != value
+                for key, value in expected_prepared.items()
+            )
         ):
             return False
         return tuple(event_types) in {
@@ -931,11 +937,13 @@ class GuardedDispatcher:
         events: list[dict[str, Any]],
         attempt_id: str,
         client_order_id: str,
+        expected_prepared: dict[str, Any],
     ) -> DispatchOutcome:
         if not self._existing_history_is_canonical(
             events=events,
             attempt_id=attempt_id,
             client_order_id=client_order_id,
+            expected_prepared=expected_prepared,
         ):
             return DispatchOutcome(
                 "UNKNOWN",
@@ -958,6 +966,7 @@ class GuardedDispatcher:
         attempt_id: str,
         client_order_id: str,
         now: str,
+        expected_prepared: dict[str, Any],
     ) -> DispatchOutcome:
         events = self._events(attempt_id)
         if not events:
@@ -966,6 +975,7 @@ class GuardedDispatcher:
             events=events,
             attempt_id=attempt_id,
             client_order_id=client_order_id,
+            expected_prepared=expected_prepared,
         ):
             return DispatchOutcome(
                 "UNKNOWN",
@@ -979,6 +989,7 @@ class GuardedDispatcher:
                 events=events,
                 attempt_id=attempt_id,
                 client_order_id=client_order_id,
+            expected_prepared=expected_prepared,
             )
         if last["event_type"] == "SubmissionSending":
             # Recovery time is caller/process input, but the durable Sending row
@@ -1019,6 +1030,7 @@ class GuardedDispatcher:
                         events=current,
                         attempt_id=attempt_id,
                         client_order_id=client_order_id,
+                    expected_prepared=expected_prepared,
                     )
                 raise
             current = self._events(attempt_id)
@@ -1026,6 +1038,7 @@ class GuardedDispatcher:
                 events=current,
                 attempt_id=attempt_id,
                 client_order_id=client_order_id,
+            expected_prepared=expected_prepared,
             )
         if last["event_type"] != "SubmissionPrepared":
             raise RuntimeError(f"unsupported submission attempt state: {last['event_type']}")
@@ -1073,6 +1086,7 @@ class GuardedDispatcher:
                     events=current,
                     attempt_id=attempt_id,
                     client_order_id=client_order_id,
+                expected_prepared=expected_prepared,
                 )
             if current_last["event_type"] == "SubmissionSending":
                 return self._recover_existing(
@@ -1081,7 +1095,13 @@ class GuardedDispatcher:
                     now=now,
                 )
             raise
-        return self._outcome_from_terminal(self._events(attempt_id)[-1], client_order_id)
+        current = self._events(attempt_id)
+        return self._terminal_outcome_from_existing_history(
+            events=current,
+            attempt_id=attempt_id,
+            client_order_id=client_order_id,
+            expected_prepared=expected_prepared,
+        )
 
     def dispatch(
         self,
@@ -1135,6 +1155,17 @@ class GuardedDispatcher:
             client_id_format=client_id_format,
         )
 
+        expected_prepared = {
+            "attempt_id": attempt_id,
+            "intent_id": intent_id,
+            "intent_hash": intent_hash,
+            "provider": provider,
+            "request_hash": request_hash,
+            "client_order_id": client_order_id,
+            "environment": self.environment,
+            "account_id": self.account_id,
+            "submission_scope_hash": submission_scope_hash,
+        }
         existing = self._events(attempt_id)
         if existing:
             prepared = existing[0].get("payload")
@@ -1145,23 +1176,16 @@ class GuardedDispatcher:
                     None,
                     "durable_submission_history_invalid",
                 )
-            expected = {
-                "attempt_id": attempt_id,
-                "intent_id": intent_id,
-                "intent_hash": intent_hash,
-                "provider": provider,
-                "request_hash": request_hash,
-                "client_order_id": client_order_id,
-                "environment": self.environment,
-                "account_id": self.account_id,
-                "submission_scope_hash": submission_scope_hash,
-            }
-            if any(prepared.get(key) != value for key, value in expected.items()):
+            if any(
+                prepared.get(key) != value
+                for key, value in expected_prepared.items()
+            ):
                 raise ValueError("attempt_id conflicts with existing submission content")
             return self._recover_existing(
                 attempt_id=attempt_id,
                 client_order_id=client_order_id,
                 now=now,
+                expected_prepared=expected_prepared,
             )
 
         prepared_payload = {
@@ -1191,6 +1215,7 @@ class GuardedDispatcher:
                 attempt_id=attempt_id,
                 client_order_id=client_order_id,
                 now=now,
+                expected_prepared=expected_prepared,
             )
 
         try:
@@ -1419,6 +1444,7 @@ class GuardedDispatcher:
                         events=events,
                         attempt_id=attempt_id,
                         client_order_id=client_order_id,
+                    expected_prepared=expected_prepared,
                     )
             return DispatchOutcome("BLOCKED", client_order_id, None, str(error))
         except Exception as error:

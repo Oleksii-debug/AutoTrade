@@ -1406,6 +1406,22 @@ class GuardedDispatcher:
             self.owner_epoch,
             self.prepared_lease_seconds,
         )
+        dispatcher_class_surfaces = tuple(
+            (base, tuple(base.__dict__.items()))
+            for base in type(self).__mro__
+            if base is not object
+        )
+        dispatcher_class_owned_names = frozenset(
+            name
+            for base, members in dispatcher_class_surfaces
+            for name, _member in members
+        )
+        initial_instance_state = vars(self)
+        initial_instance_class_shadow = tuple(
+            (name, initial_instance_state[name])
+            for name in dispatcher_class_owned_names
+            if name in initial_instance_state
+        )
 
         def require_dispatch_call_authority() -> None:
             (
@@ -1436,11 +1452,39 @@ class GuardedDispatcher:
                 owner_epoch,
                 prepared_lease_seconds,
             )
+            current_instance_state = vars(self)
+            expected_shadow = dict(initial_instance_class_shadow)
+            current_shadow_names = {
+                name
+                for name in dispatcher_class_owned_names
+                if name in current_instance_state
+            }
+            shadow_is_unchanged = (
+                current_shadow_names == set(expected_shadow)
+                and all(
+                    current_instance_state[name] is member
+                    for name, member in initial_instance_class_shadow
+                )
+            )
+            class_surface_is_unchanged = True
+            for base, members in dispatcher_class_surfaces:
+                current_members = base.__dict__
+                if len(current_members) != len(members):
+                    class_surface_is_unchanged = False
+                    break
+                if any(
+                    name not in current_members or current_members[name] is not member
+                    for name, member in members
+                ):
+                    class_surface_is_unchanged = False
+                    break
             if (
                 self.store is authority_store
                 and self._journal_store_path is authority_path
                 and self._journal_store_identity is authority_identity
                 and self._dispatch_authority_state is authority_state
+                and shadow_is_unchanged
+                and class_surface_is_unchanged
                 and type(self.environment) is str
                 and type(self.account_id) is str
                 and type(self.scope_key) is str
@@ -1458,6 +1502,11 @@ class GuardedDispatcher:
             self._journal_store_path = authority_path
             self._journal_store_identity = authority_identity
             self._dispatch_authority_state = authority_state
+            for name in dispatcher_class_owned_names:
+                if name in expected_shadow:
+                    current_instance_state[name] = expected_shadow[name]
+                else:
+                    current_instance_state.pop(name, None)
             (
                 self.environment,
                 self.account_id,
@@ -1669,6 +1718,7 @@ class GuardedDispatcher:
                 except _DispatchAuthorityChanged:
                     raise
                 except Exception as error:
+                    require_dispatch_call_authority()
                     barrier_reason = f"sender_fence_rejected:{type(error).__name__}"
                     self._append(
                         attempt_id=attempt_id,

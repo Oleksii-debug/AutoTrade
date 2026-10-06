@@ -429,6 +429,17 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
                         observation(response(), **kwargs)
                     )
 
+    def test_parser_rejects_non_text_side_without_container_type_error(self):
+        for invalid_side in (["Buy"], {"value": "Buy"}, 1, True, None):
+            with self.subTest(side=invalid_side):
+                payload = response()
+                payload["result"]["list"][0]["side"] = invalid_side
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "side must be exact Buy or Sell text",
+                ):
+                    parse_option_delivery_page(observation(payload))
+
     def test_parser_rejects_delivery_row_schema_drift(self):
         payload = response()
         payload["result"]["list"][0]["unexpectedField"] = "surprise"

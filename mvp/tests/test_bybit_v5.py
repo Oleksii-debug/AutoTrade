@@ -506,6 +506,8 @@ class BybitV5AdapterTests(unittest.TestCase):
         response,
         *,
         provider_environment="MAINNET",
+        submission_scope_provider_environment=None,
+        http_status=None,
         intent_id="bybit-write-intent",
         attempt_id=None,
     ):
@@ -566,11 +568,19 @@ class BybitV5AdapterTests(unittest.TestCase):
                 authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=lambda _cid, _request, guard: (
                     guard(),
-                    ExactJsonTransportResponse(raw),
+                    ExactJsonTransportResponse(
+                        raw,
+                        http_status=http_status,
+                    ),
                 )[1],
                 sender_check=lambda _owner, _epoch: None,
                 submission_scope={
                     "endpoint": prepared.endpoint,
+                    "provider_environment": (
+                        submission_scope_provider_environment
+                        if submission_scope_provider_environment is not None
+                        else provider_environment
+                    ),
                     "prepared_request_sha256": prepared.body_sha256,
                     "capability_snapshot_ids": list(
                         prepared.capability_snapshot_ids
@@ -653,6 +663,60 @@ class BybitV5AdapterTests(unittest.TestCase):
                     result["evidence"][0]["source_uri"],
                     source_uri,
                 )
+
+    def test_submission_response_rejects_durable_provider_environment_scope_mismatch(self):
+        for scoped_provider_environment in ("DEMO", "testnet", " TESTNET "):
+            with self.subTest(
+                scoped_provider_environment=scoped_provider_environment
+            ):
+                attempt, prepared, observation = self._durable_write_observation(
+                    {
+                        "retCode": 0,
+                        "retMsg": "OK",
+                        "result": {
+                            "orderId": "provider-domain-mismatch",
+                            "orderLinkId": "__CLIENT__",
+                        },
+                    },
+                    provider_environment="TESTNET",
+                    submission_scope_provider_environment=scoped_provider_environment,
+                    intent_id=(
+                        "bybit-provider-domain-mismatch-"
+                        + scoped_provider_environment.strip().lower()
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "provider-write provenance scope mismatch",
+                ):
+                    parse_submission_response(
+                        attempt_id=attempt,
+                        prepared_request=prepared,
+                        observation=observation,
+                    )
+
+    def test_submission_response_rejects_non_2xx_sent_binding(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "orderId": "contradictory-http-status",
+                    "orderLinkId": "__CLIENT__",
+                },
+            },
+            http_status=500,
+            intent_id="bybit-contradictory-http-status",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "requires successful HTTP status",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
 
     def test_journal_observation_time_and_provider_time_are_distinct(self):
         attempt, prepared, observation = self._durable_write_observation(

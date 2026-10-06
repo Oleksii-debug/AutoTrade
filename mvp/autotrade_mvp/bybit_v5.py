@@ -1116,6 +1116,26 @@ def _install_submission_response_parser(
         observed = observation_projection(observation)
         if observed["attempt_id"] != aid:
             raise error_type("Bybit submission observation attempt_id mismatch")
+        submission_scope = exact_mapping(
+            observed["submission_scope"],
+            "submission_scope",
+        )
+        raw_scoped_provider_environment = submission_scope.get(
+            "provider_environment"
+        )
+        scoped_provider_environment = exact_text(
+            raw_scoped_provider_environment,
+            "submission_scope.provider_environment",
+        )
+        if scoped_provider_environment != raw_scoped_provider_environment:
+            raise error_type("provider-write provenance scope mismatch")
+        http_status = observed["http_status"]
+        if http_status is not None:
+            http_status = exact_integer(http_status, "http_status")
+            if http_status < 200 or http_status > 299:
+                raise error_type(
+                    "Bybit submission observation requires successful HTTP status"
+                )
         if (
             observed["provider_id"] != "BYBIT"
             or observed["endpoint"] != prepared["endpoint"]
@@ -1126,6 +1146,7 @@ def _install_submission_response_parser(
             != canonical_tuple(prepared["instrument_versions"])
             or observed["account_id"] != prepared["account_id"]
             or observed["environment"] != prepared["environment"]
+            or scoped_provider_environment != prepared["provider_environment"]
             or observed["client_order_id"] != cid
         ):
             raise error_type("provider-write provenance scope mismatch")

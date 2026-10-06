@@ -958,22 +958,6 @@ def simulate_execution(
         model=model,
         lot_size=order.lot_size,
     )
-    if capacity <= 0:
-        return SimulatedExecution(
-            status="NO_FILL",
-            filled_quantity=Decimal("0"),
-            fill_price=None,
-            fee=Decimal("0"),
-            arrival_at=arrival_text,
-            trade_time=None,
-            evidence_available_at=observation.available_at,
-            triggered=order.already_triggered,
-            model_fingerprint=model.fingerprint,
-            scenario=model.scenario,
-            data_fidelity=model.data_fidelity,
-            reason="qualified participation capacity is below one lot",
-            warnings=tuple(warnings),
-        )
 
     triggered = order.already_triggered
     if order.order_type == "STOP_LIMIT" and not triggered:
@@ -995,6 +979,25 @@ def simulate_execution(
                 warnings=tuple(warnings),
             )
         triggered = True
+        if capacity <= 0:
+            return SimulatedExecution(
+                status="NO_FILL",
+                filled_quantity=Decimal("0"),
+                fill_price=None,
+                fee=Decimal("0"),
+                arrival_at=arrival_text,
+                trade_time=None,
+                evidence_available_at=observation.available_at,
+                triggered=True,
+                model_fingerprint=model.fingerprint,
+                scenario=model.scenario,
+                data_fidelity=model.data_fidelity,
+                reason=(
+                    "stop triggered but qualified participation capacity "
+                    "is below one lot"
+                ),
+                warnings=tuple(warnings),
+            )
         if model.data_fidelity == "BAR" and _limit_touched(order, observation, model):
             # With OHLC only, seeing both trigger and limit prices inside one
             # candle does not prove that executable limit liquidity occurred
@@ -1035,6 +1038,23 @@ def simulate_execution(
             scenario=model.scenario,
             data_fidelity=model.data_fidelity,
             reason="stop triggered; wait for later liquidity before limit execution",
+            warnings=tuple(warnings),
+        )
+
+    if capacity <= 0:
+        return SimulatedExecution(
+            status="NO_FILL",
+            filled_quantity=Decimal("0"),
+            fill_price=None,
+            fee=Decimal("0"),
+            arrival_at=arrival_text,
+            trade_time=None,
+            evidence_available_at=observation.available_at,
+            triggered=triggered,
+            model_fingerprint=model.fingerprint,
+            scenario=model.scenario,
+            data_fidelity=model.data_fidelity,
+            reason="qualified participation capacity is below one lot",
             warnings=tuple(warnings),
         )
 

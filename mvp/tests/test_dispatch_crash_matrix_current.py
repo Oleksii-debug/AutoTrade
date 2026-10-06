@@ -358,6 +358,45 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
             )
             self.assertEqual(outbound, 1)
 
+    def test_committed_blocked_replays_without_callbacks_after_restart(self):
+        with TemporaryDirectory() as directory:
+            path = self._path(directory)
+            dispatcher = self._dispatcher(path)
+
+            blocked = self._dispatch(
+                dispatcher,
+                attempt_id="lost-blocked-result",
+                now="2026-10-06T16:36:30Z",
+                transport=self._forbidden_transport,
+                authority_check=lambda _intent_hash, _now: (
+                    False,
+                    "operator_revoked",
+                ),
+            )
+            self.assertEqual(blocked.status, "BLOCKED")
+            self.assertEqual(blocked.reason, "operator_revoked")
+            self.assertEqual(
+                self._event_types(path, dispatcher, "lost-blocked-result"),
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
+            restarted = self._dispatcher(path, owner_token="owner-b")
+            recovered = self._dispatch(
+                restarted,
+                attempt_id="lost-blocked-result",
+                now="2026-10-06T16:36:31Z",
+                transport=self._forbidden_transport,
+                authority_check=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("terminal replay must not re-authorize")),
+            )
+            self.assertEqual(recovered.status, "BLOCKED")
+            self.assertEqual(recovered.reason, "operator_revoked")
+            self.assertEqual(
+                self._event_types(path, restarted, "lost-blocked-result"),
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
     def test_committed_sent_replays_after_caller_result_loss_without_resend(self):
         with TemporaryDirectory() as directory:
             path = self._path(directory)

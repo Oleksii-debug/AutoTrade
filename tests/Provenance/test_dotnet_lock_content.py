@@ -12,9 +12,11 @@ from tools.dotnet_lock import (
     dotnet_locked_dependency_graph,
     dotnet_project_package_references,
     dotnet_restore_command_tokens,
+    dotnet_restore_project_target,
     dotnet_restore_targets_project,
     dotnet_restore_tokens_are_locked,
     dotnet_restore_workflow_commands,
+    dotnet_restore_workflow_environment_authority_lines,
 )
 
 
@@ -106,6 +108,69 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             )
         )
 
+    def test_comma_separated_properties_cannot_hide_restore_override(self):
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    "run: dotnet restore src/App/App.csproj --locked-mode "
+                    "-p:Other=x,RestoreForceEvaluate=true"
+                )
+            )
+        )
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    "run: dotnet restore src/App/App.csproj --locked-mode "
+                    "-property:Other=x,NuGetLockFilePath=artifacts/other.lock.json"
+                )
+            )
+        )
+
+    def test_custom_lock_path_defeats_committed_lock_authority(self):
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    "run: dotnet restore src/App/App.csproj "
+                    "--locked-mode --lock-file-path artifacts/other.lock.json"
+                )
+            )
+        )
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    "run: dotnet restore src/App/App.csproj "
+                    "-p:RestoreLockedMode=true;"
+                    "NuGetLockFilePath=artifacts/other.lock.json"
+                )
+            )
+        )
+
+    def test_force_evaluate_defeats_locked_restore_authority(self):
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    "run: dotnet restore src/App/App.csproj "
+                    "--locked-mode --force-evaluate"
+                )
+            )
+        )
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    "run: dotnet restore src/App/App.csproj "
+                    "-p:RestoreLockedMode=true;RestoreForceEvaluate=true"
+                )
+            )
+        )
+        self.assertTrue(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    "run: dotnet restore src/App/App.csproj "
+                    "-p:RestoreLockedMode=true;RestoreForceEvaluate=false"
+                )
+            )
+        )
+
     def test_yaml_comment_cannot_mint_locked_restore_authority(self):
         tokens = dotnet_restore_command_tokens(
             'run: dotnet restore src/App/App.csproj # --locked-mode'
@@ -141,6 +206,47 @@ class NugetLockGateCandidateTests(unittest.TestCase):
         self.assertEqual(commands, [])
         self.assertEqual(unscoped_lines, [2])
 
+    def test_folded_scalar_split_restore_is_reported_as_unscoped(self):
+        commands, unscoped_lines = dotnet_restore_workflow_commands(
+            "steps:\n"
+            "  - run: >\n"
+            "      dotnet\n"
+            "      restore src/App/App.csproj --locked-mode\n"
+            "  - run: dotnet restore src/App/App.csproj --locked-mode\n"
+        )
+        self.assertEqual(
+            commands,
+            ["run: dotnet restore src/App/App.csproj --locked-mode"],
+        )
+        self.assertEqual(unscoped_lines, [3])
+
+    def test_shell_continuation_split_restore_is_reported_as_unscoped(self):
+        commands, unscoped_lines = dotnet_restore_workflow_commands(
+            "steps:\n"
+            "  - run: |\n"
+            "      dotnet \\\n"
+            "        restore src/App/App.csproj\n"
+            "  - run: dotnet restore src/App/App.csproj --locked-mode\n"
+        )
+        self.assertEqual(
+            commands,
+            ["run: dotnet restore src/App/App.csproj --locked-mode"],
+        )
+        self.assertEqual(unscoped_lines, [3])
+
+    def test_restore_subcommand_label_is_not_executable_restore_text(self):
+        commands, unscoped_lines = dotnet_restore_workflow_commands(
+            "steps:\n"
+            "  - run: python tools/check.py "
+            "--command \"dotnet restore/build release contract\"\n"
+            "  - run: dotnet restore src/App/App.csproj --locked-mode\n"
+        )
+        self.assertEqual(
+            commands,
+            ["run: dotnet restore src/App/App.csproj --locked-mode"],
+        )
+        self.assertEqual(unscoped_lines, [])
+
     def test_canonical_restore_line_is_discovered_once(self):
         commands, unscoped_lines = dotnet_restore_workflow_commands(
             "steps:\n"
@@ -151,6 +257,82 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             ["run: dotnet restore src/App/App.csproj --locked-mode"],
         )
         self.assertEqual(unscoped_lines, [])
+
+    def test_canonical_restore_rejects_shell_chaining_and_substitution(self):
+        for command in (
+            "run: dotnet restore src/App/App.csproj --locked-mode "
+            "&& dotnet restore src/App/App.csproj",
+            "run: dotnet restore src/App/App.csproj --locked-mode "
+            "$(dotnet restore src/App/App.csproj)",
+            "run: dotnet restore src/App/App.csproj --locked-mode "
+            "| tee restore.log",
+        ):
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "shell execution control",
+                ):
+                    dotnet_restore_command_tokens(command)
+
+
+    def test_workflow_environment_cannot_replace_restore_authority(self):
+        findings = dotnet_restore_workflow_environment_authority_lines(
+            "env:\n"
+            "  restoreforceevaluate: true\n"
+            "jobs:\n"
+            "  build:\n"
+            "    env:\n"
+            "      NuGetLockFilePath: artifacts/other.lock.json\n"
+        )
+        self.assertEqual(
+            findings,
+            [
+                (2, "RestoreForceEvaluate"),
+                (6, "NuGetLockFilePath"),
+            ],
+        )
+        self.assertEqual(
+            dotnet_restore_workflow_environment_authority_lines(
+                "env:\n  NUGET_PACKAGES: .nuget/packages\n"
+            ),
+            [],
+        )
+
+    def test_current_canonical_restore_targets_exist(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (
+            root / ".github" / "workflows" / "dotnet-foundation.yml"
+        ).read_text(encoding="utf-8")
+        commands, unscoped_lines = dotnet_restore_workflow_commands(workflow)
+        self.assertEqual(unscoped_lines, [])
+        self.assertTrue(commands)
+        for command in commands:
+            tokens = dotnet_restore_command_tokens(command)
+            target = dotnet_restore_project_target(tokens)
+            self.assertIsNotNone(target, command)
+            self.assertTrue((root / target).is_file(), target)
+
+    def test_restore_target_must_be_canonical_repo_relative_csproj(self):
+        valid = dotnet_restore_command_tokens(
+            "run: dotnet restore src/App/App.csproj --locked-mode"
+        )
+        self.assertEqual(
+            dotnet_restore_project_target(valid),
+            "src/App/App.csproj",
+        )
+        for command in (
+            "run: dotnet restore ../App/App.csproj --locked-mode",
+            "run: dotnet restore /tmp/App.csproj --locked-mode",
+            "run: dotnet restore src\\App\\App.csproj --locked-mode",
+            "run: dotnet restore src/App/App.sln --locked-mode",
+            "run: dotnet restore --locked-mode",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(
+                    dotnet_restore_project_target(
+                        dotnet_restore_command_tokens(command)
+                    )
+                )
 
     def test_restore_project_coverage_requires_first_positional_target(self):
         canonical = dotnet_restore_command_tokens(
@@ -777,6 +959,54 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 ['DOTNET_PROJECT_LOCK_MISSING:src/AutoTrade.Desktop/AutoTrade.Desktop.csproj'],
             )
 
+    def test_third_party_project_sdk_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'PluginHost' / 'PluginHost.csproj'
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                '<Project Sdk="Third.Party.Sdk/1.2.3" />',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [
+                    'DOTNET_PROJECT_SDK_AUTHORITY_UNSUPPORTED:'
+                    'src/PluginHost/PluginHost.csproj:Third.Party.Sdk/1.2.3'
+                ],
+            )
+
+    def test_child_sdk_declaration_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'PluginHost' / 'PluginHost.csproj'
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                '<Project><Sdk Name="Third.Party.Sdk" Version="1.2.3" /></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [
+                    'DOTNET_PROJECT_SDK_ELEMENT_UNSUPPORTED:'
+                    'src/PluginHost/PluginHost.csproj'
+                ],
+            )
+
+    def test_canonical_microsoft_dotnet_sdk_is_not_blocked(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'App' / 'App.csproj'
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                '<Project Sdk="Microsoft.NET.Sdk" />',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [],
+            )
+
     def test_explicit_project_import_fails_closed(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -809,6 +1039,115 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 'imported MSBuild PackageReference',
             ):
                 dotnet_locked_dependency_graph(root, [project])
+
+    def test_restore_authority_property_names_are_case_insensitive(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'App' / 'App.csproj'
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                '<Project TreatAsLocalProperty="restorelockedmode">'
+                '<PropertyGroup>'
+                '<restoreforceevaluate>true</restoreforceevaluate>'
+                '</PropertyGroup></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [
+                    'DOTNET_RESTORE_AUTHORITY_PROPERTY_UNSUPPORTED:'
+                    'src/App/App.csproj:RestoreForceEvaluate',
+                    'DOTNET_RESTORE_AUTHORITY_LOCAL_OVERRIDE_UNSUPPORTED:'
+                    'src/App/App.csproj:RestoreLockedMode',
+                ],
+            )
+
+    def test_project_cannot_localize_restore_locked_mode(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'AutoTrade.Desktop' / 'AutoTrade.Desktop.csproj'
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                '<Project TreatAsLocalProperty="RestoreLockedMode">'
+                '<PropertyGroup><RestoreLockedMode>false</RestoreLockedMode>'
+                '</PropertyGroup><ItemGroup>'
+                '<PackageReference Include="Microsoft.Web.WebView2" '
+                'Version="1.0.4191.47" />'
+                '</ItemGroup></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [
+                    'DOTNET_RESTORE_AUTHORITY_LOCAL_OVERRIDE_UNSUPPORTED:'
+                    'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj:'
+                    'RestoreLockedMode'
+                ],
+            )
+
+    def test_props_cannot_localize_restore_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            props = root / 'Directory.Build.props'
+            props.write_text(
+                '<Project TreatAsLocalProperty="Other; RestoreForceEvaluate">'
+                '<PropertyGroup><Other>value</Other></PropertyGroup>'
+                '</Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [
+                    'DOTNET_RESTORE_AUTHORITY_LOCAL_OVERRIDE_UNSUPPORTED:'
+                    'Directory.Build.props:RestoreForceEvaluate'
+                ],
+            )
+
+    def test_project_restore_force_evaluate_property_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'AutoTrade.Desktop' / 'AutoTrade.Desktop.csproj'
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                '<Project><PropertyGroup>'
+                '<RestoreForceEvaluate>true</RestoreForceEvaluate>'
+                '</PropertyGroup><ItemGroup>'
+                '<PackageReference Include="Microsoft.Web.WebView2" '
+                'Version="1.0.4191.47" />'
+                '</ItemGroup></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [
+                    'DOTNET_RESTORE_AUTHORITY_PROPERTY_UNSUPPORTED:'
+                    'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj:'
+                    'RestoreForceEvaluate'
+                ],
+            )
+
+    def test_props_custom_lock_path_property_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            props = root / 'Directory.Build.props'
+            props.write_text(
+                '<Project><PropertyGroup>'
+                '<NuGetLockFilePath>artifacts/other.lock.json</NuGetLockFilePath>'
+                '</PropertyGroup></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [
+                    'DOTNET_RESTORE_AUTHORITY_PROPERTY_UNSUPPORTED:'
+                    'Directory.Build.props:NuGetLockFilePath'
+                ],
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                'restore authority',
+            ):
+                dotnet_locked_dependency_graph(root, [])
 
     def test_root_props_package_reference_fails_closed(self):
         with TemporaryDirectory() as directory:

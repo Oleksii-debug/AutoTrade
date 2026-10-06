@@ -691,5 +691,59 @@ class PostSendBuiltinAuthorityTests(unittest.TestCase):
             self.assertEqual(callbacks, 0)
 
 
+    def test_exact_response_str_shadow_does_not_false_positive_decoder_change(self):
+        callbacks = 0
+
+        def hostile_str(*_args):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("rebound str executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original = getattr(dispatch_module, "str", None)
+            had_global = "str" in vars(dispatch_module)
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                dispatch_module.str = hostile_str
+                return ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-str-exact-a1",
+                    transport=transport,
+                )
+                self.assertEqual(callbacks, 0)
+                if had_global:
+                    self.assertIs(dispatch_module.str, original)
+                else:
+                    self.assertNotIn("str", vars(dispatch_module))
+            finally:
+                if had_global:
+                    dispatch_module.str = original
+                else:
+                    vars(dispatch_module).pop("str", None)
+
+            self.assertEqual(result.status, "SENT")
+            self.assertEqual(result.reason, "sent_confirmed")
+            self.assertEqual(result.response, {"accepted": True})
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-str-exact-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
+            )
+            self.assertEqual(callbacks, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

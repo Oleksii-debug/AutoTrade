@@ -3032,6 +3032,82 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
 
 
 
+    def test_dispatch_canonicalizes_identity_text_before_durable_send_and_replay(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            wire_calls = 0
+
+            def transport(_client_order_id, _request, guard):
+                nonlocal wire_calls
+                guard()
+                wire_calls += 1
+                return ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+
+            first = dispatcher.dispatch(
+                attempt_id="  canonical-attempt  ",
+                intent_id="  canonical-intent  ",
+                intent_hash="sha256:" + "1" * 64,
+                provider="  provider  ",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda *_args: (True, "allowed"),
+                transport_send=transport,
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(first.status, "SENT")
+            self.assertEqual(wire_calls, 1)
+
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("canonical-attempt"),
+            )
+            prepared = events[0]["payload"]
+            self.assertEqual(prepared["attempt_id"], "canonical-attempt")
+            self.assertEqual(prepared["intent_id"], "canonical-intent")
+            self.assertEqual(prepared["provider"], "provider")
+
+            binding = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="canonical-attempt",
+            )
+            self.assertEqual(binding.attempt_id, "canonical-attempt")
+            self.assertEqual(binding.provider, "provider")
+
+            def must_not_resend(*_args):
+                raise AssertionError("canonical replay must not resend")
+
+            replay = dispatcher.dispatch(
+                attempt_id="canonical-attempt",
+                intent_id="canonical-intent",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:01Z",
+                authority_check=lambda *_args: (
+                    (_ for _ in ()).throw(
+                        AssertionError("canonical replay must not rerun authority")
+                    )
+                ),
+                transport_send=must_not_resend,
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(replay.status, "SENT")
+            self.assertEqual(replay.client_order_id, first.client_order_id)
+            self.assertEqual(wire_calls, 1)
+
     def test_dispatch_rejects_polymorphic_text_before_caller_methods_execute(self):
         class TrapText(str):
             def strip(self, *args, **kwargs):

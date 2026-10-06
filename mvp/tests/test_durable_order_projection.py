@@ -1206,12 +1206,13 @@ class DurableOrderProjectionTests(unittest.TestCase):
             self.assertIsNone(projected.provider_order_id)
             self.assertEqual(projected.submission_attempt_id, attempt_id)
 
-            # The exact HTTP/provider response is transport truth only. A caller
-            # cannot promote it to provider acknowledgement in PAPER without a
-            # separately authenticated provider-lifecycle evidence artifact.
+            # The exact HTTP/provider response is transport truth only. PAPER
+            # lifecycle authority requires a sealed provider-origin issuer;
+            # neither an omitted reference nor caller-published storage bytes
+            # may promote transport truth into acknowledgement.
             with self.assertRaisesRegex(
                 OrderProjectionConflict,
-                "requires immutable evidence",
+                "requires sealed provider-origin authority",
             ):
                 book.acknowledge(
                     event_key="forged-transport-success-as-ack",

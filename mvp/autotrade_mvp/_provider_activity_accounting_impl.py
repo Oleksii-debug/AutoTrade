@@ -445,14 +445,21 @@ def _provider_fill_binding_aggregate_id(
     account_id: str,
     environment: str,
     provider_execution_id: str,
+    provider_environment: str | None = None,
 ) -> str:
-    return _scoped_identity(
-        "provider-fill-financial-binding",
-        _text(provider_id, name="provider_id").upper(),
-        _text(account_id, name="account_id"),
-        _environment(environment),
-        _text(provider_execution_id, name="provider_execution_id"),
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    runtime = _environment(environment)
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=runtime,
+        provider_environment=provider_environment,
     )
+    parts = [provider, account, runtime]
+    if provider_scope != runtime:
+        parts.append(provider_scope)
+    parts.append(_text(provider_execution_id, name="provider_execution_id"))
+    return _scoped_identity("provider-fill-financial-binding", *parts)
 
 
 def _projected_fill_binding_payload(
@@ -476,7 +483,7 @@ def _projected_fill_binding_payload(
 def _provider_fill_binding_payload(
     provider_fill: ProviderFillEvidence,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "provider_id": provider_fill.provider_id,
         "account_id": provider_fill.account_id,
         "environment": provider_fill.environment,
@@ -493,6 +500,13 @@ def _provider_fill_binding_payload(
         "position_effect": getattr(provider_fill, "position_effect", None),
         "evidence_refs": list(provider_fill.evidence_refs),
     }
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=provider_fill.provider_environment,
+        environment=provider_fill.environment,
+    )
+    if provider_scope_payload is not None:
+        payload["provider_environment"] = provider_scope_payload
+    return payload
 
 
 def _require_plain_financial_json(
@@ -592,7 +606,10 @@ def _provider_fill_from_binding_payload(
     *,
     name: str,
 ) -> ProviderFillEvidence:
-    if type(payload) is not dict or set(payload) != _PROVIDER_FILL_BINDING_FIELDS:
+    if type(payload) is not dict or set(payload) not in (
+        _PROVIDER_FILL_BINDING_FIELDS,
+        _PROVIDER_FILL_BINDING_FIELDS | {"provider_environment"},
+    ):
         raise AccountingConflict(f"{name} shape is invalid")
     raw = dict(payload)
     refs = raw["evidence_refs"]
@@ -603,6 +620,7 @@ def _provider_fill_from_binding_payload(
             provider_id=raw["provider_id"],
             account_id=raw["account_id"],
             environment=raw["environment"],
+            provider_environment=raw.get("provider_environment"),
             provider_execution_id=raw["provider_execution_id"],
             client_order_id=raw["client_order_id"],
             instrument=raw["instrument"],
@@ -650,11 +668,16 @@ def _prepare_provider_fill_binding(
         )
     if plan.intent_id != projected_fill.intent_id:
         raise AccountingConflict("provider fill binding intent identity changed")
+    if provider_fill.provider_environment != economic_book.provider_environment:
+        raise AccountingConflict(
+            "provider fill binding provider environment changed"
+        )
 
     aggregate_id = _provider_fill_binding_aggregate_id(
         provider_id=economic_book.provider_id,
         account_id=economic_book.account_id,
         environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
         provider_execution_id=provider_fill.provider_execution_id,
     )
     usage = {
@@ -663,8 +686,12 @@ def _prepare_provider_fill_binding(
     }
     projected_payload = _projected_fill_binding_payload(projected_fill)
     provider_payload = _provider_fill_binding_payload(provider_fill)
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=economic_book.provider_environment,
+        environment=economic_book.environment,
+    )
     request = {
-        "schema_version": "1.1.0",
+        "schema_version": "1.2.0" if provider_scope_payload is not None else "1.1.0",
         "provider_id": economic_book.provider_id,
         "account_id": economic_book.account_id,
         "environment": economic_book.environment,
@@ -685,6 +712,8 @@ def _prepare_provider_fill_binding(
         ),
         "derived_usage": usage,
     }
+    if provider_scope_payload is not None:
+        request["provider_environment"] = provider_scope_payload
     events = _economic_store_load_events(economic_book,
         _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
         aggregate_id,
@@ -703,6 +732,8 @@ def _prepare_provider_fill_binding(
             payload.get("provider_id") != economic_book.provider_id
             or payload.get("account_id") != economic_book.account_id
             or payload.get("environment") != economic_book.environment
+            or payload.get("provider_environment", economic_book.environment)
+            != economic_book.provider_environment
             or payload.get("provider_execution_id") != plan.provider_execution_id
         ):
             raise AccountingConflict(
@@ -754,20 +785,23 @@ def _prepare_provider_fill_binding(
                 "provider fill financial binding reservation cut is invalid"
             )
         stored_plan_digest = stored_request.get("plan_digest")
-        expected_plan_digest = payload_digest(
-            {
-                "schema_version": "1.1.0",
-                "provider_id": economic_book.provider_id,
-                "account_id": economic_book.account_id,
-                "environment": economic_book.environment,
-                "reservation_id": plan.reservation_id,
-                "intent_id": plan.intent_id,
-                "provider_execution_id": plan.provider_execution_id,
-                "reservation_cut_digest": stored_cut,
-                "transaction": canonical_transaction(plan.transaction),
-                "derived_usage": usage,
-            }
-        )
+        expected_plan_material = {
+            "schema_version": (
+                "1.2.0" if provider_scope_payload is not None else "1.1.0"
+            ),
+            "provider_id": economic_book.provider_id,
+            "account_id": economic_book.account_id,
+            "environment": economic_book.environment,
+            "reservation_id": plan.reservation_id,
+            "intent_id": plan.intent_id,
+            "provider_execution_id": plan.provider_execution_id,
+            "reservation_cut_digest": stored_cut,
+            "transaction": canonical_transaction(plan.transaction),
+            "derived_usage": usage,
+        }
+        if provider_scope_payload is not None:
+            expected_plan_material["provider_environment"] = provider_scope_payload
+        expected_plan_digest = payload_digest(expected_plan_material)
         if stored_plan_digest != expected_plan_digest:
             raise AccountingConflict(
                 "provider fill financial binding plan digest is invalid"
@@ -793,7 +827,7 @@ def _prepare_provider_fill_binding(
         )
     )
     payload = {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0" if provider_scope_payload is not None else "1.0.0",
         "provider_id": economic_book.provider_id,
         "account_id": economic_book.account_id,
         "environment": economic_book.environment,
@@ -801,6 +835,8 @@ def _prepare_provider_fill_binding(
         "request_digest": request_digest,
         "request": request,
     }
+    if provider_scope_payload is not None:
+        payload["provider_environment"] = provider_scope_payload
     envelope = {
         "event_id": event_id,
         "event_type": _PROVIDER_FILL_BINDING_EVENT_TYPE,
@@ -924,14 +960,21 @@ def _provider_fill_correction_binding_aggregate_id(
     account_id: str,
     environment: str,
     provider_execution_id: str,
+    provider_environment: str | None = None,
 ) -> str:
-    return _scoped_identity(
-        "provider-fill-reservation-correction-binding",
-        _text(provider_id, name="provider_id").upper(),
-        _text(account_id, name="account_id"),
-        _environment(environment),
-        _text(provider_execution_id, name="provider_execution_id"),
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    runtime = _environment(environment)
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=runtime,
+        provider_environment=provider_environment,
     )
+    parts = [provider, account, runtime]
+    if provider_scope != runtime:
+        parts.append(provider_scope)
+    parts.append(_text(provider_execution_id, name="provider_execution_id"))
+    return _scoped_identity("provider-fill-reservation-correction-binding", *parts)
 
 
 def _prepare_provider_fill_correction_binding(
@@ -962,6 +1005,11 @@ def _prepare_provider_fill_correction_binding(
     if type(replacement) is not JournalTransaction:
         raise TypeError("replacement must be an exact JournalTransaction")
     _require_durable_provider_economic_book_authority(economic_book)
+    for evidence in (original_provider_fill, corrected_provider_fill):
+        if evidence.provider_environment != economic_book.provider_environment:
+            raise AccountingConflict(
+                "provider fill correction provider environment changed"
+            )
     _require_same_financial_journal_generation(
         economic_book,
         reservation_book,
@@ -1003,6 +1051,7 @@ def _prepare_provider_fill_correction_binding(
         provider_id=economic_book.provider_id,
         account_id=economic_book.account_id,
         environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
         provider_execution_id=execution_id,
     )
     initial_events = _economic_store_load_events(economic_book,
@@ -1038,6 +1087,8 @@ def _prepare_provider_fill_correction_binding(
         initial_request.get("provider_id") != economic_book.provider_id
         or initial_request.get("account_id") != economic_book.account_id
         or initial_request.get("environment") != economic_book.environment
+        or initial_request.get("provider_environment", economic_book.environment)
+        != economic_book.provider_environment
         or initial_request.get("provider_execution_id") != execution_id
         or initial_request.get("reservation_id") != rid
         or initial_request.get("intent_id") != corrected_projected_fill.intent_id
@@ -1063,6 +1114,8 @@ def _prepare_provider_fill_correction_binding(
         or initial_provider_evidence.provider_id != economic_book.provider_id
         or initial_provider_evidence.account_id != economic_book.account_id
         or initial_provider_evidence.environment != economic_book.environment
+        or initial_provider_evidence.provider_environment
+        != economic_book.provider_environment
         or initial_provider_evidence.provider_execution_id != execution_id
         or initial_provider_evidence.client_order_id
         != initial_projected_evidence.client_order_id
@@ -1158,6 +1211,7 @@ def _prepare_provider_fill_correction_binding(
         provider_id=economic_book.provider_id,
         account_id=economic_book.account_id,
         environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
         provider_execution_id=execution_id,
     )
     events = _economic_store_load_events(economic_book,
@@ -1196,6 +1250,8 @@ def _prepare_provider_fill_correction_binding(
             payload.get("provider_id") != economic_book.provider_id
             or payload.get("account_id") != economic_book.account_id
             or payload.get("environment") != economic_book.environment
+            or payload.get("provider_environment", economic_book.environment)
+            != economic_book.provider_environment
             or payload.get("provider_execution_id") != execution_id
         ):
             raise AccountingConflict(
@@ -1212,6 +1268,8 @@ def _prepare_provider_fill_correction_binding(
         if (
             request.get("reservation_id") != rid
             or request.get("intent_id") != corrected_projected_fill.intent_id
+            or request.get("provider_environment", economic_book.environment)
+            != economic_book.provider_environment
             or request.get("provider_execution_id") != execution_id
             or request.get("previous_fill_id") != active_fill_id
         ):
@@ -1346,6 +1404,8 @@ def _prepare_provider_fill_correction_binding(
             or historical_provider.provider_id != economic_book.provider_id
             or historical_provider.account_id != economic_book.account_id
             or historical_provider.environment != economic_book.environment
+            or historical_provider.provider_environment
+            != economic_book.provider_environment
             or historical_provider.provider_execution_id != execution_id
             or historical_provider.client_order_id
             != historical_projected.client_order_id
@@ -1540,8 +1600,12 @@ def _prepare_provider_fill_correction_binding(
         if amount > conservative_usage.get(resource, Decimal("0"))
     }
     reservation_cut = reservation_snapshot_digest(snapshot)
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=economic_book.provider_environment,
+        environment=economic_book.environment,
+    )
     request = {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0" if provider_scope_payload is not None else "1.0.0",
         "provider_id": economic_book.provider_id,
         "account_id": economic_book.account_id,
         "environment": economic_book.environment,
@@ -1559,6 +1623,8 @@ def _prepare_provider_fill_correction_binding(
         "resulting_conservative_usage": _usage_payload(resulting_usage),
         "additional_usage": _usage_payload(additional_usage),
     }
+    if provider_scope_payload is not None:
+        request["provider_environment"] = provider_scope_payload
     request_digest = payload_digest(request)
     next_version = len(events) + 1
     event_id = str(
@@ -1571,7 +1637,7 @@ def _prepare_provider_fill_correction_binding(
         )
     )
     payload = {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0" if provider_scope_payload is not None else "1.0.0",
         "provider_id": economic_book.provider_id,
         "account_id": economic_book.account_id,
         "environment": economic_book.environment,
@@ -1579,6 +1645,8 @@ def _prepare_provider_fill_correction_binding(
         "request_digest": request_digest,
         "request": request,
     }
+    if provider_scope_payload is not None:
+        payload["provider_environment"] = provider_scope_payload
     envelope = {
         "event_id": event_id,
         "event_type": _PROVIDER_FILL_CORRECTION_BINDING_EVENT_TYPE,
@@ -4053,6 +4121,7 @@ def commit_provider_fill_bust_with_economic_reversal(
         provider_id=economic_book.provider_id,
         account_id=economic_book.account_id,
         environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
         provider_execution_id=projected_fill.provider_execution_id,
     )
     binding_events = _economic_store_load_events(
@@ -4141,6 +4210,8 @@ def commit_provider_fill_bust_with_economic_reversal(
             binding_request.get("provider_id") != economic_book.provider_id
             or binding_request.get("account_id") != economic_book.account_id
             or binding_request.get("environment") != economic_book.environment
+            or binding_request.get("provider_environment", economic_book.environment)
+            != economic_book.provider_environment
             or binding_request.get("provider_execution_id")
             != projected_fill.provider_execution_id
             or binding_request.get("reservation_id") != rid

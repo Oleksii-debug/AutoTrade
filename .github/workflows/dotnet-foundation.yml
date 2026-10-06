@@ -56,6 +56,7 @@ permissions:
 env:
   AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
 
 jobs:
   build:
@@ -79,6 +80,11 @@ jobs:
       # Bootstrap has no NuGet package references yet. WP-03 must add committed
       # package locks and locked-mode before introducing release dependencies.
       - run: dotnet restore src/AutoTrade.Contracts/AutoTrade.Contracts.csproj
+      - run: >-
+          python tools/dotnet_package_rights.py
+          --verify-restored
+          --packages-root "${{ env.NUGET_PACKAGES }}"
+          --project src/AutoTrade.Contracts/AutoTrade.Contracts.csproj
       - run: dotnet build src/AutoTrade.Contracts/AutoTrade.Contracts.csproj --configuration Release --no-restore
       - name: Write exact-head .NET foundation evidence
         run: >-
@@ -107,6 +113,11 @@ jobs:
           dotnet-version: "10.0.100"
       - run: python tools/dotnet_package_rights.py --check-policy
       - run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj
+      - run: >-
+          python tools/dotnet_package_rights.py
+          --verify-restored
+          --packages-root "${{ env.NUGET_PACKAGES }}"
+          --project src/AutoTrade.Desktop/AutoTrade.Desktop.csproj
       - run: dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --configuration Release --no-restore
       - run: dotnet restore tests/Desktop.Client/Desktop.Client.csproj
       - run: dotnet run --project tests/Desktop.Client/Desktop.Client.csproj --configuration Release --no-restore

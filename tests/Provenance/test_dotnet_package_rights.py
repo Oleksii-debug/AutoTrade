@@ -117,6 +117,44 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 ["DOTNET_PACKAGE_RIGHTS_MISSING:Example.Package@1.2.3"],
             )
 
+    def test_zero_package_project_does_not_require_nuget_cache(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "src" / "NoPackages" / "NoPackages.csproj"
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                "<Project Sdk=\"Microsoft.NET.Sdk\">"
+                "<PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>"
+                "</Project>\n",
+                encoding="utf-8",
+            )
+            verify_restored_package_rights(
+                root / "missing-nuget-cache",
+                root=root,
+                projects=[project],
+            )
+
+    def test_foundation_workflow_verifies_restored_package_rights(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "dotnet-foundation.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages",
+            workflow,
+        )
+        normalized = " ".join(line.strip() for line in workflow.splitlines())
+        for project in (
+            "src/AutoTrade.Contracts/AutoTrade.Contracts.csproj",
+            "src/AutoTrade.Desktop/AutoTrade.Desktop.csproj",
+        ):
+            with self.subTest(project=project):
+                self.assertIn(
+                    "--verify-restored "
+                    '--packages-root "${{ env.NUGET_PACKAGES }}" '
+                    f"--project {project}",
+                    normalized,
+                )
+
     def test_exact_locked_package_and_reviewed_license_pass(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

@@ -255,9 +255,11 @@ def verify_restored_package_rights(
     root: Path = ROOT,
     projects: list[Path] | None = None,
 ) -> None:
+    artifacts = locked_package_artifacts(root, projects=projects)
+    if not artifacts:
+        return
     if not packages_root.is_dir():
         raise ValueError("NuGet global-packages root is unavailable")
-    artifacts = locked_package_artifacts(root, projects=projects)
     records = {_artifact_key(item): item for item in package_rights_records(root)}
     for artifact in artifacts:
         key = _artifact_key(artifact)

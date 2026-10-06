@@ -1094,6 +1094,117 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
             del corporate_action_evidence_module._require_authoritative_corporate_action
             del corporate_action_evidence_module._resolve_authoritative_corporate_action_impl
 
+    def test_instance_shadowed_durable_policy_and_helpers_cannot_redirect_record(self):
+        accepted = self._accepted()
+        calls = []
+
+        def decoy(name):
+            def fail(*_args, **_kwargs):
+                calls.append(name)
+                raise AssertionError(f"instance {name} decoy must not execute")
+            return fail
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            durable._AGGREGATE_TYPE = "forged_aggregate"
+            durable._EVENT_TYPE = "ForgedEvent"
+            durable._ACTOR = "forged-actor"
+            durable._composition = decoy("composition")
+            durable._events = decoy("events")
+            durable._payload = decoy("payload")
+            durable._command_id = decoy("command_id")
+            durable._idempotency_key = decoy("idempotency_key")
+            durable.prepare_record_mutation = decoy("prepare_record_mutation")
+
+            result = DurableCorporateActionEvidenceStore.record(
+                durable,
+                accepted,
+            )
+
+            events = journal.load_events(
+                "corporate_action_evidence",
+                durable.aggregate_id,
+            )
+
+        self.assertTrue(result.inserted)
+        self.assertEqual(calls, [])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(
+            events[0]["event_type"],
+            "CorporateActionEvidenceAccepted",
+        )
+        self.assertEqual(events[0]["aggregate_type"], "corporate_action_evidence")
+
+    def test_late_module_global_store_decoy_cannot_redirect_existing_exact_store(self):
+        accepted = self._accepted()
+        calls = []
+        original = corporate_action_evidence_module.DurableCorporateActionEvidenceStore
+
+        class DecoyStore:
+            _AGGREGATE_TYPE = "forged_aggregate"
+            _EVENT_TYPE = "ForgedEvent"
+            _ACTOR = "forged-actor"
+
+            @staticmethod
+            def _composition(*_args, **_kwargs):
+                calls.append("composition")
+                raise AssertionError("late store decoy must not execute")
+
+            @staticmethod
+            def _events(*_args, **_kwargs):
+                calls.append("events")
+                raise AssertionError("late store decoy must not execute")
+
+            @staticmethod
+            def _payload(*_args, **_kwargs):
+                calls.append("payload")
+                raise AssertionError("late store decoy must not execute")
+
+            @staticmethod
+            def _command_id(*_args, **_kwargs):
+                calls.append("command_id")
+                raise AssertionError("late store decoy must not execute")
+
+            @staticmethod
+            def _idempotency_key(*_args, **_kwargs):
+                calls.append("idempotency_key")
+                raise AssertionError("late store decoy must not execute")
+
+            @staticmethod
+            def prepare_record_mutation(*_args, **_kwargs):
+                calls.append("prepare")
+                raise AssertionError("late store decoy must not execute")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            corporate_action_evidence_module.DurableCorporateActionEvidenceStore = (
+                DecoyStore
+            )
+            try:
+                result = DurableCorporateActionEvidenceStore.record(
+                    durable,
+                    accepted,
+                )
+            finally:
+                corporate_action_evidence_module.DurableCorporateActionEvidenceStore = (
+                    original
+                )
+
+            events = journal.load_events(
+                "corporate_action_evidence",
+                durable.aggregate_id,
+            )
+
+        self.assertTrue(result.inserted)
+        self.assertEqual(calls, [])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(
+            events[0]["event_type"],
+            "CorporateActionEvidenceAccepted",
+        )
+
     def test_manually_constructed_authoritative_action_cannot_reach_durable_store(self):
         issued = self._accepted()
         forged = AuthoritativeCorporateAction(**issued.__dict__)

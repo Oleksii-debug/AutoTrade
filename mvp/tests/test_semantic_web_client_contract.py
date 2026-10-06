@@ -83,6 +83,19 @@ class SemanticWebClientContractTests(unittest.TestCase):
                 f'id="{filter_id}" type="search" aria-keyshortcuts="Escape"',
                 html,
             )
+        for region_id, status_id in (
+            ("permissions-region", "permissions-filter-status"),
+            ("strategy-region", "strategy-filter-status"),
+            ("portfolio-region", "portfolio-filter-status"),
+            ("operations-region", "operations-filter-status"),
+            ("risk-region", "risk-filter-status"),
+            ("jobs-region", "jobs-filter-status"),
+            ("event-history-region", "event-history-filter-status"),
+        ):
+            self.assertRegex(
+                html,
+                rf'id="{region_id}"[^>]*aria-describedby="{status_id}"',
+            )
 
     def test_projection_rendering_is_text_only_deterministic_and_focusable(self):
         html = INDEX.read_text(encoding="utf-8")

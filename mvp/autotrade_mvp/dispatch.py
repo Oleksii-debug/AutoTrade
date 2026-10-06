@@ -2539,6 +2539,7 @@ class GuardedDispatcher:
         snapshot_module_globals_pop = snapshot_module_globals.pop
         snapshot_builtin_missing = object()
         snapshot_postsend_global_names = (
+            "_builtins",
             "type",
             "id",
             "tuple",

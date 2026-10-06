@@ -2,6 +2,7 @@ import builtins
 from tempfile import TemporaryDirectory
 import unittest
 
+from mvp.autotrade_mvp import dispatch as dispatch_module
 from mvp.autotrade_mvp.dispatch import ExactJsonTransportResponse, GuardedDispatcher
 from mvp.autotrade_mvp.persistence import JournalStore
 
@@ -82,6 +83,45 @@ class PostSendBuiltinNamespaceAuthorityTests(unittest.TestCase):
                 )],
                 ["SubmissionPrepared", "SubmissionSending"],
             )
+
+    def test_postsend_builtin_module_binding_is_clean_before_next_dispatch(self):
+        original_module = dispatch_module._builtins
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+
+            def first_transport(_client_order_id, _request, final_guard):
+                final_guard()
+                dispatch_module._builtins = object()
+                return ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+
+            first = self._dispatch(
+                dispatcher,
+                "builtin-module-binding-a1",
+                first_transport,
+            )
+            self.assertIs(dispatch_module._builtins, original_module)
+            self.assertEqual(first.status, "SENT")
+            self.assertEqual(first.reason, "sent_confirmed")
+
+            second = self._dispatch(
+                dispatcher,
+                "builtin-module-binding-a2",
+                lambda _client_order_id, _request, final_guard: (
+                    final_guard(),
+                    ExactJsonTransportResponse(
+                        b'{"accepted":true}',
+                        http_status=200,
+                    ),
+                )[1],
+            )
+            self.assertEqual(second.status, "SENT")
+            self.assertEqual(second.reason, "sent_confirmed")
+            self.assertIs(dispatch_module._builtins, original_module)
 
     def test_postsend_builtin_exception_mutation_cannot_reclassify_transport_failure(self):
         original_exception = builtins.Exception

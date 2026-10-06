@@ -236,12 +236,9 @@ class ResponseDepthNumericAuthorityTests(unittest.TestCase):
             parser = dispatch_module.parse_bounded_json_number_token
             parse_decimal = parser.__globals__["parse_bounded_exact_decimal"]
             original_code = parse_decimal.__code__
-            forged_calls = 0
 
             def forged_decimal(value, *, allow_exponent=True):
-                nonlocal forged_calls
-                forged_calls += 1
-                return value
+                raise AssertionError("forged exact-decimal parser executed")
 
             def transport(_client_order_id, _request, final_guard):
                 final_guard()
@@ -259,7 +256,6 @@ class ResponseDepthNumericAuthorityTests(unittest.TestCase):
                     transport,
                 )
                 self.assertIs(parse_decimal.__code__, original_code)
-                self.assertEqual(forged_calls, 0)
             finally:
                 parse_decimal.__code__ = original_code
 

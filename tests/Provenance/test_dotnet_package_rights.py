@@ -291,6 +291,73 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 package_rights_blockers(root),
             )
 
+
+    def test_verifier_text_inside_run_block_does_not_count(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "env:\n"
+                "  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages\n"
+                "jobs:\n"
+                "  verify:\n"
+                "    steps:\n"
+                "      - run: dotnet restore src/App/App.csproj --locked-mode\n"
+                "      - run: |\n"
+                "          cat <<'EOF'\n"
+                "          - run: python tools/dotnet_package_rights.py "
+                "--verify-restored "
+                "--packages-root \"${{ env.NUGET_PACKAGES }}\" "
+                "--project src/App/App.csproj\n"
+                "          EOF\n",
+                encoding="utf-8",
+            )
+            blockers = package_rights_blockers(root)
+            self.assertIn(
+                "DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_MISSING:"
+                "src/App/App.csproj",
+                blockers,
+            )
+            self.assertTrue(
+                any(
+                    value.startswith(
+                        "DOTNET_PACKAGE_RIGHTS_VERIFY_COMMAND_INVALID:"
+                    )
+                    for value in blockers
+                )
+            )
+
+    def test_restore_text_inside_run_block_does_not_count(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "env:\n"
+                "  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages\n"
+                "jobs:\n"
+                "  verify:\n"
+                "    steps:\n"
+                "      - run: |\n"
+                "          cat <<'EOF'\n"
+                "          - run: dotnet restore src/App/App.csproj --locked-mode\n"
+                "          EOF\n"
+                "      - run: python tools/dotnet_package_rights.py "
+                "--verify-restored "
+                "--packages-root \"${{ env.NUGET_PACKAGES }}\" "
+                "--project src/App/App.csproj\n",
+                encoding="utf-8",
+            )
+            self.assertIn(
+                "DOTNET_PACKAGE_RIGHTS_VERIFY_ORDER_INVALID:src/App/App.csproj",
+                package_rights_blockers(root),
+            )
+
     def test_second_restore_after_rights_verification_is_blocked(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

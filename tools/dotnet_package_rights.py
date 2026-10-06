@@ -34,6 +34,7 @@ _CANONICAL_NUGET_PACKAGES_AUTHORITY = (
     "NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages"
 )
 _CANONICAL_VERIFY_PACKAGES_ROOT = "${{ env.NUGET_PACKAGES }}"
+_CANONICAL_WORKFLOW_STEP_INDENT = 6
 
 _REQUIRED_PACKAGE_FIELDS = frozenset(
     {
@@ -225,6 +226,23 @@ def package_rights_records(root: Path = ROOT) -> list[dict[str, str]]:
     return sorted(records, key=_artifact_key)
 
 
+def _direct_workflow_run_command(raw: str) -> str | None:
+    """Return one canonical top-level step command, never block-scalar text."""
+
+    if type(raw) is not str:
+        raise TypeError("workflow line must be exact str")
+    indent = len(raw) - len(raw.lstrip(" "))
+    stripped = raw.strip()
+    prefix = "- run: "
+    if (
+        indent != _CANONICAL_WORKFLOW_STEP_INDENT
+        or not stripped.startswith(prefix)
+    ):
+        return None
+    command = stripped.removeprefix(prefix)
+    return command if command else None
+
+
 def _workflow_step_has_bypass(lines: list[str], command_index: int) -> bool:
     """Reject verifier steps that can be skipped or can suppress exit semantics."""
 
@@ -285,21 +303,24 @@ def workflow_restored_rights_projects(
     invalid_lines: list[int] = []
     for command_index, raw in enumerate(lines):
         line_number = command_index + 1
-        command = raw.strip()
-        if command.startswith("- "):
-            command = command[2:].strip()
+        direct = _direct_workflow_run_command(raw)
+        candidate = raw.strip()
         if (
-            "tools/dotnet_package_rights.py" not in command
-            or "--verify-restored" not in command
+            "tools/dotnet_package_rights.py" not in candidate
+            or "--verify-restored" not in candidate
         ):
             continue
+        if direct is None:
+            invalid_lines.append(line_number)
+            continue
+        command = "run: " + direct
         if not command.startswith(_VERIFY_RESTORED_PREFIX):
             invalid_lines.append(line_number)
             continue
         if _workflow_step_has_bypass(lines, command_index):
             invalid_lines.append(line_number)
             continue
-        payload = command.removeprefix("run: ")
+        payload = direct
         if _VERIFY_SHELL_CONTROL.search(payload) is not None:
             invalid_lines.append(line_number)
             continue
@@ -436,15 +457,17 @@ def _workflow_rights_blockers(
         restore_lines = [
             index
             for index, raw in enumerate(workflow_lines, start=1)
-            if raw.strip().removeprefix("- ").strip() == f"run: {restore_command}"
+            if _direct_workflow_run_command(raw) == restore_command
         ]
         verify_lines = [
             index
             for index, raw in enumerate(workflow_lines, start=1)
             if (
-                "tools/dotnet_package_rights.py" in raw
-                and "--verify-restored" in raw
-                and raw.strip().endswith(verify_suffix)
+                (command := _direct_workflow_run_command(raw)) is not None
+                and command.startswith(
+                    "python tools/dotnet_package_rights.py --verify-restored "
+                )
+                and command.endswith(verify_suffix)
             )
         ]
         if len(restore_lines) != 1 or len(verify_lines) != 1:
@@ -467,8 +490,7 @@ def _workflow_rights_blockers(
         later_restore = any(
             index > verify_lines[0]
             and _workflow_job_name(workflow_lines, index) == verify_job
-            and raw.strip().removeprefix("- ").strip()
-            == f"run: {restore_command}"
+            and _direct_workflow_run_command(raw) == restore_command
             for index, raw in enumerate(workflow_lines, start=1)
         )
         if later_restore:

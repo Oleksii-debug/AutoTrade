@@ -14,7 +14,7 @@ from uuid import NAMESPACE_URL, uuid5
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .dispatch import submission_attempt_aggregate_id
-from .exact_decimal import ExactDecimalError, parse_bounded_exact_decimal
+from .exact_decimal import ExactDecimalError, as_fraction, parse_bounded_exact_decimal
 from .persistence import (
     JournalStore,
     canonical_json,
@@ -928,23 +928,36 @@ def load_account_resource_availability_evidence(
     if isinstance(max_age_seconds, Decimal) and type(max_age_seconds) is not Decimal:
         raise TypeError("max_age_seconds must be an exact built-in Decimal")
     try:
-        max_age = (
-            max_age_seconds
-            if type(max_age_seconds) is Decimal
-            else Decimal(max_age_seconds)
-        )
-    except Exception as error:
-        raise ValueError("max_age_seconds must be a finite decimal") from error
-    if not max_age.is_finite() or max_age < 0:
+        max_age = parse_bounded_exact_decimal(max_age_seconds)
+        max_age_fraction = as_fraction(max_age)
+    except ExactDecimalError as error:
+        raise ValueError(
+            "max_age_seconds must be a finite decimal within the exact resource envelope"
+        ) from error
+    if max_age < 0:
         raise ValueError("max_age_seconds must be a non-negative finite decimal")
     delta = current - completed
     age_microseconds = (
         (delta.days * 86400 + delta.seconds) * 1_000_000
         + delta.microseconds
     )
-    age_seconds = Decimal(age_microseconds) / Decimal(1_000_000)
-    if age_seconds > max_age:
+    if (
+        age_microseconds * max_age_fraction.denominator
+        > 1_000_000 * max_age_fraction.numerator
+    ):
         raise ValueError("availability checkpoint is stale")
+
+    # Hard freshness is exact integer/rational arithmetic.  Diagnostic rendering
+    # is derived separately so ambient Decimal precision/rounding has no authority.
+    age_whole_seconds, age_fractional_microseconds = divmod(
+        age_microseconds,
+        1_000_000,
+    )
+    age_seconds_text = str(age_whole_seconds)
+    if age_fractional_microseconds:
+        age_seconds_text += (
+            "." + f"{age_fractional_microseconds:06d}".rstrip("0")
+        )
 
     resource_evidence = payload.get("resource_availability")
     if type(resource_evidence) is not dict:
@@ -1328,7 +1341,7 @@ def load_account_resource_availability_evidence(
         # risk/admission events and must compare identically after restart.
         "resource_evidence_refs": list(normalized_evidence_refs),
         "observed_at": _instant(payload.get("observed_at"), name="observed_at"),
-        "age_seconds": str(age_seconds),
+        "age_seconds": age_seconds_text,
         "availability": {
             resource: str(amount)
             for resource, amount in sorted(availability.items())

@@ -117,21 +117,59 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
 
     public async ValueTask DisposeAsync()
     {
-        if (!_process.HasExited)
+        Exception? gracefulStopFailure = null;
+        try
         {
-            // The owned pipe requests the existing production-host drain. It does
-            // not bypass the authenticated financial command API.
-            await _process.StandardInput.WriteLineAsync("STOP");
-            await _process.StandardInput.FlushAsync();
-            using CancellationTokenSource deadline = new(TimeSpan.FromSeconds(30));
-            try { await _process.WaitForExitAsync(deadline.Token); }
-            catch (OperationCanceledException)
+            if (!_process.HasExited)
+            {
+                // The owned pipe requests the existing production-host drain. It does
+                // not bypass the authenticated financial command API.
+                try
+                {
+                    await _process.StandardInput.WriteLineAsync("STOP");
+                    await _process.StandardInput.FlushAsync();
+                }
+                catch (Exception error) when (
+                    error is IOException
+                    or ObjectDisposedException
+                    or InvalidOperationException)
+                {
+                    gracefulStopFailure = error;
+                }
+
+                if (gracefulStopFailure is null && !_process.HasExited)
+                {
+                    using CancellationTokenSource deadline = new(TimeSpan.FromSeconds(30));
+                    try { await _process.WaitForExitAsync(deadline.Token); }
+                    catch (OperationCanceledException) { }
+                }
+
+                if (!_process.HasExited)
+                {
+                    _process.Kill(entireProcessTree: true);
+                    await _process.WaitForExitAsync();
+                }
+            }
+        }
+        finally
+        {
+            // A broken control pipe, cancellation or later cleanup exception must
+            // never strand an owned host after the Desktop has decided to exit.
+            if (!_process.HasExited)
             {
                 _process.Kill(entireProcessTree: true);
                 await _process.WaitForExitAsync();
             }
+            await Task.WhenAll(_stdoutDrain, _stderrDrain);
+            _process.Dispose();
+            _http.Dispose();
         }
-        await Task.WhenAll(_stdoutDrain, _stderrDrain);
-        _process.Dispose(); _http.Dispose();
+
+        if (gracefulStopFailure is not null)
+        {
+            throw new InvalidOperationException(
+                "The local host control pipe failed during shutdown; the child process was terminated.",
+                gracefulStopFailure);
+        }
     }
 }

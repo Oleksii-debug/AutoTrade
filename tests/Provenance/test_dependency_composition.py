@@ -498,6 +498,25 @@ project = "not-a-table"
                 relative,
             )
 
+
+            workflow.write_text(
+                'paths:\n'
+                '  - "src/**/packages.lock.json"\n'
+                "env:\n"
+                "  RestoreForceEvaluate: true\n"
+                "steps:\n"
+                "  - run: dotnet restore src/ReleaseApp/ReleaseApp.csproj --locked-mode\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project]),
+                [
+                    "DOTNET_RESTORE_ENVIRONMENT_AUTHORITY_UNSUPPORTED:"
+                    ".github/workflows/dotnet-foundation.yml:"
+                    "4:RestoreForceEvaluate"
+                ],
+            )
+
     def test_nuget_lock_changes_must_trigger_dotnet_workflow(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

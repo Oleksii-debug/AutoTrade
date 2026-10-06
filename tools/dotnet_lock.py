@@ -21,6 +21,10 @@ _DOTNET_RESTORE_MULTILINE_TEXT = re.compile(
 _DOTNET_RESTORE_SHELL_CONTROL = re.compile(
     r"(?:&&|\|\||[;&|<>\x60]|\$\()"
 )
+_DOTNET_RESTORE_ENVIRONMENT_AUTHORITY = (
+    "RestoreForceEvaluate",
+    "NuGetLockFilePath",
+)
 
 
 def _strict_json(text: str):
@@ -98,6 +102,31 @@ def dotnet_restore_workflow_commands(
 
     unscoped_lines.sort()
     return commands, unscoped_lines
+
+def dotnet_restore_workflow_environment_authority_lines(
+    workflow_text: str,
+) -> list[tuple[int, str]]:
+    """Find source-controlled workflow environment keys that can replace lock authority."""
+    if type(workflow_text) is not str:
+        raise TypeError("workflow text must be exact str")
+
+    names = {
+        name.casefold(): name
+        for name in _DOTNET_RESTORE_ENVIRONMENT_AUTHORITY
+    }
+    findings: list[tuple[int, str]] = []
+    for line_number, raw in enumerate(workflow_text.splitlines(), start=1):
+        stripped = raw.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)[ \t]*:", stripped)
+        if match is None:
+            continue
+        canonical = names.get(match.group(1).casefold())
+        if canonical is not None:
+            findings.append((line_number, canonical))
+    return findings
+
 
 def dotnet_restore_command_tokens(command: str) -> tuple[str, ...]:
     """Parse one canonical YAML run-line dotnet restore command."""

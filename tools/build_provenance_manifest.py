@@ -23,6 +23,7 @@ if __package__:
         dotnet_restore_targets_project,
         dotnet_restore_tokens_are_locked,
         dotnet_restore_workflow_commands,
+        dotnet_restore_workflow_environment_authority_lines,
     )
 else:
     from dotnet_lock import (
@@ -988,6 +989,29 @@ def build_manifest() -> dict[str, object]:
                 restore_commands,
                 unscoped_restore_lines,
             ) = dotnet_restore_workflow_commands(foundation_text)
+            restore_environment_authority = (
+                dotnet_restore_workflow_environment_authority_lines(
+                    foundation_text
+                )
+            )
+            if restore_environment_authority:
+                blockers.append(
+                    {
+                        "code": "DOTNET_RESTORE_ENVIRONMENT_AUTHORITY_UNSUPPORTED",
+                        "properties": [
+                            {
+                                "line": line_number,
+                                "name": property_name,
+                            }
+                            for line_number, property_name
+                            in restore_environment_authority
+                        ],
+                        "detail": (
+                            "Workflow environment must not replace the committed "
+                            "NuGet lock authority."
+                        ),
+                    }
+                )
             if unscoped_restore_lines:
                 blockers.append(
                     {

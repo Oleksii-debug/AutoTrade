@@ -24,6 +24,7 @@ if __package__:
         dotnet_restore_targets_project,
         dotnet_restore_tokens_are_locked,
         dotnet_restore_workflow_commands,
+        dotnet_restore_workflow_environment_authority_lines,
     )
 else:
     from dotnet_lock import (
@@ -230,6 +231,14 @@ def _dotnet_dependency_lock_blockers(
     restore_commands, unscoped_restore_lines = dotnet_restore_workflow_commands(
         workflow_text
     )
+    for line_number, property_name in (
+        dotnet_restore_workflow_environment_authority_lines(workflow_text)
+    ):
+        blockers.append(
+            "DOTNET_RESTORE_ENVIRONMENT_AUTHORITY_UNSUPPORTED:"
+            f".github/workflows/dotnet-foundation.yml:"
+            f"{line_number}:{property_name}"
+        )
     for line_number in unscoped_restore_lines:
         blockers.append(
             "DOTNET_RESTORE_COMMAND_UNSCOPED:"

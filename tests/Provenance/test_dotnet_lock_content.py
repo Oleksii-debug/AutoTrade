@@ -16,6 +16,7 @@ from tools.dotnet_lock import (
     dotnet_restore_targets_project,
     dotnet_restore_tokens_are_locked,
     dotnet_restore_workflow_commands,
+    dotnet_restore_workflow_environment_authority_lines,
 )
 
 
@@ -255,6 +256,29 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 ):
                     dotnet_restore_command_tokens(command)
 
+
+    def test_workflow_environment_cannot_replace_restore_authority(self):
+        findings = dotnet_restore_workflow_environment_authority_lines(
+            "env:\n"
+            "  restoreforceevaluate: true\n"
+            "jobs:\n"
+            "  build:\n"
+            "    env:\n"
+            "      NuGetLockFilePath: artifacts/other.lock.json\n"
+        )
+        self.assertEqual(
+            findings,
+            [
+                (2, "RestoreForceEvaluate"),
+                (6, "NuGetLockFilePath"),
+            ],
+        )
+        self.assertEqual(
+            dotnet_restore_workflow_environment_authority_lines(
+                "env:\n  NUGET_PACKAGES: .nuget/packages\n"
+            ),
+            [],
+        )
 
     def test_current_canonical_restore_targets_exist(self):
         root = Path(__file__).resolve().parents[2]

@@ -1340,6 +1340,39 @@ class DurableOrderBookProjection:
                         "submission attempt has multiple terminal outcomes"
                     )
                 terminal_seen = True
+                payload = event.get("payload")
+                if isinstance(payload, dict) and _has_exact_response_markers(payload):
+                    # Ambiguous post-SEND bytes remain transport evidence only,
+                    # but replay must still revalidate the exact durable WP-18
+                    # response binding before projecting UNKNOWN. Otherwise a
+                    # malformed/substituted terminal row could cross the stable
+                    # WP-18 -> WP-19 handoff without exact-response authority.
+                    try:
+                        with journal_store_authority_scope(store, identity):
+                            binding = load_submission_response_binding(
+                                store,
+                                environment=self.environment,
+                                account_id=self.account_id,
+                                attempt_id=attempt,
+                            )
+                        bound = submission_response_binding_projection(binding)
+                    except (KeyError, TypeError, ValueError, RuntimeError) as error:
+                        raise OrderProjectionConflict(
+                            "exact submission response binding is invalid"
+                        ) from error
+                    if (
+                        bound.get("terminal_state") != "UNKNOWN"
+                        or bound.get("retry_disposition") != "RECONCILE_FIRST"
+                        or bound.get("attempt_id") != attempt
+                        or bound.get("client_order_id") != client_order_id
+                        or bound.get("environment") != self.environment
+                        or bound.get("account_id") != self.account_id
+                        or type(bound.get("provider")) is not str
+                        or bound["provider"].upper() != provider
+                    ):
+                        raise OrderProjectionConflict(
+                            "exact ambiguous response binding differs from durable attempt"
+                        )
                 results.append(
                     self.acknowledge(
                         event_key=event_key,

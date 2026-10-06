@@ -903,7 +903,7 @@
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
       "proposed_status": "IN_PROGRESS",
-      "status_note": "Order lifecycle projection is integrated on main at d412fde8c64f22595142c646c524449b70d4dc28, including ACK != fill, partial fill/cancel, correction/bust and overfill/OCO violation handling. Remaining work: provider-normalized event integration, restart projection rebuild and broader lifecycle qualification."
+      "status_note": "Order lifecycle projection and durable restart replay are integrated on main, including ACK != fill, partial fill/cancel, correction/bust, overfill/OCO violation handling, constructor-time journal replay, UNKNOWN/cancel/fill restoration, tamper fail-closed behavior and stale-process reload. Remaining work: provider-normalized event integration, broader provider/reconciliation lifecycle qualification and exact release evidence."
     },
     {
       "id": "WP-20",

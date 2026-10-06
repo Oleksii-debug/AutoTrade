@@ -1354,16 +1354,6 @@ def verify_qualification_attestation(
     )
     verified_attestation_json = verified_attestation_bytes.decode("utf-8")
 
-    try:
-        evidence_reader = trusted_authenticated_reader(
-            evidence_root,
-            publication_store=evidence_store,
-        )
-    except (ArtifactIntegrityError, OSError, TypeError, ValueError) as error:
-        raise QualificationTrustError(
-            "evidence artifact authority cannot be bound"
-        ) from error
-
     expected_policy_id = _digest(
         expected_policy_id, name="expected_policy_id"
     )
@@ -1508,6 +1498,21 @@ def verify_qualification_attestation(
         signature=signature,
         root=root,
     )
+
+    # Only now may external evidence-reader construction execute callbacks.
+    # The complete signed graph, expected scope, policy/root authorization and
+    # RSA signature are already detached and verified, so reader construction
+    # cannot retarget the trust decision that selected this attestation.
+    try:
+        evidence_reader = trusted_authenticated_reader(
+            evidence_root,
+            publication_store=evidence_store,
+        )
+    except (ArtifactIntegrityError, OSError, TypeError, ValueError) as error:
+        raise QualificationTrustError(
+            "evidence artifact authority cannot be bound"
+        ) from error
+
     for ref in attestation.evidence_refs:
         _resolve_evidence(evidence_reader, ref)
 

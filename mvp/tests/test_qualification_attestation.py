@@ -1775,6 +1775,45 @@ class QualificationAttestationTests(unittest.TestCase):
         self.assertEqual(accepted.attestation_json, expected_attestation_json)
         self.assertEqual(accepted.signature_b64, expected_signature)
 
+    def test_reader_construction_cannot_retarget_verified_policy_or_attestation(self):
+        trust_root = root()
+        trust_policy = policy(trust_root)
+        original = attestation(trust_root)
+        receipt = SignedQualificationAttestation(original, sign(original))
+        expected_policy_id = trust_policy.policy_id
+        expected_policy_version = trust_policy.policy_version
+        expected_root_id = trust_root.root_id
+        expected_source_sha = original.source_sha
+        callbacks = []
+        original_reader = qualification_attestation_module.trusted_authenticated_reader
+
+        def mutate_during_reader_binding(*args, **kwargs):
+            callbacks.append("reader")
+            object.__setattr__(trust_policy, "policy_version", "forged-policy")
+            object.__setattr__(trust_root, "producer_id", "forged.producer")
+            object.__setattr__(original, "source_sha", OTHER_SOURCE)
+            return original_reader(*args, **kwargs)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with patch.object(
+                qualification_attestation_module,
+                "trusted_authenticated_reader",
+                side_effect=mutate_during_reader_binding,
+            ):
+                accepted = verify(receipt, store, trust_policy)
+
+        self.assertEqual(callbacks, ["reader"])
+        self.assertEqual(trust_policy.policy_version, "forged-policy")
+        self.assertEqual(trust_root.producer_id, "forged.producer")
+        self.assertEqual(original.source_sha, OTHER_SOURCE)
+        self.assertEqual(accepted.policy_id, expected_policy_id)
+        self.assertEqual(accepted.policy_version, expected_policy_version)
+        self.assertEqual(accepted.trust_root_id, expected_root_id)
+        self.assertEqual(accepted.source_sha, expected_source_sha)
+
+
     def test_verified_snapshot_freezes_signature_before_evidence_callback(self):
         trust_root = root()
         original = attestation(trust_root)

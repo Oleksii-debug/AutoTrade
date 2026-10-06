@@ -161,5 +161,119 @@ class EmptyWriteResidualCurrentTests(unittest.TestCase):
             self.assertEqual(sends, ["sent"])
 
 
+    def test_provider_text_authority_rejects_hostile_str_subclasses_before_callbacks(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self, *_args):
+                callbacks.append("strip")
+                raise AssertionError("hostile strip executed")
+
+            def upper(self):
+                callbacks.append("upper")
+                raise AssertionError("hostile upper executed")
+
+            def lower(self):
+                callbacks.append("lower")
+                raise AssertionError("hostile lower executed")
+
+        cases = (
+            dict(
+                provider_id=HostileText("BINANCE"),
+                environment="PAPER",
+                base_url="https://testnet.binance.vision",
+                allowed_hosts=frozenset({"testnet.binance.vision"}),
+            ),
+            dict(
+                provider_id="BINANCE",
+                environment="PAPER",
+                base_url="https://testnet.binance.vision",
+                allowed_hosts=frozenset({HostileText("testnet.binance.vision")}),
+            ),
+            dict(
+                provider_id="BINANCE",
+                environment="PAPER",
+                base_url=HostileText("https://testnet.binance.vision"),
+                allowed_hosts=frozenset({"testnet.binance.vision"}),
+            ),
+        )
+        from mvp.autotrade_mvp.provider_transport import ProviderEndpointPolicy
+        for kwargs in cases:
+            with self.subTest(field=repr(kwargs)):
+                with self.assertRaises(ProviderTransportScopeError):
+                    ProviderEndpointPolicy(**kwargs)
+                self.assertEqual(callbacks, [])
+
+        policy = ProviderEndpointPolicy(
+            provider_id="BINANCE",
+            environment="PAPER",
+            base_url="https://testnet.binance.vision",
+            allowed_hosts=frozenset({"testnet.binance.vision"}),
+        )
+        with self.assertRaisesRegex(ProviderTransportScopeError, "is required"):
+            policy.absolute_url(HostileText("/api/v3/order"))
+        self.assertEqual(callbacks, [])
+
+        parsers = (
+            WhiteBitCredential.parse,
+            KrakenFuturesCredential.parse,
+            KrakenSpotCredential.parse,
+            AlpacaTradingCredential.parse,
+            BybitV5Credential.parse,
+            BinanceSpotCredential.parse,
+        )
+        class HostileCredentialText(str):
+            def __bool__(self):
+                callbacks.append("bool")
+                raise AssertionError("hostile bool executed")
+
+            def strip(self, *_args):
+                callbacks.append("strip")
+                raise AssertionError("hostile strip executed")
+
+            def encode(self, *_args, **_kwargs):
+                callbacks.append("encode")
+                raise AssertionError("hostile encode executed")
+
+        for parser in parsers:
+            with self.subTest(parser=parser.__qualname__):
+                with self.assertRaisesRegex(
+                    ProviderTransportScopeError,
+                    "credential material is unavailable",
+                ):
+                    parser(HostileCredentialText(
+                        '{"api_key":"synthetic","api_secret":"synthetic"}'
+                    ))
+                self.assertEqual(callbacks, [])
+
+    def test_binance_signer_rejects_hostile_parameter_value_before_strip(self):
+        callbacks = []
+
+        class HostileValue(str):
+            def strip(self, *_args):
+                callbacks.append("strip")
+                raise AssertionError("hostile strip executed")
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "order parameters must be canonical strings",
+        ):
+            BinanceSpotSigner.sign(
+                policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+                endpoint=BinanceSpotSigner.PLACE_ORDER_ENDPOINT,
+                body={
+                    "symbol": "BTCUSDT",
+                    "side": "BUY",
+                    "type": "LIMIT",
+                    "quantity": HostileValue("0.001"),
+                    "price": "50000",
+                    "timeInForce": "GTC",
+                },
+                credential_plaintext='{"api_key":"key","api_secret":"secret"}',
+                timestamp_ms=1,
+            )
+        self.assertEqual(callbacks, [])
+
+
 if __name__ == "__main__":
     unittest.main()

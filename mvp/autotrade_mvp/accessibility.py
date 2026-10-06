@@ -43,10 +43,26 @@ def _plain_text(value: Any, default: str = "Unavailable") -> str:
     return default
 
 
+def _dict_get_exact(mapping: Any, key: str, default: Any = None) -> Any:
+    """Read an exact string key without invoking caller-defined key equality."""
+
+    if type(mapping) is not dict or type(key) is not str:
+        return default
+    for candidate, value in mapping.items():
+        if type(candidate) is str and candidate == key:
+            return value
+    return default
+
+
+def _dict_has_exact_key(mapping: Any, key: str) -> bool:
+    sentinel = object()
+    return _dict_get_exact(mapping, key, sentinel) is not sentinel
+
+
 def _value(mapping: dict[str, Any] | None, key: str, default: str = "Unavailable") -> str:
     if type(mapping) is not dict:
         return default
-    return _plain_text(mapping.get(key), default)
+    return _plain_text(_dict_get_exact(mapping, key), default)
 
 
 def _replay_verification_text(value: Any) -> str:
@@ -62,14 +78,14 @@ def accessible_status_state(status: Any) -> str:
 
     if type(status) is not dict:
         return "corrupt"
-    state = status.get("status", "corrupt")
+    state = _dict_get_exact(status, "status", "corrupt")
     if type(state) is not str or state not in STATE_TEXT:
         return "corrupt"
     return state
 
 
 def _reservation_lines(status: dict[str, Any]) -> list[str]:
-    reservations = status.get("active_reservations", [])
+    reservations = _dict_get_exact(status, "active_reservations", [])
     if type(reservations) is not list:
         return ["Active reservations: unavailable"]
 
@@ -78,8 +94,8 @@ def _reservation_lines(status: dict[str, Any]) -> list[str]:
         if type(item) is not dict:
             lines.append(f"Reservation {index}: unavailable")
             continue
-        remaining = item.get("remaining")
-        state = _plain_text(item.get("state"))
+        remaining = _dict_get_exact(item, "remaining")
+        state = _plain_text(_dict_get_exact(item, "state"))
         if type(remaining) is not dict:
             lines.append(f"Reservation {index}: unavailable; state: {state}")
             continue
@@ -96,7 +112,7 @@ def _reservation_lines(status: dict[str, Any]) -> list[str]:
 
 
 def _cash_bucket_lines(economic_report: dict[str, Any]) -> list[str]:
-    buckets = economic_report.get("cash_buckets")
+    buckets = _dict_get_exact(economic_report, "cash_buckets")
     if type(buckets) is not dict:
         return []
 
@@ -158,8 +174,8 @@ def format_accessible_status(
         )
         return "\n".join(lines)
 
-    replay_verified = status.get("replay_verified")
-    fills = status.get("fills", {})
+    replay_verified = _dict_get_exact(status, "replay_verified")
+    fills = _dict_get_exact(status, "fills", {})
     recorded_fills = len(fills) if type(fills) is dict else "Unavailable"
     lines.extend(
         [
@@ -176,7 +192,7 @@ def format_accessible_status(
             "Action required: recovery or reconciliation is needed before trusting current state"
         )
 
-    state_format = status.get("state_format")
+    state_format = _dict_get_exact(status, "state_format")
     if type(state_format) is str and state_format == "canonical_journal":
         lines.extend(
             [
@@ -184,7 +200,7 @@ def format_accessible_status(
                 f"Session outcome: {_value(status, 'session_status')}",
             ]
         )
-        if "completed_episodes" in status:
+        if _dict_has_exact_key(status, "completed_episodes"):
             lines.extend(
                 [
                     f"Autonomous episodes: {_value(status, 'completed_episodes')} of {_value(status, 'total_episodes')}",
@@ -204,7 +220,7 @@ def format_accessible_status(
             lines.append(
                 "Action required: confirm the terminal order state; a reconciled fill does not confirm order completion"
             )
-        session_status = status.get("session_status")
+        session_status = _dict_get_exact(status, "session_status")
         if type(session_status) is str and session_status == "BLOCKED":
             lines.append(f"Blocked reason: {_value(status, 'reason')}")
 
@@ -216,10 +232,10 @@ def format_accessible_status(
                 f"Total fees: {_value(economic_report, 'total_fees')}",
                 f"Turnover: {_value(economic_report, 'turnover')}",
                 f"Maximum drawdown: {_value(economic_report, 'max_drawdown')}",
-                f"Economic reconciliation: {'passed' if economic_report.get('reconciled') is True else 'not confirmed'}",
+                f"Economic reconciliation: {'passed' if _dict_get_exact(economic_report, 'reconciled') is True else 'not confirmed'}",
             ]
         )
-        valuation_status = economic_report.get("valuation_status")
+        valuation_status = _dict_get_exact(economic_report, "valuation_status")
         if type(valuation_status) is str and valuation_status == "MARK_UNAVAILABLE":
             lines.append(
                 "Portfolio valuation and profit or loss: unavailable; no retained current market mark"

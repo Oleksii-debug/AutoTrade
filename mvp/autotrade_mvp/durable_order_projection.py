@@ -254,25 +254,20 @@ def _order_projection_binding_operations():
             store = state["store"]
             identity = require_exact_journal_store_authority(store, subject="durable OMS JournalStore")
             scope = tuple(state[name] for name in _ORDER_SCOPE_FIELDS)
-            binding_key = id(value)
-
-            def release_binding(reference, *, binding_key=binding_key):
-                # The registry must not outlive the OMS authority it protects.
-                # Do not capture value here: that would keep the referent alive.
-                # The identity check also prevents a delayed weakref callback
-                # from deleting a newer object that reused the same id().
-                with lock:
-                    entry = bindings.get(binding_key)
-                    if entry is not None and entry[0] is reference:
-                        bindings.pop(binding_key, None)
-
-            reference = weakref.ref(value, release_binding)
-            bindings[binding_key] = (
+            evidence = state["evidence_artifact_store"]
+            # Keep the owner reference callback-free. Python exposes weakref
+            # callbacks through weakref.getweakrefs(value), so a callback here
+            # would hand same-process callers an invokable trust-binding eraser.
+            # Resource ownership is instead released by retaining only weak
+            # references to the selected stores; the live OMS itself is their
+            # strong owner through its frozen state.
+            reference = weakref.ref(value)
+            bindings[id(value)] = (
                 reference,
-                store,
+                weakref.ref(store),
                 identity,
                 scope,
-                state["evidence_artifact_store"],
+                None if evidence is None else weakref.ref(evidence),
             )
 
     def require(value):

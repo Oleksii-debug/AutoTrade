@@ -304,7 +304,6 @@ class AccessibleStatusTests(unittest.TestCase):
         text = output.getvalue()
         self.assertIn("System state: Running", text)
         self.assertIn("Replay verification: passed", text)
-        self.assertIn("Final equity:", text) if False else None
         self.assertNotIn("Final equity:", text)
         self.assertIn("Economic edge: unproven", text)
 

@@ -239,29 +239,39 @@ def normalize_spdx_packages(sbom) -> dict[str, dict[str, object]]:
         checksums = package.get("checksums", [])
         if type(checksums) is not list:
             raise ReleaseScopeMappingError("SBOM checksums must be list")
-        sha512_values = []
+        normalized_checksums = {}
         for checksum in checksums:
             if type(checksum) is not dict:
                 raise ReleaseScopeMappingError("SBOM checksum must be object")
-            if checksum.get("algorithm") == "SHA512":
-                sha512_values.append(
-                    _text(
-                        checksum.get("checksumValue"),
-                        name="SBOM SHA512",
-                    ).lower()
+            algorithm = checksum.get("algorithm")
+            if algorithm not in {"SHA256", "SHA512"}:
+                continue
+            if algorithm in normalized_checksums:
+                raise ReleaseScopeMappingError(
+                    "SBOM package checksum identity is duplicated"
                 )
-        if (
-            len(sha512_values) != 1
-            or re.fullmatch(r"[0-9a-f]{128}", sha512_values[0]) is None
-        ):
+            value = _text(
+                checksum.get("checksumValue"),
+                name=f"SBOM {algorithm}",
+            ).lower()
+            expected_length = 64 if algorithm == "SHA256" else 128
+            if re.fullmatch(
+                rf"[0-9a-f]{{{expected_length}}}",
+                value,
+            ) is None:
+                raise ReleaseScopeMappingError(
+                    f"SBOM package has invalid {algorithm} checksum"
+                )
+            normalized_checksums[algorithm] = value
+        if not normalized_checksums:
             raise ReleaseScopeMappingError(
-                "SBOM package requires one canonical SHA512 checksum"
+                "SBOM external package requires a supported checksum"
             )
         by_purl[purls[0]] = {
             "spdx_id": spdx_id,
             "name": name,
             "version": version,
-            "sha512": sha512_values[0],
+            "checksums": normalized_checksums,
         }
     return by_purl
 
@@ -275,6 +285,7 @@ def build_mapping(
     package_rights,
     provenance_components,
     reuse_documents=(),
+    external_runtime_rights=(),
 ) -> dict[str, object]:
     composition = normalize_composition(composition)
     if "sha256:" + sha256(sbom_raw).hexdigest() != composition["sbom_sha256"]:
@@ -326,7 +337,7 @@ def build_mapping(
             raise ReleaseScopeMappingError(
                 f"SBOM package identity mismatch: {name}@{version}"
             )
-        if package["sha512"] != _sha512_hex(content_hash):
+        if package["checksums"].get("SHA512") != _sha512_hex(content_hash):
             raise ReleaseScopeMappingError(
                 f"SBOM package hash mismatch: {name}@{version}"
             )
@@ -339,11 +350,64 @@ def build_mapping(
             "sbom_spdx_id": package["spdx_id"],
         })
     locked_purls = {item["purl"] for item in packages}
-    extras = sorted(set(sbom_packages) - locked_purls)
-    if extras:
-        raise ReleaseScopeMappingError(
-            "SBOM contains unmapped external package(s): " + ", ".join(extras)
+    external_rights = {}
+    for record in external_runtime_rights:
+        if type(record) is not dict:
+            raise ReleaseScopeMappingError(
+                "external runtime rights record must be object"
+            )
+        purl = _text(record.get("purl"), name="external runtime purl")
+        if purl in external_rights:
+            raise ReleaseScopeMappingError(
+                "external runtime rights identity is duplicated"
+            )
+        external_rights[purl] = record
+    external_components = []
+    unresolved_external = []
+    for purl in sorted(set(sbom_packages) - locked_purls):
+        package = sbom_packages[purl]
+        rights = external_rights.get(purl)
+        if rights is None:
+            raise ReleaseScopeMappingError(
+                f"SBOM contains unmapped external package: {purl}"
+            )
+        name = _text(rights.get("name"), name=f"{purl} rights name")
+        version = _text(
+            rights.get("version"), name=f"{purl} rights version"
         )
+        if package["name"] != name or package["version"] != version:
+            raise ReleaseScopeMappingError(
+                f"external runtime identity mismatch: {purl}"
+            )
+        artifact_sha256 = _digest(
+            rights.get("artifact_sha256"),
+            name=f"{purl} artifact_sha256",
+        )
+        if package["checksums"].get("SHA256") != artifact_sha256.removeprefix("sha256:"):
+            raise ReleaseScopeMappingError(
+                f"external runtime artifact hash mismatch: {purl}"
+            )
+        state = _text(
+            rights.get("release_distribution_state"),
+            name=f"{purl} release_distribution_state",
+        )
+        external_components.append({
+            "purl": purl,
+            "name": name,
+            "version": version,
+            "artifact_sha256": artifact_sha256,
+            "license_concluded": _text(
+                rights.get("license_concluded"),
+                name=f"{purl} license_concluded",
+            ),
+            "release_distribution_state": state,
+            "upstream_sbom_url": _text(
+                rights.get("upstream_sbom_url"),
+                name=f"{purl} upstream_sbom_url",
+            ),
+        })
+        if state != "APPROVED":
+            unresolved_external.append(name)
 
     scope = []
     unresolved_rights = []
@@ -463,8 +527,14 @@ def build_mapping(
                 item["ecosystem"], item["name"].casefold(), item["version"]
             ),
         ),
+        "external_runtime_components": sorted(
+            external_components,
+            key=lambda item: item["purl"],
+        ),
         "provenance_scope": scope,
-        "unresolved_distribution_rights": sorted(set(unresolved_rights)),
+        "unresolved_distribution_rights": sorted(
+            set(unresolved_rights + unresolved_external)
+        ),
     }
     return {
         **result,
@@ -505,6 +575,21 @@ def build_repository_mapping(*, root: Path, composition_path: Path, sbom_path: P
         (root / "provenance" / "components.json").read_bytes(),
         label="components provenance",
     )
+    external_rights_path = (
+        root / "provenance" / "external-runtime-rights.json"
+    )
+    external_rights_document = strict_json_bytes(
+        external_rights_path.read_bytes(),
+        label="external runtime rights",
+    )
+    if (
+        type(external_rights_document) is not dict
+        or external_rights_document.get("schema_version") != "1.0.0"
+        or type(external_rights_document.get("runtimes")) is not list
+    ):
+        raise ReleaseScopeMappingError(
+            "external runtime rights schema is unsupported"
+        )
     reuse_documents = []
     reuse_root = root / "provenance" / "reuse"
     if reuse_root.is_dir():
@@ -531,6 +616,7 @@ def build_repository_mapping(*, root: Path, composition_path: Path, sbom_path: P
         package_rights=package_rights_records(root),
         provenance_components=components["components"],
         reuse_documents=reuse_documents,
+        external_runtime_rights=external_rights_document["runtimes"],
     )
 
 

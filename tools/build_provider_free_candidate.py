@@ -28,7 +28,12 @@ SOURCE_PREFIXES = ('mvp/autotrade_mvp/', 'research/autotrade_research/',
 STATIC = ('web/src/index.html', 'web/src/app.js', 'web/src/host-api-routes.js', 'web/src/styles.css',
           'contracts/openapi/host-api.yaml', 'contracts/bindings/python/common_scalars.py',
           'src/AutoTrade.Desktop/packages.lock.json',
-          'packaging/windows/provider-free-inputs.json', 'provenance/release-dependency-manifest.json')
+          'packaging/windows/provider-free-inputs.json',
+          'provenance/release-dependency-manifest.json',
+          'provenance/dotnet-package-rights.json',
+          'provenance/external-runtime-rights.json',
+          'provenance/components.json',
+          'provenance/reuse/autosport-neutral-primitives.json')
 
 
 def _write_new_payload_bytes(path, payload):
@@ -297,6 +302,110 @@ def extract_pinned(archive_path, destination, expected_digest, *, digest_algorit
         if missing_overrides: raise ValueError('archive override path is absent: ' + ','.join(sorted(missing_overrides)))
 
 
+def _build_candidate_sbom(source_sha, inventory, inputs, webview_content_hash):
+    if type(inventory) is not list:
+        raise TypeError('candidate inventory must be a list')
+    try:
+        webview_sha512 = base64.b64decode(
+            webview_content_hash,
+            validate=True,
+        ).hex()
+    except (ValueError, base64.binascii.Error) as error:
+        raise ValueError('WebView2 content hash is invalid') from error
+    python_sha256 = inputs['python']['sha256']
+    python_version = inputs['python']['version']
+    files = [
+        {
+            'SPDXID': 'SPDXRef-File-' + sha256(
+                item['path'].encode('utf-8')
+            ).hexdigest()[:32],
+            'fileName': item['path'],
+            'checksums': [{
+                'algorithm': 'SHA256',
+                'checksumValue': item['sha256'].removeprefix('sha256:'),
+            }],
+        }
+        for item in inventory
+    ]
+    packages = [
+        {
+            'SPDXID': 'SPDXRef-Package-AutoTrade',
+            'name': 'AutoTrade',
+            'versionInfo': source_sha,
+            'licenseConcluded': 'NOASSERTION',
+            'primaryPackagePurpose': 'APPLICATION',
+        },
+        {
+            'SPDXID': 'SPDXRef-Package-CPython',
+            'name': 'CPython',
+            'versionInfo': python_version,
+            'licenseConcluded': 'PSF-2.0',
+            'primaryPackagePurpose': 'RUNTIME',
+            'externalRefs': [{
+                'referenceCategory': 'PACKAGE_MANAGER',
+                'referenceType': 'purl',
+                'referenceLocator':
+                    'pkg:generic/cpython-embed@' + python_version,
+            }],
+            'checksums': [{
+                'algorithm': 'SHA256',
+                'checksumValue': python_sha256,
+            }],
+        },
+        {
+            'SPDXID': 'SPDXRef-Package-WebView2',
+            'name': 'Microsoft.Web.WebView2',
+            'versionInfo': inputs['webview2_sdk']['version'],
+            'licenseConcluded': 'BSD-3-Clause',
+            'primaryPackagePurpose': 'LIBRARY',
+            'externalRefs': [{
+                'referenceCategory': 'PACKAGE_MANAGER',
+                'referenceType': 'purl',
+                'referenceLocator': (
+                    'pkg:nuget/Microsoft.Web.WebView2@'
+                    + inputs['webview2_sdk']['version']
+                ),
+            }],
+            'checksums': [{
+                'algorithm': 'SHA512',
+                'checksumValue': webview_sha512,
+            }],
+        },
+    ]
+    return {
+        'SPDXID': 'SPDXRef-DOCUMENT',
+        'spdxVersion': 'SPDX-2.3',
+        'dataLicense': 'CC0-1.0',
+        'name': 'AutoTrade ZERO candidate SBOM',
+        'documentNamespace': (
+            'https://autotrade.invalid/spdx/' + source_sha
+        ),
+        'creationInfo': {
+            'created': '1970-01-01T00:00:00Z',
+            'creators': ['Tool: AutoTrade build_provider_free_candidate'],
+        },
+        'packages': packages,
+        'files': files,
+        'relationships': [
+            {
+                'spdxElementId': 'SPDXRef-DOCUMENT',
+                'relationshipType': 'DESCRIBES',
+                'relatedSpdxElement': 'SPDXRef-Package-AutoTrade',
+            },
+            {
+                'spdxElementId': 'SPDXRef-Package-AutoTrade',
+                'relationshipType': 'DEPENDS_ON',
+                'relatedSpdxElement': 'SPDXRef-Package-CPython',
+            },
+            {
+                'spdxElementId': 'SPDXRef-Package-AutoTrade',
+                'relationshipType': 'DEPENDS_ON',
+                'relatedSpdxElement': 'SPDXRef-Package-WebView2',
+            },
+        ],
+    }
+
+
 def _copy_publish_snapshot(publish_snapshot, destination):
     if (type(publish_snapshot) is not dict
         or any(type(path) is not str or type(content) is not bytes
@@ -424,8 +533,13 @@ def build_candidate(*, source_root, source_sha, desktop, host, python_archive, w
     }
     _write_new_payload_json(payload / 'dependency-lock.json', dependencies)
     inventory = [{'path': p, 'sha256': 'sha256:' + sha256(b).hexdigest()} for p, _, b in _collect(payload)]
-    _write_new_payload_json(payload / 'sbom.json', {'source_sha': source_sha, 'files': inventory,
-        'rights_review': 'PENDING', 'advisory_review': 'PENDING'})
+    sbom = _build_candidate_sbom(
+        source_sha,
+        inventory,
+        inputs,
+        webview_content_hash,
+    )
+    _write_new_payload_json(payload / 'sbom.json', sbom)
     files = _collect(payload)
     components = [{'component_id': 'candidate-' + sha256(p.encode()).hexdigest()[:32],
         'kind': 'dependency-lock' if p == 'dependency-lock.json' else 'sbom' if p == 'sbom.json' else 'product-file',
@@ -438,6 +552,38 @@ def build_candidate(*, source_root, source_sha, desktop, host, python_archive, w
         'runtime': {'architecture': 'x64', 'runtime_identifier': 'win-x64', 'minimum_windows_version': 'Windows 11'},
         'components': components}
     composition_path = work / 'windows-composition.json'; atomic_write_json(composition_path, composition)
+    from tools.release_scope_mapping import build_mapping
+    release_manifest = strict_json_bytes(
+        (payload / 'product/provenance/release-dependency-manifest.json').read_bytes(),
+        label='release dependency manifest',
+    )
+    dotnet_rights = strict_json_bytes(
+        (payload / 'product/provenance/dotnet-package-rights.json').read_bytes(),
+        label='dotnet package rights',
+    )
+    external_rights = strict_json_bytes(
+        (payload / 'product/provenance/external-runtime-rights.json').read_bytes(),
+        label='external runtime rights',
+    )
+    provenance_components = strict_json_bytes(
+        (payload / 'product/provenance/components.json').read_bytes(),
+        label='provenance components',
+    )
+    reuse_manifest = strict_json_bytes(
+        (payload / 'product/provenance/reuse/autosport-neutral-primitives.json').read_bytes(),
+        label='Autosport reuse provenance',
+    )
+    mapping = build_mapping(
+        composition=composition,
+        sbom=sbom,
+        sbom_raw=(payload / 'sbom.json').read_bytes(),
+        locked_packages=release_manifest['dotnet_package_dependencies'],
+        package_rights=dotnet_rights['packages'],
+        provenance_components=provenance_components['components'],
+        reuse_documents=[reuse_manifest],
+        external_runtime_rights=external_rights['runtimes'],
+    )
+    atomic_write_json(work / 'release-scope-mapping.json', mapping)
     result = build_bundle(staging=payload, output=output, version='0.1.0-zero-candidate', source_sha=source_sha,
         mode='diagnostics', provenance_path=payload / 'product/provenance/release-dependency-manifest.json',
         composition_path=composition_path)

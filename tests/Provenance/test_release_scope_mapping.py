@@ -115,6 +115,19 @@ REUSE = [{
     }],
 }]
 
+EXTERNAL_RIGHTS = [{
+    "purl": "pkg:generic/cpython-embed@3.12.10",
+    "name": "CPython",
+    "version": "3.12.10",
+    "artifact_sha256": "sha256:" + "2" * 64,
+    "license_concluded": "PSF-2.0",
+    "release_distribution_state": "BLOCKED",
+    "upstream_sbom_url": (
+        "https://www.python.org/ftp/python/3.12.10/"
+        "python-3.12.10-embed-amd64.zip.spdx.json"
+    ),
+}]
+
 PROVENANCE = [
     {
         "name": "Autosport first-party source",
@@ -144,7 +157,8 @@ PROVENANCE = [
 
 class ReleaseScopeMappingTests(unittest.TestCase):
     def _build(self, *, extra=False, wrong_hash=False, locked=None,
-               rights=None, provenance=None, reuse=None, sbom_override=None):
+               rights=None, provenance=None, reuse=None, sbom_override=None,
+               external_rights=None):
         sbom, raw = _sbom(extra=extra, wrong_hash=wrong_hash)
         if sbom_override is not None:
             sbom, raw = sbom_override
@@ -158,6 +172,9 @@ class ReleaseScopeMappingTests(unittest.TestCase):
                 PROVENANCE if provenance is None else provenance
             ),
             reuse_documents=REUSE if reuse is None else reuse,
+            external_runtime_rights=(
+                [] if external_rights is None else external_rights
+            ),
         )
 
     def test_exact_webview2_mapping_keeps_imported_rights_blocker(self):
@@ -248,6 +265,66 @@ class ReleaseScopeMappingTests(unittest.TestCase):
             autosport["reuse_mapping"]["release_distribution_rights"],
             "UNRESOLVED",
         )
+
+    def test_external_runtime_is_mapped_and_kept_blocked(self):
+        document, raw = _sbom()
+        python_package = {
+            "SPDXID": "SPDXRef-Python",
+            "name": "CPython",
+            "versionInfo": "3.12.10",
+            "externalRefs": [{
+                "referenceType": "purl",
+                "referenceLocator":
+                    "pkg:generic/cpython-embed@3.12.10",
+            }],
+            "checksums": [{
+                "algorithm": "SHA256",
+                "checksumValue": "2" * 64,
+            }],
+        }
+        document["packages"].append(python_package)
+        raw = (
+            json.dumps(document, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        result = self._build(
+            sbom_override=(document, raw),
+            external_rights=EXTERNAL_RIGHTS,
+        )
+        self.assertEqual(
+            result["external_runtime_components"][0]["name"],
+            "CPython",
+        )
+        self.assertIn(
+            "CPython",
+            result["unresolved_distribution_rights"],
+        )
+
+    def test_external_runtime_without_rights_record_fails(self):
+        document, raw = _sbom()
+        document["packages"].append({
+            "SPDXID": "SPDXRef-Python",
+            "name": "CPython",
+            "versionInfo": "3.12.10",
+            "externalRefs": [{
+                "referenceType": "purl",
+                "referenceLocator":
+                    "pkg:generic/cpython-embed@3.12.10",
+            }],
+            "checksums": [{
+                "algorithm": "SHA256",
+                "checksumValue": "2" * 64,
+            }],
+        })
+        raw = (
+            json.dumps(document, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError,
+            "unmapped external package",
+        ):
+            self._build(sbom_override=(document, raw))
 
     def test_mapping_is_order_stable(self):
         first = self._build()

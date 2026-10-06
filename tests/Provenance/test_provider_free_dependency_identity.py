@@ -73,6 +73,32 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
                 )
             self.assertFalse(destination.exists())
 
+    def test_candidate_sbom_exposes_python_and_webview_identities(self):
+        inputs = strict_json_bytes(
+            (
+                candidate.ROOT
+                / "packaging/windows/provider-free-inputs.json"
+            ).read_bytes(),
+            label="provider-free inputs",
+        )
+        inventory = [{
+            "path": "AutoTrade.Desktop.exe",
+            "sha256": "sha256:" + "1" * 64,
+        }]
+        document = candidate._build_candidate_sbom(
+            "a" * 40,
+            inventory,
+            inputs,
+            inputs["webview2_sdk"]["content_hash_sha512_base64"],
+        )
+        packages = {item["name"]: item for item in document["packages"]}
+        self.assertEqual(packages["CPython"]["versionInfo"], "3.12.10")
+        self.assertEqual(
+            packages["Microsoft.Web.WebView2"]["versionInfo"],
+            "1.0.4258.31",
+        )
+        self.assertEqual(document["spdxVersion"], "SPDX-2.3")
+
     def test_workflow_uses_source_controlled_runtime_urls(self):
         workflow = (
             candidate.ROOT / ".github/workflows/provider-free-product.yml"

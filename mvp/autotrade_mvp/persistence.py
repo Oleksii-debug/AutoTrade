@@ -57,6 +57,12 @@ class JournalStore(_JournalStoreImpl):
     """
 
     def __init__(self, path: str | Path):
+        # Reject executable PathLike/subclass ingress before pathname
+        # interpretation or filesystem qualification can dispatch caller code.
+        if type(path) is not str and type(path) is not type(Path()):
+            raise TypeError(
+                "journal database path must be exact text or exact platform Path"
+            )
         # Freeze caller-relative text before locality admission performs Win32
         # I/O. A concurrent process-wide chdir after admission must not retarget
         # durable financial state into an unclassified namespace.

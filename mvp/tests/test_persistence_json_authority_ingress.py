@@ -62,6 +62,11 @@ class _HostileText(str):
         raise AssertionError("hostile text upper dispatched")
 
 
+class _HostilePathLike:
+    def __fspath__(self):
+        raise AssertionError("hostile path conversion dispatched")
+
+
 class _HostileInt(int):
     def __int__(self):
         raise AssertionError("hostile int conversion dispatched")
@@ -77,6 +82,14 @@ class _HostileInt(int):
 
 
 class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
+    def test_journal_store_rejects_executable_pathlike_before_filesystem_authority(self):
+        hostile = _HostilePathLike()
+        with self.assertRaisesRegex(
+            TypeError,
+            "journal database path must be exact text or exact platform Path",
+        ):
+            JournalStore(hostile)
+
     def test_outer_event_subclass_is_rejected_before_virtual_get(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

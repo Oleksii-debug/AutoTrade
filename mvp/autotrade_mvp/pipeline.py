@@ -620,8 +620,22 @@ def _repair_interrupted_replay(
             raise ValueError(
                 "Unexpected durable journal state before replay repair"
             )
-        for event in replay_events:
+        for expected_aggregate_version, event in enumerate(replay_events, start=1):
             if type(event) is not dict:
+                raise ValueError("Corrupt simulation journal replay event")
+            if (
+                event.get("aggregate_version") != expected_aggregate_version
+                or event.get("journal_sequence") != expected_aggregate_version
+                or event.get("event_type") != "SimulationEpisodeRecorded"
+                or event.get("aggregate_type") != "simulation_portfolio"
+                or event.get("aggregate_id") != symbol
+                or event.get("host_id") != "local-mvp"
+                or event.get("owner_epoch") != "1"
+                or event.get("environment") != "SIMULATION"
+                or event.get("schema_version") != "1.0.0"
+                or event.get("causation_id") is not None
+                or event.get("evidence_refs") != []
+            ):
                 raise ValueError("Corrupt simulation journal replay event")
             payload = event.get("payload")
             evidence_id = (
@@ -631,6 +645,38 @@ def _repair_interrupted_replay(
             )
             if type(evidence_id) is not str or evidence_id in journal_ids:
                 raise ValueError("Corrupt simulation journal evidence identity")
+            record = records.get(evidence_id)
+            if type(record) is not dict:
+                raise ValueError("Corrupt simulation journal evidence identity")
+            expected_payload = {
+                "evidence_id": evidence_id,
+                "input_hash": record.get("input_hash"),
+                "decision": record.get("decision"),
+                "decision_reason": record.get("decision_reason"),
+                "risk_outcome": record.get("risk_outcome"),
+                "order_id": record.get("order_id"),
+                "fill_id": record.get("fill_id"),
+                "cash": record.get("cash"),
+                "position": record.get("position"),
+                "equity": record.get("equity"),
+                "reconciled": record.get("reconciled"),
+                "financial_configuration_hash": financial_configuration_hash,
+            }
+            try:
+                expected_timestamp = _utc_z(record["recorded_at"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError("Corrupt simulation journal replay chronology") from error
+            if (
+                payload != expected_payload
+                or event.get("event_id")
+                != _event_uuid("simulation-episode", evidence_id)
+                or event.get("correlation_id")
+                != _event_uuid("correlation", evidence_id)
+                or event.get("occurred_at") != expected_timestamp
+                or event.get("observed_at") != expected_timestamp
+                or event.get("committed_at") != expected_timestamp
+            ):
+                raise ValueError("Corrupt simulation journal replay event")
             journal_ids.add(evidence_id)
     if journal_ids - expected_ids:
         raise ValueError("Simulation journal contains unknown replay evidence")

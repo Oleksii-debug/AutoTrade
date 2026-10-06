@@ -45,6 +45,24 @@ or order-status summary.
 - https://www.interactivebrokers.com/docs/web-api/v1/endpoints/order-monitoring/trades
 - https://www.interactivebrokers.com/docs/tws-api/ref/execution
 
+## Authenticated brokerage-status source boundary — 2026-10-06
+
+Order preparation no longer accepts a caller-constructed
+`IbkrBrokerageSessionStatus` as financial readiness evidence. A usable session
+status must be derived from the canonical provider-neutral
+`ProviderResponseObservation` for `/iserver/auth/status`, with exact boolean
+`connected`, `authenticated`, `established`, and `competing` fields.
+The resulting in-process status authority is bound to the authenticated-read
+account/environment and exact observation chronology; post-mint mutation,
+cross-account reuse, cross-environment reuse, malformed flags, wrong endpoint
+scope, and explicit provider failure all fail closed before order preparation.
+
+This closes only the local source-binding seam. It does not establish
+`/iserver/auth/ssodh/init` generation ownership, `/iserver/accounts`
+membership authority, session expiry/re-auth/reconnect qualification, numeric
+wire serialization, pacing, restart recovery, or any PAPER/LIVE provider
+qualification.
+
 ## What remains unqualified
 
 WP-26 remains incomplete. Required future evidence includes exact API/SDK

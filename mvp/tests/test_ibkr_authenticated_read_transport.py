@@ -18,6 +18,7 @@ from mvp.autotrade_mvp.provider_transport import (
     IbkrWebAuthenticatedReadSigner,
     IbkrWebAuthenticatedReadTransport,
     ProviderTransportScopeError,
+    UrllibJsonWireClient,
 )
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 from mvp.tests.capability_test_support import fresh_test_admission
@@ -115,6 +116,57 @@ class IbkrWebAuthenticatedReadTransportTests(unittest.TestCase):
         )
         self.assertEqual(request.headers["Content-Length"], "0")
         self.assertEqual(request.headers["Content-Type"], "application/json")
+
+    def test_status_content_length_survives_urllib_wire_construction(self):
+        class Response:
+            status = 200
+
+            def __init__(self):
+                from io import BytesIO
+
+                self.body = BytesIO(
+                    b'{"success":{"value":{"connected":true}}}'
+                )
+
+            def read(self, size=-1):
+                return self.body.read(size)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class Opener:
+            def __init__(self):
+                self.requests = []
+
+            def open(self, request, *, timeout):
+                self.requests.append((request, timeout))
+                return Response()
+
+        request = IbkrWebAuthenticatedReadSigner.sign(
+            policy=IBKR_WEB_ENDPOINT_POLICIES["PAPER"],
+            query_binding=_binding(
+                self.snapshot,
+                "/iserver/auth/status",
+                self.at,
+            ),
+            credential_plaintext="opaque-token",
+        )
+        client = UrllibJsonWireClient(max_response_bytes=1024)
+        opener = Opener()
+        client._opener = opener
+
+        response = client.send(request)
+
+        self.assertEqual(response.http_status, 200)
+        self.assertEqual(len(opener.requests), 1)
+        outbound, timeout = opener.requests[0]
+        self.assertEqual(outbound.get_method(), "POST")
+        self.assertIsNone(outbound.data)
+        self.assertEqual(outbound.get_header("Content-length"), "0")
+        self.assertEqual(timeout, 15)
 
     def test_accounts_uses_exact_oauth2_host_queryless_get(self):
         request = IbkrWebAuthenticatedReadSigner.sign(

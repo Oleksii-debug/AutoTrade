@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
@@ -454,6 +455,21 @@ class ExecutionRealismTests(unittest.TestCase):
                 instrument_metadata_binding=INSTRUMENT_BINDING,
                 source_evidence_binding=INSTRUMENT_BINDING,
             )
+
+    def test_price_grid_issuance_requires_exact_registry_and_metadata_evidence(self):
+        with self.assertRaisesRegex(TypeError, "registry must be exact InstrumentRegistry"):
+            ExecutionPriceGrid.from_registry(object(), INSTRUMENT_REF)
+
+        unbound = replace(canonical_instrument(), metadata_evidence=())
+        registry = InstrumentRegistry(
+            calendars=(TradingCalendar.continuous_24_7(),),
+            versions=(unbound,),
+        )
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "requires metadata evidence",
+        ):
+            ExecutionPriceGrid.from_registry(registry, INSTRUMENT_REF)
 
     def test_registry_price_grid_detects_post_issuance_mutation(self):
         exact_model = model()

@@ -63,6 +63,7 @@ from .provider_core import (
     ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
+    provider_response_observation_projection,
 )
 from .windows_secrets import PersistentCredentialHandle
 from .provider_response_limits import (
@@ -2862,7 +2863,11 @@ def _install_direct_authenticated_read_observation_authority(
     canonical_object = object
     canonical_weakref = weakref_ref
     canonical_reader = receipt_reader
+    canonical_reader_code = canonical_reader.__code__
     canonical_snapshot_reader = receipt_snapshot_reader
+    canonical_snapshot_reader_code = canonical_snapshot_reader.__code__
+    canonical_projection = provider_response_observation_projection
+    canonical_projection_code = canonical_projection.__code__
     canonical_sha256 = sha256
 
     client_type = UrllibJsonWireClient
@@ -2885,6 +2890,16 @@ def _install_direct_authenticated_read_observation_authority(
             raise transport_error(
                 "exact provider response observation is required"
             )
+        if (
+            canonical_reader.__code__ is not canonical_reader_code
+            or canonical_snapshot_reader.__code__
+            is not canonical_snapshot_reader_code
+            or canonical_projection.__code__ is not canonical_projection_code
+        ):
+            raise transport_error(
+                "direct authenticated-read observation authority changed"
+            )
+        projection = canonical_projection(observation)
         # Custom/injected clients remain useful test seams but receive no
         # production direct-wire provenance.
         if canonical_type(client) is not client_type:
@@ -2907,11 +2922,8 @@ def _install_direct_authenticated_read_observation_authority(
             snapshot["http_status"],
             snapshot["response_sha256"],
         )
-        status = canonical_object.__getattribute__(observation, "http_status")
-        response_sha256 = canonical_object.__getattribute__(
-            observation,
-            "response_sha256",
-        )
+        status = projection["http_status"]
+        response_sha256 = projection["response_sha256"]
         raw = canonical_object.__getattribute__(response, "body")
         if (
             values[3] != status
@@ -2943,6 +2955,15 @@ def _install_direct_authenticated_read_observation_authority(
             raise transport_error(
                 "exact provider response observation is required"
             )
+        if (
+            canonical_snapshot_reader.__code__
+            is not canonical_snapshot_reader_code
+            or canonical_projection.__code__ is not canonical_projection_code
+        ):
+            raise transport_error(
+                "direct authenticated-read observation authority changed"
+            )
+        projection = canonical_projection(observation)
         prune()
         state = states.get(canonical_id(observation))
         if state is None or state[0]() is not observation:
@@ -2967,13 +2988,8 @@ def _install_direct_authenticated_read_observation_authority(
                 "direct authenticated-read observation receipt changed"
             )
         if (
-            canonical_object.__getattribute__(observation, "http_status")
-            != current[3]
-            or canonical_object.__getattribute__(
-                observation,
-                "response_sha256",
-            )
-            != current[4]
+            projection["http_status"] != current[3]
+            or projection["response_sha256"] != current[4]
         ):
             raise transport_error(
                 "provider response changed after direct-wire binding"

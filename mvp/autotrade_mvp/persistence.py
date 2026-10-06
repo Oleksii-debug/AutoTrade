@@ -122,6 +122,7 @@ class JournalStore(_JournalStoreImpl):
         if type(envelope) is not dict:
             raise TypeError("envelope must be an exact object")
         envelope = _impl._detach_json_value(envelope)
+        _impl._validate_canonical_event_envelope_if_claimed(envelope)
 
         event_id = _impl._require_canonical_durable_text(
             envelope.get("event_id"), name="event_id"

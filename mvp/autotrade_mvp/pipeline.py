@@ -1016,6 +1016,23 @@ def _restore_simulated_fills(
             price=price,
             fee=fee,
         )
+
+    intents_root = root / "order-intents"
+    try:
+        durable_intent_files = (
+            {path.name for path in intents_root.glob("*.json")}
+            if intents_root.is_dir()
+            else set()
+        )
+    except OSError as error:
+        raise ValueError("Cannot enumerate durable order intents") from error
+    expected_intent_files = {
+        f"{client_order_id}.json" for client_order_id in restored
+    }
+    if durable_intent_files != expected_intent_files:
+        raise ValueError(
+            "Durable order intents do not match checkpoint fills"
+        )
     return restored
 
 

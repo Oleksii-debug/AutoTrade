@@ -25,7 +25,14 @@ from .durable_provider_qualification import (
     DurableProviderQualificationRegistry,
     ProviderQualificationError,
 )
-from .persistence import JournalStore, canonical_json
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    require_exact_journal_store_authority,
+)
+from .provider_domain import ProviderFinancialScope
+from .provider_qualification_authority import AcceptedProviderQualification
+from .provider_qualification_identity import ProviderQualificationIdentity
 from .provider_account_reconciliation_semantics import (
     ProviderAccountReconciliationSemanticsError,
     QualifiedProviderAccountReconciliationSemantics,
@@ -48,6 +55,31 @@ _ENDPOINT_RE = re.compile(r"^/[A-Za-z0-9._~!$&'()*+,;=:@/-]{1,255}$")
 _QID_RE = re.compile(r"^provider-qualification:sha256:[0-9a-f]{64}$")
 _SCOPE_RE = re.compile(r"^provider-financial-scope:sha256:[0-9a-f]{64}$")
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+# Retain the exact authority surfaces selected by this module.  Public aliases,
+# class methods and helpers remain APIs, not late-binding trust roots.
+_REGISTRY_TYPE = DurableProviderQualificationRegistry
+_REGISTRY_QUALIFICATION = DurableProviderQualificationRegistry.qualification
+_JOURNAL_STORE_TYPE = JournalStore
+_REQUIRE_EXACT_JOURNAL_STORE_AUTHORITY = require_exact_journal_store_authority
+_RECONCILIATION_TYPE = QualifiedProviderAccountReconciliationSemantics
+_REQUIRE_RECONCILIATION_AUTHORITY = (
+    require_provider_account_reconciliation_semantics_authority
+)
+_RESOLVE_RECONCILIATION = (
+    resolve_current_provider_account_reconciliation_semantics
+)
+_RECONCILIATION_DIGEST_FGET = (
+    QualifiedProviderAccountReconciliationSemantics.content_digest.fget
+)
+_ACCEPTED_Q_TYPE = AcceptedProviderQualification
+_QUALIFICATION_IDENTITY_TYPE = ProviderQualificationIdentity
+_PROVIDER_SCOPE_TYPE = ProviderFinancialScope
+_PROVIDER_SCOPE_PAYLOAD = ProviderFinancialScope.payload
+_CANONICAL_JSON = canonical_json
+_SHA256 = sha256
+_JSON_LOADS = json.loads
+_JSON_DECODE_ERROR = _JSON_DECODE_ERROR
 
 
 class ProviderAccountAbsenceSemanticsError(ValueError):
@@ -167,19 +199,38 @@ def account_reconciliation_absence_route_semantic(
         semantics_version=semantics_version,
     )
     return {
-        _CLAIM_PREFIX + payload["surface"]: canonical_json(payload),
+        _CLAIM_PREFIX + payload["surface"]: _CANONICAL_JSON(payload),
     }
 
 
+def _provider_scope_digest_exact(scope: object) -> str:
+    if type(scope) is not _PROVIDER_SCOPE_TYPE:
+        raise ProviderAccountAbsenceSemanticsError(
+            "provider absence semantics Q provider scope is non-canonical"
+        )
+    payload = _PROVIDER_SCOPE_PAYLOAD(scope)
+    return "provider-financial-scope:sha256:" + _SHA256(
+        _CANONICAL_JSON(payload).encode("utf-8")
+    ).hexdigest()
+
+
 def _canonical_route_semantics(qualification: object) -> tuple[dict[str, str], str]:
-    raw = getattr(qualification, "route_semantics_json", None)
+    if type(qualification) is not _ACCEPTED_Q_TYPE:
+        raise ProviderAccountAbsenceSemanticsError(
+            "provider Q must be exact AcceptedProviderQualification"
+        )
+    if type(qualification.identity) is not _QUALIFICATION_IDENTITY_TYPE:
+        raise ProviderAccountAbsenceSemanticsError(
+            "provider Q identity is non-canonical"
+        )
+    raw = qualification.route_semantics_json
     if type(raw) is not str or not raw:
         raise ProviderAccountAbsenceSemanticsError(
             "provider Q route semantics are unavailable"
         )
     try:
-        decoded = json.loads(raw)
-    except (json.JSONDecodeError, RecursionError) as error:
+        decoded = _JSON_LOADS(raw)
+    except (_JSON_DECODE_ERROR, RecursionError) as error:
         raise ProviderAccountAbsenceSemanticsError(
             "provider Q route semantics are malformed"
         ) from error
@@ -191,13 +242,12 @@ def _canonical_route_semantics(qualification: object) -> tuple[dict[str, str], s
         raise ProviderAccountAbsenceSemanticsError(
             "provider Q route semantics are non-canonical"
         )
-    digest = "sha256:" + sha256(raw.encode("utf-8")).hexdigest()
-    identity = getattr(qualification, "identity", None)
+    digest = "sha256:" + _SHA256(raw.encode("utf-8")).hexdigest()
+    identity = qualification.identity
     if (
-        identity is None
-        or getattr(identity, "route_semantics_digest", None) != digest
-        or getattr(identity, "content_digest", None)
-        != getattr(qualification, "qualification_id", None)
+        identity.route_semantics_digest != digest
+        or type(qualification.qualification_id) is not str
+        or _QID_RE.fullmatch(qualification.qualification_id) is None
     ):
         raise ProviderAccountAbsenceSemanticsError(
             "provider Q route semantics do not match qualification identity"
@@ -212,8 +262,8 @@ def _parse_rule(*, surface: str, raw: object) -> dict[str, object]:
             f"provider Q absence rule for {expected_surface} is unavailable"
         )
     try:
-        payload = json.loads(raw)
-    except (json.JSONDecodeError, RecursionError) as error:
+        payload = _JSON_LOADS(raw)
+    except (_JSON_DECODE_ERROR, RecursionError) as error:
         raise ProviderAccountAbsenceSemanticsError(
             f"provider Q absence rule for {expected_surface} is malformed"
         ) from error
@@ -233,7 +283,7 @@ def _parse_rule(*, surface: str, raw: object) -> dict[str, object]:
         type(payload) is not dict
         or set(payload) != expected_keys
         or any(type(key) is not str for key in payload)
-        or canonical_json(payload) != raw
+        or _CANONICAL_JSON(payload) != raw
     ):
         raise ProviderAccountAbsenceSemanticsError(
             f"provider Q absence rule for {expected_surface} is non-canonical"
@@ -259,7 +309,7 @@ def _parse_rule(*, surface: str, raw: object) -> dict[str, object]:
     return {
         **payload,
         "claim_key": _CLAIM_PREFIX + expected_surface,
-        "rule_digest": "sha256:" + sha256(raw.encode("utf-8")).hexdigest(),
+        "rule_digest": "sha256:" + _SHA256(raw.encode("utf-8")).hexdigest(),
     }
 
 
@@ -280,8 +330,8 @@ class QualifiedProviderAccountAbsenceSemantics:
 
     @property
     def rules(self) -> tuple[dict[str, object], ...]:
-        require_provider_account_absence_semantics_authority(self)
-        decoded = json.loads(self.rules_json)
+        _REQUIRE_ABSENCE_AUTHORITY(self)
+        decoded = _JSON_LOADS(self.rules_json)
         if type(decoded) is not list:
             raise ProviderAccountAbsenceSemanticsError(
                 "absence semantics rule set is non-canonical"
@@ -289,7 +339,7 @@ class QualifiedProviderAccountAbsenceSemantics:
         return tuple(dict(item) for item in decoded)
 
     def payload(self) -> dict[str, object]:
-        require_provider_account_absence_semantics_authority(self)
+        _REQUIRE_ABSENCE_AUTHORITY(self)
         return {
             "schema_version": _SCHEMA_VERSION,
             "provider_scope_digest": self.provider_scope_digest,
@@ -297,14 +347,27 @@ class QualifiedProviderAccountAbsenceSemantics:
             "qualification_route_semantics_digest":
                 self.qualification_route_semantics_digest,
             "reconciliation_semantics_digest": self.reconciliation_semantics_digest,
-            "rules": json.loads(self.rules_json),
+            "rules": _JSON_LOADS(self.rules_json),
         }
 
     @property
     def content_digest(self) -> str:
-        return "provider-account-absence-semantics:sha256:" + sha256(
-            canonical_json(self.payload()).encode("utf-8")
+        _REQUIRE_ABSENCE_AUTHORITY(self)
+        payload = {
+            "schema_version": _SCHEMA_VERSION,
+            "provider_scope_digest": self.provider_scope_digest,
+            "qualification_id": self.qualification_id,
+            "qualification_route_semantics_digest":
+                self.qualification_route_semantics_digest,
+            "reconciliation_semantics_digest": self.reconciliation_semantics_digest,
+            "rules": _JSON_LOADS(self.rules_json),
+        }
+        return "provider-account-absence-semantics:sha256:" + _SHA256(
+            _CANONICAL_JSON(payload).encode("utf-8")
         ).hexdigest()
+
+
+_ABSENCE_TYPE = QualifiedProviderAccountAbsenceSemantics
 
 
 def _install_absence_semantics_authority():
@@ -326,7 +389,7 @@ def _install_absence_semantics_authority():
     )
 
     def material(value: QualifiedProviderAccountAbsenceSemantics) -> tuple[object, ...]:
-        if type(value) is not QualifiedProviderAccountAbsenceSemantics:
+        if type(value) is not _ABSENCE_TYPE:
             raise ProviderAccountAbsenceSemanticsError(
                 "exact QualifiedProviderAccountAbsenceSemantics is required"
             )
@@ -341,12 +404,15 @@ def _install_absence_semantics_authority():
         value: QualifiedProviderAccountAbsenceSemantics,
         store: JournalStore,
     ) -> None:
-        if type(store) is not JournalStore:
+        if type(store) is not _JOURNAL_STORE_TYPE:
             raise ProviderAccountAbsenceSemanticsError(
                 "provider absence semantics require exact JournalStore"
             )
         snapshot = material(value)
-        store_identity = store.store_identity
+        store_identity = _REQUIRE_EXACT_JOURNAL_STORE_AUTHORITY(
+            store,
+            subject="provider absence semantics journal",
+        )
         prune()
         current = states.get(id(value))
         if current is not None and current[0]() is not None:
@@ -377,12 +443,19 @@ def _install_absence_semantics_authority():
             raise ProviderAccountAbsenceSemanticsError(
                 "provider absence semantics changed after Q resolution"
             )
-        if type(state[2]) is not JournalStore or state[2].store_identity != state[3]:
+        if (
+            type(state[2]) is not _JOURNAL_STORE_TYPE
+            or _REQUIRE_EXACT_JOURNAL_STORE_AUTHORITY(
+                state[2],
+                subject="provider absence semantics journal",
+            )
+            != state[3]
+        ):
             raise ProviderAccountAbsenceSemanticsError(
                 "provider absence semantics JournalStore generation changed"
             )
         if qualification_registry is not None:
-            if type(qualification_registry) is not DurableProviderQualificationRegistry:
+            if type(qualification_registry) is not _REGISTRY_TYPE:
                 raise TypeError(
                     "qualification_registry must be exact DurableProviderQualificationRegistry"
                 )
@@ -391,13 +464,20 @@ def _install_absence_semantics_authority():
                     "provider absence semantics and Q registry must share "
                     "the same exact JournalStore generation"
                 )
+            if _REQUIRE_EXACT_JOURNAL_STORE_AUTHORITY(
+                state[2],
+                subject="provider absence semantics Q registry journal",
+            ) != state[3]:
+                raise ProviderAccountAbsenceSemanticsError(
+                    "provider absence semantics Q registry store generation changed"
+                )
             if at is None:
                 raise ProviderAccountAbsenceSemanticsError(
                     "current provider absence semantics require an exact consumption time"
                 )
             try:
                 current_reconciliation = (
-                    resolve_current_provider_account_reconciliation_semantics(
+                    _RESOLVE_RECONCILIATION(
                         qualification_registry=qualification_registry,
                         qualification_id=value.qualification_id,
                         provider_scope_digest=value.provider_scope_digest,
@@ -431,6 +511,46 @@ def _install_absence_semantics_authority():
     require_provider_account_absence_semantics_authority,
 ) = _install_absence_semantics_authority()
 del _install_absence_semantics_authority
+_REQUIRE_ABSENCE_AUTHORITY = (
+    require_provider_account_absence_semantics_authority
+)
+
+
+def _registry_store_cut(
+    registry: object,
+) -> tuple[JournalStore, object]:
+    if type(registry) is not _REGISTRY_TYPE:
+        raise TypeError(
+            "qualification_registry must be exact DurableProviderQualificationRegistry"
+        )
+    store = registry.store
+    if type(store) is not _JOURNAL_STORE_TYPE:
+        raise ProviderAccountAbsenceSemanticsError(
+            "provider absence semantics Q registry store is not canonical"
+        )
+    identity = _REQUIRE_EXACT_JOURNAL_STORE_AUTHORITY(
+        store,
+        subject="provider absence semantics Q registry journal",
+    )
+    return store, identity
+
+
+def _require_registry_store_cut(
+    registry: object,
+    store: JournalStore,
+    identity: object,
+) -> None:
+    if type(registry) is not _REGISTRY_TYPE or registry.store is not store:
+        raise ProviderAccountAbsenceSemanticsError(
+            "provider absence semantics Q registry store changed during resolution"
+        )
+    if _REQUIRE_EXACT_JOURNAL_STORE_AUTHORITY(
+        store,
+        subject="provider absence semantics Q registry journal",
+    ) != identity:
+        raise ProviderAccountAbsenceSemanticsError(
+            "provider absence semantics Q registry store generation changed during resolution"
+        )
 
 
 def resolve_current_provider_account_absence_semantics(
@@ -441,31 +561,36 @@ def resolve_current_provider_account_absence_semantics(
 ) -> QualifiedProviderAccountAbsenceSemantics:
     """Resolve all four exact source-owned absence rules from current provider Q."""
 
-    if type(reconciliation_semantics) is not QualifiedProviderAccountReconciliationSemantics:
+    if type(reconciliation_semantics) is not _RECONCILIATION_TYPE:
         raise TypeError(
             "reconciliation_semantics must be exact "
             "QualifiedProviderAccountReconciliationSemantics"
         )
-    if type(qualification_registry) is not DurableProviderQualificationRegistry:
-        raise TypeError(
-            "qualification_registry must be exact DurableProviderQualificationRegistry"
-        )
+    store, store_identity = _registry_store_cut(qualification_registry)
     try:
-        accepted_reconciliation = require_provider_account_reconciliation_semantics_authority(
+        accepted_reconciliation = _REQUIRE_RECONCILIATION_AUTHORITY(
             reconciliation_semantics,
             qualification_registry=qualification_registry,
         )
-        fresh_reconciliation = resolve_current_provider_account_reconciliation_semantics(
+        fresh_reconciliation = _RESOLVE_RECONCILIATION(
             qualification_registry=qualification_registry,
             qualification_id=accepted_reconciliation.qualification_id,
             provider_scope_digest=accepted_reconciliation.provider_scope_digest,
             at=at,
         )
+        _require_registry_store_cut(
+            qualification_registry,
+            store,
+            store_identity,
+        )
     except ProviderAccountReconciliationSemanticsError as error:
         raise ProviderAccountAbsenceSemanticsError(
             "provider reconciliation semantics are not exact current authority"
         ) from error
-    if fresh_reconciliation.content_digest != accepted_reconciliation.content_digest:
+    if (
+        _RECONCILIATION_DIGEST_FGET(fresh_reconciliation)
+        != _RECONCILIATION_DIGEST_FGET(accepted_reconciliation)
+    ):
         raise ProviderAccountAbsenceSemanticsError(
             "provider reconciliation semantics changed before absence resolution"
         )
@@ -481,15 +606,25 @@ def resolve_current_provider_account_absence_semantics(
             "provider reconciliation semantics identity is non-canonical"
         )
     try:
-        qualification = qualification_registry.qualification(
-            accepted_reconciliation.qualification_id
+        qualification = _REGISTRY_QUALIFICATION(
+            qualification_registry,
+            accepted_reconciliation.qualification_id,
         )
     except ProviderQualificationError as error:
         raise ProviderAccountAbsenceSemanticsError(
             "provider absence semantics Q is not durably accepted"
         ) from error
+    _require_registry_store_cut(
+        qualification_registry,
+        store,
+        store_identity,
+    )
+    if type(qualification) is not _ACCEPTED_Q_TYPE:
+        raise ProviderAccountAbsenceSemanticsError(
+            "provider absence semantics Q is not exact accepted authority"
+        )
     if (
-        qualification.scope.provider_scope.content_digest
+        _provider_scope_digest_exact(qualification.scope.provider_scope)
         != accepted_reconciliation.provider_scope_digest
     ):
         raise ProviderAccountAbsenceSemanticsError(
@@ -515,9 +650,9 @@ def resolve_current_provider_account_absence_semantics(
             "provider Q lacks source-owned absence rules for: " + ",".join(missing)
         )
     rules.sort(key=lambda rule: rule["surface"])
-    rules_json = canonical_json(rules)
+    rules_json = _CANONICAL_JSON(rules)
 
-    value = object.__new__(QualifiedProviderAccountAbsenceSemantics)
+    value = object.__new__(_ABSENCE_TYPE)
     object.__setattr__(
         value,
         "provider_scope_digest",
@@ -541,7 +676,7 @@ def resolve_current_provider_account_absence_semantics(
     object.__setattr__(value, "rules_json", rules_json)
     _register_provider_account_absence_semantics_authority(
         value,
-        qualification_registry.store,
+        store,
     )
     return value
 
@@ -557,7 +692,7 @@ def require_provider_account_absence_rule(
 ) -> dict[str, object]:
     """Return one exact qualified rule; never a coverage/absence verdict."""
 
-    accepted = require_provider_account_absence_semantics_authority(
+    accepted = _REQUIRE_ABSENCE_AUTHORITY(
         value,
         qualification_registry=qualification_registry,
         at=at,
@@ -568,7 +703,12 @@ def require_provider_account_absence_rule(
         data_entitlement,
         name="data_entitlement",
     )
-    for rule in accepted.rules:
+    decoded_rules = _JSON_LOADS(accepted.rules_json)
+    if type(decoded_rules) is not list or any(type(item) is not dict for item in decoded_rules):
+        raise ProviderAccountAbsenceSemanticsError(
+            "absence semantics rule set is non-canonical"
+        )
+    for rule in decoded_rules:
         if rule["surface"] != expected_surface:
             continue
         if (

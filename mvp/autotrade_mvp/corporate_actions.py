@@ -9,22 +9,35 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
+from types import MappingProxyType
 from typing import Iterable, Mapping
 
+from .exact_decimal import (
+    ExactDecimalError,
+    as_fraction,
+    bounded_fraction,
+    exact_abs,
+    exact_add,
+    exact_multiply,
+    exact_subtract,
+    parse_bounded_exact_decimal,
+    terminating_decimal,
+)
 from .instruments import InstrumentRegistry, InstrumentVersion
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    if type(value) not in (Decimal, str, int):
+        raise TypeError(
+            f"{name} must use exact Decimal, string or integer input"
+        )
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(
+            f"{name} must be a finite decimal within the exact resource envelope"
+        ) from error
 
 
 def _positive(value, *, name: str, allow_zero: bool = False) -> Decimal:
@@ -34,16 +47,92 @@ def _positive(value, *, name: str, allow_zero: bool = False) -> Decimal:
     return result
 
 
+def _exact_addition(left: Decimal, right: Decimal, *, name: str) -> Decimal:
+    try:
+        return exact_add(left, right)
+    except ExactDecimalError as error:
+        raise ValueError(
+            f"{name} exceeds exact decimal resource envelope"
+        ) from error
+
+
+def _exact_difference(left: Decimal, right: Decimal, *, name: str) -> Decimal:
+    try:
+        return exact_subtract(left, right)
+    except ExactDecimalError as error:
+        raise ValueError(
+            f"{name} exceeds exact decimal resource envelope"
+        ) from error
+
+
+def _exact_product(*values: Decimal, name: str) -> Decimal:
+    try:
+        return exact_multiply(*values)
+    except ExactDecimalError as error:
+        raise ValueError(
+            f"{name} exceeds exact decimal resource envelope"
+        ) from error
+
+
+def _exact_absolute(value: Decimal, *, name: str) -> Decimal:
+    try:
+        return exact_abs(value)
+    except ExactDecimalError as error:
+        raise ValueError(
+            f"{name} exceeds exact decimal resource envelope"
+        ) from error
+
+
+def _exact_ratio_product(
+    value: Decimal,
+    numerator: Decimal,
+    denominator: Decimal,
+    *,
+    name: str,
+) -> Decimal:
+    try:
+        result = bounded_fraction(
+            bounded_fraction(
+                as_fraction(value) * as_fraction(numerator)
+            )
+            / as_fraction(denominator)
+        )
+        return terminating_decimal(result)
+    except (ExactDecimalError, ZeroDivisionError) as error:
+        raise ValueError(
+            f"{name} is not representable within the exact decimal resource envelope"
+        ) from error
+
+
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact text")
+    result = str.strip(value)
+    if not result:
         raise ValueError(f"{name} is required")
-    return value.strip()
+    return result
 
 
 def _utc_instant(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise ValueError(f"{name} must be a timezone-aware datetime")
-    return value.astimezone(timezone.utc)
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise ValueError(
+            f"{name} must be an exact datetime with a fixed built-in timezone"
+        )
+    return datetime.astimezone(value, timezone.utc)
+
+
+def _payload_value_text(value, *, name: str) -> str:
+    if type(value) is str:
+        return value
+    if type(value) in (int, Decimal):
+        return str(_decimal(value, name=name))
+    if type(value) in (bool, float):
+        raise TypeError(
+            "corporate-event numeric payload must use exact decimal input"
+        )
+    raise TypeError(
+        "corporate-event payload values must be text or exact decimal input"
+    )
 
 
 @dataclass(frozen=True)
@@ -72,7 +161,10 @@ class EquityState:
         )
         if recalled > borrowed:
             raise ValueError("recalled_quantity cannot exceed borrowed_quantity")
-        if quantity < 0 and borrowed != -quantity:
+        if quantity < 0 and borrowed != _exact_absolute(
+            quantity,
+            name="short quantity",
+        ):
             raise ValueError(
                 "cash-equity short quantity must be fully matched by borrowed_quantity"
             )
@@ -146,7 +238,14 @@ class EquityState:
 
     @property
     def unit_basis(self) -> Decimal:
-        return Decimal("0") if self.quantity == 0 else self.total_basis / abs(self.quantity)
+        if self.quantity == 0:
+            return Decimal("0")
+        return _exact_ratio_product(
+            self.total_basis,
+            Decimal("1"),
+            _exact_absolute(self.quantity, name="unit basis quantity"),
+            name="unit basis",
+        )
 
 
 @dataclass(frozen=True)
@@ -172,14 +271,10 @@ class CorporateEvent:
         }:
             raise ValueError("unsupported corporate event kind")
         instrument_id = _text(self.instrument_id, name="instrument_id")
-        if (
-            not isinstance(self.instrument_version, int)
-            or isinstance(self.instrument_version, bool)
-            or self.instrument_version < 1
-        ):
+        if type(self.instrument_version) is not int or self.instrument_version < 1:
             raise ValueError("instrument_version must be a positive integer")
-        if not isinstance(self.effective_date, date):
-            raise ValueError("effective_date is required")
+        if type(self.effective_date) is not date:
+            raise ValueError("effective_date must be an exact date")
         if self.effective_at is not None:
             effective_at = _utc_instant(self.effective_at, name="effective_at")
             if effective_at.date() != self.effective_date:
@@ -187,25 +282,21 @@ class CorporateEvent:
                     "effective_at UTC date must match effective_date"
                 )
             object.__setattr__(self, "effective_at", effective_at)
-        if not isinstance(self.payload, Mapping):
-            raise ValueError("payload must be a mapping")
+        if type(self.payload) is not dict:
+            raise TypeError("payload must be an exact dict")
 
+        payload_snapshot = dict.copy(self.payload)
         normalized_payload: dict[str, str] = {}
-        for raw_key, raw_value in self.payload.items():
+        for raw_key, raw_value in payload_snapshot.items():
             key = _text(raw_key, name="payload key")
             if key in normalized_payload:
                 raise ValueError(
                     "corporate-event payload keys must be unique after normalization"
                 )
-            if isinstance(raw_value, bool) or isinstance(raw_value, float):
-                raise TypeError(
-                    "corporate-event numeric payload must use exact decimal input"
-                )
-            if not isinstance(raw_value, (str, int, Decimal)):
-                raise TypeError(
-                    "corporate-event payload values must be text or exact decimal input"
-                )
-            normalized_payload[key] = str(raw_value)
+            normalized_payload[key] = _payload_value_text(
+                raw_value,
+                name=f"payload value for {key}",
+            )
 
         object.__setattr__(self, "event_id", _text(self.event_id, name="event_id"))
         object.__setattr__(self, "instrument_id", instrument_id)
@@ -216,12 +307,11 @@ class CorporateEvent:
             _text(self.source_revision, name="source_revision"),
         )
         if self.source_sequence is not None and (
-            not isinstance(self.source_sequence, int)
-            or isinstance(self.source_sequence, bool)
+            type(self.source_sequence) is not int
             or self.source_sequence < 0
         ):
             raise ValueError("source_sequence must be a non-negative integer when provided")
-        object.__setattr__(self, "payload", normalized_payload)
+        object.__setattr__(self, "payload", MappingProxyType(normalized_payload))
 
     @classmethod
     def create(
@@ -247,22 +337,22 @@ class CorporateEvent:
         }
         if normalized_kind not in allowed:
             raise ValueError("unsupported corporate event kind")
-        if not isinstance(effective_date, date):
-            raise ValueError("effective_date is required")
-        if not isinstance(payload, Mapping):
-            raise ValueError("payload must be a mapping")
+        if type(effective_date) is not date:
+            raise ValueError("effective_date must be an exact date")
+        if type(payload) is not dict:
+            raise TypeError("payload must be an exact dict")
+        payload_snapshot = dict.copy(payload)
         normalized_payload: dict[str, str] = {}
-        for raw_key, raw_value in payload.items():
+        for raw_key, raw_value in payload_snapshot.items():
             key = _text(raw_key, name="payload key")
             if key in normalized_payload:
                 raise ValueError(
                     "corporate-event payload keys must be unique after normalization"
                 )
-            if isinstance(raw_value, bool) or isinstance(raw_value, float):
-                raise TypeError("corporate-event numeric payload must use exact decimal input")
-            if not isinstance(raw_value, (str, int, Decimal)):
-                raise TypeError("corporate-event payload values must be text or exact decimal input")
-            normalized_payload[key] = str(raw_value)
+            normalized_payload[key] = _payload_value_text(
+                raw_value,
+                name=f"payload value for {key}",
+            )
         return cls(
             event_id=_text(event_id, name="event_id"),
             instrument_id=_text(instrument_id, name="instrument_id"),
@@ -284,6 +374,23 @@ class Transition:
     economic_pnl: Decimal
     reason: str
 
+    def __post_init__(self) -> None:
+        if type(self.before) is not EquityState:
+            raise TypeError("transition before must be exact EquityState")
+        if type(self.after) is not EquityState:
+            raise TypeError("transition after must be exact EquityState")
+        if type(self.economic_pnl) is not Decimal:
+            raise TypeError("economic_pnl must be exact Decimal")
+        try:
+            economic_pnl = parse_bounded_exact_decimal(self.economic_pnl)
+        except ExactDecimalError as error:
+            raise ValueError(
+                "economic_pnl must be a finite decimal within the exact resource envelope"
+            ) from error
+        object.__setattr__(self, "event_id", _text(self.event_id, name="transition event_id"))
+        object.__setattr__(self, "economic_pnl", economic_pnl)
+        object.__setattr__(self, "reason", _text(self.reason, name="transition reason"))
+
 
 @dataclass(frozen=True)
 class CorporateActionCheckpoint:
@@ -304,24 +411,26 @@ class CorporateActionCheckpoint:
             "checkpoint_id",
             _text(self.checkpoint_id, name="checkpoint_id"),
         )
-        if not isinstance(self.state, EquityState):
-            raise TypeError("checkpoint state must be EquityState")
-        if not isinstance(self.instrument_version, InstrumentVersion):
+        if type(self.state) is not EquityState:
+            raise TypeError("checkpoint state must be exact EquityState")
+        if type(self.instrument_version) is not InstrumentVersion:
             raise TypeError(
-                "checkpoint instrument_version must be InstrumentVersion"
+                "checkpoint instrument_version must be exact InstrumentVersion"
             )
+        if type(self.records) is not tuple:
+            raise TypeError("checkpoint records must be an exact tuple")
 
         seen: set[str] = set()
         previous_after: EquityState | None = None
         for record in self.records:
             if (
-                not isinstance(record, tuple)
+                type(record) is not tuple
                 or len(record) != 2
-                or not isinstance(record[0], CorporateEvent)
-                or not isinstance(record[1], Transition)
+                or type(record[0]) is not CorporateEvent
+                or type(record[1]) is not Transition
             ):
                 raise TypeError(
-                    "checkpoint records must contain CorporateEvent/Transition pairs"
+                    "checkpoint records must contain exact CorporateEvent/Transition pairs"
                 )
             event, transition = record
             if event.event_id in seen:
@@ -351,12 +460,12 @@ class CorporateActionBook:
         instrument_version: InstrumentVersion,
         registry: InstrumentRegistry,
     ):
-        if not isinstance(state, EquityState):
-            raise TypeError("state must be EquityState")
-        if not isinstance(instrument_version, InstrumentVersion):
-            raise TypeError("instrument_version must be InstrumentVersion")
-        if not isinstance(registry, InstrumentRegistry):
-            raise TypeError("registry must be InstrumentRegistry")
+        if type(state) is not EquityState:
+            raise TypeError("state must be exact EquityState")
+        if type(instrument_version) is not InstrumentVersion:
+            raise TypeError("instrument_version must be exact InstrumentVersion")
+        if type(registry) is not InstrumentRegistry:
+            raise TypeError("registry must be exact InstrumentRegistry")
         if instrument_version.asset_class != "CASH_EQUITY":
             raise ValueError("corporate-action book requires a CASH_EQUITY instrument")
         registered = tuple(
@@ -402,7 +511,7 @@ class CorporateActionBook:
             registry=registry,
         )
         materialized = tuple(events)
-        if not all(isinstance(event, CorporateEvent) for event in materialized):
+        if not all(type(event) is CorporateEvent for event in materialized):
             raise TypeError("events must contain CorporateEvent values")
 
         by_date: dict[date, list[CorporateEvent]] = {}
@@ -452,10 +561,10 @@ class CorporateActionBook:
     ) -> "CorporateActionBook":
         """Restore checkpoint state and replay only the strict retained suffix."""
 
-        if not isinstance(checkpoint, CorporateActionCheckpoint):
-            raise TypeError("checkpoint must be CorporateActionCheckpoint")
+        if type(checkpoint) is not CorporateActionCheckpoint:
+            raise TypeError("checkpoint must be exact CorporateActionCheckpoint")
         materialized = tuple(events)
-        if not all(isinstance(event, CorporateEvent) for event in materialized):
+        if not all(type(event) is CorporateEvent for event in materialized):
             raise TypeError("events must contain CorporateEvent values")
         event_ids = tuple(event.event_id for event in materialized)
         if len(set(event_ids)) != len(event_ids):
@@ -526,8 +635,8 @@ class CorporateActionBook:
         )
 
     def apply(self, event: CorporateEvent) -> Transition:
-        if not isinstance(event, CorporateEvent):
-            raise TypeError("event must be CorporateEvent")
+        if type(event) is not CorporateEvent:
+            raise TypeError("event must be exact CorporateEvent")
         existing = self._events.get(event.event_id)
         if existing is not None:
             prior_event, transition = existing
@@ -587,13 +696,27 @@ class CorporateActionBook:
             raise ValueError("split requires exactly numerator and denominator")
         numerator = _positive(event.payload.get("numerator"), name="numerator")
         denominator = _positive(event.payload.get("denominator"), name="denominator")
-        ratio = numerator / denominator
         before = self.state
         after = replace(
             before,
-            quantity=before.quantity * ratio,
-            borrowed_quantity=before.borrowed_quantity * ratio,
-            recalled_quantity=before.recalled_quantity * ratio,
+            quantity=_exact_ratio_product(
+                before.quantity,
+                numerator,
+                denominator,
+                name="split quantity",
+            ),
+            borrowed_quantity=_exact_ratio_product(
+                before.borrowed_quantity,
+                numerator,
+                denominator,
+                name="split borrowed quantity",
+            ),
+            recalled_quantity=_exact_ratio_product(
+                before.recalled_quantity,
+                numerator,
+                denominator,
+                name="split recalled quantity",
+            ),
         )
         return Transition(
             event_id=event.event_id,
@@ -606,8 +729,14 @@ class CorporateActionBook:
     def _cash_dividend(self, event: CorporateEvent) -> Transition:
         per_share = self._cash_event_amount(event, amount_key="per_share")
         before = self.state
-        entitlement = before.quantity * per_share
-        after = replace(before, unsettled_cash=before.unsettled_cash + entitlement)
+        try:
+            entitlement = exact_multiply(before.quantity, per_share)
+            unsettled_cash = exact_add(before.unsettled_cash, entitlement)
+        except ExactDecimalError as error:
+            raise ValueError(
+                "cash dividend arithmetic exceeds exact decimal resource envelope"
+            ) from error
+        after = replace(before, unsettled_cash=unsettled_cash)
         return Transition(
             event_id=event.event_id,
             before=before,
@@ -624,13 +753,25 @@ class CorporateActionBook:
         before = self.state
         if before.borrowed_quantity != 0:
             raise ValueError("cash merger with unresolved borrowed quantity requires explicit provider handling")
-        proceeds = before.quantity * cash_per_share
-        pnl = proceeds - before.total_basis
+        proceeds = _exact_product(
+            before.quantity,
+            cash_per_share,
+            name="cash merger proceeds",
+        )
+        pnl = _exact_difference(
+            proceeds,
+            before.total_basis,
+            name="cash merger P&L",
+        )
         after = replace(
             before,
             quantity=Decimal("0"),
             total_basis=Decimal("0"),
-            unsettled_cash=before.unsettled_cash + proceeds,
+            unsettled_cash=_exact_addition(
+                before.unsettled_cash,
+                proceeds,
+                name="cash merger unsettled cash",
+            ),
         )
         return Transition(
             event_id=event.event_id,
@@ -677,12 +818,13 @@ class CorporateActionBook:
             raise ValueError(
                 "successor_instrument_version must be a canonical positive integer"
             )
-        successor_version = int(raw_version)
         current = self.instrument_version
-        if successor_version != current.version + 1:
+        expected_successor_version = current.version + 1
+        if raw_version != str(expected_successor_version):
             raise ValueError(
                 "symbol change successor must be the next instrument version"
             )
+        successor_version = expected_successor_version
         matches = tuple(
             item
             for item in self.registry.versions(current.instrument_id)
@@ -760,6 +902,8 @@ class CorporateActionBook:
 def settle_cash(state: EquityState, amount) -> EquityState:
     """Move an evidenced receivable or payable from unsettled to settled cash."""
 
+    if type(state) is not EquityState:
+        raise TypeError("state must be exact EquityState")
     value = _decimal(amount, name="amount")
     outstanding = state.unsettled_cash
     if value == 0:
@@ -768,12 +912,23 @@ def settle_cash(state: EquityState, amount) -> EquityState:
         raise ValueError("cannot settle cash when no unsettled balance exists")
     if (value > 0) != (outstanding > 0):
         raise ValueError("settlement amount must have the same sign as unsettled cash")
-    if abs(value) > abs(outstanding):
+    if _exact_absolute(value, name="settlement amount") > _exact_absolute(
+        outstanding,
+        name="unsettled cash",
+    ):
         raise ValueError("cannot settle more cash than is currently unsettled")
     return replace(
         state,
-        unsettled_cash=outstanding - value,
-        settled_cash=state.settled_cash + value,
+        unsettled_cash=_exact_difference(
+            outstanding,
+            value,
+            name="remaining unsettled cash",
+        ),
+        settled_cash=_exact_addition(
+            state.settled_cash,
+            value,
+            name="settled cash",
+        ),
     )
 
 
@@ -783,20 +938,34 @@ def record_unsettled_purchase(
     quantity,
     price,
 ) -> EquityState:
+    if type(state) is not EquityState:
+        raise TypeError("state must be exact EquityState")
     qty = _positive(quantity, name="quantity")
     unit_price = _positive(price, name="price")
     if state.quantity < 0 or state.borrowed_quantity != 0:
         raise ValueError(
             "long purchase helper cannot implicitly cover an existing cash-equity short"
         )
-    cost = qty * unit_price
+    cost = _exact_product(qty, unit_price, name="purchase cost")
     if cost > state.settled_cash:
         raise ValueError("purchase cannot spend unfunded settled cash")
     return replace(
         state,
-        quantity=state.quantity + qty,
-        total_basis=state.total_basis + cost,
-        settled_cash=state.settled_cash - cost,
+        quantity=_exact_addition(
+            state.quantity,
+            qty,
+            name="purchase quantity",
+        ),
+        total_basis=_exact_addition(
+            state.total_basis,
+            cost,
+            name="purchase total basis",
+        ),
+        settled_cash=_exact_difference(
+            state.settled_cash,
+            cost,
+            name="purchase settled cash",
+        ),
     )
 
 
@@ -806,16 +975,30 @@ def establish_short(
     quantity,
     sale_price,
 ) -> EquityState:
+    if type(state) is not EquityState:
+        raise TypeError("state must be exact EquityState")
     qty = _positive(quantity, name="quantity")
     price = _positive(sale_price, name="sale_price")
     if state.quantity > 0:
         raise ValueError("foundation does not net a long position into a new short implicitly")
-    proceeds = qty * price
+    proceeds = _exact_product(qty, price, name="short-sale proceeds")
     return replace(
         state,
-        quantity=state.quantity - qty,
-        borrowed_quantity=state.borrowed_quantity + qty,
-        unsettled_cash=state.unsettled_cash + proceeds,
+        quantity=_exact_difference(
+            state.quantity,
+            qty,
+            name="short position quantity",
+        ),
+        borrowed_quantity=_exact_addition(
+            state.borrowed_quantity,
+            qty,
+            name="borrowed quantity",
+        ),
+        unsettled_cash=_exact_addition(
+            state.unsettled_cash,
+            proceeds,
+            name="short-sale unsettled cash",
+        ),
     )
 
 
@@ -826,38 +1009,84 @@ def accrue_borrow_financing(
     marked_value,
     days: int,
 ) -> EquityState:
+    if type(state) is not EquityState:
+        raise TypeError("state must be exact EquityState")
     rate = _positive(daily_rate, name="daily_rate", allow_zero=True)
     value = _positive(marked_value, name="marked_value", allow_zero=True)
-    if not isinstance(days, int) or isinstance(days, bool) or days < 0:
+    if type(days) is not int or days < 0:
         raise ValueError("days must be a non-negative integer")
-    charge = value * rate * Decimal(days)
+    charge = _exact_product(
+        value,
+        rate,
+        Decimal(days),
+        name="borrow financing charge",
+    )
     return replace(
         state,
-        accrued_financing=state.accrued_financing + charge,
-        unsettled_cash=state.unsettled_cash - charge,
+        accrued_financing=_exact_addition(
+            state.accrued_financing,
+            charge,
+            name="accrued borrow financing",
+        ),
+        unsettled_cash=_exact_difference(
+            state.unsettled_cash,
+            charge,
+            name="borrow financing unsettled cash",
+        ),
     )
 
 
 def record_recall(state: EquityState, quantity) -> EquityState:
+    if type(state) is not EquityState:
+        raise TypeError("state must be exact EquityState")
     qty = _positive(quantity, name="quantity")
-    available = state.borrowed_quantity - state.recalled_quantity
+    available = _exact_difference(
+        state.borrowed_quantity,
+        state.recalled_quantity,
+        name="available borrow quantity",
+    )
     if qty > available:
         raise ValueError("recall exceeds currently borrowed unrecalled quantity")
-    return replace(state, recalled_quantity=state.recalled_quantity + qty)
+    return replace(
+        state,
+        recalled_quantity=_exact_addition(
+            state.recalled_quantity,
+            qty,
+            name="recalled quantity",
+        ),
+    )
 
 
 def cover_recalled_short(state: EquityState, *, quantity, buy_price) -> EquityState:
+    if type(state) is not EquityState:
+        raise TypeError("state must be exact EquityState")
     qty = _positive(quantity, name="quantity")
     price = _positive(buy_price, name="buy_price")
     if qty > state.recalled_quantity or qty > state.borrowed_quantity:
         raise ValueError("cover quantity exceeds recalled/borrowed quantity")
-    cost = qty * price
+    cost = _exact_product(qty, price, name="short-cover cost")
     if cost > state.settled_cash:
         raise ValueError("cover requires sufficient settled cash in this foundation")
     return replace(
         state,
-        quantity=state.quantity + qty,
-        borrowed_quantity=state.borrowed_quantity - qty,
-        recalled_quantity=state.recalled_quantity - qty,
-        settled_cash=state.settled_cash - cost,
+        quantity=_exact_addition(
+            state.quantity,
+            qty,
+            name="covered position quantity",
+        ),
+        borrowed_quantity=_exact_difference(
+            state.borrowed_quantity,
+            qty,
+            name="remaining borrowed quantity",
+        ),
+        recalled_quantity=_exact_difference(
+            state.recalled_quantity,
+            qty,
+            name="remaining recalled quantity",
+        ),
+        settled_cash=_exact_difference(
+            state.settled_cash,
+            cost,
+            name="short-cover settled cash",
+        ),
     )

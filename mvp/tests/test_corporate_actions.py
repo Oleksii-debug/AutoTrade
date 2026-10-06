@@ -1,5 +1,5 @@
-from datetime import date, datetime, timezone
-from decimal import Decimal
+from datetime import date, datetime, timezone, tzinfo
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import unittest
 
 from mvp.autotrade_mvp.corporate_actions import (
@@ -309,6 +309,371 @@ class CorporateSettlementTests(unittest.TestCase):
         recalled = record_recall(short, "1")
         with self.assertRaises(ValueError):
             cover_recalled_short(recalled, quantity="1", buy_price="90")
+
+    def test_corporate_action_economics_are_invariant_to_decimal_context(self):
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+
+                        book = bound_book(
+                            state(
+                                quantity="1234567890.1",
+                                total_basis="1000000000.9",
+                                unsettled_cash="0.4",
+                            )
+                        )
+                        split = book.apply(
+                            corporate_event(
+                                event_id="context-split",
+                                kind="SPLIT",
+                                effective_date=date(2026, 1, 2),
+                                source_revision="context-r1",
+                                payload={"numerator": "2", "denominator": "1"},
+                            )
+                        )
+                        dividend = book.apply(
+                            corporate_event(
+                                event_id="context-dividend",
+                                kind="CASH_DIVIDEND",
+                                effective_date=date(2026, 1, 3),
+                                source_revision="context-r2",
+                                payload={"per_share": "0.9", "currency": "USD"},
+                            )
+                        )
+                        merger = book.apply(
+                            corporate_event(
+                                event_id="context-merger",
+                                kind="MERGER_CASH",
+                                effective_date=date(2026, 1, 4),
+                                source_revision="context-r3",
+                                payload={"cash_per_share": "1.1", "currency": "USD"},
+                            )
+                        )
+
+                    self.assertEqual(
+                        split.after.quantity,
+                        Decimal("2469135780.2"),
+                    )
+                    self.assertEqual(
+                        dividend.after.unsettled_cash,
+                        Decimal("2222222202.58"),
+                    )
+                    self.assertEqual(
+                        merger.economic_pnl,
+                        Decimal("1716049357.32"),
+                    )
+                    self.assertEqual(
+                        merger.after.unsettled_cash,
+                        Decimal("4938271560.80"),
+                    )
+                    self.assertEqual(merger.after.quantity, Decimal("0"))
+                    self.assertEqual(merger.after.total_basis, Decimal("0"))
+
+    def test_equity_cash_and_borrow_helpers_are_context_independent(self):
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+
+                        settled = settle_cash(
+                            state(
+                                settled_cash="10000000000.4",
+                                unsettled_cash="1234567890.1",
+                            ),
+                            "0.9",
+                        )
+                        purchased = record_unsettled_purchase(
+                            state(
+                                quantity="0",
+                                total_basis="0",
+                                settled_cash="10000000000.4",
+                            ),
+                            quantity="1234567890.1",
+                            price="1.1",
+                        )
+                        short = establish_short(
+                            state(
+                                quantity="0",
+                                total_basis="0",
+                                settled_cash="10000000000.4",
+                                unsettled_cash="0.4",
+                            ),
+                            quantity="1234567890.1",
+                            sale_price="1.1",
+                        )
+                        financed = accrue_borrow_financing(
+                            short,
+                            daily_rate="0.001",
+                            marked_value="2200000000.1",
+                            days=2,
+                        )
+                        recalled = record_recall(financed, "0.9")
+                        covered = cover_recalled_short(
+                            recalled,
+                            quantity="0.9",
+                            buy_price="1.2",
+                        )
+
+                    self.assertEqual(
+                        settled.unsettled_cash,
+                        Decimal("1234567889.2"),
+                    )
+                    self.assertEqual(
+                        settled.settled_cash,
+                        Decimal("10000000001.3"),
+                    )
+                    self.assertEqual(
+                        purchased.quantity,
+                        Decimal("1234567890.1"),
+                    )
+                    self.assertEqual(
+                        purchased.total_basis,
+                        Decimal("1358024679.11"),
+                    )
+                    self.assertEqual(
+                        purchased.settled_cash,
+                        Decimal("8641975321.29"),
+                    )
+                    self.assertEqual(
+                        short.unsettled_cash,
+                        Decimal("1358024679.51"),
+                    )
+                    self.assertEqual(
+                        financed.accrued_financing,
+                        Decimal("4400000.0002"),
+                    )
+                    self.assertEqual(
+                        financed.unsettled_cash,
+                        Decimal("1353624679.5098"),
+                    )
+                    self.assertEqual(
+                        covered.quantity,
+                        Decimal("-1234567889.2"),
+                    )
+                    self.assertEqual(
+                        covered.borrowed_quantity,
+                        Decimal("1234567889.2"),
+                    )
+                    self.assertEqual(
+                        covered.recalled_quantity,
+                        Decimal("0.0"),
+                    )
+                    self.assertEqual(
+                        covered.settled_cash,
+                        Decimal("9999999999.32"),
+                    )
+
+    def test_nonterminating_unit_basis_fails_closed_without_rounding_policy(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "unit basis.*exact decimal",
+        ):
+            _ = state(quantity="3", total_basis="1").unit_basis
+
+    def test_split_requires_final_quantities_to_be_exactly_representable(self):
+        exact = bound_book(state(quantity="3", total_basis="1"))
+        result = exact.apply(
+            corporate_event(
+                event_id="exact-third-split",
+                kind="SPLIT",
+                effective_date=date(2026, 1, 2),
+                source_revision="exact-third-r1",
+                payload={"numerator": "1", "denominator": "3"},
+            )
+        )
+        self.assertEqual(result.after.quantity, Decimal("1"))
+
+        inexact = bound_book(state(quantity="1", total_basis="1"))
+        with self.assertRaisesRegex(
+            ValueError,
+            "split quantity.*exact decimal",
+        ):
+            inexact.apply(
+                corporate_event(
+                    event_id="inexact-third-split",
+                    kind="SPLIT",
+                    effective_date=date(2026, 1, 2),
+                    source_revision="inexact-third-r1",
+                    payload={"numerator": "1", "denominator": "3"},
+                )
+            )
+
+    def test_decimal_subclasses_and_oversized_values_fail_before_financial_use(self):
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("hostile Decimal virtual dispatch")
+
+            def as_tuple(self):
+                raise AssertionError("hostile Decimal virtual dispatch")
+
+        with self.assertRaises(TypeError):
+            EquityState.create(
+                symbol="AAA",
+                quantity=HostileDecimal("1"),
+                total_basis="1",
+                settled_cash="1",
+                currency="USD",
+            )
+        with self.assertRaises(TypeError):
+            corporate_event(
+                event_id="hostile-payload",
+                kind="CASH_DIVIDEND",
+                effective_date=date(2026, 1, 2),
+                source_revision="r1",
+                payload={
+                    "per_share": HostileDecimal("1"),
+                    "currency": "USD",
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "resource envelope"):
+            EquityState.create(
+                symbol="AAA",
+                quantity="1" * 10000,
+                total_basis="1",
+                settled_cash="1",
+                currency="USD",
+            )
+
+    def test_text_and_temporal_subclasses_fail_before_virtual_dispatch(self):
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("text subclass dispatch")
+
+        class HostileDatetime(datetime):
+            def astimezone(self, *args, **kwargs):
+                raise AssertionError("datetime subclass dispatch")
+
+        class HostileTzinfo(tzinfo):
+            def utcoffset(self, dt):
+                raise AssertionError("tzinfo dispatch")
+
+            def dst(self, dt):
+                raise AssertionError("tzinfo dispatch")
+
+            def tzname(self, dt):
+                raise AssertionError("tzinfo dispatch")
+
+        with self.assertRaisesRegex(TypeError, "exact text"):
+            EquityState.create(
+                symbol=HostileText("AAA"),
+                quantity="1",
+                total_basis="1",
+                settled_cash="1",
+                currency="USD",
+            )
+
+        with self.assertRaisesRegex(ValueError, "exact datetime"):
+            corporate_event(
+                event_id="datetime-subclass",
+                kind="CASH_DIVIDEND",
+                effective_date=date(2026, 1, 2),
+                effective_at=HostileDatetime(
+                    2026,
+                    1,
+                    2,
+                    tzinfo=timezone.utc,
+                ),
+                source_revision="r1",
+                payload={"per_share": "1", "currency": "USD"},
+            )
+
+        hostile_tz = HostileTzinfo()
+        with self.assertRaisesRegex(ValueError, "fixed built-in timezone"):
+            corporate_event(
+                event_id="tzinfo-subclass",
+                kind="CASH_DIVIDEND",
+                effective_date=date(2026, 1, 2),
+                effective_at=datetime(
+                    2026,
+                    1,
+                    2,
+                    tzinfo=hostile_tz,
+                ),
+                source_revision="r1",
+                payload={"per_share": "1", "currency": "USD"},
+            )
+
+        with self.assertRaisesRegex(ValueError, "exact date"):
+            CorporateEvent.create(
+                event_id="date-subclass-through-datetime",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                kind="CASH_DIVIDEND",
+                effective_date=datetime(
+                    2026,
+                    1,
+                    2,
+                    tzinfo=timezone.utc,
+                ),
+                effective_at=datetime(
+                    2026,
+                    1,
+                    2,
+                    tzinfo=timezone.utc,
+                ),
+                source_revision="r1",
+                payload={"per_share": "1", "currency": "USD"},
+            )
+
+    def test_event_and_checkpoint_subclasses_fail_before_semantic_reads(self):
+        class HostileEvent(CorporateEvent):
+            def __getattribute__(self, name):
+                if name in {
+                    "event_id",
+                    "effective_date",
+                    "source_sequence",
+                    "instrument_id",
+                }:
+                    raise AssertionError("event subclass dispatch")
+                return super().__getattribute__(name)
+
+        base = corporate_event(
+            event_id="base-event",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 1, 2),
+            source_revision="r1",
+            payload={"per_share": "1", "currency": "USD"},
+        )
+        hostile = object.__new__(HostileEvent)
+        for key, value in base.__dict__.items():
+            object.__setattr__(hostile, key, value)
+
+        with self.assertRaisesRegex(TypeError, "exact CorporateEvent"):
+            bound_book(state()).apply(hostile)
+
+        current = instrument()
+        registry = InstrumentRegistry(versions=(current,))
+        with self.assertRaisesRegex(TypeError, "events must contain"):
+            CorporateActionBook.replay(
+                state(),
+                instrument_version=current,
+                registry=registry,
+                events=(hostile,),
+            )
+
+        checkpoint = bound_book(state()).checkpoint("base-checkpoint")
+
+        class HostileCheckpoint(CorporateActionCheckpoint):
+            def __getattribute__(self, name):
+                if name in {"state", "instrument_version", "records"}:
+                    raise AssertionError("checkpoint subclass dispatch")
+                return super().__getattribute__(name)
+
+        hostile_checkpoint = object.__new__(HostileCheckpoint)
+        for key, value in checkpoint.__dict__.items():
+            object.__setattr__(hostile_checkpoint, key, value)
+
+        with self.assertRaisesRegex(TypeError, "exact CorporateActionCheckpoint"):
+            CorporateActionBook.from_checkpoint(
+                hostile_checkpoint,
+                registry=registry,
+                events=(),
+            )
 
     def test_equity_currency_is_canonical_and_bound_to_instrument_settlement(self):
         canonical = state(currency=" usd ")

@@ -225,6 +225,79 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 permission_scope="ORDER.READ",
             )
 
+    def test_evidence_boundary_rejects_hostile_text_without_callbacks(self):
+        calls = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("hostile text callback executed")
+
+        source = sealed_dividend()
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "canonical non-empty text",
+        ):
+            resolve_authoritative_corporate_action(
+                HostileText(source.evidence_ref),
+                evidence_resolver={source.evidence_ref: source}.__getitem__,
+                instrument_registry=canonical_registry(),
+                expected_provider_id="BINANCE",
+                expected_account_id="acct-1",
+                expected_environment="PAPER",
+                allowed_endpoints=frozenset({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
+        self.assertEqual(calls, [])
+
+    def test_evidence_boundary_rejects_registry_subclass_before_dispatch(self):
+        calls = []
+
+        class HostileRegistry(InstrumentRegistry):
+            def __getattribute__(self, name):
+                calls.append(name)
+                raise AssertionError("hostile registry dispatched")
+
+        source = sealed_dividend()
+        with self.assertRaisesRegex(TypeError, "exact InstrumentRegistry"):
+            resolve_authoritative_corporate_action(
+                source.evidence_ref,
+                evidence_resolver={source.evidence_ref: source}.__getitem__,
+                instrument_registry=object.__new__(HostileRegistry),
+                expected_provider_id="BINANCE",
+                expected_account_id="acct-1",
+                expected_environment="PAPER",
+                allowed_endpoints=frozenset({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
+        self.assertEqual(calls, [])
+
+    def test_evidence_boundary_rejects_response_subclass_before_dispatch(self):
+        calls = []
+        source = sealed_dividend()
+
+        class HostileResponse(type(source)):
+            def __getattribute__(self, name):
+                calls.append(name)
+                raise AssertionError("hostile response dispatched")
+
+        hostile = object.__new__(HostileResponse)
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "exact sealed ProviderResponseObservation",
+        ):
+            resolve_authoritative_corporate_action(
+                source.evidence_ref,
+                evidence_resolver=lambda _ref: hostile,
+                instrument_registry=canonical_registry(),
+                expected_provider_id="BINANCE",
+                expected_account_id="acct-1",
+                expected_environment="PAPER",
+                allowed_endpoints=frozenset({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
+        self.assertEqual(calls, [])
+
     def test_expected_provider_account_environment_scope_is_authoritative(self):
         source = sealed_dividend()
         for field, value in (
@@ -416,12 +489,14 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
         revision="1",
         observed_offset=2,
         corrects=None,
+        kind="CASH_DIVIDEND",
     ):
         source = sealed_dividend(
             external_event_id=external_event_id,
             revision=revision,
             observed_offset=observed_offset,
             corrects=corrects,
+            kind=kind,
         )
         return resolve(source)
 
@@ -461,6 +536,44 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
             self.assertEqual(
                 events[0]["payload"]["provenance_digest"],
                 accepted.provenance_digest,
+            )
+
+    def test_manually_reconstructed_authoritative_action_is_not_durable_authority(self):
+        accepted = self._accepted()
+        forged = type(accepted)(**accepted.__dict__)
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict,
+                "not issued by the sealed resolver",
+            ):
+                durable.record(forged)
+            self.assertEqual(
+                journal.load_events(
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
+
+    def test_resolved_authoritative_action_cannot_be_mutated_before_durable_use(self):
+        accepted = self._accepted()
+        object.__setattr__(accepted, "provider_revision", "forged-revision")
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict,
+                "changed after sealed resolution",
+            ):
+                durable.record(accepted)
+            self.assertEqual(
+                journal.load_events(
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
             )
 
     def test_durable_scope_mismatch_fails_before_journal_mutation(self):
@@ -596,22 +709,12 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
             corrects="corp-1",
         )
 
-        changed_event = CorporateEvent.create(
-            event_id=correction.event.event_id,
-            instrument_id=correction.event.instrument_id,
-            instrument_version=correction.event.instrument_version,
+        changed = self._accepted(
+            external_event_id="corp-2",
+            revision="2",
+            observed_offset=3,
+            corrects="corp-1",
             kind="SPLIT",
-            effective_date=correction.event.effective_date,
-            effective_at=correction.event.effective_at,
-            source_revision=correction.event.source_revision,
-            source_sequence=correction.event.source_sequence,
-            payload={"numerator": "2", "denominator": "1"},
-        )
-        changed = type(correction)(
-            **{
-                **correction.__dict__,
-                "event": changed_event,
-            }
         )
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

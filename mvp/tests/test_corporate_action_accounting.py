@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,6 +11,7 @@ from mvp.autotrade_mvp.corporate_action_accounting import (
     commit_authoritative_corporate_action,
 )
 from mvp.autotrade_mvp.corporate_action_evidence import (
+    CorporateActionEvidenceConflict,
     CorporateActionObservation,
     DurableCorporateActionEvidenceStore,
     resolve_authoritative_corporate_action,
@@ -98,7 +99,7 @@ def resolve_action(source, *, corrects=None):
     )
 
 
-def pure_book(*, quantity="10"):
+def pure_book(*, quantity="10", unsettled_cash="0"):
     current = canonical_instrument()
     return CorporateActionBook(
         EquityState.create(
@@ -106,7 +107,7 @@ def pure_book(*, quantity="10"):
             quantity=quantity,
             total_basis="1000",
             settled_cash="1000",
-            unsettled_cash="0",
+            unsettled_cash=unsettled_cash,
             currency="USDT",
         ),
         instrument_version=current,
@@ -203,6 +204,49 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                 )
             self.assertEqual(calls, [])
 
+    def test_financial_entry_rejects_mutated_authority_before_field_callbacks(self):
+        calls = []
+
+        class HostileText(str):
+            def replace(self, *args, **kwargs):
+                calls.append("replace")
+                raise AssertionError("hostile observed_at callback executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            accepted = resolve_action(sealed_action())
+            object.__setattr__(
+                accepted,
+                "observed_at",
+                HostileText(accepted.observed_at),
+            )
+            durable_evidence = evidence_store(store)
+            economics = economic_book(store)
+            transaction_count = len(economics.transactions)
+
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict,
+                "observed_at is non-canonical",
+            ):
+                commit_authoritative_corporate_action(
+                    store=store,
+                    evidence_store=durable_evidence,
+                    economic_book=economics,
+                    corporate_book=pure_book(),
+                    accepted=accepted,
+                )
+
+            self.assertEqual(calls, [])
+            self.assertEqual(len(economics.transactions), transaction_count)
+            self.assertEqual(
+                JournalStore.load_events(
+                    store,
+                    "corporate_action_evidence",
+                    durable_evidence.aggregate_id,
+                ),
+                [],
+            )
+
     def test_sealed_dividend_source_and_economics_commit_together(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
@@ -238,6 +282,85 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                 1,
             )
             self.assertEqual(len(economics.transactions), 2)
+
+    def test_dividend_financial_path_is_invariant_to_decimal_context(self):
+        expected_quantity = Decimal("1234567891.0")
+        expected_cash = Decimal("1234567891.4")
+        expected_income = Decimal("-1234567891.0")
+
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with TemporaryDirectory() as directory:
+                        store = JournalStore(Path(directory) / "journal.sqlite3")
+                        economics = DurableProviderEconomicBook(
+                            store,
+                            provider_id="BINANCE",
+                            account_id="acct-1",
+                            environment="PAPER",
+                        )
+                        for index, quantity in enumerate(
+                            ("1234567890.1", "0.9"),
+                            start=1,
+                        ):
+                            economics.append(
+                                book_equity_fill(
+                                    transaction_id=f"context-position-{index}",
+                                    cause_event_id=f"provider-fill:context-position-{index}",
+                                    instrument="BTCUSDT",
+                                    settlement_currency="USDT",
+                                    side="BUY",
+                                    quantity=quantity,
+                                    price="1",
+                                    economic_effective_at=(
+                                        READ_NOW - timedelta(minutes=4 - index)
+                                    ).isoformat().replace("+00:00", "Z"),
+                                    economic_order_key=(
+                                        f"provider:BINANCE:execution:context-position-{index}"
+                                    ),
+                                    observed_at=(
+                                        READ_NOW - timedelta(minutes=2 - index)
+                                    ).isoformat().replace("+00:00", "Z"),
+                                )
+                            )
+
+                        accepted = resolve_action(sealed_action(per_share="1"))
+                        with localcontext() as context:
+                            context.prec = precision
+                            context.rounding = rounding
+                            result = commit_authoritative_corporate_action(
+                                store=store,
+                                evidence_store=evidence_store(store),
+                                economic_book=economics,
+                                corporate_book=pure_book(
+                                    quantity=str(expected_quantity),
+                                    unsettled_cash="0.4",
+                                ),
+                                accepted=accepted,
+                            )
+
+                        self.assertEqual(
+                            result.next_state.quantity,
+                            expected_quantity,
+                        )
+                        self.assertEqual(
+                            result.next_state.unsettled_cash,
+                            expected_cash,
+                        )
+                        self.assertEqual(
+                            economics.balance(
+                                "UNSETTLED_CASH:USDT",
+                                "USDT",
+                            ),
+                            expected_quantity,
+                        )
+                        self.assertEqual(
+                            economics.balance(
+                                "CORPORATE_ACTION_INCOME:USDT",
+                                "USDT",
+                            ),
+                            expected_income,
+                        )
 
     def test_prepared_evidence_does_not_mutate_until_shared_commit(self):
         with TemporaryDirectory() as directory:

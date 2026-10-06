@@ -92,7 +92,12 @@ class CorporateActionEvidenceError(ValueError):
 
 
 def _text(value: object, name: str) -> str:
-    if not isinstance(value, str) or not value.strip() or value != value.strip():
+    if type(value) is not str:
+        raise CorporateActionEvidenceError(
+            f"{name} must be canonical non-empty text"
+        )
+    normalized = str.strip(value)
+    if not normalized or value != normalized:
         raise CorporateActionEvidenceError(
             f"{name} must be canonical non-empty text"
         )
@@ -371,7 +376,7 @@ class AuthoritativeCorporateAction:
 EvidenceResolver = Callable[[str], ProviderResponseObservation]
 
 
-def resolve_authoritative_corporate_action(
+def _resolve_authoritative_corporate_action_unsealed(
     evidence_ref: str,
     *,
     evidence_resolver: EvidenceResolver,
@@ -394,8 +399,8 @@ def resolve_authoritative_corporate_action(
     reference = _text(evidence_ref, "evidence_ref")
     if not callable(evidence_resolver):
         raise TypeError("evidence_resolver must be callable")
-    if not isinstance(instrument_registry, InstrumentRegistry):
-        raise TypeError("instrument_registry must be InstrumentRegistry")
+    if type(instrument_registry) is not InstrumentRegistry:
+        raise TypeError("instrument_registry must be exact InstrumentRegistry")
     if normalizer is not None:
         raise TypeError(
             "caller-supplied corporate-action normalizer is not financial authority"
@@ -415,8 +420,8 @@ def resolve_authoritative_corporate_action(
         raise CorporateActionEvidenceError(
             "expected_environment must be canonical"
         )
-    if not isinstance(allowed_endpoints, frozenset) or not allowed_endpoints:
-        raise TypeError("allowed_endpoints must be a non-empty frozenset")
+    if type(allowed_endpoints) is not frozenset or not allowed_endpoints:
+        raise TypeError("allowed_endpoints must be an exact non-empty frozenset")
     endpoints = frozenset(
         _text(value, "allowed endpoint") for value in allowed_endpoints
     )
@@ -435,9 +440,9 @@ def resolve_authoritative_corporate_action(
         raise CorporateActionEvidenceError(
             "corporate-action evidence could not be resolved"
         ) from error
-    if not isinstance(source, ProviderResponseObservation):
+    if type(source) is not ProviderResponseObservation:
         raise CorporateActionEvidenceError(
-            "corporate-action evidence must be a sealed ProviderResponseObservation"
+            "corporate-action evidence must be an exact sealed ProviderResponseObservation"
         )
     if source.evidence_ref != reference:
         raise CorporateActionEvidenceError(
@@ -579,6 +584,228 @@ def resolve_authoritative_corporate_action(
         provenance_digest=provenance_digest,
         corrects_external_event_id=observation.corrects_external_event_id,
     )
+
+
+def _authoritative_corporate_action_authority():
+    """Retain resolver issuance and immutable snapshots outside caller-writable state."""
+
+    seals: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+    seal_lock = threading.RLock()
+
+    def event_snapshot(event: CorporateEvent) -> tuple[object, ...]:
+        if type(event) is not CorporateEvent:
+            raise TypeError(
+                "authoritative corporate action event must be exact CorporateEvent"
+            )
+        state = object.__getattribute__(event, "__dict__")
+        expected = {
+            "event_id",
+            "instrument_id",
+            "instrument_version",
+            "kind",
+            "effective_date",
+            "source_revision",
+            "payload",
+            "source_sequence",
+            "effective_at",
+        }
+        if type(state) is not dict or set(state) != expected:
+            raise CorporateActionEvidenceConflict(
+                "authoritative corporate action event state is non-canonical"
+            )
+        payload = state["payload"]
+        if type(payload) is not MappingProxyType:
+            raise CorporateActionEvidenceConflict(
+                "authoritative corporate action payload is not sealed"
+            )
+        payload_items = tuple(sorted(payload.items()))
+        if any(
+            type(key) is not str or type(value) is not str
+            for key, value in payload_items
+        ):
+            raise CorporateActionEvidenceConflict(
+                "authoritative corporate action payload is non-canonical"
+            )
+        detached = CorporateEvent.create(
+            event_id=state["event_id"],
+            instrument_id=state["instrument_id"],
+            instrument_version=state["instrument_version"],
+            kind=state["kind"],
+            effective_date=state["effective_date"],
+            source_revision=state["source_revision"],
+            payload=dict(payload_items),
+            source_sequence=state["source_sequence"],
+            effective_at=state["effective_at"],
+        )
+        return (
+            detached.event_id,
+            detached.instrument_id,
+            detached.instrument_version,
+            detached.kind,
+            detached.effective_date,
+            detached.source_revision,
+            tuple(sorted(detached.payload.items())),
+            detached.source_sequence,
+            detached.effective_at,
+        )
+
+    def snapshot(value: AuthoritativeCorporateAction) -> tuple[object, ...]:
+        if type(value) is not AuthoritativeCorporateAction:
+            raise TypeError(
+                "accepted must be canonical AuthoritativeCorporateAction"
+            )
+        state = object.__getattribute__(value, "__dict__")
+        expected = {
+            "event",
+            "evidence_ref",
+            "provider_id",
+            "account_id",
+            "environment",
+            "external_event_id",
+            "provider_revision",
+            "raw_evidence_digest",
+            "query_digest",
+            "capability_snapshot_id",
+            "provider_instrument_version",
+            "observed_at",
+            "provenance_digest",
+            "corrects_external_event_id",
+        }
+        if type(state) is not dict or set(state) != expected:
+            raise CorporateActionEvidenceConflict(
+                "authoritative corporate action state is non-canonical"
+            )
+        string_fields = (
+            "evidence_ref",
+            "provider_id",
+            "account_id",
+            "environment",
+            "external_event_id",
+            "provider_revision",
+            "raw_evidence_digest",
+            "query_digest",
+            "capability_snapshot_id",
+            "provider_instrument_version",
+            "observed_at",
+            "provenance_digest",
+        )
+        values: list[object] = [event_snapshot(state["event"])]
+        for name in string_fields:
+            value_part = state[name]
+            if type(value_part) is not str:
+                raise CorporateActionEvidenceConflict(
+                    f"authoritative corporate action {name} is non-canonical"
+                )
+            values.append(value_part)
+        correction = state["corrects_external_event_id"]
+        if correction is not None and type(correction) is not str:
+            raise CorporateActionEvidenceConflict(
+                "authoritative corporate action correction identity is non-canonical"
+            )
+        values.append(correction)
+        return tuple(values)
+
+    def restore(sealed: tuple[object, ...]) -> AuthoritativeCorporateAction:
+        event_data = sealed[0]
+        assert type(event_data) is tuple
+        event = CorporateEvent.create(
+            event_id=event_data[0],
+            instrument_id=event_data[1],
+            instrument_version=event_data[2],
+            kind=event_data[3],
+            effective_date=event_data[4],
+            source_revision=event_data[5],
+            payload=dict(event_data[6]),
+            source_sequence=event_data[7],
+            effective_at=event_data[8],
+        )
+        return AuthoritativeCorporateAction(
+            event=event,
+            evidence_ref=sealed[1],
+            provider_id=sealed[2],
+            account_id=sealed[3],
+            environment=sealed[4],
+            external_event_id=sealed[5],
+            provider_revision=sealed[6],
+            raw_evidence_digest=sealed[7],
+            query_digest=sealed[8],
+            capability_snapshot_id=sealed[9],
+            provider_instrument_version=sealed[10],
+            observed_at=sealed[11],
+            provenance_digest=sealed[12],
+            corrects_external_event_id=sealed[13],
+        )
+
+    def prune_dead() -> None:
+        dead = [key for key, state in seals.items() if state[0]() is None]
+        for key in dead:
+            seals.pop(key, None)
+
+    def register(value: AuthoritativeCorporateAction) -> AuthoritativeCorporateAction:
+        sealed = snapshot(value)
+        with seal_lock:
+            prune_dead()
+            object_id = id(value)
+            existing = seals.get(object_id)
+            if existing is not None and existing[0]() is not None:
+                raise CorporateActionEvidenceConflict(
+                    "authoritative corporate action issuance identity collision"
+                )
+            seals[object_id] = (weakref.ref(value), sealed)
+        return value
+
+    def resolve(
+        evidence_ref: str,
+        *,
+        evidence_resolver: EvidenceResolver,
+        instrument_registry: InstrumentRegistry,
+        expected_provider_id: str,
+        expected_account_id: str,
+        expected_environment: str,
+        allowed_endpoints: frozenset[str],
+        permission_scope: str,
+        normalizer: object | None = None,
+        instrument_resolver: object | None = None,
+    ) -> AuthoritativeCorporateAction:
+        value = _resolve_authoritative_corporate_action_unsealed(
+            evidence_ref,
+            evidence_resolver=evidence_resolver,
+            instrument_registry=instrument_registry,
+            expected_provider_id=expected_provider_id,
+            expected_account_id=expected_account_id,
+            expected_environment=expected_environment,
+            allowed_endpoints=allowed_endpoints,
+            permission_scope=permission_scope,
+            normalizer=normalizer,
+            instrument_resolver=instrument_resolver,
+        )
+        return register(value)
+
+    def require(
+        value: AuthoritativeCorporateAction,
+    ) -> AuthoritativeCorporateAction:
+        current = snapshot(value)
+        with seal_lock:
+            state = seals.get(id(value))
+            if state is None or state[0]() is not value:
+                raise CorporateActionEvidenceConflict(
+                    "authoritative corporate action was not issued by the sealed resolver"
+                )
+            sealed = state[1]
+        if current != sealed:
+            raise CorporateActionEvidenceConflict(
+                "authoritative corporate action changed after sealed resolution"
+            )
+        return restore(sealed)
+
+    return resolve, require
+
+
+(
+    resolve_authoritative_corporate_action,
+    require_authoritative_corporate_action,
+) = _authoritative_corporate_action_authority()
+del _authoritative_corporate_action_authority
 
 
 
@@ -910,6 +1137,7 @@ class DurableCorporateActionEvidenceStore:
 
         if type(accepted) is not AuthoritativeCorporateAction:
             raise TypeError("accepted must be canonical AuthoritativeCorporateAction")
+        accepted = require_authoritative_corporate_action(accepted)
         _, _, provider_id, account_id, environment, aggregate_id = (
             DurableCorporateActionEvidenceStore._composition(self)
         )

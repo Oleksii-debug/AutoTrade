@@ -29,8 +29,15 @@ from .corporate_action_evidence import (
     AuthoritativeCorporateAction,
     CorporateActionEvidenceConflict,
     DurableCorporateActionEvidenceStore,
+    require_authoritative_corporate_action,
 )
 from .corporate_actions import CorporateActionBook, CorporateEvent, EquityState, Transition
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    exact_subtract,
+    exact_sum,
+)
 from .persistence import (
     JournalStore,
     canonical_json,
@@ -64,6 +71,14 @@ def _transaction_id(accepted: AuthoritativeCorporateAction, suffix: str) -> str:
         accepted.provenance_digest,
         suffix,
     )
+
+
+def _exact_utc_instant(value: datetime, *, name: str) -> datetime:
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise TypeError(
+            f"{name} must be an exact datetime with a fixed built-in timezone"
+        )
+    return datetime.astimezone(value, timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -123,12 +138,10 @@ def _canonical_entitlement_position_proof(
             "corporate-action entitlement requires exact economic effective cut"
         )
 
-    if (
-        not isinstance(activation_cut, datetime)
-        or activation_cut.tzinfo is None
-        or activation_cut.utcoffset() is None
-    ):
-        raise TypeError("activation_cut must be timezone-aware")
+    observed_cut = _exact_utc_instant(
+        activation_cut,
+        name="activation_cut",
+    )
     if (
         type(source_journal_sequence) is not int
         or source_journal_sequence < 0
@@ -136,10 +149,9 @@ def _canonical_entitlement_position_proof(
         raise TypeError(
             "source_journal_sequence must be a non-negative integer"
         )
-    observed_cut = activation_cut.astimezone(timezone.utc)
     symbol = version.provider_symbol
     position_account = f"POSITION:{symbol}"
-    quantity = Decimal("0")
+    position_amounts: list[Decimal] = []
     contributors: list[dict[str, str]] = []
 
     economic_book.refresh()
@@ -171,9 +183,8 @@ def _canonical_entitlement_position_proof(
                 "canonical position history contains invalid entitlement timestamps"
             ) from error
         if effective <= event.effective_at and observed <= observed_cut:
-            quantity += sum(
-                (posting.signed_amount for posting in position_postings),
-                Decimal("0"),
+            position_amounts.extend(
+                posting.signed_amount for posting in position_postings
             )
             contributors.append(
                 {
@@ -181,6 +192,18 @@ def _canonical_entitlement_position_proof(
                     "transaction_digest": transaction_digest(transaction),
                 }
             )
+
+    try:
+        quantity = (
+            exact_sum(position_amounts)
+            if position_amounts
+            else Decimal("0")
+        )
+        quantity_text = canonical_decimal_text(quantity)
+    except ExactDecimalError as error:
+        raise AccountingConflict(
+            "corporate-action entitlement position exceeds exact arithmetic resource envelope"
+        ) from error
 
     if quantity != corporate_book.state.quantity:
         raise AccountingConflict(
@@ -200,7 +223,7 @@ def _canonical_entitlement_position_proof(
         "causal_observed_cut": observed_cut.isoformat().replace(
             "+00:00", "Z"
         ),
-        "quantity": str(quantity),
+        "quantity": quantity_text,
         "contributing_transactions": contributors,
     }
     proof["digest"] = payload_digest(proof)
@@ -266,7 +289,16 @@ def _dividend_transaction(
     economic_effective_at: str | None = None,
     observed_at: str | None = None,
 ) -> JournalTransaction | None:
-    amount = transition.after.unsettled_cash - transition.before.unsettled_cash
+    try:
+        amount = exact_subtract(
+            transition.after.unsettled_cash,
+            transition.before.unsettled_cash,
+        )
+        opposite_amount = exact_subtract(Decimal("0"), amount)
+    except ExactDecimalError as error:
+        raise AccountingConflict(
+            "corporate-action dividend delta exceeds exact arithmetic resource envelope"
+        ) from error
     if amount == 0:
         return None
     currency = transition.after.currency
@@ -280,7 +312,11 @@ def _dividend_transaction(
         ),
         postings=(
             Posting(f"UNSETTLED_CASH:{currency}", currency, amount),
-            Posting(f"CORPORATE_ACTION_INCOME:{currency}", currency, -amount),
+            Posting(
+                f"CORPORATE_ACTION_INCOME:{currency}",
+                currency,
+                opposite_amount,
+            ),
         ),
         economic_effective_at=(
             economic_effective_at
@@ -495,6 +531,8 @@ def commit_authoritative_corporate_action(
         raise TypeError(
             "accepted must be exact AuthoritativeCorporateAction from sealed provider evidence"
         )
+    issued_accepted = accepted
+    accepted = require_authoritative_corporate_action(issued_accepted)
     (
         evidence_journal,
         _,
@@ -523,11 +561,11 @@ def commit_authoritative_corporate_action(
             "durable corporate-action accounting requires exact effective_at"
         )
 
-    cut = activation_at
-    if cut is not None:
-        if not isinstance(cut, datetime) or cut.tzinfo is None:
-            raise TypeError("activation_at must be timezone-aware")
-        cut = cut.astimezone(timezone.utc)
+    cut = (
+        None
+        if activation_at is None
+        else _exact_utc_instant(activation_at, name="activation_at")
+    )
     activation_cut = observed_at if observed_at >= effective_at else cut
 
     if activation_cut is None or activation_cut < effective_at:
@@ -535,7 +573,7 @@ def commit_authoritative_corporate_action(
         # causal provider truth without making a future-effective posting visible.
         retained = DurableCorporateActionEvidenceStore.record(
             evidence_store,
-            accepted,
+            issued_accepted,
         )
         return CorporateActionFinancialResult(
             inserted=retained.inserted,
@@ -549,7 +587,7 @@ def commit_authoritative_corporate_action(
 
     evidence_plan = DurableCorporateActionEvidenceStore.prepare_record_mutation(
         evidence_store,
-        accepted,
+        issued_accepted,
     )
     candidate, transition = _candidate_book(corporate_book, accepted)
     activation_text = activation_cut.isoformat().replace("+00:00", "Z")
@@ -606,7 +644,7 @@ def commit_authoritative_corporate_action(
     # the same attempted journal state.  Any later advance is rejected by CAS.
     evidence_plan = DurableCorporateActionEvidenceStore.prepare_record_mutation(
         evidence_store,
-        accepted,
+        issued_accepted,
     )
     candidate, transition = _candidate_book(corporate_book, accepted)
     transactions = _economic_transactions(
@@ -748,4 +786,3 @@ def commit_authoritative_corporate_action(
         transaction_ids=tuple(item.transaction_id for item in transactions),
         economically_active=True,
     )
-

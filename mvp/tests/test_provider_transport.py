@@ -5,6 +5,7 @@ import json
 from io import BytesIO
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
+import urllib.request as urllib_request
 from urllib.request import ProxyHandler
 import subprocess
 import sys
@@ -34,6 +35,7 @@ from mvp.autotrade_mvp.dispatch import (
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_core import (
     AuthenticatedReadQueryBinding,
+    ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
@@ -43,6 +45,7 @@ from mvp.autotrade_mvp.provider_transport import (
     BINANCE_SPOT_ENDPOINT_POLICIES,
     AuthenticatedReadHttpRequest,
     AuthenticatedReadWireResponse,
+    DirectAuthenticatedReadExecutionReceipt,
     AlpacaTradingHttpTransport,
     BinanceSpotAuthenticatedReadSigner,
     BinanceSpotAuthenticatedReadTransport,
@@ -51,9 +54,18 @@ from mvp.autotrade_mvp.provider_transport import (
     ProviderEndpointPolicy,
     ProviderTransportError,
     ProviderTransportScopeError,
+    DirectTradingWriteExecutionReceipt,
     TradingWireResponse,
     SignedHttpRequest,
     UrllibJsonWireClient,
+    direct_authenticated_read_execution_receipt,
+    direct_authenticated_read_execution_receipt_snapshot,
+    direct_authenticated_read_network_policy_identity,
+    direct_authenticated_read_observation_receipt,
+    direct_authenticated_read_transport_identity,
+    direct_trading_write_execution_receipt,
+    direct_trading_write_exact_response_receipt,
+    require_direct_trading_write_client,
     _exact_trading_response,
     _bybit_exact_trading_response,
     _binance_exact_trading_response,
@@ -4577,6 +4589,300 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
             body=b"{}",
             timeout_seconds=2,
         )
+
+    @staticmethod
+    def authenticated_read_request():
+        return AuthenticatedReadHttpRequest(
+            url="https://api.example.test/read?category=linear",
+            headers={"X-API-KEY": "synthetic"},
+            timeout_seconds=2,
+        )
+
+    def test_direct_authenticated_read_receipt_constructor_is_sealed(self):
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "minted only by canonical wire execution",
+        ):
+            DirectAuthenticatedReadExecutionReceipt()
+
+    def test_direct_authenticated_read_transport_identity_is_explicit(self):
+        self.assertEqual(
+            direct_authenticated_read_transport_identity(),
+            "autotrade.provider_transport.UrllibJsonWireClient:"
+            "direct-authenticated-read:v1",
+        )
+        policy = direct_authenticated_read_network_policy_identity()
+        self.assertTrue(policy.startswith("sha256:"))
+        self.assertEqual(len(policy), 71)
+
+    def test_forged_authenticated_read_receipt_has_no_execution_authority(self):
+        response = AuthenticatedReadWireResponse(
+            http_status=200,
+            body=b'{"ok":true}',
+        )
+        forged = object.__new__(DirectAuthenticatedReadExecutionReceipt)
+        object.__setattr__(
+            response,
+            "_direct_authenticated_read_execution_receipt",
+            forged,
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "construction authority is unavailable",
+        ):
+            direct_authenticated_read_execution_receipt(response)
+
+    def test_caller_assembled_authenticated_read_response_has_no_direct_receipt(self):
+        response = AuthenticatedReadWireResponse(
+            http_status=200,
+            body=b'{"ok":true}',
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "canonical direct authenticated-read execution receipt",
+        ):
+            direct_authenticated_read_execution_receipt(response)
+
+    def test_injected_opener_read_response_cannot_mint_direct_receipt(self):
+        class Stream(BytesIO):
+            status = 200
+
+            def __init__(self):
+                super().__init__(b'{"ok":true}')
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class InjectedOpener:
+            def open(self, *_args, **_kwargs):
+                return Stream()
+
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        client._opener = InjectedOpener()
+        response = client.send(self.authenticated_read_request())
+        self.assertIs(type(response), AuthenticatedReadWireResponse)
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "canonical direct authenticated-read execution receipt",
+        ):
+            direct_authenticated_read_execution_receipt(response)
+
+    def test_forged_read_receipt_snapshot_is_rejected(self):
+        forged = object.__new__(DirectAuthenticatedReadExecutionReceipt)
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "construction authority is unavailable",
+        ):
+            direct_authenticated_read_execution_receipt_snapshot(forged)
+
+    def test_plain_provider_observation_has_no_direct_wire_authority(self):
+        query = authenticated_read_binding()
+        observation = observe_authenticated_json_response(
+            query_binding=query,
+            http_status=200,
+            response_bytes=b'{"ok":true}',
+            observed_at=READ_NOW + timedelta(seconds=1),
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "lacks direct authenticated-read wire authority",
+        ):
+            direct_authenticated_read_observation_receipt(observation)
+
+    def test_forged_provider_observation_cannot_gain_direct_wire_authority(self):
+        query = authenticated_read_binding()
+        canonical = observe_authenticated_json_response(
+            query_binding=query,
+            http_status=200,
+            response_bytes=b'{"ok":true}',
+            observed_at=READ_NOW + timedelta(seconds=1),
+        )
+        forged = object.__new__(ProviderResponseObservation)
+        for field in (
+            "query_binding",
+            "observed_at",
+            "http_status",
+            "response_sha256",
+            "evidence_ref",
+            "payload",
+        ):
+            object.__setattr__(forged, field, object.__getattribute__(canonical, field))
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "canonical provider response observation authority is unavailable",
+        ):
+            direct_authenticated_read_observation_receipt(forged)
+
+    def test_direct_trading_write_receipt_constructor_is_sealed(self):
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "minted only by canonical wire execution",
+        ):
+            DirectTradingWriteExecutionReceipt()
+
+    def test_canonical_direct_trading_client_is_registered_without_network_io(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        self.assertIs(require_direct_trading_write_client(client), client)
+
+    def test_replaced_opener_loses_direct_trading_write_authority_before_io(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        client._opener = object()
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "network authority changed",
+        ):
+            require_direct_trading_write_client(client)
+
+    def test_network_method_rebinding_loses_direct_trading_write_authority(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        with patch(
+            "mvp.autotrade_mvp.provider_transport.HTTPSHandler.https_open",
+            new=lambda *_args, **_kwargs: self.fail("patched network method executed"),
+        ):
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "network authority changed",
+            ):
+                require_direct_trading_write_client(client)
+
+    def test_https_connection_rebinding_loses_direct_write_authority_before_io(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        with patch.object(
+            urllib_request.http.client,
+            "HTTPSConnection",
+            new=object,
+        ):
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "network authority changed",
+            ):
+                require_direct_trading_write_client(client)
+
+    def test_https_connection_method_rebinding_loses_direct_write_authority(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        connection_type = urllib_request.http.client.HTTPSConnection
+        with patch.object(
+            connection_type,
+            "connect",
+            new=lambda *_args, **_kwargs: self.fail(
+                "rebound HTTPS connection executed"
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "network authority changed",
+            ):
+                require_direct_trading_write_client(client)
+
+    def test_socket_connection_rebinding_loses_direct_write_authority_before_io(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        with patch.object(
+            urllib_request.http.client.socket,
+            "create_connection",
+            new=lambda *_args, **_kwargs: self.fail(
+                "rebound socket connector executed"
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "network authority changed",
+            ):
+                require_direct_trading_write_client(client)
+
+    def test_default_tls_context_rebinding_loses_direct_write_authority_before_io(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        with patch.object(
+            urllib_request.http.client.ssl,
+            "_create_default_https_context",
+            new=lambda *_args, **_kwargs: self.fail(
+                "rebound TLS context factory executed"
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "network authority changed",
+            ):
+                require_direct_trading_write_client(client)
+
+    def test_signed_request_verifier_rebinding_fails_without_hostile_dispatch(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        calls = 0
+
+        def hostile_verifier(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("hostile signed-request verifier executed")
+
+        with patch(
+            "mvp.autotrade_mvp.provider_transport._require_signed_http_request",
+            new=hostile_verifier,
+        ):
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "network authority changed",
+            ):
+                require_direct_trading_write_client(client)
+        self.assertEqual(calls, 0)
+
+    def test_forged_write_receipt_on_local_response_has_no_execution_authority(self):
+        response = TradingWireResponse(
+            http_status=200,
+            body=b'{"ok":true}',
+        )
+        forged = object.__new__(DirectTradingWriteExecutionReceipt)
+        object.__setattr__(
+            response,
+            "_direct_trading_write_execution_receipt",
+            forged,
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "construction authority is unavailable",
+        ):
+            direct_trading_write_execution_receipt(response)
+
+    def test_injected_opener_write_response_cannot_mint_direct_receipt(self):
+        class Stream(BytesIO):
+            status = 200
+
+            def __init__(self):
+                super().__init__(b'{"ok":true}')
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class InjectedOpener:
+            def open(self, *_args, **_kwargs):
+                return Stream()
+
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        client._opener = InjectedOpener()
+        response = client.send(self.request())
+        self.assertIs(type(response), TradingWireResponse)
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "canonical direct trading-write execution receipt",
+        ):
+            direct_trading_write_execution_receipt(response)
+
+    def test_caller_assembled_exact_response_has_no_direct_write_authority(self):
+        exact = _bybit_exact_trading_response(
+            TradingWireResponse(
+                http_status=200,
+                body=b'{"retCode":0,"retMsg":"OK","result":{}}',
+            )
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "lacks direct trading-write execution authority",
+        ):
+            direct_trading_write_exact_response_receipt(exact)
 
     def test_production_client_disables_ambient_process_os_proxy_discovery(self):
         with patch("mvp.autotrade_mvp.provider_transport.build_opener") as factory:

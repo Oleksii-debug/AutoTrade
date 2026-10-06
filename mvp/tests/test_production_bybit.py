@@ -10,9 +10,17 @@ import unittest
 
 from mvp.autotrade_mvp import production_host
 from mvp.autotrade_mvp.authority import AuthorityService
-from mvp.autotrade_mvp.bybit_v5 import guarded_order_projection, prepare_order_submission
+from mvp.autotrade_mvp.bybit_v5 import (
+    guarded_order_projection,
+    guarded_order_request_sha256,
+    parse_submission_response,
+    prepare_order_submission,
+)
 from mvp.autotrade_mvp.capabilities import CapabilityRegistry
-from mvp.autotrade_mvp.dispatch import stable_client_order_id
+from mvp.autotrade_mvp.dispatch import (
+    load_submission_response_binding,
+    stable_client_order_id,
+)
 from mvp.autotrade_mvp.durable_financial_bybit_sender import (
     DurableFinanciallyBoundBybitOrderSender,
 )
@@ -33,7 +41,8 @@ from mvp.autotrade_mvp.production_bybit import (
 )
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
-from mvp.autotrade_mvp.provider_transport import ProviderTransportScopeError
+from mvp.autotrade_mvp.provider_core import observe_submission_json_response
+from mvp.autotrade_mvp.provider_transport import ProviderTransportScopeError, TradingWireResponse
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.security import SecurityBoundary
@@ -53,13 +62,17 @@ class _FenceStub:
 
 
 class _RecordingWire:
-    def __init__(self, response: bytes) -> None:
+    def __init__(self, response: bytes, *, http_status: int = 200) -> None:
         self.response = response
+        self.http_status = http_status
         self.requests = []
 
     def send(self, request):
         self.requests.append(request)
-        return self.response
+        return TradingWireResponse(
+            http_status=self.http_status,
+            body=self.response,
+        )
 
 
 class ProductionBybitCurrentHostTests(unittest.TestCase):
@@ -123,6 +136,8 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
         capability_snapshot_id: str = "capability-1",
         wire_client=None,
         session_token: str = "session-1",
+        quota_gate=None,
+        clock_utc=None,
     ) -> ProductionBybitOrderSender:
         return _build_production_bybit_order_sender(
             runtime,
@@ -132,7 +147,8 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             credential_handle=credential_handle or self._handle(),
             session_token=session_token,
             clock_millis=lambda: 1_700_000_000_000,
-            clock_utc=lambda: _NOW,
+            clock_utc=clock_utc or (lambda: _NOW),
+            quota_gate=quota_gate,
             wire_client=wire_client,
         )
 
@@ -411,6 +427,558 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
                 before,
             )
 
+    def test_successful_quota_wait_emits_exactly_one_wire_request(self) -> None:
+        with TemporaryDirectory() as root:
+            runtime, _host, _boundary = self._runtime(root)
+            capability = write_capability(
+                family="LINEAR_DERIVATIVES",
+                position_mode="HEDGE",
+                account_id="account-1",
+                environment="PAPER",
+                instrument_version="BTCUSDT@1",
+                permission_scope="BYBIT.LINEAR.ORDER.WRITE",
+                additional_permission_scopes=("ORDER_WRITE",),
+                provider_environment="TESTNET",
+                expires_at=_NOW + timedelta(minutes=5),
+            )
+            registry = CapabilityRegistry()
+            registry.add(capability)
+            quota_calls = 0
+            wire = _RecordingWire(
+                b'{"retCode":0,"retMsg":"OK","result":{"orderId":"quota-ok"}}'
+            )
+
+            def quota_gate(*_args):
+                nonlocal quota_calls
+                quota_calls += 1
+
+            sender = self._sender(
+                runtime,
+                capability_registry=registry,
+                capability_snapshot_id=capability.snapshot_id,
+                wire_client=wire,
+                quota_gate=quota_gate,
+            )
+            intent_id = "intent-quota-success"
+            client_order_id = stable_client_order_id(
+                "BYBIT",
+                intent_id,
+                environment="PAPER",
+                account_id="account-1",
+                max_length=36,
+                client_id_format="TOKEN",
+            )
+            prepared = prepare_order_submission(
+                capability=capability,
+                at=_NOW,
+                provider_environment="TESTNET",
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.001",
+                client_order_id=client_order_id,
+                time_in_force="GTC",
+                price="50000",
+                reduce_only=False,
+                position_side="LONG",
+                position_idx=1,
+            )
+            self._mark_ready(runtime)
+            dispatch_now = _NOW.isoformat().replace("+00:00", "Z")
+            outcome = sender.dispatch(
+                attempt_id="attempt-quota-success",
+                intent_id=intent_id,
+                intent_hash="sha256:" + "7" * 64,
+                request=guarded_order_projection(prepared),
+                now=dispatch_now,
+                authority_check=lambda *_args: (True, "allowed"),
+                final_barrier_clock=lambda: dispatch_now,
+                submission_scope={
+                    "endpoint": prepared.endpoint,
+                    "prepared_request_sha256": guarded_order_request_sha256(prepared),
+                    "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
+                    "instrument_versions": list(prepared.instrument_versions),
+                    "provider_environment": prepared.provider_environment,
+                },
+            )
+            self.assertEqual(outcome.status, "SENT")
+            self.assertEqual(outcome.client_order_id, client_order_id)
+            self.assertEqual(quota_calls, 1)
+            self.assertEqual(len(wire.requests), 1)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in runtime.journal.load_events_by_aggregate_type(
+                        "submission_attempt"
+                    )
+                ],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
+            )
+
+    def test_capability_expiry_during_quota_wait_is_zero_wire(self) -> None:
+        with TemporaryDirectory() as root:
+            runtime, _host, _boundary = self._runtime(root)
+            capability = write_capability(
+                family="LINEAR_DERIVATIVES",
+                position_mode="HEDGE",
+                account_id="account-1",
+                environment="PAPER",
+                instrument_version="BTCUSDT@1",
+                permission_scope="BYBIT.LINEAR.ORDER.WRITE",
+                additional_permission_scopes=("ORDER_WRITE",),
+                provider_environment="TESTNET",
+                expires_at=_NOW + timedelta(minutes=5),
+            )
+            registry = CapabilityRegistry()
+            registry.add(capability)
+            current = [_NOW]
+            quota_calls = 0
+            wire = _RecordingWire(
+                b'{"retCode":0,"retMsg":"OK","result":{"orderId":"never"}}'
+            )
+
+            def quota_gate(*_args):
+                nonlocal quota_calls
+                quota_calls += 1
+                current[0] = _NOW + timedelta(minutes=6)
+
+            sender = self._sender(
+                runtime,
+                capability_registry=registry,
+                capability_snapshot_id=capability.snapshot_id,
+                wire_client=wire,
+                quota_gate=quota_gate,
+                clock_utc=lambda: current[0],
+            )
+            intent_id = "intent-quota-expiry"
+            client_order_id = stable_client_order_id(
+                "BYBIT",
+                intent_id,
+                environment="PAPER",
+                account_id="account-1",
+                max_length=36,
+                client_id_format="TOKEN",
+            )
+            prepared = prepare_order_submission(
+                capability=capability,
+                at=_NOW,
+                provider_environment="TESTNET",
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.001",
+                client_order_id=client_order_id,
+                time_in_force="GTC",
+                price="50000",
+                reduce_only=False,
+                position_side="LONG",
+                position_idx=1,
+            )
+            self._mark_ready(runtime)
+            dispatch_now = _NOW.isoformat().replace("+00:00", "Z")
+
+            outcome = sender.dispatch(
+                attempt_id="attempt-quota-expiry",
+                intent_id=intent_id,
+                intent_hash="sha256:" + "3" * 64,
+                request=guarded_order_projection(prepared),
+                now=dispatch_now,
+                authority_check=lambda *_args: (True, "allowed"),
+                final_barrier_clock=lambda: dispatch_now,
+                submission_scope={
+                    "endpoint": prepared.endpoint,
+                    "prepared_request_sha256": guarded_order_request_sha256(prepared),
+                    "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
+                    "instrument_versions": list(prepared.instrument_versions),
+                    "provider_environment": prepared.provider_environment,
+                },
+            )
+
+            self.assertEqual(outcome.status, "BLOCKED")
+            self.assertEqual(outcome.reason, "transport_failed_before_send")
+            self.assertEqual(quota_calls, 1)
+            self.assertEqual(len(wire.requests), 0)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in runtime.journal.load_events_by_aggregate_type(
+                        "submission_attempt"
+                    )
+                ],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
+    def test_host_revoke_during_quota_wait_is_zero_wire(self) -> None:
+        with TemporaryDirectory() as root:
+            runtime, host, _boundary = self._runtime(root)
+            capability = write_capability(
+                family="LINEAR_DERIVATIVES",
+                position_mode="HEDGE",
+                account_id="account-1",
+                environment="PAPER",
+                instrument_version="BTCUSDT@1",
+                permission_scope="BYBIT.LINEAR.ORDER.WRITE",
+                additional_permission_scopes=("ORDER_WRITE",),
+                provider_environment="TESTNET",
+                expires_at=_NOW + timedelta(minutes=5),
+            )
+            registry = CapabilityRegistry()
+            registry.add(capability)
+            quota_calls = 0
+            wire = _RecordingWire(
+                b'{"retCode":0,"retMsg":"OK","result":{"orderId":"never"}}'
+            )
+
+            def quota_gate(*_args):
+                nonlocal quota_calls
+                quota_calls += 1
+                host._serve_state = "CLOSING"
+
+            sender = self._sender(
+                runtime,
+                capability_registry=registry,
+                capability_snapshot_id=capability.snapshot_id,
+                wire_client=wire,
+                quota_gate=quota_gate,
+            )
+            intent_id = "intent-quota-revoke"
+            client_order_id = stable_client_order_id(
+                "BYBIT",
+                intent_id,
+                environment="PAPER",
+                account_id="account-1",
+                max_length=36,
+                client_id_format="TOKEN",
+            )
+            prepared = prepare_order_submission(
+                capability=capability,
+                at=_NOW,
+                provider_environment="TESTNET",
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.001",
+                client_order_id=client_order_id,
+                time_in_force="GTC",
+                price="50000",
+                reduce_only=False,
+                position_side="LONG",
+                position_idx=1,
+            )
+            self._mark_ready(runtime)
+            dispatch_now = _NOW.isoformat().replace("+00:00", "Z")
+
+            outcome = sender.dispatch(
+                attempt_id="attempt-quota-revoke",
+                intent_id=intent_id,
+                intent_hash="sha256:" + "4" * 64,
+                request=guarded_order_projection(prepared),
+                now=dispatch_now,
+                authority_check=lambda *_args: (True, "allowed"),
+                final_barrier_clock=lambda: dispatch_now,
+                submission_scope={
+                    "endpoint": prepared.endpoint,
+                    "prepared_request_sha256": guarded_order_request_sha256(prepared),
+                    "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
+                    "instrument_versions": list(prepared.instrument_versions),
+                    "provider_environment": prepared.provider_environment,
+                },
+            )
+
+            self.assertEqual(outcome.status, "BLOCKED")
+            self.assertEqual(outcome.reason, "transport_failed_before_send")
+            self.assertEqual(quota_calls, 1)
+            self.assertEqual(len(wire.requests), 0)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in runtime.journal.load_events_by_aggregate_type(
+                        "submission_attempt"
+                    )
+                ],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
+    def test_host_revoke_inside_final_barrier_is_unknown_zero_wire(self) -> None:
+        credential = json.dumps(
+            {"api_key": "api-key-SECRET", "api_secret": "signing-SECRET"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with TemporaryDirectory() as root:
+            boundary = SecurityBoundary(
+                allowed_origins={"http://127.0.0.1:18765"},
+                credential_vault=ProtectedCredentialVault(
+                    Path(root) / "credentials.json",
+                    protector=DeterministicProtector(),
+                ),
+                session_authorizer=lambda _subject, _role, _origin: True,
+                now=lambda: 1000.0,
+            )
+            runtime, host, _boundary = self._runtime(
+                root,
+                security_boundary=boundary,
+            )
+            session = boundary.create_session(
+                subject="test-owner",
+                role="OWNER",
+                origin=runtime.config.public_origin,
+            )
+            credential_handle = boundary.register_secret(
+                session.token,
+                origin=runtime.config.public_origin,
+                owner_identity=runtime.financial_dispatcher.owner.owner_id,
+                account_id="account-1",
+                provider="BYBIT",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                purpose="TRADE",
+                secret_value=credential,
+            )
+            capability = write_capability(
+                family="LINEAR_DERIVATIVES",
+                position_mode="HEDGE",
+                account_id="account-1",
+                environment="PAPER",
+                instrument_version="BTCUSDT@1",
+                permission_scope="BYBIT.LINEAR.ORDER.WRITE",
+                additional_permission_scopes=("ORDER_WRITE",),
+                provider_environment="TESTNET",
+                expires_at=_NOW + timedelta(minutes=5),
+            )
+            registry = CapabilityRegistry()
+            registry.add(capability)
+            intent_id = "intent-final-barrier-revoke"
+            client_order_id = stable_client_order_id(
+                "BYBIT",
+                intent_id,
+                environment="PAPER",
+                account_id="account-1",
+                max_length=36,
+                client_id_format="TOKEN",
+            )
+            prepared = prepare_order_submission(
+                capability=capability,
+                at=_NOW,
+                provider_environment="TESTNET",
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.001",
+                client_order_id=client_order_id,
+                time_in_force="GTC",
+                price="50000",
+                reduce_only=False,
+                position_side="LONG",
+                position_idx=1,
+            )
+            wire = _RecordingWire(
+                b'{"retCode":0,"retMsg":"OK","result":{"orderId":"never"}}'
+            )
+            sender = self._sender(
+                runtime,
+                capability_registry=registry,
+                capability_snapshot_id=capability.snapshot_id,
+                wire_client=wire,
+                credential_handle=credential_handle,
+                session_token=session.token,
+            )
+            self._mark_ready(runtime)
+            dispatch_now = _NOW.isoformat().replace("+00:00", "Z")
+
+            def revoke_after_sending_cut():
+                host._serve_state = "CLOSING"
+                return dispatch_now
+
+            outcome = sender.dispatch(
+                attempt_id="attempt-final-barrier-revoke",
+                intent_id=intent_id,
+                intent_hash="sha256:" + "6" * 64,
+                request=guarded_order_projection(prepared),
+                now=dispatch_now,
+                authority_check=lambda *_args: (True, "allowed"),
+                final_barrier_clock=revoke_after_sending_cut,
+                submission_scope={
+                    "endpoint": prepared.endpoint,
+                    "prepared_request_sha256": guarded_order_request_sha256(prepared),
+                    "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
+                    "instrument_versions": list(prepared.instrument_versions),
+                    "provider_environment": prepared.provider_environment,
+                },
+            )
+
+            self.assertEqual(outcome.status, "UNKNOWN")
+            self.assertEqual(outcome.reason, "transport_result_ambiguous")
+            self.assertEqual(len(wire.requests), 0)
+            events = runtime.journal.load_events_by_aggregate_type(
+                "submission_attempt"
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "transport_exception_after_send_barrier:PermissionError",
+            )
+
+    def test_production_bybit_http_429_is_unknown_and_never_resent(self) -> None:
+        credential = json.dumps(
+            {"api_key": "api-key-SECRET", "api_secret": "signing-SECRET"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        raw_response = (
+            b'{"retCode":10006,"retMsg":"rate limit","result":{}}'
+        )
+        with TemporaryDirectory() as root:
+            boundary = SecurityBoundary(
+                allowed_origins={"http://127.0.0.1:18765"},
+                credential_vault=ProtectedCredentialVault(
+                    Path(root) / "credentials.json",
+                    protector=DeterministicProtector(),
+                ),
+                session_authorizer=lambda _subject, _role, _origin: True,
+                now=lambda: 1000.0,
+            )
+            runtime, _host, _boundary = self._runtime(
+                root,
+                security_boundary=boundary,
+            )
+            session = boundary.create_session(
+                subject="test-owner",
+                role="OWNER",
+                origin=runtime.config.public_origin,
+            )
+            credential_handle = boundary.register_secret(
+                session.token,
+                origin=runtime.config.public_origin,
+                owner_identity=runtime.financial_dispatcher.owner.owner_id,
+                account_id="account-1",
+                provider="BYBIT",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                purpose="TRADE",
+                secret_value=credential,
+            )
+            capability = write_capability(
+                family="LINEAR_DERIVATIVES",
+                position_mode="HEDGE",
+                account_id="account-1",
+                environment="PAPER",
+                instrument_version="BTCUSDT@1",
+                permission_scope="BYBIT.LINEAR.ORDER.WRITE",
+                additional_permission_scopes=("ORDER_WRITE",),
+                provider_environment="TESTNET",
+                expires_at=_NOW + timedelta(minutes=5),
+            )
+            registry = CapabilityRegistry()
+            registry.add(capability)
+            intent_id = "intent-production-429"
+            client_order_id = stable_client_order_id(
+                "BYBIT",
+                intent_id,
+                environment="PAPER",
+                account_id="account-1",
+                max_length=36,
+                client_id_format="TOKEN",
+            )
+            prepared = prepare_order_submission(
+                capability=capability,
+                at=_NOW,
+                provider_environment="TESTNET",
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.001",
+                client_order_id=client_order_id,
+                time_in_force="GTC",
+                price="50000",
+                reduce_only=False,
+                position_side="LONG",
+                position_idx=1,
+            )
+            wire = _RecordingWire(raw_response, http_status=429)
+            sender = self._sender(
+                runtime,
+                capability_registry=registry,
+                capability_snapshot_id=capability.snapshot_id,
+                wire_client=wire,
+                credential_handle=credential_handle,
+                session_token=session.token,
+            )
+            self._mark_ready(runtime)
+            dispatch_now = _NOW.isoformat().replace("+00:00", "Z")
+            submission_scope = {
+                "endpoint": prepared.endpoint,
+                "prepared_request_sha256": guarded_order_request_sha256(prepared),
+                "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
+                "instrument_versions": list(prepared.instrument_versions),
+                "provider_environment": prepared.provider_environment,
+            }
+            common = dict(
+                attempt_id="attempt-production-429",
+                intent_id=intent_id,
+                intent_hash="sha256:" + "5" * 64,
+                request=guarded_order_projection(prepared),
+                authority_check=lambda *_args: (True, "allowed"),
+                submission_scope=submission_scope,
+            )
+            first = sender.dispatch(
+                **common,
+                now=dispatch_now,
+                final_barrier_clock=lambda: dispatch_now,
+            )
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(
+                first.reason,
+                "bybit_http_non_2xx_execution_unknown",
+            )
+            self.assertEqual(len(wire.requests), 1)
+
+            replay = sender.dispatch(
+                **common,
+                now=(_NOW + timedelta(seconds=1)).isoformat().replace(
+                    "+00:00",
+                    "Z",
+                ),
+                final_barrier_clock=lambda: (_ for _ in ()).throw(
+                    AssertionError("UNKNOWN replay must not reacquire barrier")
+                ),
+            )
+            self.assertEqual(replay.status, "UNKNOWN")
+            self.assertEqual(
+                replay.reason,
+                "bybit_http_non_2xx_execution_unknown",
+            )
+            self.assertEqual(replay.client_order_id, client_order_id)
+            self.assertEqual(len(wire.requests), 1)
+            events = runtime.journal.load_events_by_aggregate_type(
+                "submission_attempt"
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["retry_disposition"],
+                "RECONCILE_FIRST",
+            )
+            self.assertEqual(events[-1]["payload"]["http_status"], 429)
+
     def test_end_to_end_send_uses_one_host_boundary_one_wire_and_durable_terminal(self) -> None:
         credential = json.dumps(
             {"api_key": "api-key-SECRET", "api_secret": "signing-SECRET"},
@@ -494,12 +1062,21 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
                 return True, "authorized"
 
             dispatch_now = _NOW.isoformat().replace("+00:00", "Z")
+            prepared_request_sha256 = guarded_order_request_sha256(prepared)
+            submission_scope = {
+                "endpoint": prepared.endpoint,
+                "prepared_request_sha256": prepared_request_sha256,
+                "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
+                "instrument_versions": list(prepared.instrument_versions),
+                "provider_environment": prepared.provider_environment,
+            }
             outcome = sender.dispatch(
                 attempt_id="attempt-e2e", intent_id=intent_id,
                 intent_hash="sha256:" + "2" * 64,
                 request=guarded_order_projection(prepared), now=dispatch_now,
                 authority_check=authority_check,
                 final_barrier_clock=lambda: dispatch_now,
+                submission_scope=submission_scope,
             )
 
             self.assertEqual(outcome.status, "SENT")
@@ -521,6 +1098,60 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             self.assertEqual(
                 events[-1]["payload"]["response_sha256"],
                 "sha256:" + sha256(raw_response).hexdigest(),
+            )
+
+            binding = load_submission_response_binding(
+                runtime.journal,
+                environment="PAPER",
+                account_id="account-1",
+                attempt_id="attempt-e2e",
+            )
+            self.assertEqual(binding.request_hash, prepared_request_sha256)
+            observation = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="BYBIT",
+                endpoint=prepared.endpoint,
+                prepared_request_sha256=prepared_request_sha256,
+                capability_snapshot_ids=prepared.capability_snapshot_ids,
+                instrument_versions=prepared.instrument_versions,
+            )
+            normalized = parse_submission_response(
+                attempt_id="attempt-e2e",
+                prepared_request=prepared,
+                observation=observation,
+            )
+            self.assertEqual(normalized["outcome"], "ACKNOWLEDGED")
+            self.assertEqual(normalized["provider_order_id"], "provider-1")
+            self.assertEqual(normalized["retry_disposition"], "NEVER")
+            self.assertEqual(normalized["client_order_id"], client_order_id)
+            self.assertNotIn("fill", repr(normalized).lower())
+
+            replay = sender.dispatch(
+                attempt_id="attempt-e2e",
+                intent_id=intent_id,
+                intent_hash="sha256:" + "2" * 64,
+                request=guarded_order_projection(prepared),
+                now=dispatch_now,
+                authority_check=lambda *_args: (_ for _ in ()).throw(
+                    AssertionError("terminal replay must not re-authorize")
+                ),
+                final_barrier_clock=lambda: (_ for _ in ()).throw(
+                    AssertionError("terminal replay must not reacquire barrier")
+                ),
+                submission_scope=submission_scope,
+            )
+            self.assertEqual(replay.status, "SENT")
+            self.assertEqual(replay.client_order_id, client_order_id)
+            self.assertEqual(replay.response["result"]["orderId"], "provider-1")
+            self.assertEqual(len(wire.requests), 1)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in runtime.journal.load_events_by_aggregate_type(
+                        "submission_attempt"
+                    )
+                ],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
             )
 
 

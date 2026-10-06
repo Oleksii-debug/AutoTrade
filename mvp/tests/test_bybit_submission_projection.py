@@ -447,7 +447,7 @@ class AuthenticatedBybitSubmissionProjectionTests(unittest.TestCase):
 
             book.order = hostile_order
             with self.assertRaisesRegex(
-                Exception,
+                OrderProjectionConflict,
                 "durable OMS instance state is shadowed",
             ):
                 project_authenticated_bybit_submission(

@@ -49,6 +49,12 @@
         <dt>Account</dt><dd><span id="active-account">Unavailable</span></dd>
         <dt>Environment</dt><dd><span id="active-environment">Unavailable</span></dd>
       </dl>
+      <div class="table-tools" aria-label="Permission and capability table tools">
+        <label for="permissions-filter">Filter permission and capability rows</label>
+        <input id="permissions-filter" type="search" autocomplete="off" spellcheck="false" aria-describedby="permissions-filter-status">
+        <button id="permissions-copy" type="button">Copy visible permission and capability rows</button>
+        <p id="permissions-filter-status" class="table-filter-status">No host rows are available to filter.</p>
+      </div>
       <div id="permissions-region" class="table-scroll" role="region" aria-label="Authenticated permission and capability evidence" tabindex="0">
         <table>
           <caption>Authenticated permission and capability evidence</caption>
@@ -91,6 +97,12 @@
           <thead><tr><th scope="col">Field</th><th scope="col">Host evidence</th></tr></thead>
           <tbody id="portfolio-body"><tr><td colspan="2">No portfolio projection loaded.</td></tr></tbody>
         </table>
+      </div>
+      <div class="table-tools" aria-label="Current host operation table tools">
+        <label for="operations-filter">Filter current host operation rows</label>
+        <input id="operations-filter" type="search" autocomplete="off" spellcheck="false" aria-describedby="operations-filter-status">
+        <button id="operations-copy" type="button">Copy visible current host operation rows</button>
+        <p id="operations-filter-status" class="table-filter-status">No host rows are available to filter.</p>
       </div>
       <div id="operations-region" class="table-scroll" role="region"
            aria-label="Current host operations table" tabindex="0">

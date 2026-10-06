@@ -951,10 +951,13 @@ class JournalStore:
                 "aggregate_version must be a positive canonical integer"
             )
 
+        raw_payload = row["payload_json"]
         try:
-            payload = json.loads(row["payload_json"])
+            payload = json.loads(raw_payload)
         except (json.JSONDecodeError, TypeError) as error:
             raise ValueError("journal event payload is not valid JSON") from error
+        if canonical_json(payload) != raw_payload:
+            raise ValueError("journal event payload is not canonical JSON")
         if payload_digest(payload) != row["payload_hash"]:
             raise ValueError("journal event payload hash does not match stored payload")
 

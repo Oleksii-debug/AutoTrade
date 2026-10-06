@@ -96,60 +96,68 @@ class CorporateActionEvidenceError(ValueError):
     """Provider evidence cannot authorize a corporate-action fact."""
 
 
-def _text(value: object, name: str) -> str:
+def _text(
+    value: object,
+    name: str,
+    _error_type=CorporateActionEvidenceError,
+) -> str:
     if type(value) is not str:
-        raise CorporateActionEvidenceError(
-            f"{name} must be canonical exact text"
-        )
+        raise _error_type(f"{name} must be canonical exact text")
     stripped = str.strip(value)
     if not stripped or value != stripped:
-        raise CorporateActionEvidenceError(
-            f"{name} must be canonical non-empty text"
-        )
+        raise _error_type(f"{name} must be canonical non-empty text")
     return value
 
 
-def _utc(value: datetime, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise CorporateActionEvidenceError(
-            f"{name} must be a timezone-aware datetime"
-        )
-    return value.astimezone(timezone.utc)
+def _utc(
+    value: datetime,
+    name: str,
+    _datetime_type=datetime,
+    _timezone_utc=timezone.utc,
+    _error_type=CorporateActionEvidenceError,
+) -> datetime:
+    if not isinstance(value, _datetime_type) or value.tzinfo is None:
+        raise _error_type(f"{name} must be a timezone-aware datetime")
+    return value.astimezone(_timezone_utc)
 
 
-def _utc_text(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+def _utc_text(
+    value: datetime,
+    _timezone_utc=timezone.utc,
+) -> str:
+    return value.astimezone(_timezone_utc).isoformat().replace("+00:00", "Z")
 
 
-def _exact_payload(value: Mapping[str, object]) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise CorporateActionEvidenceError("payload must be a mapping")
+def _exact_payload(
+    value: Mapping[str, object],
+    _mapping_type=Mapping,
+    _decimal_type=Decimal,
+    _text_fn=_text,
+    _mapping_proxy_type=MappingProxyType,
+    _error_type=CorporateActionEvidenceError,
+) -> Mapping[str, object]:
+    if not isinstance(value, _mapping_type):
+        raise _error_type("payload must be a mapping")
     normalized: dict[str, object] = {}
     for raw_key, raw_value in value.items():
-        key = _text(raw_key, "payload key")
+        key = _text_fn(raw_key, "payload key")
         if key in normalized:
-            raise CorporateActionEvidenceError(
-                "payload keys must be unique after normalization"
-            )
+            raise _error_type("payload keys must be unique after normalization")
         if isinstance(raw_value, (bool, float)):
-            raise CorporateActionEvidenceError(
-                "corporate-action numeric payload must use exact values"
-            )
-        if isinstance(raw_value, Decimal):
+            raise _error_type("corporate-action numeric payload must use exact values")
+        if isinstance(raw_value, _decimal_type):
             if not raw_value.is_finite():
-                raise CorporateActionEvidenceError(
-                    "corporate-action decimal payload must be finite"
-                )
+                raise _error_type("corporate-action decimal payload must be finite")
             normalized[key] = format(raw_value, "f")
         elif isinstance(raw_value, int):
             normalized[key] = str(raw_value)
         elif isinstance(raw_value, str):
             normalized[key] = raw_value
         else:
-            raise CorporateActionEvidenceError(
+            raise _error_type(
                 "corporate-action payload values must be text or exact numeric values"
             )
-    return MappingProxyType(normalized)
+    return _mapping_proxy_type(normalized)
 
 
 @dataclass(frozen=True)
@@ -262,19 +270,21 @@ class CorporateActionObservation:
         object.__setattr__(self, "payload", _exact_payload_fn(self.payload))
 
 
-def _provider_instant(value: object, name: str) -> datetime:
+def _provider_instant(
+    value: object,
+    name: str,
+    _datetime_type=datetime,
+    _timezone_utc=timezone.utc,
+    _error_type=CorporateActionEvidenceError,
+) -> datetime:
     if not isinstance(value, str) or not value.endswith("Z"):
-        raise CorporateActionEvidenceError(
-            f"{name} must be canonical provider UTC text"
-        )
+        raise _error_type(f"{name} must be canonical provider UTC text")
     try:
-        return datetime.fromisoformat(
+        return _datetime_type.fromisoformat(
             value[:-1] + "+00:00"
-        ).astimezone(timezone.utc)
+        ).astimezone(_timezone_utc)
     except ValueError as error:
-        raise CorporateActionEvidenceError(
-            f"{name} must be canonical provider UTC text"
-        ) from error
+        raise _error_type(f"{name} must be canonical provider UTC text") from error
 
 
 def _canonical_observation_from_sealed_response(
@@ -600,6 +610,15 @@ def _resolve_authoritative_corporate_action_impl(
     _instrument_registry_type,
     _corporate_event_create,
     _authoritative_action_type,
+    _source_type,
+    _surface_activities,
+    _text_fn,
+    _environments,
+    _utc_text_fn,
+    _payload_digest_fn,
+    _parser_id,
+    _parser_version,
+    _parser_contract_digest,
 ) -> AuthoritativeCorporateAction:
     """Resolve one accepted event exclusively from sealed provider evidence.
 
@@ -609,9 +628,9 @@ def _resolve_authoritative_corporate_action_impl(
     """
 
     expected_environment_value = str.upper(
-        _text(expected_environment, "expected_environment")
+        _text_fn(expected_environment, "expected_environment")
     )
-    if expected_environment_value not in _ENVIRONMENTS:
+    if expected_environment_value not in _environments:
         raise CorporateActionEvidenceError(
             "expected_environment must be canonical"
         )
@@ -620,7 +639,7 @@ def _resolve_authoritative_corporate_action_impl(
             "PAPER/LIVE corporate actions require durable provider-origin authority"
         )
 
-    reference = _text(evidence_ref, "evidence_ref")
+    reference = _text_fn(evidence_ref, "evidence_ref")
     if not callable(evidence_resolver):
         raise TypeError("evidence_resolver must be callable")
     if type(instrument_registry) is not _instrument_registry_type:
@@ -636,13 +655,13 @@ def _resolve_authoritative_corporate_action_impl(
             "caller-supplied instrument_resolver is not financial authority"
         )
     expected_provider = str.upper(
-        _text(expected_provider_id, "expected_provider_id")
+        _text_fn(expected_provider_id, "expected_provider_id")
     )
-    expected_account = _text(expected_account_id, "expected_account_id")
+    expected_account = _text_fn(expected_account_id, "expected_account_id")
     if type(allowed_endpoints) is not frozenset or not allowed_endpoints:
         raise TypeError("allowed_endpoints must be an exact non-empty frozenset")
     endpoints = frozenset(
-        _text(value, "allowed endpoint") for value in allowed_endpoints
+        _text_fn(value, "allowed endpoint") for value in allowed_endpoints
     )
     if any(
         not value.startswith("/") or "://" in value
@@ -651,7 +670,7 @@ def _resolve_authoritative_corporate_action_impl(
         raise CorporateActionEvidenceError(
             "allowed endpoints must be provider-relative paths"
         )
-    required_permission = _text(permission_scope, "permission_scope")
+    required_permission = _text_fn(permission_scope, "permission_scope")
 
     try:
         source = evidence_resolver(reference)
@@ -659,7 +678,7 @@ def _resolve_authoritative_corporate_action_impl(
         raise CorporateActionEvidenceError(
             "corporate-action evidence could not be resolved"
         ) from error
-    if type(source) is not ProviderResponseObservation:
+    if type(source) is not _source_type:
         raise CorporateActionEvidenceError(
             "corporate-action evidence must be an exact sealed ProviderResponseObservation"
         )
@@ -693,7 +712,7 @@ def _resolve_authoritative_corporate_action_impl(
         projection = _provider_require_scope(
             source,
             provider_id=expected_provider,
-            surface=Surface.ACTIVITIES,
+            surface=_surface_activities,
             endpoint=endpoint,
             account_id=expected_account,
             environment=expected_environment_value,
@@ -761,36 +780,36 @@ def _resolve_authoritative_corporate_action_impl(
         "instrument_id": observation.instrument_id,
         "instrument_version": observation.instrument_version,
         "kind": observation.kind,
-        "effective_at": _utc_text(observation.effective_at),
+        "effective_at": _utc_text_fn(observation.effective_at),
         "observed_at": projection["observed_at"],
         "raw_evidence_digest": projection["response_sha256"],
         "query_digest": projection["query_digest"],
         "capability_snapshot_id": projection["capability_snapshot_id"],
         "endpoint": endpoint,
         "permission_scope": projection["permission_scope"],
-        "parser_id": _CORPORATE_ACTION_PARSER_ID,
-        "parser_version": _CORPORATE_ACTION_PARSER_VERSION,
-        "parser_contract_digest": _CORPORATE_ACTION_PARSER_CONTRACT_DIGEST,
+        "parser_id": _parser_id,
+        "parser_version": _parser_version,
+        "parser_contract_digest": _parser_contract_digest,
         "source_sequence": observation.source_sequence,
         "announcement_at": (
             None
             if observation.announcement_at is None
-            else _utc_text(observation.announcement_at)
+            else _utc_text_fn(observation.announcement_at)
         ),
         "record_at": (
             None
             if observation.record_at is None
-            else _utc_text(observation.record_at)
+            else _utc_text_fn(observation.record_at)
         ),
         "ex_at": (
             None
             if observation.ex_at is None
-            else _utc_text(observation.ex_at)
+            else _utc_text_fn(observation.ex_at)
         ),
         "pay_at": (
             None
             if observation.pay_at is None
-            else _utc_text(observation.pay_at)
+            else _utc_text_fn(observation.pay_at)
         ),
         "corrects_external_event_id": (
             observation.corrects_external_event_id
@@ -798,7 +817,7 @@ def _resolve_authoritative_corporate_action_impl(
         "complete": True,
         "payload": dict(observation.payload),
     }
-    provenance_digest = payload_digest(provenance)
+    provenance_digest = _payload_digest_fn(provenance)
     event = _corporate_event_create(
         event_id=observation.external_event_id,
         instrument_id=observation.instrument_id,
@@ -843,6 +862,15 @@ def _bind_authoritative_corporate_action_resolver(
     instrument_registry_type,
     corporate_event_create,
     authoritative_action_type,
+    source_type,
+    surface_activities,
+    text_fn,
+    environments,
+    utc_text_fn,
+    payload_digest_fn,
+    parser_id,
+    parser_version,
+    parser_contract_digest,
 ):
     def resolve_authoritative_corporate_action(
         evidence_ref: str,
@@ -875,6 +903,15 @@ def _bind_authoritative_corporate_action_resolver(
             _instrument_registry_type=instrument_registry_type,
             _corporate_event_create=corporate_event_create,
             _authoritative_action_type=authoritative_action_type,
+            _source_type=source_type,
+            _surface_activities=surface_activities,
+            _text_fn=text_fn,
+            _environments=environments,
+            _utc_text_fn=utc_text_fn,
+            _payload_digest_fn=payload_digest_fn,
+            _parser_id=parser_id,
+            _parser_version=parser_version,
+            _parser_contract_digest=parser_contract_digest,
         )
 
     return resolve_authoritative_corporate_action
@@ -889,6 +926,15 @@ resolve_authoritative_corporate_action = _bind_authoritative_corporate_action_re
     InstrumentRegistry,
     CorporateEvent.create,
     AuthoritativeCorporateAction,
+    ProviderResponseObservation,
+    Surface.ACTIVITIES,
+    _text,
+    _ENVIRONMENTS,
+    _utc_text,
+    payload_digest,
+    _CORPORATE_ACTION_PARSER_ID,
+    _CORPORATE_ACTION_PARSER_VERSION,
+    _CORPORATE_ACTION_PARSER_CONTRACT_DIGEST,
 )
 del _bind_authoritative_corporate_action_resolver
 del _resolve_authoritative_corporate_action_impl

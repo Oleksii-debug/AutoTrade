@@ -39,6 +39,40 @@ class IbkrWebAdapterError(ValueError):
 IBKR_WEB_BROKERAGE_STATUS_ENDPOINT = "/iserver/auth/status"
 IBKR_WEB_BROKERAGE_ACCOUNTS_ENDPOINT = "/iserver/accounts"
 
+# Source-owned parser identity for the exact provider response used by
+# brokerage-account membership. This is a semantic Q/C contract only; it
+# grants no provider qualification or network authority.
+IBKR_BROKERAGE_ACCOUNTS_PARSER_IDENTITY = "IBKR_BROKERAGE_ACCOUNTS_V1_JSON_V1"
+IBKR_BROKERAGE_ACCOUNTS_PARSER_VERSION = "1.0.0"
+_IBKR_BROKERAGE_ACCOUNTS_PARSER_CONTRACT = {
+    "endpoint": IBKR_WEB_BROKERAGE_ACCOUNTS_ENDPOINT,
+    "surface": "AUTHENTICATED_READ",
+    "permission_scope": "ORDER.READ",
+    "query": {},
+    "payload": {
+        "accounts": "non_empty_unique_canonical_array",
+        "selectedAccount": "canonical_member_of_accounts",
+        "sessionId": "canonical_non_empty_text",
+        "isPaper": "exact_boolean_matching_runtime_environment",
+    },
+    "authority": {
+        "account_scope_must_be_member": True,
+        "observation_time_must_be_causal": True,
+        "post_mint_mutation_rejected": True,
+    },
+}
+IBKR_BROKERAGE_ACCOUNTS_PARSER_CONTRACT_DIGEST = (
+    "sha256:" + hashlib.sha256(
+        json.dumps(
+            _IBKR_BROKERAGE_ACCOUNTS_PARSER_CONTRACT,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+)
+
 
 IBKR_WEB_DOCS = MappingProxyType(
     {

@@ -91,3 +91,11 @@ REST `/v5/execution/list` не вважається повним економі�
 ## Environment-bound response provenance
 
 Recorded order-submission evidence is not environment-neutral. The adapter now requires an explicit `MAINNET`, `TESTNET` or `DEMO` environment for every parsed create-order response and binds the evidence URI to the corresponding documented REST service (`api.bybit.com`, `api-testnet.bybit.com`, or `api-demo.bybit.com`). Unknown environments fail closed. This prevents testnet/demo observations from being mislabeled as mainnet evidence; regional/entity-specific production endpoints remain outside this bounded foundation until separately qualified.
+
+## Typed fee-currency authority gate — 2026-10-06
+
+`feeCurrency` is financially material because it selects the cash/resource unit used when a provider fill is booked. Bybit execution rows may expose an empty `feeCurrency` while `execFee` is nonzero, so a fallback can be required for some documented product rows.
+
+The parser now refuses caller-authored `Mapping[str, str]` fallback values. The replacement `BybitFeeCurrencyAuthority` is a sealed typed value carrying provider environment, account/entity, product category, exact `InstrumentVersion`, fee currency, evidence identity, validity interval, qualification identity, and adapter build identity. Only a canonical source authority can register such an object for use; this foundation intentionally exposes no local issuance path.
+
+Consequently an empty provider fee currency remains fail-closed until a reviewed provider/instrument authority issues the typed value. This removes the caller-selected currency as a bookable trust input without claiming Bybit provider qualification or economic-edge evidence.

@@ -6639,9 +6639,11 @@ def _install_bybit_direct_authenticated_read_executor(
                 query_binding,
             )
             require_transport_unchanged()
-            # Provider I/O is an unbounded concurrency window. Re-resolve the
-            # exact endpoint rule after the response before any success status
-            # can become accepted provider state.
+            # Provider I/O is an unbounded concurrency window. Re-resolve
+            # both capability and endpoint-rule authority after the response
+            # before any status/body can become accepted provider state.
+            require_current_capability(self, query_binding, rule)
+            require_transport_unchanged()
             validate_query_rule(query_binding)
             if canonical_type(wire_response) is not response_type:
                 raise transport_error(

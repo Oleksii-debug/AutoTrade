@@ -1,13 +1,20 @@
 from datetime import timedelta
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 
 from autotrade_runtime.artifacts import ArtifactStore
 
+from mvp.autotrade_mvp.bybit_v5 import (
+    BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
+    BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
+)
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 import mvp.autotrade_mvp.provider_core as provider_core_module
+import mvp.autotrade_mvp.provider_route_reads as provider_route_reads_module
 
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
@@ -20,6 +27,8 @@ from mvp.autotrade_mvp.provider_route_reads import (
     QualifiedProviderResponseObservation,
     observe_qualified_provider_json_response,
     prepare_qualified_provider_read,
+    qualified_read_parser_semantic_claim,
+    qualified_read_route_semantic_claim,
 )
 from mvp.autotrade_mvp.provider_selection import select_provider
 from mvp.tests.provider_qualification_test_support import (
@@ -33,6 +42,20 @@ from mvp.tests.test_provider_selection import (
     candidate,
     request as route_request,
 )
+
+
+def _qualification_with_route_semantics(semantics):
+    raw = canonical_json(dict(sorted(semantics.items())))
+    digest = "sha256:" + sha256(raw.encode("utf-8")).hexdigest()
+    qualification_id = "provider-qualification:sha256:" + "d" * 64
+    return SimpleNamespace(
+        route_semantics_json=raw,
+        identity=SimpleNamespace(
+            route_semantics_digest=digest,
+            content_digest=qualification_id,
+        ),
+        qualification_id=qualification_id,
+    )
 
 
 class ProviderRouteReadTests(unittest.TestCase):
@@ -109,6 +132,102 @@ class ProviderRouteReadTests(unittest.TestCase):
             self.assertEqual(binding.accepted_success_statuses, (200,))
             self.assertEqual(binding.parser_identity, "BYBIT_ORDER_V5_JSON_V1")
             self.assertEqual(len(binding.query_digest), 71)
+
+    def test_delivery_read_requires_endpoint_specific_parser_q_claim(self):
+        rule_key, rule_digest = qualified_read_route_semantic_claim(
+            provider_id="BYBIT",
+            endpoint="/v5/asset/delivery-record",
+            surface=Surface.ACTIVITIES,
+            permission_scope="ACCOUNT.READ",
+        )
+        parser_key, parser_contract_digest = qualified_read_parser_semantic_claim(
+            provider_id="BYBIT",
+            endpoint="/v5/asset/delivery-record",
+            surface=Surface.ACTIVITIES,
+            permission_scope="ACCOUNT.READ",
+        )
+        self.assertEqual(
+            parser_contract_digest,
+            BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
+        )
+        self.assertTrue(parser_key.startswith("READ_PARSER:"))
+        self.assertNotEqual(parser_key, rule_key)
+
+        global_parser_only = _qualification_with_route_semantics({
+            "PARSER_IDENTITY": "BYBIT_ORDER_V5_JSON_V1",
+            rule_key: rule_digest,
+        })
+        with self.assertRaisesRegex(
+            ProviderRouteReadError,
+            "does not cover exact authenticated-read parser contract",
+        ):
+            provider_route_reads_module._qualified_read_rule(
+                qualification=global_parser_only,
+                provider_id="BYBIT",
+                endpoint="/v5/asset/delivery-record",
+                surface=Surface.ACTIVITIES,
+                permission_scope="ACCOUNT.READ",
+            )
+
+        stale_endpoint_parser = _qualification_with_route_semantics({
+            "PARSER_IDENTITY": "BYBIT_ORDER_V5_JSON_V1",
+            parser_key: (
+                "sha256:"
+                "b26269b85ed6ae54339092502a678ddaf8b046ce65cddb0e4553aceabd2a94e7"
+            ),
+            rule_key: rule_digest,
+        })
+        with self.assertRaisesRegex(
+            ProviderRouteReadError,
+            "does not cover exact authenticated-read parser contract",
+        ):
+            provider_route_reads_module._qualified_read_rule(
+                qualification=stale_endpoint_parser,
+                provider_id="BYBIT",
+                endpoint="/v5/asset/delivery-record",
+                surface=Surface.ACTIVITIES,
+                permission_scope="ACCOUNT.READ",
+            )
+
+        exact = _qualification_with_route_semantics({
+            "PARSER_IDENTITY": "BYBIT_ORDER_V5_JSON_V1",
+            parser_key: parser_contract_digest,
+            rule_key: rule_digest,
+        })
+        (
+            _semantics_digest,
+            returned_rule_digest,
+            qualified_rule_digest,
+            entitlement,
+            success_statuses,
+            returned_parser_identity,
+        ) = provider_route_reads_module._qualified_read_rule(
+            qualification=exact,
+            provider_id="BYBIT",
+            endpoint="/v5/asset/delivery-record",
+            surface=Surface.ACTIVITIES,
+            permission_scope="ACCOUNT.READ",
+        )
+        self.assertEqual(returned_rule_digest, rule_digest)
+        self.assertTrue(qualified_rule_digest.startswith("sha256:"))
+        self.assertEqual(entitlement, "ACTIVITIES")
+        self.assertEqual(success_statuses, (200,))
+        self.assertEqual(
+            returned_parser_identity,
+            BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
+        )
+
+    def test_parser_claim_helper_rejects_legacy_endpoint_without_source_parser(self):
+        with self.assertRaisesRegex(
+            ProviderRouteReadError,
+            "no source-owned endpoint parser contract",
+        ):
+            qualified_read_parser_semantic_claim(
+                provider_id="BYBIT",
+                endpoint="/v5/account/wallet-balance",
+                surface=Surface.AUTHENTICATED_READ,
+                permission_scope="ACCOUNT.READ",
+            )
 
     def test_qualified_read_and_response_constructors_are_sealed(self):
         with TemporaryDirectory() as directory:

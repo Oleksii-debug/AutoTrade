@@ -18,6 +18,10 @@ from types import MappingProxyType
 import weakref
 from typing import Mapping
 
+from .bybit_v5 import (
+    BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
+    BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
+)
 from .capabilities import CapabilityError
 from .durable_capabilities import DurableCapabilityRegistry
 from .durable_provider_qualification import DurableProviderQualificationRegistry
@@ -83,6 +87,16 @@ _READ_ENDPOINTS = MappingProxyType(
         "BINANCE": BINANCE_SPOT_AUTHENTICATED_READ_ENDPOINTS,
         "BYBIT": BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS,
         "KRAKEN": KRAKEN_SPOT_AUTHENTICATED_READ_ENDPOINTS,
+    }
+)
+
+
+_READ_ENDPOINT_PARSER_CONTRACTS = MappingProxyType(
+    {
+        ("BYBIT", "/v5/asset/delivery-record"): (
+            BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
+            BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
+        ),
     }
 )
 
@@ -164,6 +178,34 @@ def qualified_read_route_semantic_claim(
     return key, digest
 
 
+def qualified_read_parser_semantic_claim(
+    *,
+    provider_id: str,
+    endpoint: str,
+    surface: Surface,
+    permission_scope: str,
+) -> tuple[str, str]:
+    """Return one source-owned endpoint parser claim required from provider Q."""
+    _claim_key, _rule_digest, _rule = _qualified_read_endpoint_rule(
+        provider_id=provider_id,
+        endpoint=endpoint,
+        surface=surface,
+        permission_scope=permission_scope,
+    )
+    provider = provider_id.upper()
+    parser_contract = _READ_ENDPOINT_PARSER_CONTRACTS.get((provider, endpoint))
+    if parser_contract is None:
+        raise ProviderRouteReadError(
+            "authenticated-read endpoint has no source-owned endpoint parser contract"
+        )
+    _parser_identity, parser_contract_digest = parser_contract
+    locator = {"provider_id": provider, "endpoint": endpoint}
+    parser_claim_key = "READ_PARSER:" + sha256(
+        canonical_json(locator).encode("utf-8")
+    ).hexdigest()
+    return parser_claim_key, parser_contract_digest
+
+
 def _route_semantics(qualification: object) -> tuple[dict[str, str], str]:
     raw = getattr(qualification, "route_semantics_json", None)
     if type(raw) is not str or not raw:
@@ -216,21 +258,43 @@ def _qualified_read_rule(
         raise ProviderRouteReadError(
             "provider qualification does not cover exact authenticated-read endpoint rule"
         )
-    parser_identity = semantics.get("PARSER_IDENTITY")
-    if (
-        type(parser_identity) is not str
-        or not parser_identity
-        or parser_identity != parser_identity.strip()
-    ):
-        raise ProviderRouteReadError(
-            "provider qualification lacks canonical parser identity for provider read"
+    source_parser_contract = _READ_ENDPOINT_PARSER_CONTRACTS.get(
+        (provider_id.upper(), endpoint)
+    )
+    parser_contract_digest = None
+    if source_parser_contract is None:
+        parser_identity = semantics.get("PARSER_IDENTITY")
+        if (
+            type(parser_identity) is not str
+            or not parser_identity
+            or parser_identity != parser_identity.strip()
+        ):
+            raise ProviderRouteReadError(
+                "provider qualification lacks canonical parser identity for provider read"
+            )
+    else:
+        parser_identity, expected_parser_contract_digest = source_parser_contract
+        parser_claim_key, parser_contract_digest = qualified_read_parser_semantic_claim(
+            provider_id=provider_id,
+            endpoint=endpoint,
+            surface=surface,
+            permission_scope=permission_scope,
         )
+        if parser_contract_digest != expected_parser_contract_digest:
+            raise ProviderRouteReadError(
+                "source-owned authenticated-read parser contract is inconsistent"
+            )
+        if semantics.get(parser_claim_key) != parser_contract_digest:
+            raise ProviderRouteReadError(
+                "provider qualification does not cover exact authenticated-read parser contract"
+            )
     qualified_rule_digest = "sha256:" + sha256(
         canonical_json(
             {
                 "endpoint_rule_digest": endpoint_rule_digest,
                 "qualification_route_semantics_digest": semantics_digest,
                 "parser_identity": parser_identity,
+                "parser_contract_digest": parser_contract_digest,
             }
         ).encode("utf-8")
     ).hexdigest()

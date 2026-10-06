@@ -23,6 +23,7 @@ from mvp.autotrade_mvp.dispatch import (
     stable_client_order_id,
 )
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
+from mvp.autotrade_mvp.order_projection import OrderProjectionConflict
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_core import ProviderCoreError
 from mvp.tests.test_bybit_v5 import READ_AT, write_capability

@@ -12,7 +12,13 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Iterable, Mapping
 
-from .accounting import EconomicBook, JournalTransaction, ScopedEconomicBook, _canonical_equity_fill_terms
+from .accounting import (
+    EconomicBook,
+    JournalTransaction,
+    ScopedEconomicBook,
+    _canonical_equity_fill_terms,
+    _require_exact_transaction_graph,
+)
 from .exact_decimal import (
     ExactDecimalError,
     canonical_decimal_text,
@@ -1266,12 +1272,11 @@ def cash_settlement_obligation_from_transaction(
     contractual settlement date.
     """
 
-    if not isinstance(transaction, JournalTransaction):
-        raise TypeError("transaction must be a JournalTransaction")
+    _require_exact_transaction_graph(transaction)
     if type(trade_date) is not date or type(settlement_date) is not date:
         raise TypeError("trade_date and settlement_date must be date values")
-    if not isinstance(rule_binding, SettlementRuleBinding):
-        raise TypeError("rule_binding must be SettlementRuleBinding")
+    if type(rule_binding) is not SettlementRuleBinding:
+        raise TypeError("rule_binding must be exact SettlementRuleBinding")
     unit = _text(currency, name="currency").upper()
     bound_instrument = _text(
         instrument_version, name="instrument_version"
@@ -1322,8 +1327,7 @@ def equity_cash_obligation_from_transaction(
 ) -> SettlementObligation:
     """Create exact settlement obligation from canonical booked fill economics."""
 
-    if not isinstance(transaction, JournalTransaction):
-        raise TypeError("transaction must be a JournalTransaction")
+    _require_exact_transaction_graph(transaction)
     if transaction.economic_effective_at is None:
         raise SettlementConflict(
             "settlement-bound fill requires economic_effective_at"
@@ -1351,8 +1355,8 @@ def equity_cash_obligation_from_transaction(
             "source transaction economic_effective_at must be timezone-aware"
         )
     trade_date = trade_instant.astimezone(timezone.utc).date()
-    if not isinstance(rule_binding, SettlementRuleBinding):
-        raise TypeError("rule_binding must be SettlementRuleBinding")
+    if type(rule_binding) is not SettlementRuleBinding:
+        raise TypeError("rule_binding must be exact SettlementRuleBinding")
     if rule_binding.settlement_currency != unit:
         raise SettlementConflict(
             "settlement rule currency does not match source fill"

@@ -4,6 +4,8 @@ import unittest
 
 from mvp.autotrade_mvp.accounting import (
     EconomicBook,
+    JournalTransaction,
+    Posting,
     book_equity_fill,
     book_external_cash_flow,
     book_fx_exchange,
@@ -1352,6 +1354,91 @@ class EconomicSettlementCapitalTests(unittest.TestCase):
                 currency="USD",
                 as_of=datetime(2026, 9, 24, 16, tzinfo=timezone.utc),
                 buying_power_evidence=hostile_evidence,
+            )
+
+    def test_cash_obligation_derivation_requires_exact_transaction_graph(self):
+        rule = self.rule()
+
+        class TransactionSubclass(JournalTransaction):
+            pass
+
+        subclass_transaction = TransactionSubclass(
+            transaction_id="subclass-transaction",
+            cause_event_id="subclass-event",
+            postings=(),
+        )
+        with self.assertRaisesRegex(TypeError, "exact JournalTransaction"):
+            cash_settlement_obligation_from_transaction(
+                subclass_transaction,
+                obligation_id="subclass-obligation",
+                currency="USD",
+                trade_date=date(2026, 9, 24),
+                settlement_date=date(2026, 9, 25),
+                component_id="PRIMARY",
+                instrument_version="ABC",
+                rule_binding=rule,
+            )
+
+        class PostingSubclass(Posting):
+            pass
+
+        forged_graph = JournalTransaction(
+            transaction_id="forged-posting-transaction",
+            cause_event_id="forged-posting-event",
+            postings=(
+                PostingSubclass(
+                    ledger_account="CASH:USD",
+                    asset_or_currency="USD",
+                    signed_amount=Decimal("100"),
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(TypeError, "exact Posting"):
+            cash_settlement_obligation_from_transaction(
+                forged_graph,
+                obligation_id="forged-posting-obligation",
+                currency="USD",
+                trade_date=date(2026, 9, 24),
+                settlement_date=date(2026, 9, 25),
+                component_id="PRIMARY",
+                instrument_version="ABC",
+                rule_binding=rule,
+            )
+
+        class RuleSubclass(SettlementRuleBinding):
+            pass
+
+        subclass_rule = RuleSubclass(
+            rule_id="subclass-rule",
+            rule_version="1",
+            scope=self.scope,
+            instrument_version="ABC",
+            settlement_currency="USD",
+            effective_from=date(2026, 9, 1),
+            effective_to=None,
+            evidence_refs=("provider:subclass-rule",),
+        )
+        exact_transaction = JournalTransaction(
+            transaction_id="exact-transaction",
+            cause_event_id="exact-event",
+            postings=(
+                Posting(
+                    ledger_account="CASH:USD",
+                    asset_or_currency="USD",
+                    signed_amount=Decimal("100"),
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(TypeError, "exact SettlementRuleBinding"):
+            cash_settlement_obligation_from_transaction(
+                exact_transaction,
+                obligation_id="subclass-rule-obligation",
+                currency="USD",
+                trade_date=date(2026, 9, 24),
+                settlement_date=date(2026, 9, 25),
+                component_id="PRIMARY",
+                instrument_version="ABC",
+                rule_binding=subclass_rule,
             )
 
     def test_settlement_rule_for_different_instrument_version_fails_closed(self):

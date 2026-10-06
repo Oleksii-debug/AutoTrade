@@ -4,7 +4,11 @@ import unittest
 from research.autotrade_research.learning.retention import (
     RegimeMetric,
     RetentionPolicy,
+    evaluate_population_bound_retention,
     evaluate_retention,
+)
+from research.autotrade_research.learning.population_coverage import (
+    PopulationCoverageManifest,
 )
 
 
@@ -298,6 +302,50 @@ class RetentionTests(unittest.TestCase):
                 },
                 policy(),
             )
+
+
+    def test_mutated_population_manifest_is_rejected_before_container_callbacks(self):
+        calls = []
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("hostile population iteration executed")
+
+        forged = object.__new__(PopulationCoverageManifest)
+        values = {
+            "candidate_hash": "sha256:" + "1" * 64,
+            "frozen_protocol_hash": "sha256:" + "2" * 64,
+            "input_snapshot_hash": "sha256:" + "3" * 64,
+            "causal_cutoff": "2026-10-06T00:00:00Z",
+            "permission_classes": ("RESEARCH",),
+            "task": None,
+            "instrument_family": None,
+            "eligible_episode_ids": (),
+            "included_episode_ids": (),
+            "exclusions": (),
+            "episode_digests": (),
+            "eligible_outcomes": (),
+            "included_outcomes": (),
+            "eligible_no_trade_count": 0,
+            "included_no_trade_count": 0,
+            "included_regime_counts": HostileTuple((("new", 1),)),
+            "included_labels_complete_by_regime": (),
+            "digest": "sha256:" + "4" * 64,
+        }
+        for name, value in values.items():
+            object.__setattr__(forged, name, value)
+
+        with self.assertRaisesRegex(TypeError, "exact inert manifest values"):
+            evaluate_population_bound_retention(
+                {
+                    "old": metric("old", "0.10", "0.10"),
+                    "new": metric("new", "0.05", "0.20"),
+                },
+                policy(),
+                forged,
+            )
+        self.assertEqual(calls, [])
 
 if __name__ == "__main__":
     unittest.main()

@@ -665,6 +665,11 @@ def _install_journal_store_authority():
 
     store_type = JournalStore
     canonical_getattr = getattr
+    canonical_setattr = setattr
+    canonical_type = type
+    canonical_dict = dict
+    canonical_tuple = tuple
+    canonical_id = id
     canonical_vars = vars
     identity_descriptor = store_type.__dict__.get("store_identity")
     operations = {
@@ -679,6 +684,134 @@ def _install_journal_store_authority():
     )
     if identity_descriptor is None:
         raise RuntimeError("submission journal identity authority is unavailable")
+
+    executable_states = []
+    seen_executables = set()
+    for _base, members in class_surfaces:
+        for _member_name, member in members:
+            pending = [member]
+            while pending:
+                candidate = pending.pop()
+                candidate_identity = canonical_id(candidate)
+                if candidate_identity in seen_executables:
+                    continue
+                seen_executables.add(candidate_identity)
+                for nested_name in (
+                    "__func__",
+                    "fget",
+                    "fset",
+                    "fdel",
+                    "__wrapped__",
+                ):
+                    nested = canonical_getattr(candidate, nested_name, None)
+                    if nested is not None and nested is not candidate:
+                        pending.append(nested)
+                candidate_code = canonical_getattr(candidate, "__code__", None)
+                if candidate_code is None:
+                    continue
+                candidate_kwdefaults = canonical_getattr(
+                    candidate,
+                    "__kwdefaults__",
+                    None,
+                )
+                if (
+                    candidate_kwdefaults is not None
+                    and canonical_type(candidate_kwdefaults) is not canonical_dict
+                ):
+                    raise RuntimeError(
+                        "submission journal executable keyword defaults are unavailable"
+                    )
+                candidate_kwdefaults_copy = (
+                    canonical_dict(candidate_kwdefaults)
+                    if canonical_type(candidate_kwdefaults) is canonical_dict
+                    else None
+                )
+                candidate_kwdefaults_fingerprint = (
+                    canonical_tuple(
+                        (canonical_id(key), canonical_id(value))
+                        for key, value in canonical_dict.items(
+                            candidate_kwdefaults
+                        )
+                    )
+                    if canonical_type(candidate_kwdefaults) is canonical_dict
+                    else None
+                )
+                executable_states.append(
+                    (
+                        candidate,
+                        candidate_code,
+                        canonical_getattr(candidate, "__defaults__", None),
+                        candidate_kwdefaults,
+                        candidate_kwdefaults_copy,
+                        candidate_kwdefaults_fingerprint,
+                    )
+                )
+    executable_states = canonical_tuple(executable_states)
+
+    def executable_state_is_unchanged() -> bool:
+        for (
+            function,
+            expected_code,
+            expected_defaults,
+            expected_kwdefaults,
+            _expected_kwdefaults_copy,
+            expected_kwdefaults_fingerprint,
+        ) in executable_states:
+            if (
+                canonical_getattr(function, "__code__", None) is not expected_code
+                or canonical_getattr(function, "__defaults__", None)
+                is not expected_defaults
+                or canonical_getattr(function, "__kwdefaults__", None)
+                is not expected_kwdefaults
+            ):
+                return False
+            if (
+                expected_kwdefaults_fingerprint is not None
+                and canonical_type(expected_kwdefaults) is canonical_dict
+                and canonical_tuple(
+                    (canonical_id(key), canonical_id(value))
+                    for key, value in canonical_dict.items(expected_kwdefaults)
+                )
+                != expected_kwdefaults_fingerprint
+            ):
+                return False
+        return True
+
+    def restore_executable_state() -> None:
+        for (
+            function,
+            expected_code,
+            expected_defaults,
+            expected_kwdefaults,
+            expected_kwdefaults_copy,
+            expected_kwdefaults_fingerprint,
+        ) in executable_states:
+            if canonical_getattr(function, "__code__", None) is not expected_code:
+                canonical_setattr(function, "__code__", expected_code)
+            if (
+                canonical_getattr(function, "__defaults__", None)
+                is not expected_defaults
+            ):
+                canonical_setattr(function, "__defaults__", expected_defaults)
+            if (
+                canonical_getattr(function, "__kwdefaults__", None)
+                is not expected_kwdefaults
+            ):
+                canonical_setattr(function, "__kwdefaults__", expected_kwdefaults)
+            if (
+                expected_kwdefaults_fingerprint is not None
+                and canonical_type(expected_kwdefaults) is canonical_dict
+            ):
+                current_fingerprint = canonical_tuple(
+                    (canonical_id(key), canonical_id(value))
+                    for key, value in canonical_dict.items(expected_kwdefaults)
+                )
+                if current_fingerprint != expected_kwdefaults_fingerprint:
+                    canonical_dict.clear(expected_kwdefaults)
+                    canonical_dict.update(
+                        expected_kwdefaults,
+                        expected_kwdefaults_copy,
+                    )
 
     def snapshot(store: JournalStore) -> tuple[object, object]:
         if JournalStore is not store_type:
@@ -702,6 +835,9 @@ def _install_journal_store_authority():
                     or current[member_name] is not member
                 ):
                     raise RuntimeError("submission journal class authority changed")
+        if not executable_state_is_unchanged():
+            restore_executable_state()
+            raise RuntimeError("submission journal executable authority changed")
         if type(store) is not store_type:
             raise TypeError("store must be the canonical JournalStore")
         state = canonical_vars(store)
@@ -2169,6 +2305,12 @@ class GuardedDispatcher:
                 owner_epoch,
                 prepared_lease_seconds,
             ) = dispatch_call_authority
+            try:
+                _canonical_journal_authority_snapshot(authority_store)
+            except (RuntimeError, TypeError, PermissionError) as error:
+                raise _DispatchAuthorityChanged(
+                    "submission journal authority changed during dispatch"
+                ) from error
             current = (
                 self.environment,
                 self.account_id,

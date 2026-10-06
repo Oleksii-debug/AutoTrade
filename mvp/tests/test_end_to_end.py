@@ -287,6 +287,24 @@ class VerticalSliceTests(unittest.TestCase):
 
             self.assertFalse(original_intent_path.exists())
 
+    def test_restart_legacy_checkpoint_without_embedded_evidence_uses_jsonl_identity(self):
+        with TemporaryDirectory() as directory:
+            first = run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint.pop("evidence_records")
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            restarted = run_vertical_slice([100, 101, 102, 103], directory)
+
+            self.assertTrue(restarted.resumed)
+            self.assertEqual(restarted.order_id, first.order_id)
+            self.assertEqual(restarted.fill_id, first.fill_id)
+            self.assertEqual(restarted.cash, first.cash)
+            migrated = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            self.assertIn("evidence_records", migrated)
+            self.assertEqual(len(migrated["evidence_records"]), 1)
+
     def test_restart_requires_durable_intent_for_each_restored_fill(self):
         with TemporaryDirectory() as directory:
             result = run_vertical_slice([100, 101, 102, 103], directory)

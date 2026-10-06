@@ -849,11 +849,17 @@ def _install_submission_response_parser_authority(parser):
     submission_projection_code = submission_projection.__code__
     response_evidence = _response_evidence
     response_evidence_code = response_evidence.__code__
+    canonical_uuid = UUID
+    value_error_type = ValueError
+    client_id_pattern = _CLIENT_ID
+    canonical_uuid5 = uuid5
+    canonical_namespace = NAMESPACE_URL
     error_type = AlpacaAdapterError
     type_error = TypeError
     canonical_type = type
     canonical_bool = bool
     canonical_isinstance = isinstance
+    canonical_str = str
     mapping_type = Mapping
     canonical_getattr = getattr
 
@@ -883,11 +889,19 @@ def _install_submission_response_parser_authority(parser):
             or _response_evidence is not response_evidence
             or canonical_getattr(response_evidence, "__code__", None)
             is not response_evidence_code
+            or UUID is not canonical_uuid
+            or ValueError is not value_error_type
+            or _CLIENT_ID is not client_id_pattern
+            or uuid5 is not canonical_uuid5
+            or canonical_getattr(canonical_uuid5, "__code__", None)
+            is not canonical_getattr(uuid5, "__code__", None)
+            or NAMESPACE_URL is not canonical_namespace
             or AlpacaAdapterError is not error_type
             or TypeError is not type_error
             or type is not canonical_type
             or bool is not canonical_bool
             or isinstance is not canonical_isinstance
+            or str is not canonical_str
             or Mapping is not mapping_type
             or getattr is not canonical_getattr
         ):

@@ -248,6 +248,111 @@ class QualificationAttestationTests(unittest.TestCase):
         self.assertEqual(callback_calls, 1)
         self.assertEqual(original.runner_id, mutated.runner_id)
 
+    def test_verified_snapshot_is_prebuilt_before_evidence_callback_rebinds_constructor(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        receipt = SignedQualificationAttestation(original, sign(original))
+        original_resolve = qualification_attestation_module._resolve_evidence
+        original_accepted_type = (
+            qualification_attestation_module.AcceptedQualificationAttestation
+        )
+        forged = object()
+
+        def rebind_constructor_after_evidence_read(read_snapshot, ref):
+            original_resolve(read_snapshot, ref)
+            qualification_attestation_module.AcceptedQualificationAttestation = (
+                lambda **_kwargs: forged
+            )
+
+        try:
+            with TemporaryDirectory() as directory:
+                store = ArtifactStore(directory)
+                publish(store)
+                with patch.object(
+                    qualification_attestation_module,
+                    "_resolve_evidence",
+                    side_effect=rebind_constructor_after_evidence_read,
+                ):
+                    accepted = verify(receipt, store, policy(trust_root))
+        finally:
+            qualification_attestation_module.AcceptedQualificationAttestation = (
+                original_accepted_type
+            )
+
+        self.assertIs(type(accepted), original_accepted_type)
+        self.assertEqual(accepted.attestation_id, original.attestation_id)
+        self.assertEqual(accepted.evidence_refs, original.evidence_refs)
+
+    def test_verifier_rejects_evidence_resolver_rebind_during_reader_construction(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        receipt = SignedQualificationAttestation(original, sign(original))
+        original_factory = qualification_attestation_module.trusted_authenticated_reader
+        original_resolver = qualification_attestation_module._resolve_evidence
+
+        def rebind_resolver_during_reader_construction(*args, **kwargs):
+            qualification_attestation_module._resolve_evidence = (
+                lambda *_args, **_kwargs: None
+            )
+            return original_factory(*args, **kwargs)
+
+        try:
+            with TemporaryDirectory() as directory:
+                store = ArtifactStore(directory)
+                publish(store)
+                with (
+                    patch.object(
+                        qualification_attestation_module,
+                        "trusted_authenticated_reader",
+                        side_effect=rebind_resolver_during_reader_construction,
+                    ),
+                    self.assertRaisesRegex(
+                        QualificationTrustError,
+                        "evidence resolver changed during verification",
+                    ),
+                ):
+                    verify(receipt, store, policy(trust_root))
+        finally:
+            qualification_attestation_module._resolve_evidence = original_resolver
+
+    def test_verifier_rejects_evidence_resolver_rebind_during_evidence_read(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        receipt = SignedQualificationAttestation(original, sign(original))
+        original_factory = qualification_attestation_module.trusted_authenticated_reader
+        original_resolver = qualification_attestation_module._resolve_evidence
+
+        def mutating_reader_factory(*args, **kwargs):
+            reader = original_factory(*args, **kwargs)
+
+            def mutating_reader(artifact_id):
+                result = reader(artifact_id)
+                qualification_attestation_module._resolve_evidence = (
+                    lambda *_args, **_kwargs: None
+                )
+                return result
+
+            return mutating_reader
+
+        try:
+            with TemporaryDirectory() as directory:
+                store = ArtifactStore(directory)
+                publish(store)
+                with (
+                    patch.object(
+                        qualification_attestation_module,
+                        "trusted_authenticated_reader",
+                        side_effect=mutating_reader_factory,
+                    ),
+                    self.assertRaisesRegex(
+                        QualificationTrustError,
+                        "evidence resolver changed during verification",
+                    ),
+                ):
+                    verify(receipt, store, policy(trust_root))
+        finally:
+            qualification_attestation_module._resolve_evidence = original_resolver
+
     def test_evidence_resolution_uses_one_canonical_authenticated_snapshot_only(self):
         ref = evidence_ref()
         with TemporaryDirectory() as directory:

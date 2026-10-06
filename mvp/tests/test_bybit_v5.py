@@ -5,6 +5,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
 
+import mvp.autotrade_mvp.bybit_v5 as bybit_v5_module
+
 from mvp.autotrade_mvp.bybit_v5 import (
     BybitFeeCurrencyAuthority,
     build_order_payload,
@@ -165,6 +167,35 @@ def submission_write_capability(
         observed_at=READ_AT,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
     )
+
+
+def fee_currency_authority(
+    *,
+    instrument_version="11111111-1111-4111-8111-111111111111@1",
+    fee_currency="USDT",
+    valid_from="2026-09-24T19:00:00Z",
+    valid_to="2026-09-25T00:00:00Z",
+    account_id="paper-1",
+    provider_environment="TESTNET",
+    product_category="spot",
+):
+    authority = BybitFeeCurrencyAuthority(
+        provider_id="BYBIT",
+        provider_environment=provider_environment,
+        account_id=account_id,
+        entity_id="bybit-test",
+        product_category=product_category,
+        instrument_version=instrument_version,
+        fee_currency=fee_currency,
+        evidence_identity="sha256:" + "a" * 64,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        qualification_id="sha256:" + "b" * 64,
+        adapter_build_sha="a" * 40,
+        _factory_token=bybit_v5_module._BYBIT_FEE_CURRENCY_AUTHORITY_TOKEN,
+    )
+    bybit_v5_module._register_bybit_fee_currency_authority(authority)
+    return authority
 
 
 def bound_execution_response(
@@ -954,6 +985,68 @@ class BybitV5AdapterTests(unittest.TestCase):
                 valid_to="2027-01-01T00:00:00Z",
                 qualification_id="sha256:" + "b" * 64,
                 adapter_build_sha="a" * 40,
+            )
+
+    def test_typed_fee_currency_authority_can_supply_blank_provider_currency(self):
+        response = {"retCode": 0, "result": {"category": "spot", "list": [{
+            "execId": "typed-fee-1", "orderLinkId": "", "symbol": "BTCUSDT", "side": "Buy",
+            "execQty": "0.01", "execPrice": "65000", "execFee": "0.5",
+            "feeCurrency": "", "extraFees": "",
+            "execTime": "1790280000000",
+        }]}}
+        evidence = bound_execution_response(
+            response,
+            instrument_version="11111111-1111-4111-8111-111111111111@1",
+        )
+        authority = fee_currency_authority()
+        fills = parse_executions(
+            evidence,
+            instrument_versions={
+                "BTCUSDT": "11111111-1111-4111-8111-111111111111@1"
+            },
+            qualified_fee_currency=authority,
+        )
+        self.assertEqual(fills[0].fee_currency, "USDT")
+
+    def test_provider_fee_currency_must_agree_with_typed_authority(self):
+        response = {"retCode": 0, "result": {"category": "spot", "list": [{
+            "execId": "typed-fee-2", "orderLinkId": "", "symbol": "BTCUSDT", "side": "Buy",
+            "execQty": "0.01", "execPrice": "65000", "execFee": "0.5",
+            "feeCurrency": "BTC", "extraFees": "",
+            "execTime": "1790280000000",
+        }]}}
+        evidence = bound_execution_response(
+            response,
+            instrument_version="11111111-1111-4111-8111-111111111111@1",
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "disagrees"):
+            parse_executions(
+                evidence,
+                instrument_versions={
+                    "BTCUSDT": "11111111-1111-4111-8111-111111111111@1"
+                },
+                qualified_fee_currency=fee_currency_authority(),
+            )
+
+    def test_typed_fee_currency_authority_validity_interval_is_enforced(self):
+        response = {"retCode": 0, "result": {"category": "spot", "list": [{
+            "execId": "typed-fee-3", "orderLinkId": "", "symbol": "BTCUSDT", "side": "Buy",
+            "execQty": "0.01", "execPrice": "65000", "execFee": "0.5",
+            "feeCurrency": "", "extraFees": "",
+            "execTime": "1790280000000",
+        }]}}
+        evidence = bound_execution_response(
+            response,
+            instrument_version="11111111-1111-4111-8111-111111111111@1",
+        )
+        authority = fee_currency_authority(valid_to="2026-09-24T19:30:00Z")
+        with self.assertRaisesRegex(ProviderCoreError, "validity interval"):
+            parse_executions(
+                evidence,
+                instrument_versions={
+                    "BTCUSDT": "11111111-1111-4111-8111-111111111111@1"
+                },
+                qualified_fee_currency=authority,
             )
 
     def test_nonempty_extra_fees_cannot_silently_disappear(self):

@@ -546,6 +546,87 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 maximum_accounts_age_seconds=30,
             )
 
+    def test_accounts_freshness_policy_is_exact_non_negative_integer(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        for invalid in (True, -1):
+            with self.subTest(maximum_accounts_age_seconds=invalid):
+                with self.assertRaisesRegex(
+                    IbkrWebAdapterError,
+                    "maximum_accounts_age_seconds must be a non-negative integer",
+                ):
+                    prepare_normalized_order(
+                        intent,
+                        client_order_id="at-invalid-accounts-age",
+                        capability=capability(),
+                        session=ready_session(),
+                        at=NOW,
+                        maximum_session_age_seconds=30,
+                        maximum_accounts_age_seconds=invalid,
+                    )
+
+        _HostileInt.comparison_called = False
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "maximum_accounts_age_seconds must be a non-negative integer",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-hostile-accounts-age",
+                capability=capability(),
+                session=ready_session(),
+                at=NOW,
+                maximum_session_age_seconds=30,
+                maximum_accounts_age_seconds=_HostileInt(30),
+            )
+        self.assertFalse(_HostileInt.comparison_called)
+
+    def test_mutated_accounts_tuple_rejects_polymorphic_members_before_comparison(self):
+        class HostileAccount(str):
+            compared = False
+
+            def __eq__(self, other):
+                type(self).compared = True
+                raise AssertionError("hostile account equality executed")
+
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        accounts = ready_accounts()
+        object.__setattr__(
+            accounts,
+            "accounts",
+            (HostileAccount("U1234567"),),
+        )
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "changed after authenticated provider observation",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-hostile-accounts-member",
+                capability=capability(),
+                session=ready_session(),
+                accounts=accounts,
+                at=NOW,
+                maximum_session_age_seconds=30,
+                maximum_accounts_age_seconds=30,
+            )
+        self.assertFalse(HostileAccount.compared)
+
     def test_accounts_financial_guard_ignores_runtime_private_rebinding(self):
         intent = IbkrWebOrderIntent.create(
             instrument_version="AAPL-CONID-265598:v1",

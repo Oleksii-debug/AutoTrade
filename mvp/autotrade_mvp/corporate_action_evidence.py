@@ -415,6 +415,10 @@ def resolve_authoritative_corporate_action(
         raise CorporateActionEvidenceError(
             "expected_environment must be canonical"
         )
+    if expected_environment_value in {"PAPER", "LIVE"}:
+        raise CorporateActionEvidenceError(
+            "PAPER/LIVE corporate actions require durable provider-origin authority"
+        )
     if not isinstance(allowed_endpoints, frozenset) or not allowed_endpoints:
         raise TypeError("allowed_endpoints must be a non-empty frozenset")
     endpoints = frozenset(

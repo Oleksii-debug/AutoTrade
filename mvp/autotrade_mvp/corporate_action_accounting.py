@@ -128,7 +128,7 @@ def _bind_corporate_action_reconciliation_inputs(
 
         Local identities come only from durable accepted evidence. Provider-side
         activities come only from issuer-verified AuthoritativeCorporateAction
-        objects. Revision/provenance changes therefore become ordinary
+        objects. Stable provider-fact changes therefore become ordinary
         missing/unexpected activity mismatches in reconcile_account(); no second
         reconciliation ledger or verdict engine is introduced here.
 
@@ -205,7 +205,7 @@ def _bind_corporate_action_reconciliation_inputs(
                 activity_id=activity_id,
                 activity_type=f"CORPORATE_ACTION:{projection['kind']}",
                 origin="EXTERNAL",
-                occurred_at=projection["observed_at"],
+                occurred_at=projection["effective_at"],
                 instrument=projection["instrument_id"],
                 currency=currency,
             )

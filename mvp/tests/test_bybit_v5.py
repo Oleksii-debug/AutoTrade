@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import mvp.autotrade_mvp.bybit_v5 as bybit_v5_module
 from mvp.autotrade_mvp.bybit_v5 import (
+    BybitPreparedSubmission,
     build_order_payload,
     prepare_order_submission,
     coverage_evidence,
@@ -708,6 +709,73 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
         self.assertEqual(result["reason_code"], "BYBIT_TRANSPORT_AMBIGUOUS")
         self.assertEqual(result["evidence"], [])
+
+    def test_submission_response_rejects_unissued_exact_prepared_clone(self):
+        issued = prepare_order_submission(
+            capability=submission_write_capability(),
+            at=READ_AT,
+            provider_environment="MAINNET",
+            product_family="SPOT",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="0.01",
+            client_order_id=stable_client_order_id(
+                "BYBIT",
+                "bybit-unissued-response",
+                environment="LIVE",
+                account_id="bybit-account",
+            ),
+            time_in_force="IOC",
+        )
+        forged = object.__new__(BybitPreparedSubmission)
+        for name in (
+            "endpoint",
+            "body",
+            "account_id",
+            "environment",
+            "provider_environment",
+            "capability_snapshot_id",
+            "entity_id",
+            "instrument_version",
+            "body_sha256",
+        ):
+            object.__setattr__(
+                forged,
+                name,
+                object.__getattribute__(issued, name),
+            )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "prepared submission authority changed",
+        ):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=forged,
+                observation=None,
+                transport_ambiguous=True,
+            )
+
+    def test_submission_response_rejects_provider_environment_retarget(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-env-retarget",
+                    "orderLinkId": "__CLIENT__",
+                },
+            }
+        )
+        object.__setattr__(prepared, "provider_environment", "TESTNET")
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "prepared submission authority changed",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
 
     def test_transport_ambiguity_requires_boolean_flag(self):
         client_id = stable_client_order_id(

@@ -18,6 +18,7 @@ import re
 from types import MappingProxyType
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
+from weakref import ref as weakref_ref
 
 from .capabilities import CapabilityError, CapabilitySnapshot
 from .instruments import (
@@ -648,13 +649,188 @@ def prepare_order_submission(
     )
 
 
+def _install_bybit_prepared_submission_authority(
+    builder,
+):
+    """Wrap canonical preparation with closure-owned issued-object provenance."""
+
+    prepared_type = BybitPreparedSubmission
+    capability_type = CapabilitySnapshot
+    prepared_ref = weakref_ref
+    prepared_init = prepared_type.__init__
+    prepared_init_code = prepared_init.__code__
+    prepared_post_init = prepared_type.__post_init__
+    prepared_post_init_code = prepared_post_init.__code__
+    builder_code = builder.__code__
+    canonical_build_order_payload = build_order_payload
+    canonical_build_order_payload_code = build_order_payload.__code__
+    canonical_text = _text
+    canonical_text_code = _text.__code__
+    canonical_decimal_text = _decimal_text
+    canonical_decimal_text_code = _decimal_text.__code__
+    canonical_client_order_id = _client_order_id
+    canonical_client_order_id_code = _client_order_id.__code__
+    canonical_position_idx = _position_idx_from_capability
+    canonical_position_idx_code = _position_idx_from_capability.__code__
+    canonical_capability_admits = capability_type.admits
+    canonical_capability_admits_code = capability_type.admits.__code__
+
+    bindings: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+    def authority_changed():
+        raise ProviderCoreError("Bybit prepared submission authority changed")
+
+    def snapshot(value):
+        try:
+            return (
+                object.__getattribute__(value, "endpoint"),
+                object.__getattribute__(value, "body"),
+                object.__getattribute__(value, "account_id"),
+                object.__getattribute__(value, "environment"),
+                object.__getattribute__(value, "provider_environment"),
+                object.__getattribute__(value, "capability_snapshot_id"),
+                object.__getattribute__(value, "entity_id"),
+                object.__getattribute__(value, "instrument_version"),
+                object.__getattribute__(value, "body_sha256"),
+            )
+        except AttributeError:
+            authority_changed()
+
+    def require_canonical_bybit_prepared_submission(value):
+        if type(value) is not prepared_type or BybitPreparedSubmission is not prepared_type:
+            authority_changed()
+        binding = bindings.get(id(value))
+        if binding is None:
+            authority_changed()
+        bound_ref, expected = binding
+        if bound_ref() is not value:
+            authority_changed()
+        current = snapshot(value)
+        if (
+            current[1] is not expected[1]
+            or current[:1] + current[2:] != expected[:1] + expected[2:]
+        ):
+            authority_changed()
+        if type(current[1]) is not MappingProxyType:
+            authority_changed()
+        return value
+
+    def canonical_prepare_order_submission(
+        *,
+        capability: CapabilitySnapshot,
+        at: datetime,
+        provider_environment: str,
+        product_family: str,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quantity: object,
+        client_order_id: str,
+        time_in_force: str,
+        price: object | None = None,
+        reduce_only: bool = False,
+        position_side: str | None = None,
+        position_idx: int | None = None,
+    ) -> BybitPreparedSubmission:
+        if (
+            type(capability) is not capability_type
+            or CapabilitySnapshot is not capability_type
+        ):
+            raise ProviderCoreError(
+                "Bybit preparation requires exact CapabilitySnapshot authority"
+            )
+        if type(at) is not datetime:
+            raise ProviderCoreError("Bybit preparation time must be exact datetime")
+        if BybitPreparedSubmission is not prepared_type:
+            authority_changed()
+        if (
+            prepared_type.__init__ is not prepared_init
+            or getattr(prepared_init, "__code__", None) is not prepared_init_code
+            or prepared_type.__post_init__ is not prepared_post_init
+            or getattr(prepared_post_init, "__code__", None) is not prepared_post_init_code
+        ):
+            authority_changed()
+        if getattr(builder, "__code__", None) is not builder_code:
+            authority_changed()
+        function_authorities = (
+            (
+                build_order_payload,
+                canonical_build_order_payload,
+                canonical_build_order_payload_code,
+            ),
+            (_text, canonical_text, canonical_text_code),
+            (_decimal_text, canonical_decimal_text, canonical_decimal_text_code),
+            (_client_order_id, canonical_client_order_id, canonical_client_order_id_code),
+            (
+                _position_idx_from_capability,
+                canonical_position_idx,
+                canonical_position_idx_code,
+            ),
+            (
+                capability_type.admits,
+                canonical_capability_admits,
+                canonical_capability_admits_code,
+            ),
+        )
+        for current, expected, code in function_authorities:
+            if (
+                current is not expected
+                or getattr(expected, "__code__", None) is not code
+            ):
+                authority_changed()
+
+        prepared = builder(
+            capability=capability,
+            at=at,
+            provider_environment=provider_environment,
+            product_family=product_family,
+            symbol=symbol,
+            side=side,
+            order_type=order_type,
+            quantity=quantity,
+            client_order_id=client_order_id,
+            time_in_force=time_in_force,
+            price=price,
+            reduce_only=reduce_only,
+            position_side=position_side,
+            position_idx=position_idx,
+        )
+        if type(prepared) is not prepared_type:
+            authority_changed()
+
+        dead = [
+            key
+            for key, (existing_ref, _snapshot) in tuple(bindings.items())
+            if existing_ref() is None
+        ]
+        for key in dead:
+            bindings.pop(key, None)
+
+        bindings[id(prepared)] = (
+            prepared_ref(prepared),
+            snapshot(prepared),
+        )
+        require_canonical_bybit_prepared_submission(prepared)
+        return prepared
+
+    return canonical_prepare_order_submission, require_canonical_bybit_prepared_submission
+
+
+_unissued_prepare_order_submission = prepare_order_submission
+(
+    prepare_order_submission,
+    require_canonical_bybit_prepared_submission,
+) = _install_bybit_prepared_submission_authority(_unissued_prepare_order_submission)
+del _unissued_prepare_order_submission
+del _install_bybit_prepared_submission_authority
+
+
 def guarded_order_projection(
     prepared_request: BybitPreparedSubmission,
 ) -> Mapping[str, object]:
     """Project canonical Bybit preparation into the shared guarded transport seam."""
 
-    if not isinstance(prepared_request, BybitPreparedSubmission):
-        raise TypeError("prepared_request must be BybitPreparedSubmission")
+    require_canonical_bybit_prepared_submission(prepared_request)
     return MappingProxyType(
         {
             "endpoint": prepared_request.endpoint,
@@ -730,6 +906,7 @@ def _submission_evidence(
     *,
     prepared_request: BybitPreparedSubmission,
 ) -> dict[str, str]:
+    require_canonical_bybit_prepared_submission(prepared_request)
     source_uri = (
         _REST_BASE_BY_ENVIRONMENT[prepared_request.provider_environment]
         + prepared_request.endpoint
@@ -758,8 +935,7 @@ def parse_submission_response(
     """Map one exact durable Bybit create-order response to SubmissionResult."""
 
     aid = _uuid_text(attempt_id, name="attempt_id")
-    if not isinstance(prepared_request, BybitPreparedSubmission):
-        raise TypeError("prepared_request must be BybitPreparedSubmission")
+    require_canonical_bybit_prepared_submission(prepared_request)
     cid = _client_order_id(prepared_request.body.get("orderLinkId"))
     if type(transport_ambiguous) is not bool:
         raise ProviderCoreError("transport_ambiguous must be boolean")

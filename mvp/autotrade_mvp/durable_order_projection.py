@@ -609,10 +609,10 @@ class DurableOrderBookProjection:
             # make ACCEPTED look like local UNKNOWN before _apply() consumes it.
             status = request.get("status")
             return (
-                _type(status) is _str_type
-                and (
-                    status in {"ACKNOWLEDGED", "ACCEPTED", "REJECTED"}
-                    or request.get("provider_order_id") is not None
+                request.get("provider_order_id") is not None
+                or (
+                    _type(status) is _str_type
+                    and status in {"ACKNOWLEDGED", "ACCEPTED", "REJECTED"}
                 )
             )
         return operation in _provider_operations

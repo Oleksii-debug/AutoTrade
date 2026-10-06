@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.authority import (
 )
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
+import mvp.autotrade_mvp.instruments as instruments_module
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 from mvp.autotrade_mvp.reconciliation import (
     ResourceAvailabilityEvidence,
@@ -406,6 +407,53 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                     reserved=None,
                 )
             self.assertEqual(reservations.version, 0)
+
+    def test_late_registry_accessor_retarget_cannot_change_borrow_unit_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = _authority(store, quantity_unit="share")
+            checkpoint = _checkpoint(store)
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            calls = []
+
+            def decoy_versions(*args, **kwargs):
+                calls.append(("versions", args, kwargs))
+                raise AssertionError(
+                    "late registry accessor must not become financial authority"
+                )
+
+            def decoy_detach(*args, **kwargs):
+                calls.append(("detach", args, kwargs))
+                raise AssertionError(
+                    "late registry detach helper must not reinterpret canonical versions"
+                )
+
+            with (
+                patch.object(
+                    instruments_module,
+                    "_registry_versions_for",
+                    new=decoy_versions,
+                ),
+                patch.object(
+                    instruments_module,
+                    "_detached_instrument_version",
+                    new=decoy_detach,
+                ),
+            ):
+                admitted = _admit_short(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    suffix="registry-accessor-retarget",
+                    reserved=None,
+                )
+
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            self.assertEqual(calls, [])
 
     def test_instrument_registry_subclass_is_not_canonical_authority(self):
         class InstrumentRegistrySubclass(InstrumentRegistry):

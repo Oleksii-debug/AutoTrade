@@ -745,6 +745,15 @@ def _validate_bybit_option_delivery_query(
 def _bybit_authenticated_read_rule(
     binding: AuthenticatedReadQueryBinding,
 ) -> AuthenticatedReadEndpointRule:
+    if type(binding) is not AuthenticatedReadQueryBinding:
+        raise TypeError(
+            "Bybit authenticated-read binding must be exact AuthenticatedReadQueryBinding"
+        )
+    _require_authenticated_read_query_binding_authority(binding)
+    if binding.provider_id != "BYBIT":
+        raise ProviderTransportScopeError(
+            "Bybit authenticated-read binding provider mismatch"
+        )
     rule = BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS.get(binding.endpoint)
     if rule is None:
         raise ProviderTransportScopeError(
@@ -4578,6 +4587,13 @@ class BybitV5AuthenticatedReadSigner:
             raise ProviderTransportScopeError(
                 "authenticated-read binding provider/environment mismatch"
             )
+        canonical_policy = BYBIT_V5_ENDPOINT_POLICIES.get(
+            query_binding.provider_environment
+        )
+        if canonical_policy is None or policy != canonical_policy:
+            raise ProviderTransportScopeError(
+                "authenticated-read binding provider environment mismatch"
+            )
         _bybit_authenticated_read_rule(query_binding)
         if (
             isinstance(timestamp_ms, bool)
@@ -4772,7 +4788,7 @@ class BybitV5AuthenticatedReadTransport:
                 account_id=self.account_id,
                 entity_id=query_binding.entity_id,
                 environment=self.policy.environment,
-                provider_environment=self.provider_environment,
+                provider_environment=query_binding.provider_environment,
                 instrument_version=query_binding.instrument_version,
                 at=point,
             )
@@ -4787,6 +4803,8 @@ class BybitV5AuthenticatedReadTransport:
             or current.account_id != self.account_id
             or current.entity_id != query_binding.entity_id
             or current.environment != self.policy.environment
+            or current.provider_environment != query_binding.provider_environment
+            or current.provider_environment != self.provider_environment
             or current.instrument_version != query_binding.instrument_version
             or current.status != "VERIFIED"
             or not (current.observed_at <= point < current.expires_at)
@@ -4802,14 +4820,16 @@ class BybitV5AuthenticatedReadTransport:
         self,
         query_binding: AuthenticatedReadQueryBinding,
     ) -> ProviderResponseObservation:
-        if not isinstance(query_binding, AuthenticatedReadQueryBinding):
+        if type(query_binding) is not AuthenticatedReadQueryBinding:
             raise TypeError(
-                "query_binding must be AuthenticatedReadQueryBinding"
+                "query_binding must be exact AuthenticatedReadQueryBinding"
             )
+        _require_authenticated_read_query_binding_authority(query_binding)
         if (
             query_binding.provider_id != "BYBIT"
             or query_binding.account_id != self.account_id
             or query_binding.environment != self.policy.environment
+            or query_binding.provider_environment != self.provider_environment
             or query_binding.capability_snapshot_id != self.capability_snapshot_id
         ):
             raise ProviderTransportScopeError(

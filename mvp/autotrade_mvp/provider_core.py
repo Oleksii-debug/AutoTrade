@@ -229,6 +229,7 @@ class AuthenticatedReadQueryBinding:
     account_id: str
     entity_id: str
     environment: str
+    provider_environment: str
     capability_snapshot_id: str
     instrument_version: str
     surface: Surface
@@ -251,6 +252,7 @@ class AuthenticatedReadQueryBinding:
         endpoint: str,
         account_id: str | None = None,
         environment: str | None = None,
+        provider_environment: str | None = None,
     ) -> None:
         _require_authenticated_read_query_binding_authority(self)
         if _text(provider_id, "provider_id").upper() != self.provider_id:
@@ -266,6 +268,14 @@ class AuthenticatedReadQueryBinding:
             and _text(environment, "environment").upper() != self.environment
         ):
             raise ProviderCoreError("provider-read provenance environment mismatch")
+        if (
+            provider_environment is not None
+            and _text(provider_environment, "provider_environment").upper()
+            != self.provider_environment
+        ):
+            raise ProviderCoreError(
+                "provider-read provenance provider environment mismatch"
+            )
 
 
 def _prepare_authenticated_read_query_impl(
@@ -314,6 +324,15 @@ def _prepare_authenticated_read_query_impl(
     if provider not in PROVIDERS:
         raise ProviderCoreError("unknown provider")
     if (
+        type(capability.provider_environment) is not str
+        or not capability.provider_environment
+        or capability.provider_environment
+        != capability.provider_environment.strip().upper()
+    ):
+        raise ProviderCoreError(
+            "capability provider_environment must be canonical text"
+        )
+    if (
         type(endpoint) is not str
         or not endpoint
         or endpoint != endpoint.strip()
@@ -333,6 +352,7 @@ def _prepare_authenticated_read_query_impl(
         "account_id": capability.account_id,
         "entity_id": capability.entity_id,
         "environment": capability.environment,
+        "provider_environment": capability.provider_environment,
         "capability_snapshot_id": capability.snapshot_id,
         "instrument_version": capability.instrument_version,
         "surface": surface.value if isinstance(surface, Surface) else str(surface),
@@ -353,6 +373,11 @@ def _prepare_authenticated_read_query_impl(
     object.__setattr__(binding, "account_id", capability.account_id)
     object.__setattr__(binding, "entity_id", capability.entity_id)
     object.__setattr__(binding, "environment", capability.environment)
+    object.__setattr__(
+        binding,
+        "provider_environment",
+        capability.provider_environment,
+    )
     object.__setattr__(binding, "capability_snapshot_id", capability.snapshot_id)
     object.__setattr__(binding, "instrument_version", capability.instrument_version)
     object.__setattr__(binding, "surface", surface)
@@ -400,6 +425,11 @@ class ProviderResponseObservation:
         _require_provider_response_observation_authority(self)
         return self.query_binding.environment
 
+    @property
+    def provider_environment(self) -> str:
+        _require_provider_response_observation_authority(self)
+        return self.query_binding.provider_environment
+
     def require_scope(
         self,
         *,
@@ -408,6 +438,7 @@ class ProviderResponseObservation:
         endpoint: str,
         account_id: str | None = None,
         environment: str | None = None,
+        provider_environment: str | None = None,
     ) -> None:
         _require_provider_response_observation_authority(self)
         self.query_binding.require_scope(
@@ -416,6 +447,7 @@ class ProviderResponseObservation:
             endpoint=endpoint,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         )
 
 
@@ -444,6 +476,7 @@ def _install_authenticated_provider_read_authority():
             object_getattribute(value, "account_id"),
             object_getattribute(value, "entity_id"),
             object_getattribute(value, "environment"),
+            object_getattribute(value, "provider_environment"),
             object_getattribute(value, "capability_snapshot_id"),
             object_getattribute(value, "instrument_version"),
             object_getattribute(value, "surface"),
@@ -484,7 +517,7 @@ def _install_authenticated_provider_read_authority():
             )
         expected = state[1]
         current = query_snapshot(value)
-        for index in (0, 1, 2, 3, 4, 5, 7, 9, 10, 11):
+        for index in (0, 1, 2, 3, 4, 5, 6, 8, 10, 11, 12):
             if (
                 canonical_type(current[index]) is not canonical_str
                 or current[index] != expected[index]
@@ -493,9 +526,9 @@ def _install_authenticated_provider_read_authority():
                     "authenticated-read binding changed after preparation"
                 )
         if (
-            canonical_type(current[6]) is not Surface
-            or current[6] is not expected[6]
-            or current[8] is not expected[8]
+            canonical_type(current[7]) is not Surface
+            or current[7] is not expected[7]
+            or current[9] is not expected[9]
         ):
             raise ProviderCoreError(
                 "authenticated-read binding changed after preparation"
@@ -575,14 +608,15 @@ def _install_authenticated_provider_read_authority():
                 "account_id": query[1],
                 "entity_id": query[2],
                 "environment": query[3],
-                "capability_snapshot_id": query[4],
-                "instrument_version": query[5],
-                "surface": query[6],
-                "endpoint": query[7],
-                "query": query[8],
-                "prepared_at": query[9],
-                "permission_scope": query[10],
-                "query_digest": query[11],
+                "provider_environment": query[4],
+                "capability_snapshot_id": query[5],
+                "instrument_version": query[6],
+                "surface": query[7],
+                "endpoint": query[8],
+                "query": query[9],
+                "prepared_at": query[10],
+                "permission_scope": query[11],
+                "query_digest": query[12],
                 "observed_at": response[1],
                 "http_status": response[2],
                 "response_sha256": response[3],
@@ -599,6 +633,7 @@ def _install_authenticated_provider_read_authority():
         endpoint: str,
         account_id: str | None = None,
         environment: str | None = None,
+        provider_environment: str | None = None,
     ) -> Mapping[str, object]:
         projection = provider_response_observation_projection(value)
         if canonical_type(surface) is not Surface:
@@ -623,6 +658,17 @@ def _install_authenticated_provider_read_authority():
             != projection["environment"]
         ):
             raise ProviderCoreError("provider-read provenance environment mismatch")
+        if (
+            provider_environment is not None
+            and canonical_text(
+                provider_environment,
+                "provider_environment",
+            ).upper()
+            != projection["provider_environment"]
+        ):
+            raise ProviderCoreError(
+                "provider-read provenance provider environment mismatch"
+            )
         return projection
 
     return (

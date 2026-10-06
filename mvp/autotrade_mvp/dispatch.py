@@ -2349,6 +2349,8 @@ class GuardedDispatcher:
             self.owner_epoch,
             self.prepared_lease_seconds,
         )
+        dispatch_authority_changed_error = _DispatchAuthorityChanged
+        dispatch_blocked_error = DispatchBlocked
         # These module-level helpers are part of the irreversible send-state
         # authority even though GuardedDispatcher methods are class-sealed.
         # Python function bodies resolve them dynamically from module globals,
@@ -2383,6 +2385,9 @@ class GuardedDispatcher:
             ("uuid5", uuid5),
             ("NAMESPACE_URL", NAMESPACE_URL),
             ("sha256", sha256),
+            ("_DispatchAuthorityChanged", dispatch_authority_changed_error),
+            ("DispatchBlocked", dispatch_blocked_error),
+            ("DispatchOutcome", DispatchOutcome),
         )
         # External callbacks run inside dispatch.  Capture the exact module,
         # builtin, class and helper execution surface before the first callback;
@@ -3083,7 +3088,7 @@ class GuardedDispatcher:
                 try:
                     sender_check(self.owner_token, self.owner_epoch)
                     require_dispatch_call_authority()
-                except _DispatchAuthorityChanged:
+                except dispatch_authority_changed_error:
                     raise
                 except Exception as error:
                     require_dispatch_call_authority()
@@ -3103,7 +3108,7 @@ class GuardedDispatcher:
                     raise DispatchBlocked(barrier_reason) from error
             try:
                 authority_result = authority_check(intent_hash, barrier_now)
-            except _DispatchAuthorityChanged:
+            except dispatch_authority_changed_error:
                 raise
             except Exception as error:
                 require_dispatch_call_authority()
@@ -3229,11 +3234,11 @@ class GuardedDispatcher:
             response = transport_send(client_order_id, request_frozen, final_guard)
             try:
                 require_dispatch_call_authority()
-            except _DispatchAuthorityChanged:
+            except dispatch_authority_changed_error:
                 if barrier_passed:
                     return authority_change_after_send_outcome()
                 raise
-        except _DispatchAuthorityChanged:
+        except dispatch_authority_changed_error:
             # The authority helper restores the invocation-selected cut before
             # raising. Once Sending is durable, preserve worst-case exposure as
             # UNKNOWN on that original journal rather than leaking a retryable
@@ -3241,10 +3246,10 @@ class GuardedDispatcher:
             if barrier_passed:
                 return authority_change_after_send_outcome()
             raise
-        except DispatchBlocked as error:
+        except dispatch_blocked_error as error:
             try:
                 require_dispatch_call_authority()
-            except _DispatchAuthorityChanged:
+            except dispatch_authority_changed_error:
                 if barrier_passed:
                     return authority_change_after_send_outcome()
                 raise
@@ -3273,7 +3278,7 @@ class GuardedDispatcher:
         except Exception as error:
             try:
                 require_dispatch_call_authority()
-            except _DispatchAuthorityChanged:
+            except dispatch_authority_changed_error:
                 if barrier_passed:
                     return authority_change_after_send_outcome()
                 raise

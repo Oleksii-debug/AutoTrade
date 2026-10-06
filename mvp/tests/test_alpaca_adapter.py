@@ -17,6 +17,7 @@ from mvp.autotrade_mvp.alpaca import (
     parse_submission_response,
     parse_trade_activities,
     prepare_order_request,
+    guarded_order_projection,
 )
 from mvp.autotrade_mvp.accounting import ScopedEconomicBook
 from mvp.autotrade_mvp.fill_accounting import (
@@ -732,6 +733,45 @@ class AlpacaAdapterTests(unittest.TestCase):
                     "client_order_id": client_id,
                 },
             )
+
+    def test_guarded_projection_ignores_exact_prepared_getattribute_callback(self):
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="LIMIT",
+            time_in_force="DAY",
+            quantity="1",
+            limit_price="220.10",
+        )
+        prepared = prepare_order_request(
+            intent,
+            client_order_id="alpaca-projection-callback",
+            account_id="paper-account",
+            environment="PAPER",
+            capability=capability(),
+            at=NOW,
+        )
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            raise AssertionError("final-send prepared callback executed")
+
+        with patch.object(AlpacaPreparedRequest, "__getattribute__", forged):
+            projected = guarded_order_projection(prepared)
+        self.assertEqual(callbacks, [])
+        self.assertEqual(projected["account_id"], "paper-account")
+        self.assertEqual(projected["environment"], "PAPER")
+        self.assertEqual(
+            projected["body"]["client_order_id"],
+            "alpaca-projection-callback",
+        )
+        self.assertEqual(
+            projected["body_sha256"],
+            object.__getattribute__(prepared, "body_sha256"),
+        )
 
     def test_submission_consumer_ignores_exact_prepared_getattribute_callback(self):
         attempt, prepared, observation = self._durable_submission_observation(

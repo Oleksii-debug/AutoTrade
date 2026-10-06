@@ -137,6 +137,10 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             )
             projected = submission_response_binding_projection(binding)
             require_canonical_submission_response_binding(binding)
+            self.assertEqual(projected["terminal_state"], "SENT")
+            self.assertEqual(projected["response_encoding"], "utf-8-json")
+            self.assertIsNone(projected["ambiguity_reason"])
+            self.assertIsNone(projected["retry_disposition"])
 
             forged = SubmissionResponseBinding(
                 attempt_id=projected["attempt_id"],
@@ -189,6 +193,55 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 "submission response binding authority is unavailable",
             ):
                 require_canonical_submission_response_binding(clone)
+
+    def test_binding_projection_preserves_durable_unknown_reconciliation_metadata(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            result = dispatcher.dispatch(
+                attempt_id="binding-unknown-a1",
+                intent_id="intent-unknown-1",
+                intent_hash="sha256:" + "2" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(
+                        b'{"accepted":false}',
+                        http_status=200,
+                        requires_reconciliation=True,
+                        ambiguity_reason="provider_response_ambiguous",
+                    ),
+                )[1],
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+
+            binding = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-unknown-a1",
+            )
+            projected = submission_response_binding_projection(binding)
+            self.assertEqual(projected["terminal_state"], "UNKNOWN")
+            self.assertEqual(projected["response_encoding"], "utf-8-json")
+            self.assertEqual(
+                projected["ambiguity_reason"],
+                "provider_response_ambiguous",
+            )
+            self.assertEqual(
+                projected["retry_disposition"],
+                "RECONCILE_FIRST",
+            )
 
     def test_binding_projection_rejects_post_load_retargeting_and_restart_remints(self):
         with TemporaryDirectory() as directory:

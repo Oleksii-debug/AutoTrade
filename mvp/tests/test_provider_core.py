@@ -29,7 +29,6 @@ from mvp.autotrade_mvp.provider_core import (
     observe_submission_json_response,
     provider_definition,
     provider_submission_observation_projection,
-    require_canonical_provider_submission_observation,
 )
 
 
@@ -149,39 +148,101 @@ class ProviderCoreTests(unittest.TestCase):
             self.assertIs(type(observation.payload["sequence"]), int)
             self.assertEqual(observation.response_sha256, binding.response_sha256)
 
-    def test_invalid_response_cannot_become_authenticated_submission_observation(self):
+            with (
+                patch.object(
+                    ProviderSubmissionObservation,
+                    "response_binding",
+                    property(lambda _observation: None),
+                    create=True,
+                ),
+                patch.object(
+                    ProviderSubmissionObservation,
+                    "endpoint",
+                    property(lambda _observation: "/forged"),
+                    create=True,
+                ),
+            ):
+                sealed = provider_submission_observation_projection(observation)
+                self.assertEqual(sealed["provider_id"], "BYBIT")
+                self.assertEqual(sealed["endpoint"], "/v5/order/create")
+                self.assertEqual(
+                    sealed["response_sha256"],
+                    binding.response_sha256,
+                )
+                self.assertEqual(observation.provider_id, "BYBIT")
+                observation.require_scope(
+                    provider_id="BYBIT",
+                    endpoint="/v5/order/create",
+                    prepared_request_sha256=request_sha,
+                    capability_snapshot_ids=("cap-1",),
+                    instrument_versions=("BTCUSD:v1",),
+                )
+
+    def test_invalid_response_cannot_bypass_sealed_dispatch_decoder(self):
         with TemporaryDirectory() as directory:
-            # Simulate a previously accepted response created by the
-            # historical transport-only JSON preview (stdlib floats). New
-            # dispatch hardening (#1137) intentionally stops such records
-            # *before* they can be newly persisted. The provider observation
-            # must still reject a legacy SHA-bound raw response on replay.
+            # A historical weak decoder can no longer be injected to mint a
+            # definitive durable response. The post-SEND transport response
+            # authority detects the decoder retarget before the response can be
+            # consumed as SENT and leaves the attempt reconciliation-required.
             legacy_raw = b'{"orderId":"provider-1","price":1e256}'
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            request = {"symbol": "BTCUSD", "qty": "1"}
+            request_text = json.dumps(
+                request,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            request_sha = "sha256:" + sha256(request_text.encode("utf-8")).hexdigest()
+            scope = {
+                "endpoint": "/v5/order/create",
+                "prepared_request_sha256": request_sha,
+                "capability_snapshot_ids": ["cap-1"],
+                "instrument_versions": ["BTCUSD:v1"],
+            }
+
+            def transport(_client_id, _request, guard):
+                guard()
+                return ExactJsonTransportResponse(legacy_raw)
+
             with patch.object(
                 legacy_dispatch,
                 "_decode_exact_json_bytes",
                 side_effect=lambda raw: json.loads(raw.decode("utf-8")),
             ):
-                binding, request_sha = self._durable_submission_binding(
-                    directory, raw=legacy_raw
+                outcome = dispatcher.dispatch(
+                    attempt_id="sealed-decoder-a1",
+                    intent_id="intent-1",
+                    intent_hash="intent-hash",
+                    provider="BYBIT",
+                    request=request,
+                    now="2026-09-24T18:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    submission_scope=scope,
                 )
-            self.assertEqual(binding.response_bytes, legacy_raw)
-            with patch.object(
-                neutral_numeric,
-                "Decimal",
-                side_effect=AssertionError("premature Decimal construction"),
-            ):
-                with self.assertRaisesRegex(
-                    ProviderCoreError, "invalid or oversized exact JSON number"
-                ):
-                    observe_submission_json_response(
-                        response_binding=binding,
-                        provider_id="BYBIT",
-                        endpoint="/v5/order/create",
-                        prepared_request_sha256=request_sha,
-                        capability_snapshot_ids=("cap-1",),
-                        instrument_versions=("BTCUSD:v1",),
-                    )
+
+            self.assertEqual(outcome.status, "UNKNOWN")
+            self.assertEqual(outcome.reason, "transport_result_ambiguous")
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("sealed-decoder-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "transport_exception_after_send_barrier:ValueError",
+            )
 
     def test_oversized_raw_bytes_fail_before_utf8_decode_or_json_materialization(self):
         # A leading invalid UTF-8 byte distinguishes resource-first rejection
@@ -313,6 +374,7 @@ class ProviderCoreTests(unittest.TestCase):
         *,
         capability_snapshot_ids=("cap-1",),
         instrument_versions=("BTCUSD:v1",),
+        provider_environment="TESTNET",
         raw=b'{ "orderId" : "provider-1" }',
     ):
         store = JournalStore(f"{directory}/journal.sqlite3")
@@ -337,6 +399,8 @@ class ProviderCoreTests(unittest.TestCase):
             "capability_snapshot_ids": list(capability_snapshot_ids),
             "instrument_versions": list(instrument_versions),
         }
+        if provider_environment is not None:
+            scope["provider_environment"] = provider_environment
 
         def transport(_client_id, _request, guard):
             guard()
@@ -378,7 +442,14 @@ class ProviderCoreTests(unittest.TestCase):
             self.assertIsInstance(observation, ProviderSubmissionObservation)
             self.assertEqual(observation.payload["orderId"], "provider-1")
             self.assertEqual(observation.response_sha256, binding.response_sha256)
+            self.assertEqual(observation.observed_at, binding.sent_at)
             self.assertEqual(observation.request_sha256, request_sha)
+            self.assertEqual(
+                provider_submission_observation_projection(observation)[
+                    "submission_scope"
+                ]["provider_environment"],
+                "TESTNET",
+            )
             observation.require_scope(
                 provider_id="BYBIT",
                 endpoint="/v5/order/create",
@@ -390,53 +461,26 @@ class ProviderCoreTests(unittest.TestCase):
                 client_order_id=binding.client_order_id,
             )
 
-    def test_importable_submission_observation_token_cannot_mint_authority(self):
-        with TemporaryDirectory() as directory:
-            binding, request_sha = self._durable_submission_binding(directory)
-            forged = ProviderSubmissionObservation(
-                response_binding=binding,
-                endpoint="/v5/order/create",
-                capability_snapshot_ids=("cap-1",),
-                instrument_versions=("BTCUSD:v1",),
-                evidence_ref="provider-write:sha256:" + "1" * 64,
-                payload={"orderId": "forged"},
-                _observation_token=provider_core_module._SUBMISSION_OBSERVED_RESPONSE_TOKEN,
-            )
-            with self.assertRaisesRegex(
-                ProviderCoreError,
-                "provider submission observation authority is unavailable",
-            ):
-                provider_submission_observation_projection(forged)
 
-            issued = observe_submission_json_response(
-                response_binding=binding,
-                provider_id="BYBIT",
-                endpoint="/v5/order/create",
-                prepared_request_sha256=request_sha,
-                capability_snapshot_ids=("cap-1",),
-                instrument_versions=("BTCUSD:v1",),
-            )
-            clone = object.__new__(ProviderSubmissionObservation)
-            for name in (
-                "response_binding",
-                "endpoint",
-                "capability_snapshot_ids",
-                "instrument_versions",
-                "evidence_ref",
-                "payload",
-            ):
-                object.__setattr__(
-                    clone,
-                    name,
-                    object.__getattribute__(issued, name),
-                )
-            with self.assertRaisesRegex(
-                ProviderCoreError,
-                "provider submission observation authority is unavailable",
-            ):
-                require_canonical_provider_submission_observation(clone)
+    def test_bybit_submission_observation_requires_durable_provider_environment(self):
+        for provider_environment in (None, "testnet", " TESTNET "):
+            with self.subTest(provider_environment=provider_environment):
+                with TemporaryDirectory() as directory:
+                    binding, request_sha = self._durable_submission_binding(
+                        directory,
+                        provider_environment=provider_environment,
+                    )
+                    with self.assertRaises(ProviderCoreError):
+                        observe_submission_json_response(
+                            response_binding=binding,
+                            provider_id="BYBIT",
+                            endpoint="/v5/order/create",
+                            prepared_request_sha256=request_sha,
+                            capability_snapshot_ids=("cap-1",),
+                            instrument_versions=("BTCUSD:v1",),
+                        )
 
-    def test_submission_observation_rejects_post_mint_retargeting(self):
+    def test_submission_observation_rejects_post_mint_scope_retargeting(self):
         with TemporaryDirectory() as directory:
             binding, request_sha = self._durable_submission_binding(directory)
             observation = observe_submission_json_response(
@@ -447,18 +491,54 @@ class ProviderCoreTests(unittest.TestCase):
                 capability_snapshot_ids=("cap-1",),
                 instrument_versions=("BTCUSD:v1",),
             )
-            projection = provider_submission_observation_projection(observation)
-            self.assertEqual(projection["observed_at"], binding.sent_at)
-            self.assertEqual(projection["request_sha256"], request_sha)
 
             object.__setattr__(observation, "endpoint", "/v5/order/cancel")
             with self.assertRaisesRegex(
                 ProviderCoreError,
                 "provider submission observation authority is unavailable",
             ):
-                provider_submission_observation_projection(observation)
+                observation.require_scope(
+                    provider_id="BYBIT",
+                    endpoint="/v5/order/cancel",
+                    prepared_request_sha256=request_sha,
+                    capability_snapshot_ids=("cap-1",),
+                    instrument_versions=("BTCUSD:v1",),
+                    account_id="acct",
+                    environment="SIMULATION",
+                    client_order_id=binding.client_order_id,
+                )
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "provider submission observation authority is unavailable",
+            ):
+                _ = observation.payload
 
-    def test_submission_observation_rejects_scope_method_rebinding_before_callback(self):
+            post_scope = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+            )
+            post_scope.require_scope(
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+                account_id="acct",
+                environment="SIMULATION",
+                client_order_id=binding.client_order_id,
+            )
+            object.__setattr__(post_scope, "payload", {"orderId": "forged"})
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "provider submission observation authority is unavailable",
+            ):
+                _ = post_scope.payload
+
+    def test_submission_observation_rejects_scope_method_rebinding(self):
         with TemporaryDirectory() as directory:
             binding, request_sha = self._durable_submission_binding(directory)
             observation = observe_submission_json_response(
@@ -469,16 +549,48 @@ class ProviderCoreTests(unittest.TestCase):
                 capability_snapshot_ids=("cap-1",),
                 instrument_versions=("BTCUSD:v1",),
             )
-            callbacks = []
-
-            def forged(*_args, **_kwargs):
-                callbacks.append(True)
-                return None
 
             with patch.object(
                 ProviderSubmissionObservation,
                 "require_scope",
-                forged,
+                lambda *_args, **_kwargs: None,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "provider submission observation authority is unavailable",
+                ):
+                    observation.require_scope(
+                        provider_id="ALPACA",
+                        endpoint="/v2/orders",
+                        prepared_request_sha256=request_sha,
+                        capability_snapshot_ids=("cap-1",),
+                        instrument_versions=("BTCUSD:v1",),
+                        account_id="acct",
+                        environment="SIMULATION",
+                        client_order_id=binding.client_order_id,
+                    )
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "provider submission observation authority is unavailable",
+                ):
+                    _ = observation.payload
+
+    def test_submission_observation_scope_barrier_rejects_attribute_lookup_rebinding(self):
+        with TemporaryDirectory() as directory:
+            binding, request_sha = self._durable_submission_binding(directory)
+            observation = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+            )
+
+            with patch.object(
+                ProviderSubmissionObservation,
+                "__getattribute__",
+                object.__getattribute__,
             ):
                 with self.assertRaisesRegex(
                     ProviderCoreError,
@@ -494,7 +606,60 @@ class ProviderCoreTests(unittest.TestCase):
                         environment="SIMULATION",
                         client_order_id=binding.client_order_id,
                     )
-            self.assertEqual(callbacks, [])
+
+    def test_submission_observation_rejects_accessor_replacement_before_scope_use(self):
+        with TemporaryDirectory() as directory:
+            binding, request_sha = self._durable_submission_binding(directory)
+            observation = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+            )
+
+            with patch.object(
+                ProviderSubmissionObservation,
+                "__getattribute__",
+                object.__getattribute__,
+            ):
+                object.__setattr__(observation, "endpoint", "/v5/order/cancel")
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "provider submission observation authority is unavailable",
+                ):
+                    observation.require_scope(
+                        provider_id="BYBIT",
+                        endpoint="/v5/order/cancel",
+                        prepared_request_sha256=request_sha,
+                        capability_snapshot_ids=("cap-1",),
+                        instrument_versions=("BTCUSD:v1",),
+                        account_id="acct",
+                        environment="SIMULATION",
+                        client_order_id=binding.client_order_id,
+                    )
+
+    def test_submission_observation_rejects_runtime_binding_projection_rebinding(self):
+        with TemporaryDirectory() as directory:
+            binding, request_sha = self._durable_submission_binding(directory)
+            with patch.object(
+                provider_core_module,
+                "submission_response_binding_projection",
+                side_effect=lambda _binding: {},
+            ):
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "provider submission observation authority is unavailable",
+                ):
+                    observe_submission_json_response(
+                        response_binding=binding,
+                        provider_id="BYBIT",
+                        endpoint="/v5/order/create",
+                        prepared_request_sha256=request_sha,
+                        capability_snapshot_ids=("cap-1",),
+                        instrument_versions=("BTCUSD:v1",),
+                    )
 
     def test_submission_observation_rejects_scope_relabelling(self):
         with TemporaryDirectory() as directory:

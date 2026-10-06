@@ -15,9 +15,9 @@ from enum import StrEnum
 from hashlib import sha256
 import json
 from types import MappingProxyType
+import weakref
 from typing import Iterable, Literal, Mapping
 import re
-import weakref
 
 from autotrade_numeric.exact_decimal import (
     ExactDecimalError,
@@ -93,8 +93,6 @@ class Surface(StrEnum):
     STREAM = "STREAM"
 
 
-_PREPARED_READ_TOKEN = object()
-_OBSERVED_RESPONSE_TOKEN = object()
 _SUBMISSION_OBSERVED_RESPONSE_TOKEN = object()
 
 
@@ -107,14 +105,18 @@ def _canonical_query_values(
 ) -> Mapping[str, str]:
     if values is None:
         return MappingProxyType({})
-    if not isinstance(values, Mapping):
-        raise ProviderCoreError("query must be a mapping")
+    if type(values) not in {dict, MappingProxyType}:
+        raise ProviderCoreError("query must be an exact inert mapping")
     normalized: dict[str, str] = {}
     for raw_key, raw_value in values.items():
-        key = _text(raw_key, "query key")
+        if type(raw_key) is not str or not raw_key or raw_key != raw_key.strip():
+            raise ProviderCoreError(
+                "authenticated-read query keys must be canonical strings"
+            )
+        key = raw_key
         if key in normalized:
             raise ProviderCoreError("query keys must be unique after normalization")
-        if not isinstance(raw_value, str) or raw_value != raw_value.strip():
+        if type(raw_value) is not str or raw_value != raw_value.strip():
             raise ProviderCoreError(
                 "authenticated-read query values must be canonical strings"
             )
@@ -219,9 +221,9 @@ def _decode_exact_json(raw: bytes) -> object:
     return _freeze_json(decoded)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class AuthenticatedReadQueryBinding:
-    """Immutable credential/capability scope fixed before provider read I/O."""
+    """Credential/capability scope minted only by verified preparation."""
 
     provider_id: str
     account_id: str
@@ -235,70 +237,11 @@ class AuthenticatedReadQueryBinding:
     prepared_at: str
     permission_scope: str
     query_digest: str
-    _preparation_token: InitVar[object | None] = None
 
-    def __post_init__(self, _preparation_token: object | None) -> None:
-        if _preparation_token is not _PREPARED_READ_TOKEN:
-            raise ProviderCoreError(
-                "authenticated-read bindings must come from verified capability preparation"
-            )
-        provider = _text(self.provider_id, "provider_id").upper()
-        if provider not in PROVIDERS:
-            raise ProviderCoreError("unknown provider")
-        object.__setattr__(self, "provider_id", provider)
-        object.__setattr__(self, "account_id", _text(self.account_id, "account_id"))
-        object.__setattr__(self, "entity_id", _text(self.entity_id, "entity_id"))
-        object.__setattr__(
-            self,
-            "environment",
-            _text(self.environment, "environment").upper(),
+    def __init__(self, *_args, **_kwargs) -> None:
+        raise ProviderCoreError(
+            "authenticated-read bindings must come from verified capability preparation"
         )
-        object.__setattr__(
-            self,
-            "capability_snapshot_id",
-            _text(self.capability_snapshot_id, "capability_snapshot_id"),
-        )
-        object.__setattr__(
-            self,
-            "instrument_version",
-            _text(self.instrument_version, "instrument_version"),
-        )
-        if not isinstance(self.surface, Surface):
-            raise ProviderCoreError("surface must be a provider Surface")
-        if self.surface not in {Surface.AUTHENTICATED_READ, Surface.ACTIVITIES}:
-            raise ProviderCoreError(
-                "authenticated-read binding requires AUTHENTICATED_READ or ACTIVITIES"
-            )
-        endpoint = _text(self.endpoint, "endpoint")
-        if not endpoint.startswith("/") or "://" in endpoint:
-            raise ProviderCoreError(
-                "authenticated-read endpoint must be a canonical provider-relative path"
-            )
-        object.__setattr__(self, "endpoint", endpoint)
-        object.__setattr__(self, "query", _canonical_query_values(self.query))
-        object.__setattr__(
-            self,
-            "prepared_at",
-            _text(self.prepared_at, "prepared_at"),
-        )
-        try:
-            parsed = datetime.fromisoformat(self.prepared_at.replace("Z", "+00:00"))
-        except ValueError as error:
-            raise ProviderCoreError("prepared_at must be an ISO timestamp") from error
-        if parsed.tzinfo is None or not self.prepared_at.endswith("Z"):
-            raise ProviderCoreError("prepared_at must be canonical UTC text")
-        canonical_time = parsed.astimezone(timezone.utc).isoformat().replace(
-            "+00:00", "Z"
-        )
-        if canonical_time != self.prepared_at:
-            raise ProviderCoreError("prepared_at must be canonical UTC text")
-        object.__setattr__(
-            self,
-            "permission_scope",
-            _text(self.permission_scope, "permission_scope"),
-        )
-        if re.fullmatch(r"sha256:[0-9a-f]{64}", self.query_digest) is None:
-            raise ProviderCoreError("query_digest must be a canonical SHA-256 digest")
 
     def require_scope(
         self,
@@ -309,6 +252,7 @@ class AuthenticatedReadQueryBinding:
         account_id: str | None = None,
         environment: str | None = None,
     ) -> None:
+        _require_authenticated_read_query_binding_authority(self)
         if _text(provider_id, "provider_id").upper() != self.provider_id:
             raise ProviderCoreError("provider-read provenance provider mismatch")
         if surface != self.surface:
@@ -324,7 +268,7 @@ class AuthenticatedReadQueryBinding:
             raise ProviderCoreError("provider-read provenance environment mismatch")
 
 
-def prepare_authenticated_read_query(
+def _prepare_authenticated_read_query_impl(
     *,
     capability: CapabilitySnapshot,
     surface: Surface,
@@ -332,6 +276,7 @@ def prepare_authenticated_read_query(
     query: Mapping[str, str] | None,
     at: datetime,
     permission_scope: str = "ORDER.READ",
+    _register_authority,
 ) -> AuthenticatedReadQueryBinding:
     """Prepare one authenticated query from canonical capability identity.
 
@@ -339,10 +284,24 @@ def prepare_authenticated_read_query(
     from the VERIFIED capability snapshot before any provider response exists.
     """
 
-    if not isinstance(capability, CapabilitySnapshot):
-        raise TypeError("capability must be CapabilitySnapshot")
+    if type(capability) is not CapabilitySnapshot:
+        raise TypeError("capability must be exact CapabilitySnapshot")
+    if type(surface) is not Surface:
+        raise TypeError("surface must be exact Surface")
+    if surface not in {Surface.AUTHENTICATED_READ, Surface.ACTIVITIES}:
+        raise ProviderCoreError(
+            "authenticated-read binding requires AUTHENTICATED_READ or ACTIVITIES"
+        )
+    if type(at) is not datetime or type(at.tzinfo) is not timezone:
+        raise ProviderCoreError("at must be an exact timezone-aware datetime")
     point = _utc(at, "at")
-    scope = _text(permission_scope, "permission_scope")
+    if (
+        type(permission_scope) is not str
+        or not permission_scope
+        or permission_scope != permission_scope.strip()
+    ):
+        raise ProviderCoreError("permission_scope must be a canonical string")
+    scope = permission_scope
     if (
         capability.status != "VERIFIED"
         or not (capability.observed_at <= point < capability.expires_at)
@@ -354,7 +313,15 @@ def prepare_authenticated_read_query(
     provider = capability.provider_id.upper()
     if provider not in PROVIDERS:
         raise ProviderCoreError("unknown provider")
-    normalized_endpoint = _text(endpoint, "endpoint")
+    if (
+        type(endpoint) is not str
+        or not endpoint
+        or endpoint != endpoint.strip()
+    ):
+        raise ProviderCoreError(
+            "authenticated-read endpoint must be a canonical string"
+        )
+    normalized_endpoint = endpoint
     if not normalized_endpoint.startswith("/") or "://" in normalized_endpoint:
         raise ProviderCoreError(
             "authenticated-read endpoint must be a canonical provider-relative path"
@@ -381,26 +348,30 @@ def prepare_authenticated_read_query(
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
-    return AuthenticatedReadQueryBinding(
-        provider_id=provider,
-        account_id=capability.account_id,
-        entity_id=capability.entity_id,
-        environment=capability.environment,
-        capability_snapshot_id=capability.snapshot_id,
-        instrument_version=capability.instrument_version,
-        surface=surface,
-        endpoint=normalized_endpoint,
-        query=normalized_query,
-        prepared_at=prepared_at,
-        permission_scope=scope,
-        query_digest="sha256:" + sha256(encoded).hexdigest(),
-        _preparation_token=_PREPARED_READ_TOKEN,
+    binding = object.__new__(AuthenticatedReadQueryBinding)
+    object.__setattr__(binding, "provider_id", provider)
+    object.__setattr__(binding, "account_id", capability.account_id)
+    object.__setattr__(binding, "entity_id", capability.entity_id)
+    object.__setattr__(binding, "environment", capability.environment)
+    object.__setattr__(binding, "capability_snapshot_id", capability.snapshot_id)
+    object.__setattr__(binding, "instrument_version", capability.instrument_version)
+    object.__setattr__(binding, "surface", surface)
+    object.__setattr__(binding, "endpoint", normalized_endpoint)
+    object.__setattr__(binding, "query", normalized_query)
+    object.__setattr__(binding, "prepared_at", prepared_at)
+    object.__setattr__(binding, "permission_scope", scope)
+    object.__setattr__(
+        binding,
+        "query_digest",
+        "sha256:" + sha256(encoded).hexdigest(),
     )
+    _register_authority(binding)
+    return binding
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ProviderResponseObservation:
-    """Exact response bytes bound to one immutable authenticated query."""
+    """Exact response bytes minted only by the canonical observation path."""
 
     query_binding: AuthenticatedReadQueryBinding
     observed_at: str
@@ -408,70 +379,25 @@ class ProviderResponseObservation:
     response_sha256: str
     evidence_ref: str
     payload: object
-    _observation_token: InitVar[object | None] = None
 
-    def __post_init__(self, _observation_token: object | None) -> None:
-        if _observation_token is not _OBSERVED_RESPONSE_TOKEN:
-            raise ProviderCoreError(
-                "provider response observations must come from exact response bytes"
-            )
-        if not isinstance(self.query_binding, AuthenticatedReadQueryBinding):
-            raise TypeError(
-                "query_binding must be AuthenticatedReadQueryBinding"
-            )
-        if (
-            isinstance(self.http_status, bool)
-            or not isinstance(self.http_status, int)
-            or self.http_status < 200
-            or self.http_status > 299
-        ):
-            raise ProviderCoreError(
-                "successful provider response observation requires HTTP 2xx status"
-            )
-        if re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None:
-            raise ProviderCoreError(
-                "response_sha256 must be a canonical SHA-256 digest"
-            )
-        if re.fullmatch(
-            r"provider-read:sha256:[0-9a-f]{64}",
-            self.evidence_ref,
-        ) is None:
-            raise ProviderCoreError("evidence_ref must be canonical")
-        observed = _text(self.observed_at, "observed_at")
-        try:
-            point = datetime.fromisoformat(observed.replace("Z", "+00:00"))
-            prepared = datetime.fromisoformat(
-                self.query_binding.prepared_at.replace("Z", "+00:00")
-            )
-        except ValueError as error:
-            raise ProviderCoreError(
-                "provider response timestamps must be ISO timestamps"
-            ) from error
-        if (
-            point.tzinfo is None
-            or not observed.endswith("Z")
-            or point < prepared
-        ):
-            raise ProviderCoreError(
-                "provider response observation must be canonical UTC at/after query preparation"
-            )
-        canonical_time = point.astimezone(timezone.utc).isoformat().replace(
-            "+00:00", "Z"
+    def __init__(self, *_args, **_kwargs) -> None:
+        raise ProviderCoreError(
+            "provider response observations must come from exact response bytes"
         )
-        if canonical_time != observed:
-            raise ProviderCoreError("observed_at must be canonical UTC text")
-        object.__setattr__(self, "observed_at", observed)
 
     @property
     def provider_id(self) -> str:
+        _require_provider_response_observation_authority(self)
         return self.query_binding.provider_id
 
     @property
     def account_id(self) -> str:
+        _require_provider_response_observation_authority(self)
         return self.query_binding.account_id
 
     @property
     def environment(self) -> str:
+        _require_provider_response_observation_authority(self)
         return self.query_binding.environment
 
     def require_scope(
@@ -483,6 +409,7 @@ class ProviderResponseObservation:
         account_id: str | None = None,
         environment: str | None = None,
     ) -> None:
+        _require_provider_response_observation_authority(self)
         self.query_binding.require_scope(
             provider_id=provider_id,
             surface=surface,
@@ -492,15 +419,244 @@ class ProviderResponseObservation:
         )
 
 
-def observe_authenticated_json_response(
+def _install_authenticated_provider_read_authority():
+    """Retain provider-read construction authority outside frozen dataclass state."""
+
+    query_states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+    response_states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+    canonical_type = type
+    canonical_id = id
+    canonical_str = str
+    canonical_int = int
+    canonical_weakref_ref = weakref.ref
+    object_getattribute = object.__getattribute__
+    mapping_proxy_type = MappingProxyType
+    canonical_text = _text
+
+    def prune(states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]]) -> None:
+        for object_id, (value_ref, _snapshot) in tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def query_snapshot(value: object) -> tuple[object, ...]:
+        return (
+            object_getattribute(value, "provider_id"),
+            object_getattribute(value, "account_id"),
+            object_getattribute(value, "entity_id"),
+            object_getattribute(value, "environment"),
+            object_getattribute(value, "capability_snapshot_id"),
+            object_getattribute(value, "instrument_version"),
+            object_getattribute(value, "surface"),
+            object_getattribute(value, "endpoint"),
+            object_getattribute(value, "query"),
+            object_getattribute(value, "prepared_at"),
+            object_getattribute(value, "permission_scope"),
+            object_getattribute(value, "query_digest"),
+        )
+
+    def register_query(value: object) -> None:
+        if canonical_type(value) is not AuthenticatedReadQueryBinding:
+            raise ProviderCoreError(
+                "authenticated-read construction authority requires exact binding"
+            )
+        prune(query_states)
+        object_id = canonical_id(value)
+        current = query_states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise ProviderCoreError(
+                "authenticated-read construction authority identity collision"
+            )
+        query_states[object_id] = (
+            canonical_weakref_ref(value),
+            query_snapshot(value),
+        )
+
+    def require_query(value: object) -> tuple[object, ...]:
+        if canonical_type(value) is not AuthenticatedReadQueryBinding:
+            raise ProviderCoreError(
+                "authenticated-read construction authority requires exact binding"
+            )
+        prune(query_states)
+        state = query_states.get(canonical_id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderCoreError(
+                "authenticated-read construction authority is unavailable"
+            )
+        expected = state[1]
+        current = query_snapshot(value)
+        for index in (0, 1, 2, 3, 4, 5, 7, 9, 10, 11):
+            if (
+                canonical_type(current[index]) is not canonical_str
+                or current[index] != expected[index]
+            ):
+                raise ProviderCoreError(
+                    "authenticated-read binding changed after preparation"
+                )
+        if (
+            canonical_type(current[6]) is not Surface
+            or current[6] is not expected[6]
+            or current[8] is not expected[8]
+        ):
+            raise ProviderCoreError(
+                "authenticated-read binding changed after preparation"
+            )
+        return expected
+
+    def response_snapshot(value: object) -> tuple[object, ...]:
+        return (
+            object_getattribute(value, "query_binding"),
+            object_getattribute(value, "observed_at"),
+            object_getattribute(value, "http_status"),
+            object_getattribute(value, "response_sha256"),
+            object_getattribute(value, "evidence_ref"),
+            object_getattribute(value, "payload"),
+        )
+
+    def register_response(value: object) -> None:
+        if canonical_type(value) is not ProviderResponseObservation:
+            raise ProviderCoreError(
+                "provider-response construction authority requires exact observation"
+            )
+        current = response_snapshot(value)
+        require_query(current[0])
+        prune(response_states)
+        object_id = canonical_id(value)
+        previous = response_states.get(object_id)
+        if previous is not None and previous[0]() is not None:
+            raise ProviderCoreError(
+                "provider-response construction authority identity collision"
+            )
+        response_states[object_id] = (
+            canonical_weakref_ref(value),
+            current,
+        )
+
+    def require_response(value: object) -> tuple[object, ...]:
+        if canonical_type(value) is not ProviderResponseObservation:
+            raise ProviderCoreError(
+                "provider-response construction authority requires exact observation"
+            )
+        prune(response_states)
+        state = response_states.get(canonical_id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderCoreError(
+                "provider-response construction authority is unavailable"
+            )
+        expected = state[1]
+        current = response_snapshot(value)
+        if current[0] is not expected[0]:
+            raise ProviderCoreError(
+                "provider response changed after exact-byte observation"
+            )
+        require_query(current[0])
+        if (
+            canonical_type(current[1]) is not canonical_str
+            or current[1] != expected[1]
+            or canonical_type(current[2]) is not canonical_int
+            or current[2] != expected[2]
+            or canonical_type(current[3]) is not canonical_str
+            or current[3] != expected[3]
+            or canonical_type(current[4]) is not canonical_str
+            or current[4] != expected[4]
+            or current[5] is not expected[5]
+        ):
+            raise ProviderCoreError(
+                "provider response changed after exact-byte observation"
+            )
+        return expected
+
+    def provider_response_observation_projection(value: object):
+        response = require_response(value)
+        query = require_query(response[0])
+        return mapping_proxy_type(
+            {
+                "query_binding": response[0],
+                "provider_id": query[0],
+                "account_id": query[1],
+                "entity_id": query[2],
+                "environment": query[3],
+                "capability_snapshot_id": query[4],
+                "instrument_version": query[5],
+                "surface": query[6],
+                "endpoint": query[7],
+                "query": query[8],
+                "prepared_at": query[9],
+                "permission_scope": query[10],
+                "query_digest": query[11],
+                "observed_at": response[1],
+                "http_status": response[2],
+                "response_sha256": response[3],
+                "evidence_ref": response[4],
+                "payload": response[5],
+            }
+        )
+
+    def provider_response_observation_require_scope(
+        value: object,
+        *,
+        provider_id: str,
+        surface: Surface,
+        endpoint: str,
+        account_id: str | None = None,
+        environment: str | None = None,
+    ) -> Mapping[str, object]:
+        projection = provider_response_observation_projection(value)
+        if canonical_type(surface) is not Surface:
+            raise TypeError("surface must be exact Surface")
+        if (
+            canonical_text(provider_id, "provider_id").upper()
+            != projection["provider_id"]
+        ):
+            raise ProviderCoreError("provider-read provenance provider mismatch")
+        if surface is not projection["surface"]:
+            raise ProviderCoreError("provider-read provenance surface mismatch")
+        if canonical_text(endpoint, "endpoint") != projection["endpoint"]:
+            raise ProviderCoreError("provider-read provenance endpoint mismatch")
+        if (
+            account_id is not None
+            and canonical_text(account_id, "account_id") != projection["account_id"]
+        ):
+            raise ProviderCoreError("provider-read provenance account mismatch")
+        if (
+            environment is not None
+            and canonical_text(environment, "environment").upper()
+            != projection["environment"]
+        ):
+            raise ProviderCoreError("provider-read provenance environment mismatch")
+        return projection
+
+    return (
+        register_query,
+        require_query,
+        register_response,
+        require_response,
+        provider_response_observation_projection,
+        provider_response_observation_require_scope,
+    )
+
+
+(
+    _register_authenticated_read_query_binding_authority,
+    _require_authenticated_read_query_binding_authority,
+    _register_provider_response_observation_authority,
+    _require_provider_response_observation_authority,
+    provider_response_observation_projection,
+    provider_response_observation_require_scope,
+) = _install_authenticated_provider_read_authority()
+del _install_authenticated_provider_read_authority
+
+
+def _observe_authenticated_json_response_impl(
     *,
     query_binding: AuthenticatedReadQueryBinding,
     http_status: int,
     response_bytes: bytes,
     observed_at: datetime,
+    _register_authority,
 ) -> ProviderResponseObservation:
-    if not isinstance(query_binding, AuthenticatedReadQueryBinding):
-        raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
+    if type(query_binding) is not AuthenticatedReadQueryBinding:
+        raise TypeError("query_binding must be exact AuthenticatedReadQueryBinding")
+    _require_authenticated_read_query_binding_authority(query_binding)
     if (
         isinstance(http_status, bool)
         or not isinstance(http_status, int)
@@ -510,8 +666,20 @@ def observe_authenticated_json_response(
         raise ProviderCoreError(
             "authenticated provider state requires an HTTP 2xx response"
         )
+    if type(observed_at) is not datetime or type(observed_at.tzinfo) is not timezone:
+        raise ProviderCoreError(
+            "observed_at must be an exact stdlib timezone datetime"
+        )
     payload = _decode_exact_json(response_bytes)
     observed = _utc_text(observed_at, "observed_at")
+    prepared = datetime.fromisoformat(
+        query_binding.prepared_at.replace("Z", "+00:00")
+    )
+    observed_point = datetime.fromisoformat(observed.replace("Z", "+00:00"))
+    if observed_point < prepared:
+        raise ProviderCoreError(
+            "provider response observation must be canonical UTC at/after query preparation"
+        )
     response_digest = "sha256:" + sha256(response_bytes).hexdigest()
     identity_material = (
         query_binding.query_digest
@@ -523,17 +691,76 @@ def observe_authenticated_json_response(
         + observed
     ).encode("utf-8")
     evidence_ref = "provider-read:sha256:" + sha256(identity_material).hexdigest()
-    return ProviderResponseObservation(
-        query_binding=query_binding,
-        observed_at=observed,
-        http_status=http_status,
-        response_sha256=response_digest,
-        evidence_ref=evidence_ref,
-        payload=payload,
-        _observation_token=_OBSERVED_RESPONSE_TOKEN,
-    )
+    observation = object.__new__(ProviderResponseObservation)
+    object.__setattr__(observation, "query_binding", query_binding)
+    object.__setattr__(observation, "observed_at", observed)
+    object.__setattr__(observation, "http_status", http_status)
+    object.__setattr__(observation, "response_sha256", response_digest)
+    object.__setattr__(observation, "evidence_ref", evidence_ref)
+    object.__setattr__(observation, "payload", payload)
+    _register_authority(observation)
+    return observation
 
 
+
+
+def _bind_authenticated_provider_read_minting(
+    prepare_impl,
+    observe_impl,
+    register_query,
+    register_response,
+):
+    def prepare_authenticated_read_query(
+        *,
+        capability: CapabilitySnapshot,
+        surface: Surface,
+        endpoint: str,
+        query: Mapping[str, str] | None,
+        at: datetime,
+        permission_scope: str = "ORDER.READ",
+    ) -> AuthenticatedReadQueryBinding:
+        return prepare_impl(
+            capability=capability,
+            surface=surface,
+            endpoint=endpoint,
+            query=query,
+            at=at,
+            permission_scope=permission_scope,
+            _register_authority=register_query,
+        )
+
+    def observe_authenticated_json_response(
+        *,
+        query_binding: AuthenticatedReadQueryBinding,
+        http_status: int,
+        response_bytes: bytes,
+        observed_at: datetime,
+    ) -> ProviderResponseObservation:
+        return observe_impl(
+            query_binding=query_binding,
+            http_status=http_status,
+            response_bytes=response_bytes,
+            observed_at=observed_at,
+            _register_authority=register_response,
+        )
+
+    return prepare_authenticated_read_query, observe_authenticated_json_response
+
+
+(
+    prepare_authenticated_read_query,
+    observe_authenticated_json_response,
+) = _bind_authenticated_provider_read_minting(
+    _prepare_authenticated_read_query_impl,
+    _observe_authenticated_json_response_impl,
+    _register_authenticated_read_query_binding_authority,
+    _register_provider_response_observation_authority,
+)
+del _bind_authenticated_provider_read_minting
+del _prepare_authenticated_read_query_impl
+del _observe_authenticated_json_response_impl
+del _register_authenticated_read_query_binding_authority
+del _register_provider_response_observation_authority
 
 
 def _thaw_json(value: object) -> object:
@@ -561,8 +788,7 @@ class ProviderSubmissionObservation:
             raise ProviderCoreError(
                 "provider submission observations must come from durable exact response binding"
             )
-        if type(self.response_binding) is not SubmissionResponseBinding:
-            raise TypeError("response_binding must be exact SubmissionResponseBinding")
+        submission_response_binding_projection(self.response_binding)
         endpoint = _text(self.endpoint, "endpoint")
         if not endpoint.startswith("/") or "://" in endpoint:
             raise ProviderCoreError(
@@ -595,31 +821,31 @@ class ProviderSubmissionObservation:
 
     @property
     def provider_id(self) -> str:
-        return self.response_binding.provider.upper()
+        return provider_submission_observation_projection(self)["provider_id"]
 
     @property
     def account_id(self) -> str:
-        return self.response_binding.account_id
+        return provider_submission_observation_projection(self)["account_id"]
 
     @property
     def environment(self) -> str:
-        return self.response_binding.environment
+        return provider_submission_observation_projection(self)["environment"]
 
     @property
     def client_order_id(self) -> str:
-        return self.response_binding.client_order_id
+        return provider_submission_observation_projection(self)["client_order_id"]
 
     @property
     def response_sha256(self) -> str:
-        return self.response_binding.response_sha256
+        return provider_submission_observation_projection(self)["response_sha256"]
 
     @property
     def observed_at(self) -> str:
-        return self.response_binding.sent_at
+        return provider_submission_observation_projection(self)["sent_at"]
 
     @property
     def request_sha256(self) -> str:
-        return self.response_binding.request_hash
+        return provider_submission_observation_projection(self)["request_sha256"]
 
     def require_scope(
         self,
@@ -633,11 +859,7 @@ class ProviderSubmissionObservation:
         environment: str | None = None,
         client_order_id: str | None = None,
     ) -> None:
-        # Compatibility surface only. Financial consumers must use the
-        # closure-owned verifier/projection below before any property/method
-        # dispatch on an observation supplied by a caller.
-        require_canonical_submission_observation(self)
-        projection = submission_observation_projection(self)
+        projection = provider_submission_observation_projection(self)
         if _text(provider_id, "provider_id").upper() != projection["provider_id"]:
             raise ProviderCoreError("provider-write provenance provider mismatch")
         if _text(endpoint, "endpoint") != projection["endpoint"]:
@@ -648,16 +870,21 @@ class ProviderSubmissionObservation:
             raise ProviderCoreError("provider-write provenance capability mismatch")
         if tuple(instrument_versions) != projection["instrument_versions"]:
             raise ProviderCoreError("provider-write provenance instrument mismatch")
-        if account_id is not None and _text(account_id, "account_id") != projection["account_id"]:
+        if (
+            account_id is not None
+            and _text(account_id, "account_id") != projection["account_id"]
+        ):
             raise ProviderCoreError("provider-write provenance account mismatch")
         if (
             environment is not None
-            and _text(environment, "environment").upper() != projection["environment"]
+            and _text(environment, "environment").upper()
+            != projection["environment"]
         ):
             raise ProviderCoreError("provider-write provenance environment mismatch")
         if (
             client_order_id is not None
-            and _text(client_order_id, "client_order_id") != projection["client_order_id"]
+            and _text(client_order_id, "client_order_id")
+            != projection["client_order_id"]
         ):
             raise ProviderCoreError("provider-write provenance client-order mismatch")
 
@@ -674,6 +901,14 @@ def observe_submission_json_response(
     """Project one exact durable write response into provider-neutral evidence."""
 
     binding = submission_response_binding_projection(response_binding)
+    if binding["terminal_state"] != "SENT":
+        raise ProviderCoreError(
+            "provider submission observation requires definitive SENT response"
+        )
+    if binding["response_encoding"] != "utf-8-json":
+        raise ProviderCoreError(
+            "provider-write JSON observation requires durable utf-8-json response bytes"
+        )
     provider = _text(provider_id, "provider_id").upper()
     if provider not in PROVIDERS:
         raise ProviderCoreError("unknown provider")
@@ -712,10 +947,88 @@ def observe_submission_json_response(
         "instrument_versions": list(instruments),
     }
     actual_scope = _thaw_json(binding["submission_scope"])
-    if actual_scope != expected_scope:
+    if type(actual_scope) is not dict:
+        raise ProviderCoreError("durable submission scope is non-canonical")
+    if any(actual_scope.get(key) != value for key, value in expected_scope.items()):
         raise ProviderCoreError(
             "durable submission scope does not match prepared provider request"
         )
+
+    # Provider-route and financial authority may extend the prepared-request
+    # scope. Those extensions remain authenticated by submission_scope_hash and
+    # therefore by this observation's evidence_ref; this neutral verifier owns
+    # only the prepared-request axes plus cross-layer identities it can prove
+    # from the durable response binding itself.
+    provider_extension_keys = {"provider_environment"}
+    financial_extension_keys = {
+        "provider_id",
+        "account_id",
+        "environment",
+        "capability_snapshot_id",
+    }
+    route_extension_keys = {
+        "provider_route_qualification_id",
+        "provider_route_capability_snapshot_id",
+        "provider_route_decision_journal_sequence_cut",
+        "provider_route_provider_environment",
+        "provider_route_adapter_code_sha",
+        "provider_route_packaged_artifact_digest",
+        "provider_route_protocol_id",
+        "provider_route_protocol_version",
+        "provider_route_entity_policy_id",
+        "provider_route_entity_id",
+    }
+    extension_keys = set(actual_scope) - set(expected_scope)
+    allowed_extension_keys = (
+        provider_extension_keys | financial_extension_keys | route_extension_keys
+    )
+    if not extension_keys <= allowed_extension_keys:
+        raise ProviderCoreError("durable submission scope has unknown authority axes")
+
+    route_shape_present = bool(
+        extension_keys & (financial_extension_keys | route_extension_keys)
+    )
+    if route_shape_present:
+        required_route_shape = (
+            provider_extension_keys | financial_extension_keys | route_extension_keys
+        )
+        if not required_route_shape <= set(actual_scope):
+            raise ProviderCoreError(
+                "durable financial route submission scope is incomplete"
+            )
+
+    financial_scope = {
+        "provider_id": provider,
+        "account_id": binding["account_id"],
+        "environment": binding["environment"],
+        "provider_environment": binding["provider_environment"],
+        "provider_route_provider_environment": binding["provider_environment"],
+    }
+    for key, value in financial_scope.items():
+        if key in actual_scope and actual_scope[key] != value:
+            raise ProviderCoreError(
+                "durable submission financial scope does not match response binding"
+            )
+    for key in (
+        "capability_snapshot_id",
+        "provider_route_capability_snapshot_id",
+    ):
+        if key in actual_scope and (
+            len(capabilities) != 1 or actual_scope[key] != capabilities[0]
+        ):
+            raise ProviderCoreError(
+                "durable submission capability scope does not match prepared request"
+            )
+
+    if "provider_route_provider_environment" in actual_scope:
+        if (
+            "provider_environment" not in actual_scope
+            or actual_scope["provider_route_provider_environment"]
+            != actual_scope["provider_environment"]
+        ):
+            raise ProviderCoreError(
+                "durable submission provider-route environment scope mismatch"
+            )
 
     identity_material = json.dumps(
         {
@@ -748,9 +1061,6 @@ def observe_submission_json_response(
         payload=_decode_exact_json(binding["response_bytes"]),
         _observation_token=_SUBMISSION_OBSERVED_RESPONSE_TOKEN,
     )
-
-
-
 
 @dataclass(frozen=True)
 class ProviderDefinition:
@@ -815,7 +1125,7 @@ PROVIDERS: Mapping[str, ProviderDefinition] = {
 
 
 def _install_provider_submission_observation_authority(binding_projection):
-    """Mint and verify write observations only from durable binding authority."""
+    """Mint write observations only from sealed durable response bindings."""
 
     observation_type = ProviderSubmissionObservation
     binding_type = SubmissionResponseBinding
@@ -828,7 +1138,6 @@ def _install_provider_submission_observation_authority(binding_projection):
     canonical_len = len
     canonical_frozenset = frozenset
     canonical_str = str
-    canonical_dict = dict
     canonical_object = object
     object_getattribute = canonical_object.__getattribute__
     object_setattr = canonical_object.__setattr__
@@ -837,29 +1146,36 @@ def _install_provider_submission_observation_authority(binding_projection):
     binding_projection_code = binding_projection.__code__
     canonical_decode = _decode_exact_json
     decode_code = canonical_decode.__code__
+    canonical_depth_guard = require_provider_json_depth
+    depth_guard_code = canonical_depth_guard.__code__
+    canonical_number_parser = parse_bounded_json_number_token
+    number_parser_code = canonical_number_parser.__code__
+    canonical_integer_parser = parse_bounded_json_integer_token
+    integer_parser_code = canonical_integer_parser.__code__
+    canonical_freeze_json = _freeze_json
+    freeze_json_code = canonical_freeze_json.__code__
     canonical_sha256 = sha256
     canonical_json_module = json
+    canonical_json_loads = json.loads
     canonical_json_dumps = json.dumps
+    canonical_exact_decimal_error = ExactDecimalError
+    canonical_value_error = ValueError
+    canonical_unicode_decode_error = UnicodeDecodeError
+    canonical_recursion_error = RecursionError
+    canonical_bytes = bytes
+    canonical_isinstance = isinstance
+    canonical_dict = dict
+    canonical_list = list
+    canonical_decimal = Decimal
+    canonical_float = float
+    canonical_bool = bool
+    canonical_int = int
     canonical_re_module = re
     digest_pattern = re.compile(r"^sha256:[0-9a-f]{64}$")
     evidence_pattern = re.compile(r"^provider-write:sha256:[0-9a-f]{64}$")
     canonical_weakref_module = weakref
     canonical_weakref_ref = weakref.ref
-    provider_ids = canonical_frozenset(PROVIDERS)
-    original_require_scope = ProviderSubmissionObservation.require_scope
-    observation_require_scope_code = None
-    observation_getattribute = None
-
-    states: dict[int, tuple[object, tuple[object, ...]]] = {}
-    field_names = (
-        "response_binding",
-        "endpoint",
-        "capability_snapshot_ids",
-        "instrument_versions",
-        "evidence_ref",
-        "payload",
-    )
-    expected_instance_fields = canonical_frozenset(field_names)
+    provider_ids = frozenset(PROVIDERS)
     sensitive_observation_fields = canonical_frozenset(
         (
             "response_binding",
@@ -877,6 +1193,8 @@ def _install_provider_submission_observation_authority(binding_projection):
             "payload",
         )
     )
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
+    observation_require_scope_code = None
 
     def authority_changed():
         raise error_type("provider submission observation authority is unavailable")
@@ -889,12 +1207,17 @@ def _install_provider_submission_observation_authority(binding_projection):
             or type is not canonical_type
             or canonical_type.__setattr__ is not canonical_type_setattr
             or canonical_type.__getattribute__ is not canonical_type_getattribute
+            or canonical_type_getattribute(observation_type, "__getattribute__")
+            is not observation_getattribute
+            or canonical_type_getattribute(observation_type, "require_scope")
+            is not observation_require_scope
+            or observation_require_scope_code is None
+            or observation_require_scope.__code__ is not observation_require_scope_code
             or id is not canonical_id
             or tuple is not canonical_tuple
             or len is not canonical_len
             or frozenset is not canonical_frozenset
             or str is not canonical_str
-            or dict is not canonical_dict
             or object is not canonical_object
             or MappingProxyType is not mapping_proxy_type
             or submission_response_binding_projection
@@ -902,19 +1225,33 @@ def _install_provider_submission_observation_authority(binding_projection):
             or canonical_binding_projection.__code__ is not binding_projection_code
             or _decode_exact_json is not canonical_decode
             or canonical_decode.__code__ is not decode_code
+            or require_provider_json_depth is not canonical_depth_guard
+            or canonical_depth_guard.__code__ is not depth_guard_code
+            or parse_bounded_json_number_token is not canonical_number_parser
+            or canonical_number_parser.__code__ is not number_parser_code
+            or parse_bounded_json_integer_token is not canonical_integer_parser
+            or canonical_integer_parser.__code__ is not integer_parser_code
+            or _freeze_json is not canonical_freeze_json
+            or canonical_freeze_json.__code__ is not freeze_json_code
             or sha256 is not canonical_sha256
             or json is not canonical_json_module
+            or json.loads is not canonical_json_loads
             or json.dumps is not canonical_json_dumps
+            or ExactDecimalError is not canonical_exact_decimal_error
+            or ValueError is not canonical_value_error
+            or UnicodeDecodeError is not canonical_unicode_decode_error
+            or RecursionError is not canonical_recursion_error
+            or bytes is not canonical_bytes
+            or isinstance is not canonical_isinstance
+            or dict is not canonical_dict
+            or list is not canonical_list
+            or Decimal is not canonical_decimal
+            or float is not canonical_float
+            or bool is not canonical_bool
+            or int is not canonical_int
             or re is not canonical_re_module
             or weakref is not canonical_weakref_module
             or weakref.ref is not canonical_weakref_ref
-            or observation_getattribute is None
-            or canonical_type_getattribute(observation_type, "__getattribute__")
-            is not observation_getattribute
-            or observation_require_scope_code is None
-            or canonical_type_getattribute(observation_type, "require_scope")
-            is not observation_require_scope
-            or observation_require_scope.__code__ is not observation_require_scope_code
         ):
             authority_changed()
 
@@ -929,27 +1266,28 @@ def _install_provider_submission_observation_authority(binding_projection):
     def canonical_text_tuple(value, name):
         if canonical_type(value) is not canonical_tuple or not value:
             raise error_type(f"{name} must be a non-empty exact tuple")
-        normalized = canonical_tuple(
-            canonical_text(item, name)
-            for item in value
-        )
+        normalized = canonical_tuple(canonical_text(item, name) for item in value)
         if canonical_len(canonical_frozenset(normalized)) != canonical_len(normalized):
             raise error_type(f"{name} must be unique")
         return normalized
 
+    field_names = (
+        "response_binding",
+        "endpoint",
+        "capability_snapshot_ids",
+        "instrument_versions",
+        "evidence_ref",
+        "payload",
+    )
+    exact_field_names = canonical_frozenset(field_names)
+
     def raw_snapshot(value):
-        try:
-            state = object_getattribute(value, "__dict__")
-        except (AttributeError, TypeError):
-            authority_changed()
+        state = object_getattribute(value, "__dict__")
         if canonical_type(state) is not canonical_dict:
             authority_changed()
-        if canonical_frozenset(state) != expected_instance_fields:
+        if canonical_frozenset(state) != exact_field_names:
             authority_changed()
-        return canonical_tuple(
-            object_getattribute(value, name)
-            for name in field_names
-        )
+        return canonical_tuple(state[name] for name in field_names)
 
     def prune():
         for object_id, (value_ref, _snapshot) in canonical_tuple(states.items()):
@@ -1000,11 +1338,10 @@ def _install_provider_submission_observation_authority(binding_projection):
             or current[5] is not expected[5]
         ):
             authority_changed()
-        return value
+        return expected
 
     def provider_submission_observation_projection(value):
-        require_canonical_provider_submission_observation(value)
-        current = raw_snapshot(value)
+        current = require_canonical_provider_submission_observation(value)
         binding = canonical_binding_projection(current[0])
         return mapping_proxy_type(
             {
@@ -1019,6 +1356,10 @@ def _install_provider_submission_observation_authority(binding_projection):
                 "sent_at": binding["sent_at"],
                 "observed_at": binding["sent_at"],
                 "response_sha256": binding["response_sha256"],
+                "response_encoding": binding["response_encoding"],
+                "terminal_state": binding["terminal_state"],
+                "ambiguity_reason": binding["ambiguity_reason"],
+                "retry_disposition": binding["retry_disposition"],
                 "http_status": binding["http_status"],
                 "submission_scope": binding["submission_scope"],
                 "submission_scope_hash": binding["submission_scope_hash"],
@@ -1042,6 +1383,9 @@ def _install_provider_submission_observation_authority(binding_projection):
         environment=None,
         client_order_id=None,
     ):
+        # Scope admission is itself financial/provider authority. Keep it inside
+        # the closure-backed registry instead of trusting a replaceable class
+        # method or derived property after the observation has been minted.
         projection = provider_submission_observation_projection(value)
         if canonical_text(provider_id, "provider_id").upper() != projection["provider_id"]:
             raise error_type("provider-write provenance provider mismatch")
@@ -1053,12 +1397,18 @@ def _install_provider_submission_observation_authority(binding_projection):
         ):
             raise error_type("provider-write provenance request digest mismatch")
         if (
-            canonical_text_tuple(capability_snapshot_ids, "capability_snapshot_ids")
+            canonical_text_tuple(
+                capability_snapshot_ids,
+                "capability_snapshot_ids",
+            )
             != projection["capability_snapshot_ids"]
         ):
             raise error_type("provider-write provenance capability mismatch")
         if (
-            canonical_text_tuple(instrument_versions, "instrument_versions")
+            canonical_text_tuple(
+                instrument_versions,
+                "instrument_versions",
+            )
             != projection["instrument_versions"]
         ):
             raise error_type("provider-write provenance instrument mismatch")
@@ -1081,6 +1431,10 @@ def _install_provider_submission_observation_authority(binding_projection):
             raise error_type("provider-write provenance client-order mismatch")
 
     def observation_getattribute(value, name):
+        # Frozen dataclass syntax is not an authority boundary: object.__setattr__
+        # can still retarget stored fields. Route every normal read of the
+        # authority-bearing observation payload/scope through the external
+        # issuance registry so post-mint relabelling fails before consumption.
         if canonical_type(name) is canonical_str:
             if name == "require_scope":
                 implementation_changed()
@@ -1111,6 +1465,14 @@ def _install_provider_submission_observation_authority(binding_projection):
     ) -> ProviderSubmissionObservation:
         implementation_changed()
         binding = canonical_binding_projection(response_binding)
+        if binding["terminal_state"] != "SENT":
+            raise error_type(
+                "provider submission observation requires definitive SENT response"
+            )
+        if binding["response_encoding"] != "utf-8-json":
+            raise error_type(
+                "provider-write JSON observation requires durable utf-8-json response bytes"
+            )
 
         provider = canonical_text(provider_id, "provider_id").upper()
         if provider not in provider_ids:
@@ -1146,18 +1508,34 @@ def _install_provider_submission_observation_authority(binding_projection):
         scope = binding["submission_scope"]
         if canonical_type(scope) is not mapping_proxy_type:
             authority_changed()
-        expected_keys = canonical_frozenset(
+        required_keys = canonical_frozenset(
             (
                 "endpoint",
                 "prepared_request_sha256",
                 "capability_snapshot_ids",
                 "instrument_versions",
+                *(
+                    ("provider_environment",)
+                    if provider == "BYBIT"
+                    else ()
+                ),
             )
         )
-        if canonical_frozenset(scope.keys()) != expected_keys:
+        scope_keys = canonical_frozenset(scope.keys())
+        if not required_keys.issubset(scope_keys):
             raise error_type(
                 "durable submission scope does not match prepared provider request"
             )
+        if "provider_environment" in scope:
+            raw_provider_environment = scope["provider_environment"]
+            scoped_provider_environment = canonical_text(
+                raw_provider_environment,
+                "submission_scope.provider_environment",
+            ).upper()
+            if scoped_provider_environment != raw_provider_environment:
+                raise error_type(
+                    "durable submission provider environment is not canonical"
+                )
         if (
             scope["endpoint"] != normalized_endpoint
             or scope["prepared_request_sha256"] != request_sha
@@ -1169,6 +1547,105 @@ def _install_provider_submission_observation_authority(binding_projection):
             raise error_type(
                 "durable submission scope does not match prepared provider request"
             )
+
+        # Financial/provider-route extensions are sealed by submission_scope_hash.
+        # Accept only the canonical base write shape or the complete financial-route
+        # shape; partial/unknown authority axes fail closed.
+        provider_extension_keys = canonical_frozenset(("provider_environment",))
+        financial_extension_keys = canonical_frozenset(
+            ("provider_id", "account_id", "environment", "capability_snapshot_id")
+        )
+        route_extension_keys = canonical_frozenset(
+            (
+                "provider_route_qualification_id",
+                "provider_route_capability_snapshot_id",
+                "provider_route_decision_journal_sequence_cut",
+                "provider_route_provider_environment",
+                "provider_route_adapter_code_sha",
+                "provider_route_packaged_artifact_digest",
+                "provider_route_protocol_id",
+                "provider_route_protocol_version",
+                "provider_route_entity_policy_id",
+                "provider_route_entity_id",
+            )
+        )
+        extension_keys = scope_keys.difference(required_keys)
+        allowed_extension_keys = (
+            provider_extension_keys
+            | financial_extension_keys
+            | route_extension_keys
+        )
+        if not extension_keys.issubset(allowed_extension_keys):
+            raise error_type("durable submission scope has unknown authority axes")
+        route_shape_present = bool(
+            extension_keys.intersection(
+                financial_extension_keys | route_extension_keys
+            )
+        )
+        if route_shape_present:
+            required_route_shape = (
+                required_keys
+                | provider_extension_keys
+                | financial_extension_keys
+                | route_extension_keys
+            )
+            if scope_keys != required_route_shape:
+                raise error_type(
+                    "durable financial route submission scope is incomplete"
+                )
+
+        financial_scope = {
+            "provider_id": provider,
+            "account_id": binding["account_id"],
+            "environment": binding["environment"],
+        }
+        for key, value in financial_scope.items():
+            if key in scope and canonical_text(
+                scope[key],
+                "submission_scope." + key,
+            ) != value:
+                raise error_type(
+                    "durable submission financial scope does not match response binding"
+                )
+        for key in (
+            "capability_snapshot_id",
+            "provider_route_capability_snapshot_id",
+        ):
+            if key in scope and (
+                len(capabilities) != 1
+                or canonical_text(
+                    scope[key],
+                    "submission_scope." + key,
+                )
+                != capabilities[0]
+            ):
+                raise error_type(
+                    "durable submission capability scope does not match prepared request"
+                )
+        if "provider_route_provider_environment" in scope:
+            if "provider_environment" not in scope:
+                raise error_type(
+                    "durable submission provider-route environment scope mismatch"
+                )
+            raw_route_provider_environment = scope[
+                "provider_route_provider_environment"
+            ]
+            route_provider_environment = canonical_text(
+                raw_route_provider_environment,
+                "submission_scope.provider_route_provider_environment",
+            ).upper()
+            if route_provider_environment != raw_route_provider_environment:
+                raise error_type(
+                    "durable submission provider-route environment is not canonical"
+                )
+            scoped_provider_environment = canonical_text(
+                scope["provider_environment"],
+                "submission_scope.provider_environment",
+            ).upper()
+            if route_provider_environment != scoped_provider_environment:
+                raise error_type(
+                    "durable submission provider-route environment scope mismatch"
+                )
 
         identity_material = canonical_json_dumps(
             {

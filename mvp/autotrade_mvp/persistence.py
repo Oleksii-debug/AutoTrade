@@ -57,6 +57,12 @@ class JournalStore(_JournalStoreImpl):
     """
 
     def __init__(self, path: str | Path):
+        # Reject executable PathLike/subclass ingress before pathname
+        # interpretation or filesystem qualification can dispatch caller code.
+        if type(path) is not str and type(path) is not type(Path()):
+            raise TypeError(
+                "journal database path must be exact text or exact platform Path"
+            )
         # Freeze caller-relative text before locality admission performs Win32
         # I/O. A concurrent process-wide chdir after admission must not retarget
         # durable financial state into an unclassified namespace.
@@ -115,18 +121,19 @@ class JournalStore(_JournalStoreImpl):
         )
         if type(envelope) is not dict:
             raise TypeError("envelope must be an exact object")
+        envelope = _impl._detach_json_value(envelope)
 
-        event_id = JournalStore._require_text(
-            envelope.get("event_id"), "event_id"
+        event_id = _impl._require_canonical_durable_text(
+            envelope.get("event_id"), name="event_id"
         )
-        event_type = JournalStore._require_text(
-            envelope.get("event_type"), "event_type"
+        event_type = _impl._require_canonical_durable_text(
+            envelope.get("event_type"), name="event_type"
         )
-        aggregate_type = JournalStore._require_text(
-            envelope.get("aggregate_type"), "aggregate_type"
+        aggregate_type = _impl._require_canonical_durable_text(
+            envelope.get("aggregate_type"), name="aggregate_type"
         )
-        aggregate_id = JournalStore._require_text(
-            envelope.get("aggregate_id"), "aggregate_id"
+        aggregate_id = _impl._require_canonical_durable_text(
+            envelope.get("aggregate_id"), name="aggregate_id"
         )
         try:
             raw_aggregate_version = envelope["aggregate_version"]
@@ -143,14 +150,14 @@ class JournalStore(_JournalStoreImpl):
             raise ValueError("first-event claim requires aggregate_version 1")
 
         payload = envelope.get("payload")
+        payload_json = _impl.canonical_json(payload)
         expected_payload_hash = _impl.payload_digest(payload)
         if envelope.get("payload_hash") != expected_payload_hash:
             raise ValueError("payload_hash does not match payload")
-        payload_json = _impl.canonical_json(payload)
         envelope_json = _impl.canonical_json(envelope)
         envelope_hash = _impl._event_envelope_digest(envelope_json)
-        committed_at = JournalStore._require_text(
-            envelope.get("committed_at"), "committed_at"
+        committed_at = _impl._require_canonical_durable_text(
+            envelope.get("committed_at"), name="committed_at"
         )
 
         with journal_store_authority_scope(self, identity):
@@ -378,7 +385,8 @@ class JournalStore(_JournalStoreImpl):
             raise TypeError("referenced_event_ids must be exact canonical text tuple")
         if len(set(referenced_event_ids)) != len(referenced_event_ids):
             raise ValueError("referenced_event_ids must be unique")
-        request_hash = _impl.payload_digest(request)
+        request_snapshot = _impl._detach_json_value(request)
+        request_hash = _impl.payload_digest(request_snapshot)
 
         with self._connect() as connection:
             connection.execute("BEGIN")

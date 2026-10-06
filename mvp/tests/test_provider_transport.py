@@ -5,6 +5,7 @@ import json
 from io import BytesIO
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
+import urllib.request as urllib_request
 from urllib.request import ProxyHandler
 import subprocess
 import sys
@@ -4607,6 +4608,65 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
         with patch(
             "mvp.autotrade_mvp.provider_transport.HTTPSHandler.https_open",
             new=lambda *_args, **_kwargs: self.fail("patched network method executed"),
+        ):
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "network authority changed",
+            ):
+                require_direct_trading_write_client(client)
+
+    def test_https_connection_rebinding_loses_direct_write_authority_before_io(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        with patch.object(
+            urllib_request.http.client,
+            "HTTPSConnection",
+            new=object,
+        ):
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "network authority changed",
+            ):
+                require_direct_trading_write_client(client)
+
+    def test_https_connection_method_rebinding_loses_direct_write_authority(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        connection_type = urllib_request.http.client.HTTPSConnection
+        with patch.object(
+            connection_type,
+            "connect",
+            new=lambda *_args, **_kwargs: self.fail(
+                "rebound HTTPS connection executed"
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "network authority changed",
+            ):
+                require_direct_trading_write_client(client)
+
+    def test_socket_connection_rebinding_loses_direct_write_authority_before_io(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        with patch.object(
+            urllib_request.http.client.socket,
+            "create_connection",
+            new=lambda *_args, **_kwargs: self.fail(
+                "rebound socket connector executed"
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "network authority changed",
+            ):
+                require_direct_trading_write_client(client)
+
+    def test_default_tls_context_rebinding_loses_direct_write_authority_before_io(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        with patch.object(
+            urllib_request.http.client.ssl,
+            "_create_default_https_context",
+            new=lambda *_args, **_kwargs: self.fail(
+                "rebound TLS context factory executed"
+            ),
         ):
             with self.assertRaisesRegex(
                 ProviderTransportError,

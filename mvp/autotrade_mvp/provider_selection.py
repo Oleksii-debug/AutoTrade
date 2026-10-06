@@ -235,6 +235,7 @@ def _install_selected_route_authority() -> tuple[
         tuple[
             object,
             ProviderCandidate,
+            tuple[str, ...],
             CapabilitySnapshot,
             AcceptedProviderQualification,
             int,
@@ -251,6 +252,19 @@ def _install_selected_route_authority() -> tuple[
         }
     )
 
+    candidate_field_names = (
+        "provider_id",
+        "product_family",
+        "provider_environment",
+        "account_id",
+        "entity_id",
+        "entity_policy_id",
+        "adapter_code_sha",
+        "packaged_artifact_digest",
+        "protocol_id",
+        "protocol_version",
+    )
+
     def authority_changed() -> None:
         message = "selected provider route authority changed"
         # The generic selector must not statically depend on the financial
@@ -262,6 +276,15 @@ def _install_selected_route_authority() -> tuple[
         except (ImportError, AttributeError):
             raise ProviderSelectionError(message)
         raise FinancialSendAuthorityError(message)
+
+    def candidate_snapshot(value: ProviderCandidate) -> tuple[str, ...]:
+        current = tuple(
+            object.__getattribute__(value, field_name)
+            for field_name in candidate_field_names
+        )
+        if any(type(item) is not str for item in current):
+            authority_changed()
+        return current
 
     @dataclass(frozen=True, slots=True, init=False, weakref_slot=True)
     class SelectedProviderRoute:
@@ -292,7 +315,14 @@ def _install_selected_route_authority() -> tuple[
                 binding = bindings.get(id(self))
                 if binding is None:
                     authority_changed()
-                bound_ref, candidate, capability, qualification, decision_cut = binding
+                (
+                    bound_ref,
+                    candidate,
+                    candidate_state,
+                    capability,
+                    qualification,
+                    decision_cut,
+                ) = binding
                 if bound_ref() is not self:
                     authority_changed()
                 try:
@@ -307,6 +337,7 @@ def _install_selected_route_authority() -> tuple[
                     authority_changed()
                 if (
                     current_candidate is not candidate
+                    or candidate_snapshot(current_candidate) != candidate_state
                     or current_capability is not capability
                     or current_qualification is not qualification
                     or type(current_cut) is not int
@@ -354,6 +385,7 @@ def _install_selected_route_authority() -> tuple[
         for key in dead:
             bindings.pop(key, None)
 
+        candidate_state = candidate_snapshot(candidate)
         route = object.__new__(SelectedProviderRoute)
         object.__setattr__(route, "candidate", candidate)
         object.__setattr__(route, "capability", capability)
@@ -366,6 +398,7 @@ def _install_selected_route_authority() -> tuple[
         bindings[id(route)] = (
             route_ref(route),
             candidate,
+            candidate_state,
             capability,
             qualification,
             decision_journal_sequence_cut,

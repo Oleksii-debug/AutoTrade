@@ -194,6 +194,46 @@ class ScientificFinancialAccountingOwnerTests(unittest.TestCase):
             self.assertTrue(owner.reconciled_cash_digest.startswith("sha256:"))
             self.assertTrue(owner.reconciled_position_digest.startswith("sha256:"))
 
+    def test_owner_compares_decimal_value_not_checkpoint_scale_or_zero_keys(self):
+        with TemporaryDirectory() as directory:
+            gate_profile, registry, registration = _science_owner(directory)
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            _book_matching_provider(store)
+            scaled = reconcile_account(
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                local_cash={"USD": "900.0", "JPY": "0.00"},
+                provider_cash={"USD": "900.0", "JPY": "0.00"},
+                local_positions={"ABC": "1.0", "ZERO": "0.000"},
+                provider_positions={"ABC": "1.0", "ZERO": "0.000"},
+                local_execution_ids=["e1"],
+                provider_fills=[_fill()],
+                snapshot_consistency=_snapshot(),
+                coverage_start="2026-09-24T17:00:00Z",
+                coverage_end="2026-09-24T19:00:00Z",
+                pagination_complete=True,
+                provider_activity_provider_id=PROVIDER,
+                provider_activity_account_id=ACCOUNT,
+            )
+            _, cut = _checkpoint_and_cut(
+                store,
+                gate_profile=gate_profile,
+                registration=registration,
+                reconciliation=scaled,
+            )
+
+            owner = resolve_scientific_financial_accounting_owner(
+                store=store,
+                financial_cut=cut,
+                scientific_registry=registry,
+                profile=gate_profile,
+            )
+
+            self.assertEqual(owner.economic_transaction_count, 2)
+            self.assertTrue(owner.reconciled_cash_digest.startswith("sha256:"))
+            self.assertTrue(owner.reconciled_position_digest.startswith("sha256:"))
+
     def test_balanced_but_wrong_local_book_cannot_ride_foreign_reconciliation(self):
         with TemporaryDirectory() as directory:
             gate_profile, registry, registration = _science_owner(directory)

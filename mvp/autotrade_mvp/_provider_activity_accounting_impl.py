@@ -2218,6 +2218,8 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 payload.get("provider_id") != authority.provider_id
                 or payload.get("account_id") != authority.account_id
                 or payload.get("environment") != authority.environment
+                or payload.get("provider_environment", authority.environment)
+                != authority.provider_environment
             ):
                 raise AccountingConflict(
                     "economic durable event scope does not match provider book"
@@ -2241,6 +2243,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 provider_id=authority.provider_id,
                 account_id=authority.account_id,
                 environment=authority.environment,
+                provider_environment=authority.provider_environment,
                 transactions=transactions,
             )
             if payload.get("batch_digest") != batch_digest:
@@ -2357,16 +2360,14 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=self.provider_id,
             account_id=self.account_id,
             environment=self.environment,
+            provider_environment=self.provider_environment,
         )
         if self.book_id != expected_book_id:
             raise AccountingConflict(
                 "historical economic cut book identity does not match owner scope"
             )
-        if self.provider_id == "BYBIT" and self.environment in {"PAPER", "LIVE"}:
-            raise AccountingConflict(
-                "BYBIT historical economic cut requires exact provider_environment "
-                "before terminal provider-cost evidence"
-            )
+        # Provider environment is part of the durable book identity, so
+        # historical cuts are unambiguous across BYBIT TESTNET/DEMO/MAINNET.
         if type(self.store) is not JournalStore:
             raise AccountingConflict(
                 "historical economic cut requires exact canonical JournalStore"
@@ -2470,6 +2471,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             "provider_id": self.provider_id,
             "account_id": self.account_id,
             "environment": self.environment,
+            "provider_environment": self.provider_environment,
             "book_id": self.book_id,
             "aggregate_version": aggregate_version,
             "journal_sequence": journal_sequence,
@@ -2485,6 +2487,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=self.provider_id,
             account_id=self.account_id,
             environment=self.environment,
+            provider_environment=self.provider_environment,
             book_id=self.book_id,
             aggregate_version=aggregate_version,
             journal_sequence=journal_sequence,
@@ -2536,6 +2539,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=authority.provider_id,
             account_id=authority.account_id,
             environment=authority.environment,
+            provider_environment=authority.provider_environment,
             transactions=batch,
         )
         request = {
@@ -2543,6 +2547,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             "provider_id": authority.provider_id,
             "account_id": authority.account_id,
             "environment": authority.environment,
+            "provider_environment": authority.provider_environment,
             "batch_digest": batch_digest,
             "transactions": transaction_payloads,
         }
@@ -2620,6 +2625,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             "provider_id": authority.provider_id,
             "account_id": authority.account_id,
             "environment": authority.environment,
+            "provider_environment": authority.provider_environment,
             "batch_digest": batch_digest,
             "previous_book_digest": previous_digest,
             "resulting_book_digest": resulting_digest,

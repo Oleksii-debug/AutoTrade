@@ -364,6 +364,50 @@ class ReconciliationJournalTests(unittest.TestCase):
                 [],
             )
 
+    def test_checkpoint_rejects_cross_provider_environment_resource_availability(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            result = reconciliation(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            wrong_domain_availability = ResourceAvailabilityEvidence(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="DEMO",
+                snapshot_id="demo-resource-cut",
+                query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+                valid_until="2026-09-24T19:05:00Z",
+                available_resources={"CASH:USDT": "100"},
+                evidence_refs=("provider:demo-resource-cut",),
+            )
+            forged = type(result)(
+                **{
+                    **result.__dict__,
+                    "resource_availability": wrong_domain_availability,
+                }
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "resource availability scope must match reconciliation result",
+            ):
+                record_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id="cross-domain-resource-availability",
+                    result=forged,
+                    observed_at="2026-09-24T19:00:00Z",
+                    host_id="test-host",
+                    owner_epoch="epoch-1",
+                )
+            self.assertEqual(
+                store.load_events_by_aggregate_type("account_reconciliation"),
+                [],
+            )
+
     def test_checkpoint_round_trip_is_exact_and_idempotent(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

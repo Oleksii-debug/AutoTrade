@@ -185,6 +185,17 @@ def reconciliation_payload(
         raise TypeError("result must be ReconciliationResult")
     timestamp = _instant(observed_at, name="observed_at")
 
+    availability = result.resource_availability
+    if availability is not None and (
+        availability.provider_id != result.provider_id
+        or availability.account_id != result.account_id
+        or availability.environment != result.environment
+        or availability.provider_environment != result.provider_environment
+    ):
+        raise ValueError(
+            "resource availability scope must match reconciliation result"
+        )
+
     unexpected_fill_bindings: list[dict[str, Any]] = []
     unexpected_fill_ids: list[str] = []
     for fill in result.unexpected_provider_fills:

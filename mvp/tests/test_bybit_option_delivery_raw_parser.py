@@ -411,6 +411,90 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
         )
         self.assertEqual(parsed.records[0].symbol, "BTC-29DEC22-16000-P")
 
+    def test_parser_enforces_limit_cursor_and_calendar_expiry(self):
+        valid_cursor = "132791%3A0%2C132791%3A0"
+        for query in (
+            {
+                "category": "option",
+                "symbol": "BTC-29DEC22-16000-P",
+                "limit": "0",
+            },
+            {
+                "category": "option",
+                "symbol": "BTC-29DEC22-16000-P",
+                "limit": "51",
+            },
+            {
+                "category": "option",
+                "symbol": "BTC-29DEC22-16000-P",
+                "limit": "01",
+            },
+            {
+                "category": "option",
+                "symbol": "BTC-29DEC22-16000-P",
+                "cursor": "",
+            },
+            {
+                "category": "option",
+                "symbol": "BTC-29DEC22-16000-P",
+                "cursor": "%3a",
+            },
+        ):
+            with self.subTest(query=query):
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "(?:limit must be between 1 and 50|limit must be canonical integer text|query cursor is non-canonical)",
+                ):
+                    parse_option_delivery_page(observation(response(), query=query))
+
+        for exp_date, message in (
+            ("29FEB23", "non-existent calendar date"),
+            ("31APR23", "non-existent calendar date"),
+        ):
+            with self.subTest(exp_date=exp_date):
+                with self.assertRaisesRegex(ProviderCoreError, message):
+                    parse_option_delivery_page(
+                        observation(
+                            response(),
+                            query={
+                                "category": "option",
+                                "symbol": "BTC-29FEB23-16000-P",
+                                "expDate": exp_date,
+                            },
+                        )
+                    )
+
+        parsed = parse_option_delivery_page(
+            observation(
+                response(),
+                query={
+                    "category": "option",
+                    "symbol": "BTC-29DEC22-16000-P",
+                    "limit": "1",
+                    "cursor": valid_cursor,
+                    "expDate": "29DEC22",
+                },
+            )
+        )
+        self.assertEqual(len(parsed.records), 1)
+
+        payload = response()
+        payload["result"]["list"].append(dict(payload["result"]["list"][0]))
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "exceeds requested limit",
+        ):
+            parse_option_delivery_page(
+                observation(
+                    payload,
+                    query={
+                        "category": "option",
+                        "symbol": "BTC-29DEC22-16000-P",
+                        "limit": "1",
+                    },
+                )
+            )
+
     def test_parser_rejects_unqualified_query_shape(self):
         with self.assertRaisesRegex(
             ProviderCoreError,
@@ -419,7 +503,11 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
             parse_option_delivery_page(
                 observation(
                     response(),
-                    query={"category": "option", "accountType": "UNIFIED"},
+                    query={
+                        "category": "option",
+                        "symbol": "BTC-29DEC22-16000-P",
+                        "accountType": "UNIFIED",
+                    },
                 )
             )
 

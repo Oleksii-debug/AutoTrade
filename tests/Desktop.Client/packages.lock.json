@@ -4,8 +4,8 @@
     "net10.0-windows7.0": {
       "Microsoft.Web.WebView2": {
         "type": "Transitive",
-        "resolved": "1.0.4191.47",
-        "contentHash": "Snb6mlTpuz6ZFjWMwIdg28Xp6kAUMy3zaLUyGbFSaw+/AJKlwoX8EiaWJ1eUMfKyJHksPkFjJHl1LIB7kX+0AQ=="
+        "resolved": "1.0.4258.31",
+        "contentHash": "sHVZ2MQrHT1J3q5/6csn0fIP27rzpTO/RRC+wPQDrZheB7T4t2n+vVbY6SdCKr4WRV9s/gmBM3PPMWWJtoDzMg=="
       },
       "autotrade.contracts": {
         "type": "Project"
@@ -14,7 +14,7 @@
         "type": "Project",
         "dependencies": {
           "AutoTrade.Contracts": "[1.0.0, )",
-          "Microsoft.Web.WebView2": "[1.0.4191.47, )"
+          "Microsoft.Web.WebView2": "[1.0.4258.31, )"
         }
       }
     }

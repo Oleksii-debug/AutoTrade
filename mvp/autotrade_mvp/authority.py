@@ -23,6 +23,8 @@ from .allocation import (
 )
 from .durable_reservations import DurableReservationBook
 from .durable_settlement import DurableSettlementBook
+from .futures import FuturesContract, FuturesError, lifecycle_gate
+from .instruments import InstrumentRegistry, InstrumentRegistryError, InstrumentVersion
 from .exact_decimal import exact_add, exact_subtract, exact_abs
 from .provider_activity_accounting import DurableProviderEconomicBook
 from .persistence import (
@@ -39,6 +41,7 @@ from .securities_borrow import (
     borrow_resource_key,
     incremental_short_borrow_quantity,
 )
+from .settlement import BuyingPowerEvidence
 from .risk import (
     LiquidationHeadroomEvidence,
     LiquidationScope,
@@ -108,6 +111,18 @@ def _instant(value: str, *, name: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError(f"{name} must include a timezone")
     return parsed.astimezone(timezone.utc)
+
+def _authority_datetime_utc(value: object, *, name: str) -> datetime:
+    """Normalize exact built-in datetime authority without hostile tzinfo callbacks."""
+
+    if type(value) is not datetime:
+        raise TypeError(f"{name} must be an exact datetime")
+    selected_timezone = value.tzinfo
+    if type(selected_timezone) is not type(timezone.utc):
+        raise TypeError(f"{name} must use an exact built-in timezone")
+    if value.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware")
+    return value.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True, order=True)
@@ -589,6 +604,139 @@ def _authority_store_call(
         return method(store, *args, **kwargs)
 
 
+
+def _authority_service_instrument_registry_operations():
+    """Retain the product-selected instrument registry outside per-call authority."""
+
+    states: dict[
+        int,
+        tuple[weakref.ReferenceType, weakref.ReferenceType | None],
+    ] = {}
+    lock = threading.RLock()
+
+    def register(
+        service: object,
+        instrument_registry: InstrumentRegistry | None,
+    ) -> None:
+        if (
+            instrument_registry is not None
+            and type(instrument_registry) is not InstrumentRegistry
+        ):
+            raise TypeError(
+                "instrument_registry must be exact InstrumentRegistry"
+            )
+        object_id = id(service)
+        service_ref = weakref.ref(service)
+        with lock:
+            current = states.get(object_id)
+            if current is not None:
+                current_service = current[0]()
+                if current_service is service:
+                    raise AuthorityConflict(
+                        "AuthorityService instrument registry is already initialized"
+                    )
+                if current_service is not None:
+                    raise AuthorityConflict(
+                        "AuthorityService instrument registry identity collision"
+                    )
+                states.pop(object_id, None)
+            service._selected_instrument_registry = instrument_registry
+            states[object_id] = (
+                service_ref,
+                (
+                    None
+                    if instrument_registry is None
+                    else weakref.ref(instrument_registry)
+                ),
+            )
+
+    def binding(
+        service: object,
+        *,
+        required: bool = False,
+    ) -> InstrumentRegistry | None:
+        with lock:
+            state = states.get(id(service))
+        if state is None or state[0]() is not service:
+            raise AuthorityConflict(
+                "AuthorityService instrument registry process state is unavailable"
+            )
+        registry = None if state[1] is None else state[1]()
+        visible = vars(service).get("_selected_instrument_registry")
+        if (
+            visible is not registry
+            or (state[1] is not None and registry is None)
+        ):
+            raise AuthorityConflict(
+                "AuthorityService instrument registry binding was modified"
+            )
+        if registry is None:
+            if required:
+                raise AuthorityConflict(
+                    "new futures exposure requires a product-selected InstrumentRegistry"
+                )
+            return None
+        if type(registry) is not InstrumentRegistry:
+            raise AuthorityConflict(
+                "AuthorityService selected instrument registry type changed"
+            )
+        return registry
+
+    return register, binding
+
+
+(
+    _register_authority_service_instrument_registry,
+    _authority_service_instrument_registry,
+) = _authority_service_instrument_registry_operations()
+del _authority_service_instrument_registry_operations
+
+
+def _require_authority_service_future_lifecycle(
+    service: object,
+    *,
+    instrument_id: str,
+    instrument_version: int,
+    provider_id: str,
+    evaluated_at: str,
+) -> InstrumentVersion:
+    """Re-resolve one FUTURE lifecycle cut from the service-owned registry."""
+
+    registry = _authority_service_instrument_registry(service, required=True)
+    assert registry is not None
+    key = f"{instrument_id}@{instrument_version}"
+    try:
+        selected = InstrumentRegistry.exact(registry, key)
+    except InstrumentRegistryError as error:
+        raise AuthorityConflict(
+            "financial FUTURE is not selected by the product InstrumentRegistry"
+        ) from error
+    if type(selected) is not InstrumentVersion or selected.asset_class != "FUTURE":
+        raise AuthorityConflict(
+            "financial FUTURE requires exact FUTURE InstrumentVersion authority"
+        )
+    if selected.provider_id != provider_id:
+        raise AuthorityConflict(
+            "financial FUTURE InstrumentVersion belongs to another provider"
+        )
+    try:
+        contract = FuturesContract.from_instrument_version(selected)
+        state = lifecycle_gate(
+            contract,
+            _instant(evaluated_at, name="evaluated_at"),
+            instrument_registry=registry,
+        )
+    except (FuturesError, InstrumentRegistryError, TypeError, ValueError) as error:
+        raise AuthorityConflict(
+            "financial FUTURE lifecycle authority is invalid"
+        ) from error
+    if state != "OPEN":
+        raise AuthorityConflict(
+            f"new futures exposure is blocked by product lifecycle authority: {state}"
+        )
+    return selected
+
+
 def _authority_service_capital_operations():
     """Retain the selected local-capital composition outside caller-writable state."""
 
@@ -718,6 +866,7 @@ def _authority_service_capital_operations():
         resources: tuple[str, ...],
         *,
         provider_evidence: Mapping[str, object] | None = None,
+        as_of: datetime | None = None,
         required: bool = False,
     ) -> dict[str, object] | None:
         settlement_book, economic_book = binding(service, required=required)
@@ -735,10 +884,14 @@ def _authority_service_capital_operations():
             or any(type(resource) is not str for resource in resources)
         ):
             raise AuthorityConflict("settlement capital resources are malformed")
-        cash_resources = tuple(
-            sorted(resource for resource in resources if resource.startswith("CASH:"))
+        capital_resources = tuple(
+            sorted(
+                resource
+                for resource in resources
+                if resource.startswith(("CASH:", "MARGIN_CREDIT:"))
+            )
         )
-        if not cash_resources:
+        if not capital_resources:
             return None
         if (
             type(provider_evidence) is not dict
@@ -858,12 +1011,30 @@ def _authority_service_capital_operations():
         _selected_store, _identity, scope, scope_id = (
             DurableSettlementBook._selected_authority(settlement_book)
         )
+        raw_details = provider_evidence.get("resource_details", {})
+        if type(raw_details) is not dict:
+            raise AuthorityConflict(
+                "settlement capital provider resource details are malformed"
+            )
+        if as_of is None:
+            projection_at = _instant(
+                _authority_text(
+                    provider_evidence.get("snapshot_query_completed_at"),
+                    name="snapshot_query_completed_at",
+                ),
+                name="snapshot_query_completed_at",
+            )
+        else:
+            projection_at = _authority_datetime_utc(
+                as_of,
+                name="settlement capital as_of",
+            )
         adjustments: dict[str, dict[str, str]] = {}
-        for resource in cash_resources:
+        for resource in capital_resources:
             raw_provider = provider_available.get(resource)
             if raw_provider is None:
                 raise AuthorityConflict(
-                    f"provider availability lacks required cash resource {resource}"
+                    f"provider availability lacks required capital resource {resource}"
                 )
             provider_amount = _authority_decimal(
                 raw_provider,
@@ -871,13 +1042,56 @@ def _authority_service_capital_operations():
             )
             if provider_amount < 0:
                 raise AuthorityConflict(
-                    "provider cash availability must be non-negative"
+                    "provider capital availability must be non-negative"
                 )
-            currency = resource.removeprefix("CASH:")
-            local_amount = projection.available_to_spend(currency)
+            if resource.startswith("CASH:"):
+                currency = resource.removeprefix("CASH:")
+                buying_power = None
+                require_buying_power = False
+            else:
+                currency = resource.removeprefix("MARGIN_CREDIT:")
+                detail = raw_details.get(resource)
+                if type(detail) is not dict:
+                    raise AuthorityConflict(
+                        "margin-credit capital requires typed provider evidence"
+                    )
+                try:
+                    buying_power = BuyingPowerEvidence.from_resource_detail(
+                        detail
+                    )
+                except (TypeError, ValueError) as error:
+                    raise AuthorityConflict(
+                        "margin-credit provider evidence is invalid"
+                    ) from error
+                if (
+                    buying_power.scope != scope
+                    or buying_power.resource_key != resource
+                    or buying_power.additional_credit != provider_amount
+                ):
+                    raise AuthorityConflict(
+                        "margin-credit provider evidence differs from capital scope"
+                    )
+                require_buying_power = True
+
+            capital = projection.available_capital(
+                scope=scope,
+                currency=currency,
+                as_of=projection_at,
+                buying_power_evidence=buying_power,
+                require_buying_power_evidence=require_buying_power,
+            )
+            if capital.blocks_new_risk:
+                raise AuthorityConflict(
+                    "local settlement capital is unresolved and blocks new risk"
+                )
+            local_amount = (
+                capital.available_cash
+                if resource.startswith("CASH:")
+                else capital.additional_buying_power
+            )
             if local_amount < 0:
                 raise AuthorityConflict(
-                    "local spendable cash must be non-negative"
+                    "local capital availability must be non-negative"
                 )
             effective = min(provider_amount, local_amount)
             adjustments[resource] = {
@@ -886,7 +1100,14 @@ def _authority_service_capital_operations():
                 "effective_available": _canonical_decimal_text(effective),
             }
         return {
-            "schema_version": "settlement-capital-cut.v1",
+            "schema_version": (
+                "settlement-capital-cut.v2"
+                if any(
+                    resource.startswith("MARGIN_CREDIT:")
+                    for resource in capital_resources
+                )
+                else "settlement-capital-cut.v1"
+            ),
             "journal_sequence": after,
             "provider_id": scope.provider_id,
             "account_id": scope.account_id,
@@ -950,7 +1171,11 @@ def _canonical_settlement_capital_adjustment(
     }
     if set(value) != expected_fields:
         raise AuthorityConflict("settlement capital adjustment is malformed")
-    if value.get("schema_version") != "settlement-capital-cut.v1":
+    schema_version = value.get("schema_version")
+    if schema_version not in {
+        "settlement-capital-cut.v1",
+        "settlement-capital-cut.v2",
+    }:
         raise AuthorityConflict("settlement capital schema is unsupported")
     journal_sequence = value.get("journal_sequence")
     if type(journal_sequence) is not int or journal_sequence < 0:
@@ -1041,21 +1266,33 @@ def _canonical_settlement_capital_adjustment(
         or any(type(key) is not str for key in raw_resources)
     ):
         raise AuthorityConflict("settlement capital resources are malformed")
-    cash_resources = tuple(
+    capital_resources = tuple(
         sorted(
             resource
             for resource in required_resources
-            if resource.startswith("CASH:")
+            if resource.startswith(("CASH:", "MARGIN_CREDIT:"))
         )
     )
-    if set(raw_resources) != set(cash_resources):
+    expected_schema = (
+        "settlement-capital-cut.v2"
+        if any(
+            resource.startswith("MARGIN_CREDIT:")
+            for resource in capital_resources
+        )
+        else "settlement-capital-cut.v1"
+    )
+    if schema_version != expected_schema:
+        raise AuthorityConflict(
+            "settlement capital schema does not match reservation resources"
+        )
+    if set(raw_resources) != set(capital_resources):
         raise AuthorityConflict(
             "settlement capital resources do not match reservation requirements"
         )
 
     effective: dict[str, Decimal] = {}
     canonical_resources: dict[str, dict[str, str]] = {}
-    for resource in cash_resources:
+    for resource in capital_resources:
         raw = raw_resources.get(resource)
         if (
             type(raw) is not dict
@@ -1103,7 +1340,7 @@ def _canonical_settlement_capital_adjustment(
         }
     return (
         {
-            "schema_version": "settlement-capital-cut.v1",
+            "schema_version": schema_version,
             "journal_sequence": journal_sequence,
             "provider_id": canonical_provider,
             "account_id": canonical_account,
@@ -2104,6 +2341,7 @@ class AuthorityService:
         | None = None,
         settlement_book: DurableSettlementBook | None = None,
         economic_book: DurableProviderEconomicBook | None = None,
+        instrument_registry: InstrumentRegistry | None = None,
     ):
         # Validate all composition inputs before publishing any process binding.
         # Explicit __init__ re-entry must fail before it can reset established
@@ -2124,6 +2362,10 @@ class AuthorityService:
             raise TypeError("risk_authority_resolver must be callable")
 
         _register_authority_service_store(self, store, risk_policy_scope)
+        _register_authority_service_instrument_registry(
+            self,
+            instrument_registry,
+        )
         # Capital validation reads the already sealed store binding, including
         # its diagnostic view. Publish that view before validating composition.
         self.store = store
@@ -4651,6 +4893,20 @@ class AuthorityService:
             authoritative_risk_snapshot_id=risk_snapshot_id,
         )
 
+        if (
+            decision.admitted
+            and normalized_action == "ORDER.SUBMIT"
+            and risk_intent.instrument_type == "FUTURE"
+            and not risk_intent.reduce_only
+        ):
+            _require_authority_service_future_lifecycle(
+                self,
+                instrument_id=snapshot_instrument.instrument_id,
+                instrument_version=snapshot_instrument.version,
+                provider_id=snapshot_provider_id,
+                evaluated_at=evaluated_at,
+            )
+
         normalized_requirements = normalize_reservation_requirements(
             reservation_requirements
         )
@@ -4998,6 +5254,7 @@ class AuthorityService:
                     canonical_available,
                     required_resource_names,
                     provider_evidence=availability_evidence,
+                    as_of=_instant(evaluated_at, name="evaluated_at"),
                     required=False,
                 )
                 if capital_cut is not None:
@@ -5786,6 +6043,7 @@ class AuthorityService:
                         current_provider_available,
                         tuple(sorted(risk_requirements)),
                         provider_evidence=current_provider_evidence,
+                        as_of=_instant(now, name="now"),
                         required=True,
                     )
                     assert current_capital is not None
@@ -5816,7 +6074,7 @@ class AuthorityService:
                                 "current settlement capital authority changed"
                             )
                     for resource, raw_requirement in risk_requirements.items():
-                        if not resource.startswith("CASH:"):
+                        if not resource.startswith(("CASH:", "MARGIN_CREDIT:")):
                             continue
                         requirement = _decimal(
                             raw_requirement,

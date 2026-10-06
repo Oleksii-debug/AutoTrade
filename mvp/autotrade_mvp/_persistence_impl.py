@@ -9,6 +9,10 @@ from pathlib import Path
 import re
 import sqlite3
 from typing import Any, Mapping
+from urllib.parse import urlsplit
+from uuid import UUID
+
+from contracts.bindings.python.common_scalars import is_valid_common_scalar
 
 
 def _detach_json_value(
@@ -161,6 +165,204 @@ def _projection_checkpoint_digest(
 
 
 _SEQUENCE_RE = re.compile(r"^(0|[1-9][0-9]*)$")
+_SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+_UUID_TEXT_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+)
+_URI_TEXT_RE = re.compile(
+    r"^[A-Za-z][A-Za-z0-9+.\-]*:[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]*$"
+)
+_BAD_PERCENT_ENCODING_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_UTC_INSTANT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
+)
+_EVENT_ENVELOPE_REQUIRED_FIELDS = frozenset(
+    {
+        "event_id",
+        "event_type",
+        "schema_version",
+        "aggregate_type",
+        "aggregate_id",
+        "aggregate_version",
+        "host_id",
+        "owner_epoch",
+        "environment",
+        "occurred_at",
+        "observed_at",
+        "committed_at",
+        "correlation_id",
+        "payload",
+        "payload_hash",
+        "evidence_refs",
+    }
+)
+_EVENT_ENVELOPE_OPTIONAL_FIELDS = frozenset(
+    {
+        "causation_id",
+        "provider_id",
+        "account_id",
+        "provider_event_id",
+        "provider_sequence",
+        "source_resolution",
+    }
+)
+_EVIDENCE_REF_REQUIRED_FIELDS = frozenset(
+    {"artifact_id", "sha256", "observed_at"}
+)
+_EVIDENCE_REF_OPTIONAL_FIELDS = frozenset(
+    {"source_uri", "rights_id"}
+)
+
+
+def _require_uuid_text(value: object, *, name: str) -> None:
+    # uuid.UUID() also accepts braces, URN prefixes and compact 32-hex text,
+    # while the canonical JSON Schema UUID format is hyphenated wire text.
+    # Reject alternate spellings before semantic parsing so persistence cannot
+    # admit an EventEnvelope that the canonical contract rejects.
+    if type(value) is not str or _UUID_TEXT_RE.fullmatch(value) is None:
+        raise ValueError(f"{name} must be a UUID string")
+    try:
+        UUID(value)
+    except (ValueError, AttributeError) as error:
+        raise ValueError(f"{name} must be a UUID string") from error
+
+
+def _require_absolute_uri(value: object, *, name: str) -> None:
+    # JSON Schema uses RFC3986 URI (not IRI) lexical semantics. urlsplit()
+    # alone is intentionally permissive and can retain spaces or malformed
+    # percent escapes, so validate the ASCII grammar before parsing.
+    if (
+        type(value) is not str
+        or not value
+        or _URI_TEXT_RE.fullmatch(value) is None
+        or _BAD_PERCENT_ENCODING_RE.search(value) is not None
+    ):
+        raise ValueError(f"{name} must be an absolute URI")
+    try:
+        parsed = urlsplit(value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an absolute URI") from error
+    if not parsed.scheme:
+        raise ValueError(f"{name} must be an absolute URI")
+
+
+def _require_utc_instant(value: object, *, name: str) -> None:
+    if type(value) is not str or _UTC_INSTANT_RE.fullmatch(value) is None:
+        raise ValueError(f"{name} must be an RFC3339 UTC instant ending Z")
+    try:
+        datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as error:
+        raise ValueError(f"{name} must be a valid UTC instant") from error
+
+
+def _validate_evidence_ref(value: object) -> None:
+    if type(value) is not dict:
+        raise ValueError("EventEnvelope evidence_refs entries must be objects")
+    fields = set(value)
+    if not _EVIDENCE_REF_REQUIRED_FIELDS <= fields:
+        raise ValueError("EventEnvelope EvidenceRef is missing required fields")
+    if fields - (
+        _EVIDENCE_REF_REQUIRED_FIELDS | _EVIDENCE_REF_OPTIONAL_FIELDS
+    ):
+        raise ValueError("EventEnvelope EvidenceRef contains unsupported fields")
+    _require_uuid_text(value.get("artifact_id"), name="EvidenceRef artifact_id")
+    if not is_valid_common_scalar("Digest", value.get("sha256")):
+        raise ValueError("EvidenceRef sha256 must be a canonical Digest")
+    _require_utc_instant(value.get("observed_at"), name="EvidenceRef observed_at")
+    if "source_uri" in value:
+        _require_absolute_uri(value["source_uri"], name="EvidenceRef source_uri")
+    if "rights_id" in value:
+        rights_id = value["rights_id"]
+        if type(rights_id) is not str or not rights_id:
+            raise ValueError("EvidenceRef rights_id must be non-empty text")
+
+
+def _validate_canonical_event_envelope_if_claimed(
+    envelope: Mapping[str, Any],
+) -> None:
+    """Validate every contract-v5 EventEnvelope field when schema_version is claimed.
+
+    Legacy internal journal rows without schema_version remain readable/writable
+    during migration. Once a caller asserts EventEnvelope schema identity, the
+    persistence boundary fails closed on partial, extra, or malformed wire shape.
+    """
+
+    if "schema_version" not in envelope:
+        return
+    if type(envelope) is not dict:
+        raise TypeError("canonical EventEnvelope must be an exact dict")
+    fields = set(envelope)
+    missing = _EVENT_ENVELOPE_REQUIRED_FIELDS - fields
+    unknown = fields - (
+        _EVENT_ENVELOPE_REQUIRED_FIELDS | _EVENT_ENVELOPE_OPTIONAL_FIELDS
+    )
+    if missing:
+        raise ValueError(
+            "canonical EventEnvelope is missing required fields: "
+            + ", ".join(sorted(missing))
+        )
+    if unknown:
+        raise ValueError(
+            "canonical EventEnvelope contains unsupported fields: "
+            + ", ".join(sorted(unknown))
+        )
+
+    _require_uuid_text(envelope.get("event_id"), name="EventEnvelope event_id")
+    _require_uuid_text(
+        envelope.get("correlation_id"), name="EventEnvelope correlation_id"
+    )
+    causation_id = envelope.get("causation_id")
+    if causation_id is not None:
+        _require_uuid_text(causation_id, name="EventEnvelope causation_id")
+
+    for field in (
+        "event_type",
+        "aggregate_type",
+        "aggregate_id",
+        "host_id",
+    ):
+        value = envelope.get(field)
+        if type(value) is not str or not value:
+            raise ValueError(f"EventEnvelope {field} must be non-empty text")
+
+    schema_version = envelope.get("schema_version")
+    if type(schema_version) is not str or _SEMVER_RE.fullmatch(schema_version) is None:
+        raise ValueError("EventEnvelope schema_version must be SemVer text")
+    if not is_valid_common_scalar(
+        "Sequence", envelope.get("aggregate_version")
+    ):
+        raise ValueError("EventEnvelope aggregate_version must be a canonical Sequence")
+    if not is_valid_common_scalar("Sequence", envelope.get("owner_epoch")):
+        raise ValueError("EventEnvelope owner_epoch must be a canonical Sequence")
+    if not is_valid_common_scalar("Environment", envelope.get("environment")):
+        raise ValueError("EventEnvelope environment must be canonical")
+
+    for field in ("occurred_at", "observed_at", "committed_at"):
+        _require_utc_instant(envelope.get(field), name=f"EventEnvelope {field}")
+
+    if not is_valid_common_scalar("Digest", envelope.get("payload_hash")):
+        raise ValueError("EventEnvelope payload_hash must be a canonical Digest")
+
+    evidence_refs = envelope.get("evidence_refs")
+    if type(evidence_refs) is not list:
+        raise ValueError("EventEnvelope evidence_refs must be an array")
+    for evidence_ref in evidence_refs:
+        _validate_evidence_ref(evidence_ref)
+
+    for field in (
+        "provider_id",
+        "account_id",
+        "provider_event_id",
+        "source_resolution",
+    ):
+        if field in envelope:
+            value = envelope[field]
+            if type(value) is not str or not value:
+                raise ValueError(f"EventEnvelope {field} must be non-empty text")
+    if "provider_sequence" in envelope and not is_valid_common_scalar(
+        "Sequence", envelope.get("provider_sequence")
+    ):
+        raise ValueError("EventEnvelope provider_sequence must be a canonical Sequence")
 
 
 def _require_canonical_durable_text(value: object, *, name: str) -> str:
@@ -687,11 +889,14 @@ class JournalStore:
                         for row in connection.execute(
                             "SELECT outbox_id, payload_json FROM outbox"
                         ):
+                            raw_payload_json = row["payload_json"]
+                            if type(raw_payload_json) is not str:
+                                raise ValueError(
+                                    "legacy outbox payload authority is not exact text"
+                                )
                             envelope_hash = (
                                 "sha256:"
-                                + sha256(
-                                    str(row["payload_json"]).encode("utf-8")
-                                ).hexdigest()
+                                + sha256(raw_payload_json.encode("utf-8")).hexdigest()
                             )
                             connection.execute(
                                 "UPDATE outbox SET envelope_hash = ? "
@@ -702,7 +907,11 @@ class JournalStore:
                         for row in connection.execute(
                             "SELECT command_id, result_json FROM command_dedupe"
                         ):
-                            result_json = str(row["result_json"])
+                            result_json = row["result_json"]
+                            if type(result_json) is not str:
+                                raise ValueError(
+                                    "legacy command result authority is not exact text"
+                                )
                             try:
                                 result_value = json.loads(result_json)
                             except (json.JSONDecodeError, TypeError) as error:
@@ -751,7 +960,15 @@ class JournalStore:
                             JOIN events ON events.event_id = outbox.event_id
                             """
                         ):
-                            raw_outbox_payload = str(row["outbox_payload_json"])
+                            raw_outbox_payload = row["outbox_payload_json"]
+                            if type(raw_outbox_payload) is not str:
+                                raise ValueError(
+                                    "legacy outbox payload authority is not exact text"
+                                )
+                            topic = _require_canonical_durable_text(
+                                row["topic"],
+                                name="legacy outbox topic",
+                            )
                             try:
                                 outbox_payload = json.loads(raw_outbox_payload)
                             except (json.JSONDecodeError, TypeError) as error:
@@ -819,7 +1036,7 @@ class JournalStore:
                                 ),
                             )
                             envelope_hash = _outbox_envelope_digest(
-                                str(row["topic"]),
+                                topic,
                                 raw_outbox_payload,
                             )
                             connection.execute(
@@ -951,10 +1168,13 @@ class JournalStore:
                 "aggregate_version must be a positive canonical integer"
             )
 
+        raw_payload = row["payload_json"]
         try:
-            payload = json.loads(row["payload_json"])
+            payload = json.loads(raw_payload)
         except (json.JSONDecodeError, TypeError) as error:
             raise ValueError("journal event payload is not valid JSON") from error
+        if canonical_json(payload) != raw_payload:
+            raise ValueError("journal event payload is not canonical JSON")
         if payload_digest(payload) != row["payload_hash"]:
             raise ValueError("journal event payload hash does not match stored payload")
 
@@ -977,6 +1197,9 @@ class JournalStore:
                 raise ValueError("journal event envelope is not valid JSON") from error
             if canonical_json(envelope) != raw_envelope:
                 raise ValueError("journal event envelope is not canonical JSON")
+            if type(envelope) is not dict:
+                raise ValueError("journal event envelope must be a JSON object")
+            _validate_canonical_event_envelope_if_claimed(envelope)
             core_envelope = {
                 "event_id": row["event_id"],
                 "event_type": row["event_type"],
@@ -1182,18 +1405,30 @@ class JournalStore:
         if type(limit) is not int or limit < 1 or limit > 100000:
             raise ValueError("limit must be between 1 and 100000")
         with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT event_id, event_type, aggregate_type, aggregate_id,
-                       aggregate_version, payload_json, payload_hash, committed_at,
-                       envelope_json, envelope_hash, journal_sequence
-                FROM events
-                WHERE journal_sequence > ?
-                ORDER BY journal_sequence
-                LIMIT ?
-                """,
-                (after_sequence, limit),
-            ).fetchall()
+            connection.execute("BEGIN")
+            try:
+                # Bind cursor validation and the returned page to one SQLite
+                # snapshot. A concurrent append cannot make a cut appear valid
+                # while returning rows from a later authority state.
+                current = self._journal_sequence_value(connection)
+                if after_sequence > current:
+                    raise ValueError("after_sequence cannot be ahead of the journal")
+                rows = connection.execute(
+                    """
+                    SELECT event_id, event_type, aggregate_type, aggregate_id,
+                           aggregate_version, payload_json, payload_hash, committed_at,
+                           envelope_json, envelope_hash, journal_sequence
+                    FROM events
+                    WHERE journal_sequence > ?
+                    ORDER BY journal_sequence
+                    LIMIT ?
+                    """,
+                    (after_sequence, limit),
+                ).fetchall()
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
         decoded = [self._decode_event_row(row) for row in rows]
         expected = after_sequence + 1
         for event in decoded:
@@ -1216,6 +1451,7 @@ class JournalStore:
         if type(envelope) is not dict:
             raise TypeError("event envelope must be an exact dict")
         envelope = _detach_json_value(envelope)
+        _validate_canonical_event_envelope_if_claimed(envelope)
         event_id = _require_canonical_durable_text(envelope.get("event_id"), name="event_id")
         event_type = _require_canonical_durable_text(envelope.get("event_type"), name="event_type")
         aggregate_type = _require_canonical_durable_text(
@@ -1554,11 +1790,7 @@ class JournalStore:
             aggregate_type, "aggregate_type"
         )
         aggregate_id = self._require_text(aggregate_id, "aggregate_id")
-        if (
-            not isinstance(aggregate_version, int)
-            or isinstance(aggregate_version, bool)
-            or aggregate_version < 0
-        ):
+        if type(aggregate_version) is not int or aggregate_version < 0:
             raise ValueError("aggregate_version must be a non-negative integer")
         state = _detach_json_value(state)
         state_json = canonical_json(state)
@@ -1579,7 +1811,7 @@ class JournalStore:
             try:
                 existing = connection.execute(
                     """
-                    SELECT aggregate_version, state_json, state_hash
+                    SELECT aggregate_version, state_json, state_hash, updated_at
                     FROM projection_checkpoints
                     WHERE projection_name = ?
                       AND aggregate_type = ?
@@ -1593,13 +1825,25 @@ class JournalStore:
                         raise ValueError(
                             "projection checkpoint aggregate_version is not a canonical integer"
                         )
+                    existing_state_json = _require_canonical_durable_text(
+                        existing["state_json"],
+                        name="projection checkpoint state_json",
+                    )
+                    existing_state_hash = _require_canonical_durable_text(
+                        existing["state_hash"],
+                        name="projection checkpoint state_hash",
+                    )
+                    _require_canonical_durable_text(
+                        existing["updated_at"],
+                        name="projection checkpoint updated_at",
+                    )
                     try:
-                        existing_state = json.loads(existing["state_json"])
+                        existing_state = json.loads(existing_state_json)
                     except (json.JSONDecodeError, TypeError) as error:
                         raise ValueError(
                             "projection checkpoint state is not valid JSON"
                         ) from error
-                    if canonical_json(existing_state) != existing["state_json"]:
+                    if canonical_json(existing_state) != existing_state_json:
                         raise ValueError(
                             "projection checkpoint state is not canonical JSON"
                         )
@@ -1614,7 +1858,7 @@ class JournalStore:
                         if self.SCHEMA_VERSION >= 8
                         else payload_digest(existing_state)
                     )
-                    if existing_hash != existing["state_hash"]:
+                    if existing_hash != existing_state_hash:
                         raise ValueError(
                             "projection checkpoint hash does not match identity, version, and state"
                         )
@@ -1630,8 +1874,8 @@ class JournalStore:
                 if existing is not None:
                     exact = (
                         existing_version == aggregate_version
-                        and existing["state_json"] == state_json
-                        and existing["state_hash"] == state_hash
+                        and existing_state_json == state_json
+                        and existing_state_hash == state_hash
                     )
                     if exact:
                         connection.commit()
@@ -1685,31 +1929,49 @@ class JournalStore:
         )
         aggregate_id = self._require_text(aggregate_id, "aggregate_id")
         with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT aggregate_version, state_json, state_hash, updated_at
-                FROM projection_checkpoints
-                WHERE projection_name = ?
-                  AND aggregate_type = ?
-                  AND aggregate_id = ?
-                """,
-                (projection_name, aggregate_type, aggregate_id),
-            ).fetchone()
-            if row is None:
-                return None
-            journal_version = self._aggregate_version_value(
-                connection,
-                aggregate_type,
-                aggregate_id,
-            )
+            connection.execute("BEGIN")
+            try:
+                # Checkpoint bytes and the journal head they are compared
+                # against must come from the same read snapshot.
+                row = connection.execute(
+                    """
+                    SELECT aggregate_version, state_json, state_hash, updated_at
+                    FROM projection_checkpoints
+                    WHERE projection_name = ?
+                      AND aggregate_type = ?
+                      AND aggregate_id = ?
+                    """,
+                    (projection_name, aggregate_type, aggregate_id),
+                ).fetchone()
+                if row is None:
+                    connection.commit()
+                    return None
+                journal_version = self._aggregate_version_value(
+                    connection,
+                    aggregate_type,
+                    aggregate_id,
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
+        state_json = _require_canonical_durable_text(
+            row["state_json"], name="projection checkpoint state_json"
+        )
+        state_hash = _require_canonical_durable_text(
+            row["state_hash"], name="projection checkpoint state_hash"
+        )
+        updated_at = _require_canonical_durable_text(
+            row["updated_at"], name="projection checkpoint updated_at"
+        )
         try:
-            state = json.loads(row["state_json"])
+            state = json.loads(state_json)
         except (json.JSONDecodeError, TypeError) as error:
             raise ValueError(
                 "projection checkpoint state is not valid JSON"
             ) from error
-        if canonical_json(state) != row["state_json"]:
+        if canonical_json(state) != state_json:
             raise ValueError(
                 "projection checkpoint state is not canonical JSON"
             )
@@ -1729,7 +1991,7 @@ class JournalStore:
             if self.SCHEMA_VERSION >= 8
             else payload_digest(state)
         )
-        if expected_hash != row["state_hash"]:
+        if expected_hash != state_hash:
             raise ValueError(
                 "projection checkpoint hash does not match identity, version, and state"
             )
@@ -1741,8 +2003,8 @@ class JournalStore:
             "aggregate_id": aggregate_id,
             "aggregate_version": aggregate_version,
             "state": state,
-            "state_hash": row["state_hash"],
-            "updated_at": row["updated_at"],
+            "state_hash": state_hash,
+            "updated_at": updated_at,
         }
 
     def save_global_projection_checkpoint(
@@ -1777,7 +2039,7 @@ class JournalStore:
                     )
                 existing = connection.execute(
                     """
-                    SELECT journal_sequence, state_json, state_hash
+                    SELECT journal_sequence, state_json, state_hash, updated_at
                     FROM global_projection_checkpoints
                     WHERE projection_name = ?
                     """,
@@ -1790,13 +2052,25 @@ class JournalStore:
                             "global projection checkpoint journal_sequence "
                             "is not a canonical integer"
                         )
+                    existing_state_json = _require_canonical_durable_text(
+                        existing["state_json"],
+                        name="global projection checkpoint state_json",
+                    )
+                    existing_state_hash = _require_canonical_durable_text(
+                        existing["state_hash"],
+                        name="global projection checkpoint state_hash",
+                    )
+                    _require_canonical_durable_text(
+                        existing["updated_at"],
+                        name="global projection checkpoint updated_at",
+                    )
                     try:
-                        existing_state = json.loads(existing["state_json"])
+                        existing_state = json.loads(existing_state_json)
                     except (json.JSONDecodeError, TypeError) as error:
                         raise ValueError(
                             "global projection checkpoint state is not valid JSON"
                         ) from error
-                    if canonical_json(existing_state) != existing["state_json"]:
+                    if canonical_json(existing_state) != existing_state_json:
                         raise ValueError(
                             "global projection checkpoint state is not canonical JSON"
                         )
@@ -1807,15 +2081,15 @@ class JournalStore:
                             "state": existing_state,
                         }
                     )
-                    if existing_hash != existing["state_hash"]:
+                    if existing_hash != existing_state_hash:
                         raise ValueError(
                             "global projection checkpoint hash does not match "
                             "identity, cut, and state"
                         )
                     exact = (
                         existing_sequence == journal_sequence
-                        and existing["state_json"] == state_json
-                        and existing["state_hash"] == state_hash
+                        and existing_state_json == state_json
+                        and existing_state_hash == state_hash
                     )
                     if exact:
                         connection.commit()
@@ -1861,25 +2135,44 @@ class JournalStore:
 
         projection_name = self._require_text(projection_name, "projection_name")
         with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT journal_sequence, state_json, state_hash, updated_at
-                FROM global_projection_checkpoints
-                WHERE projection_name = ?
-                """,
-                (projection_name,),
-            ).fetchone()
-            if row is None:
-                return None
-            current = self._journal_sequence_value(connection)
+            connection.execute("BEGIN")
+            try:
+                # Keep checkpoint bytes and the authoritative journal cut in
+                # one snapshot so a concurrent writer cannot create a torn
+                # projection/head read.
+                row = connection.execute(
+                    """
+                    SELECT journal_sequence, state_json, state_hash, updated_at
+                    FROM global_projection_checkpoints
+                    WHERE projection_name = ?
+                    """,
+                    (projection_name,),
+                ).fetchone()
+                if row is None:
+                    connection.commit()
+                    return None
+                current = self._journal_sequence_value(connection)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
+        state_json = _require_canonical_durable_text(
+            row["state_json"], name="global projection checkpoint state_json"
+        )
+        state_hash = _require_canonical_durable_text(
+            row["state_hash"], name="global projection checkpoint state_hash"
+        )
+        updated_at = _require_canonical_durable_text(
+            row["updated_at"], name="global projection checkpoint updated_at"
+        )
         try:
-            state = json.loads(row["state_json"])
+            state = json.loads(state_json)
         except (json.JSONDecodeError, TypeError) as error:
             raise ValueError(
                 "global projection checkpoint state is not valid JSON"
             ) from error
-        if canonical_json(state) != row["state_json"]:
+        if canonical_json(state) != state_json:
             raise ValueError(
                 "global projection checkpoint state is not canonical JSON"
             )
@@ -1896,7 +2189,7 @@ class JournalStore:
                 "state": state,
             }
         )
-        if expected_hash != row["state_hash"]:
+        if expected_hash != state_hash:
             raise ValueError(
                 "global projection checkpoint hash does not match identity, cut, and state"
             )
@@ -1908,8 +2201,8 @@ class JournalStore:
             "projection_name": projection_name,
             "journal_sequence": journal_sequence,
             "state": state,
-            "state_hash": row["state_hash"],
-            "updated_at": row["updated_at"],
+            "state_hash": state_hash,
+            "updated_at": updated_at,
         }
 
     def pending_outbox_count(self) -> int:
@@ -1928,7 +2221,7 @@ class JournalStore:
         return int(row["pending_count"])
 
     def pending_outbox(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        if not isinstance(limit, int) or limit < 1 or limit > 1000:
+        if type(limit) is not int or limit < 1 or limit > 1000:
             raise ValueError("limit must be between 1 and 1000")
         with self._connect() as connection:
             rows = connection.execute(
@@ -1959,9 +2252,15 @@ class JournalStore:
             ).fetchall()
         pending: list[dict[str, Any]] = []
         for row in rows:
-            raw_outbox_payload = str(row["outbox_payload_json"])
+            raw_outbox_payload = row["outbox_payload_json"]
+            if type(raw_outbox_payload) is not str:
+                raise ValueError("outbox payload authority is not exact text")
+            topic = _require_canonical_durable_text(
+                row["topic"],
+                name="outbox topic",
+            )
             actual_outbox_hash = _outbox_envelope_digest(
-                str(row["topic"]),
+                topic,
                 raw_outbox_payload,
             )
             if row["envelope_hash"] != actual_outbox_hash:
@@ -2015,131 +2314,25 @@ class JournalStore:
                 raise ValueError(
                     "outbox payload does not match authoritative journal event envelope"
                 )
+            outbox_id = _require_canonical_durable_text(
+                row["outbox_id"],
+                name="outbox_id",
+            )
+            created_at = _require_canonical_durable_text(
+                row["created_at"],
+                name="outbox created_at",
+            )
             pending.append(
                 {
-                    "outbox_id": row["outbox_id"],
-                    "event_id": row["event_id"],
-                    "topic": row["topic"],
+                    "outbox_id": outbox_id,
+                    "event_id": event["event_id"],
+                    "topic": topic,
                     "payload": outbox_payload,
-                    "created_at": row["created_at"],
-                    "envelope_hash": row["envelope_hash"],
+                    "created_at": created_at,
+                    "envelope_hash": actual_outbox_hash,
                 }
             )
         return pending
-
-    def outbox_delivery_state(
-        self,
-        event_id: str,
-        *,
-        topic: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Read one exact outbox row after canonical event-envelope checks.
-
-        event_id is unique in the durable outbox. Callers that already own an
-        exact journal event may omit topic so foreign backlog cannot force a
-        global pending-page scan. Supplying topic preserves the stricter
-        event-and-topic lookup used by external delivery/recovery paths.
-        """
-
-        event_id = self._require_text(event_id, "event_id")
-        if topic is None:
-            where = "outbox.event_id = ?"
-            parameters = (event_id,)
-        else:
-            topic = self._require_text(topic, "topic")
-            where = "outbox.event_id = ? AND outbox.topic = ?"
-            parameters = (event_id, topic)
-        with self._connect() as connection:
-            row = connection.execute(
-                f"""
-                SELECT
-                    outbox.outbox_id,
-                    outbox.event_id,
-                    outbox.topic,
-                    outbox.payload_json AS outbox_payload_json,
-                    outbox.created_at,
-                    outbox.envelope_hash,
-                    outbox.delivered_at,
-                    events.event_type,
-                    events.aggregate_type,
-                    events.aggregate_id,
-                    events.aggregate_version,
-                    events.payload_json AS event_payload_json,
-                    events.payload_hash,
-                    events.committed_at,
-                    events.envelope_json AS event_envelope_json,
-                    events.envelope_hash AS event_envelope_hash
-                FROM outbox
-                JOIN events ON events.event_id = outbox.event_id
-                WHERE {where}
-                """,
-                parameters,
-            ).fetchone()
-        if row is None:
-            return None
-
-        raw_outbox_payload = str(row["outbox_payload_json"])
-        actual_outbox_hash = _outbox_envelope_digest(
-            str(row["topic"]), raw_outbox_payload
-        )
-        if row["envelope_hash"] != actual_outbox_hash:
-            raise ValueError("outbox envelope hash does not match stored payload")
-        event_row = {
-            "event_id": row["event_id"],
-            "event_type": row["event_type"],
-            "aggregate_type": row["aggregate_type"],
-            "aggregate_id": row["aggregate_id"],
-            "aggregate_version": row["aggregate_version"],
-            "payload_json": row["event_payload_json"],
-            "payload_hash": row["payload_hash"],
-            "committed_at": row["committed_at"],
-            "envelope_json": row["event_envelope_json"],
-            "envelope_hash": row["event_envelope_hash"],
-        }
-        event = self._decode_event_row(event_row)
-        try:
-            outbox_payload = json.loads(raw_outbox_payload)
-        except (json.JSONDecodeError, TypeError) as error:
-            raise ValueError("outbox payload is not valid JSON") from error
-        if canonical_json(outbox_payload) != raw_outbox_payload:
-            raise ValueError("outbox payload is not canonical JSON")
-        raw_authoritative_envelope = row["event_envelope_json"]
-        if not isinstance(raw_authoritative_envelope, str):
-            raise ValueError("journal event envelope authority is missing")
-        try:
-            authoritative_envelope = json.loads(raw_authoritative_envelope)
-        except (json.JSONDecodeError, TypeError) as error:
-            raise ValueError("journal event envelope is not valid JSON") from error
-        if canonical_json(authoritative_envelope) != raw_authoritative_envelope:
-            raise ValueError("journal event envelope is not canonical JSON")
-        core_envelope = {
-            "event_id": event["event_id"],
-            "event_type": event["event_type"],
-            "aggregate_type": event["aggregate_type"],
-            "aggregate_id": event["aggregate_id"],
-            "aggregate_version": str(event["aggregate_version"]),
-            "payload": event["payload"],
-            "payload_hash": event["payload_hash"],
-            "committed_at": event["committed_at"],
-        }
-        for key, expected in core_envelope.items():
-            if authoritative_envelope.get(key) != expected:
-                raise ValueError(
-                    "journal event envelope conflicts with core journal event"
-                )
-        if raw_outbox_payload != raw_authoritative_envelope:
-            raise ValueError(
-                "outbox payload does not match authoritative journal event envelope"
-            )
-        return {
-            "outbox_id": row["outbox_id"],
-            "event_id": row["event_id"],
-            "topic": row["topic"],
-            "payload": outbox_payload,
-            "created_at": row["created_at"],
-            "envelope_hash": row["envelope_hash"],
-            "delivered": row["delivered_at"] is not None,
-        }
 
     def mark_outbox_delivered(
         self,
@@ -2158,10 +2351,13 @@ class JournalStore:
         the pending publication intent.
         """
 
-        outbox_id = self._require_text(outbox_id, "outbox_id")
-        expected_envelope_hash = self._require_text(
+        outbox_id = _require_canonical_durable_text(
+            outbox_id,
+            name="outbox_id",
+        )
+        expected_envelope_hash = _require_canonical_durable_text(
             expected_envelope_hash,
-            "expected_envelope_hash",
+            name="expected_envelope_hash",
         )
         if (
             expected_journal_sequence is not None
@@ -2205,9 +2401,15 @@ class JournalStore:
                 if row is None:
                     raise KeyError(outbox_id)
 
-                raw_outbox_payload = str(row["outbox_payload_json"])
+                raw_outbox_payload = row["outbox_payload_json"]
+                if type(raw_outbox_payload) is not str:
+                    raise ValueError("outbox payload authority is not exact text")
+                topic = _require_canonical_durable_text(
+                    row["topic"],
+                    name="outbox topic",
+                )
                 actual_outbox_hash = _outbox_envelope_digest(
-                    str(row["topic"]),
+                    topic,
                     raw_outbox_payload,
                 )
                 if row["envelope_hash"] != actual_outbox_hash:
@@ -2267,10 +2469,6 @@ class JournalStore:
                         "outbox payload does not match authoritative journal event envelope"
                     )
 
-                if row["delivered_at"] is not None:
-                    connection.commit()
-                    return False
-
                 journal_sequence_cut = (
                     self._journal_sequence_value(connection)
                     if self.SCHEMA_VERSION >= 6
@@ -2289,6 +2487,15 @@ class JournalStore:
                         raise ValueError(
                             "whole-store state changed after bootstrap validation"
                         )
+
+                delivered_at = row["delivered_at"]
+                if delivered_at is not None:
+                    _require_canonical_durable_text(
+                        delivered_at,
+                        name="outbox delivered_at",
+                    )
+                    connection.commit()
+                    return False
 
                 updated = connection.execute(
                     """
@@ -2353,11 +2560,16 @@ class JournalStore:
 
     @staticmethod
     def _decode_command_result(row: sqlite3.Row) -> Any:
-        result_json = str(row["result_json"])
+        result_json = row["result_json"]
+        if type(result_json) is not str:
+            raise ValueError("command result authority is not exact text")
+        result_hash = row["result_hash"]
+        if type(result_hash) is not str:
+            raise ValueError("command result hash authority is not exact text")
         expected_hash = (
             "sha256:" + sha256(result_json.encode("utf-8")).hexdigest()
         )
-        if row["result_hash"] != expected_hash:
+        if result_hash != expected_hash:
             raise ValueError("command result hash does not match stored result")
         try:
             decoded = json.loads(result_json)
@@ -2383,8 +2595,10 @@ class JournalStore:
             if effect_json is not None or effect_hash is not None:
                 raise ValueError("result-only command carries unexpected effect authority")
         elif kind == "EVENT_BATCH":
-            if not isinstance(effect_json, str) or not isinstance(effect_hash, str):
-                raise ValueError("command event-batch effect authority is missing")
+            if type(effect_json) is not str or type(effect_hash) is not str:
+                raise ValueError(
+                    "command event-batch effect authority must be exact text"
+                )
         else:
             raise ValueError("command effect kind is invalid")
         if kind != expected:
@@ -2521,12 +2735,23 @@ class JournalStore:
             else:
                 if outbox is None:
                     raise ValueError("command event-batch publication intent is missing")
+                stored_topic = _require_canonical_durable_text(
+                    outbox["topic"],
+                    name="command event-batch outbox topic",
+                )
+                stored_payload = outbox["payload_json"]
+                stored_hash = outbox["envelope_hash"]
+                if type(stored_payload) is not str or type(stored_hash) is not str:
+                    raise ValueError(
+                        "command event-batch outbox authority must be exact text"
+                    )
                 if (
-                    outbox["topic"] != descriptor["outbox_topic"]
-                    or outbox["payload_json"] != raw_envelope
-                    or outbox["envelope_hash"] != descriptor["outbox_hash"]
+                    stored_topic != descriptor["outbox_topic"]
+                    or stored_payload != raw_envelope
+                    or stored_hash != descriptor["outbox_hash"]
                     or _outbox_envelope_digest(
-                        str(outbox["topic"]), str(outbox["payload_json"])
+                        stored_topic,
+                        stored_payload,
                     ) != descriptor["outbox_hash"]
                 ):
                     raise ValueError("command event-batch publication intent changed")
@@ -2656,6 +2881,7 @@ class JournalStore:
             if type(envelope) is not dict:
                 raise TypeError("Each event envelope must be an exact dict")
             envelope = _detach_json_value(envelope)
+            _validate_canonical_event_envelope_if_claimed(envelope)
             event_id = _require_canonical_durable_text(
                 envelope.get("event_id"), name="event_id"
             )

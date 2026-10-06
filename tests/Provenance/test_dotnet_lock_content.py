@@ -189,6 +189,27 @@ class NugetLockGateCandidateTests(unittest.TestCase):
         self.assertEqual(commands, [])
         self.assertEqual(unscoped_lines, [3])
 
+
+    def test_canonical_looking_restore_inside_block_scalar_is_unscoped(self):
+        commands, unscoped_lines = dotnet_restore_workflow_commands(
+            "steps:\n"
+            "  - run: |\n"
+            "      printf '%s\\n' fake\n"
+            "      - run: dotnet restore src/App/App.csproj --locked-mode\n"
+        )
+        self.assertEqual(commands, [])
+        self.assertEqual(unscoped_lines, [4])
+
+    def test_nested_fake_steps_inside_block_scalar_cannot_mint_restore(self):
+        commands, unscoped_lines = dotnet_restore_workflow_commands(
+            "steps:\n"
+            "  - run: |\n"
+            "      steps:\n"
+            "        - run: dotnet restore src/App/App.csproj --locked-mode\n"
+        )
+        self.assertEqual(commands, [])
+        self.assertEqual(unscoped_lines, [4])
+
     def test_case_and_spacing_cannot_hide_unscoped_restore(self):
         commands, unscoped_lines = dotnet_restore_workflow_commands(
             "steps:\n"
@@ -540,6 +561,35 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                     for item in blockers
                 )
             )
+
+    def test_path_unsafe_nuget_identity_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = write_project(root)
+            write_lock(project, package_name="../Microsoft.Web.WebView2")
+            blockers = dotnet_lock_content_blockers(root, project)
+            self.assertTrue(
+                any(
+                    item.startswith("DOTNET_PROJECT_LOCK_RECORD_INVALID:")
+                    for item in blockers
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "does not match project"):
+                dotnet_locked_dependency_graph(root, [project])
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = write_project(root)
+            write_lock(project, resolved="../1.0.4191.47")
+            blockers = dotnet_lock_content_blockers(root, project)
+            self.assertTrue(
+                any(
+                    item.startswith("DOTNET_PROJECT_LOCK_RESOLVED_INVALID:")
+                    for item in blockers
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "does not match project"):
+                dotnet_locked_dependency_graph(root, [project])
 
     def test_package_name_case_drift_is_visible(self):
         with TemporaryDirectory() as directory:

@@ -376,6 +376,43 @@ class HostNetworkTests(unittest.TestCase):
                     durable_path.read_bytes(),
                 )
 
+    def test_ui_command_contract_rejects_unknown_or_missing_top_level_fields(self):
+        extra = self.command(unexpected="forbidden")
+        response = self.post(extra)
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.app.store.state_version, 0)
+
+        missing = self.command()
+        missing.pop("payload")
+        response = self.post(missing)
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.app.store.state_version, 0)
+
+    def test_ui_command_contract_rejects_noncanonical_identity_and_sequence(self):
+        invalid_commands = (
+            self.command(command_id="not-a-uuid"),
+            self.command(expected_state_version="00"),
+            self.command(expected_state_version="+0"),
+            self.command(expected_state_version=" 0"),
+            self.command(idempotency_key="x" * 129),
+            self.command(session="sid-" + "A" * 64),
+            self.command(environment="paper"),
+            self.command(action="UNKNOWN_FUTURE_ACTION"),
+            self.command(payload=[]),
+        )
+        for command in invalid_commands:
+            with self.subTest(command=command):
+                response = self.post(command)
+                self.assertEqual(response.status, 400)
+                self.assertEqual(self.app.store.state_version, 0)
+
+    def test_ui_command_contract_accepts_exact_v5_shape(self):
+        command = self.command()
+        response = self.post(command)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.body(response)["status"], "ACCEPTED")
+        self.assertEqual(self.app.store.state_version, 1)
+
     def test_non_event_routes_reject_query_and_get_body_before_auth_mutation(self):
         query = self.app.dispatch(
             method="GET",

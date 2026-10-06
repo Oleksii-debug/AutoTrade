@@ -4482,7 +4482,7 @@ class IbkrWebBearerCredential:
             plaintext != plaintext.strip()
             or len(plaintext) > 16384
             or plaintext.lower().startswith("bearer ")
-            or re.fullmatch(r"[A-Za-z0-9\\-._~+/]+={0,}", plaintext) is None
+            or re.fullmatch(r"[A-Za-z0-9._~+/-]+={0,}", plaintext) is None
         ):
             raise ProviderTransportScopeError(
                 "IBKR OAuth2 bearer credential is not canonical token text"

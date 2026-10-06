@@ -35,8 +35,14 @@
   ],
   "dotnet_package_dependencies": [
     {
+      "project": "src/AutoTrade.Desktop/AutoTrade.Desktop.csproj",
+      "target": "net10.0-windows7.0",
       "name": "Microsoft.Web.WebView2",
-      "version": "1.0.4258.31"
+      "type": "Direct",
+      "version": "1.0.4258.31",
+      "content_hash_sha512_base64": "sHVZ2MQrHT1J3q5/6csn0fIP27rzpTO/RRC+wPQDrZheB7T4t2n+vVbY6SdCKr4WRV9s/gmBM3PPMWWJtoDzMg==",
+      "dependencies": [],
+      "requested": "[1.0.4258.31, )"
     }
   ],
   "dotnet_sdk": "10.0.100",

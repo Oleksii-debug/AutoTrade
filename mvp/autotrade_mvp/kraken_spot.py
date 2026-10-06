@@ -637,14 +637,56 @@ def _iso_utc_text(value: object, *, name: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _prepared_submission_projection(
+    prepared_request: KrakenSpotPreparedRequest,
+    *,
+    _prepared_type=KrakenSpotPreparedRequest,
+    _canonical_type=type,
+    _canonical_str=str,
+    _object_getattribute=object.__getattribute__,
+    _mapping_proxy_type=MappingProxyType,
+) -> Mapping[str, object]:
+    """Read one exact prepared AddOrder request without virtual callbacks."""
+
+    if _canonical_type(prepared_request) is not _prepared_type:
+        raise TypeError(
+            "prepared_request must be exact KrakenSpotPreparedRequest"
+        )
+    body = _object_getattribute(prepared_request, "body")
+    if _canonical_type(body) is not _mapping_proxy_type:
+        raise KrakenSpotAdapterError(
+            "Kraken Spot prepared request body authority changed"
+        )
+    client_order_id = body.get("cl_ord_id")
+    fields = {
+        "endpoint": _object_getattribute(prepared_request, "endpoint"),
+        "account_id": _object_getattribute(prepared_request, "account_id"),
+        "environment": _object_getattribute(prepared_request, "environment"),
+        "capability_snapshot_id": _object_getattribute(
+            prepared_request,
+            "capability_snapshot_id",
+        ),
+        "instrument_version": _object_getattribute(
+            prepared_request,
+            "instrument_version",
+        ),
+        "body_sha256": _object_getattribute(prepared_request, "body_sha256"),
+        "client_order_id": client_order_id,
+    }
+    if any(_canonical_type(value) is not _canonical_str for value in fields.values()):
+        raise KrakenSpotAdapterError(
+            "Kraken Spot prepared request authority changed"
+        )
+    return _mapping_proxy_type(fields)
+
+
 def _validate_submission_scope(
     prepared_request: KrakenSpotPreparedRequest,
     *,
     source_uri: str,
 ) -> str:
-    if type(prepared_request) is not KrakenSpotPreparedRequest:
-        raise TypeError("prepared_request must be exact KrakenSpotPreparedRequest")
-    if prepared_request.environment != "LIVE":
+    prepared = _prepared_submission_projection(prepared_request)
+    if prepared["environment"] != "LIVE":
         raise KrakenSpotAdapterError(
             "Kraken Spot provider submission evidence is qualified only for LIVE"
         )
@@ -674,30 +716,27 @@ def _submission_projection(
         raise TypeError(
             "observation must be durable ProviderSubmissionObservation"
         )
-    if type(prepared_request) is not KrakenSpotPreparedRequest:
-        raise TypeError(
-            "prepared_request must be exact KrakenSpotPreparedRequest"
-        )
+    prepared = _prepared_submission_projection(prepared_request)
     projected = _projection(observation)
     cid = validate_spot_client_order_id(
-        prepared_request.body.get("cl_ord_id")
+        prepared["client_order_id"]
     )
     expected = (
         ("provider_id", "KRAKEN", "provider"),
-        ("endpoint", prepared_request.endpoint, "endpoint"),
-        ("request_sha256", prepared_request.body_sha256, "request digest"),
+        ("endpoint", prepared["endpoint"], "endpoint"),
+        ("request_sha256", prepared["body_sha256"], "request digest"),
         (
             "capability_snapshot_ids",
-            (prepared_request.capability_snapshot_id,),
+            (prepared["capability_snapshot_id"],),
             "capability",
         ),
         (
             "instrument_versions",
-            (prepared_request.instrument_version,),
+            (prepared["instrument_version"],),
             "instrument",
         ),
-        ("account_id", prepared_request.account_id, "account"),
-        ("environment", prepared_request.environment, "environment"),
+        ("account_id", prepared["account_id"], "account"),
+        ("environment", prepared["environment"], "environment"),
         ("client_order_id", cid, "client-order"),
     )
     for key, expected_value, label in expected:
@@ -767,8 +806,9 @@ def parse_spot_submission_response(
         prepared_request,
         source_uri=source_uri,
     )
+    prepared = _prepared_submission_projection(prepared_request)
     cid = validate_spot_client_order_id(
-        prepared_request.body.get("cl_ord_id")
+        prepared["client_order_id"]
     )
     if type(transport_ambiguous) is not bool:
         raise TypeError("transport_ambiguous must be boolean")

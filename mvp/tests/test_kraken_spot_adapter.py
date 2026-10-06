@@ -589,6 +589,30 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 observation={"error": [], "result": {"txid": ["forged"]}},
             )
 
+    def test_submission_consumer_ignores_exact_prepared_getattribute_callback(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {"error": [], "result": {"txid": ["prepared-callback-fence"]}},
+            intent_id="kraken-spot-prepared-callback-fence",
+        )
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            raise AssertionError(
+                "prepared-request virtual callback executed"
+            )
+
+        with patch.object(KrakenSpotPreparedRequest, "__getattribute__", forged):
+            result = parse_spot_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                source_uri="https://api.kraken.com/0/private/AddOrder",
+                observation=observation,
+            )
+        self.assertEqual(callbacks, [])
+        self.assertEqual(result["outcome"], "ACKNOWLEDGED")
+        self.assertEqual(result["provider_order_id"], "prepared-callback-fence")
+
     def test_submission_consumer_rejects_prepared_subclass_before_virtual_callback(self):
         callbacks = []
 

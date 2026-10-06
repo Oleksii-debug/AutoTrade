@@ -225,6 +225,47 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
                 "prepared_owner_lease_expired_before_send",
             )
 
+    def test_death_inside_transport_before_guard_stays_zero_wire(self):
+        with TemporaryDirectory() as directory:
+            path = self._path(directory)
+            dispatcher = self._dispatcher(path)
+
+            def transport(_client_order_id, _request, _final_guard):
+                raise SimulatedProcessDeath("inside transport before guard")
+
+            with self.assertRaisesRegex(
+                SimulatedProcessDeath,
+                "inside transport before guard",
+            ):
+                self._dispatch(
+                    dispatcher,
+                    attempt_id="crash-before-guard",
+                    now="2026-10-06T16:34:10Z",
+                    transport=transport,
+                )
+
+            self.assertEqual(
+                self._event_types(path, dispatcher, "crash-before-guard"),
+                ["SubmissionPrepared"],
+            )
+
+            restarted = self._dispatcher(path, owner_token="owner-b")
+            recovered = self._dispatch(
+                restarted,
+                attempt_id="crash-before-guard",
+                now="2026-10-06T16:35:11Z",
+                transport=self._forbidden_transport,
+            )
+            self.assertEqual(recovered.status, "BLOCKED")
+            self.assertEqual(
+                recovered.reason,
+                "prepared_owner_lease_expired_before_send",
+            )
+            self.assertEqual(
+                self._event_types(path, restarted, "crash-before-guard"),
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
     def test_death_after_sending_commit_before_wire_is_sticky_unknown(self):
         with TemporaryDirectory() as directory:
             path = self._path(directory)

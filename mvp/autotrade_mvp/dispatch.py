@@ -2556,6 +2556,8 @@ class GuardedDispatcher:
         decoder_function = snapshot_defaults[1]
         decoder_digest = snapshot_defaults[2]
         decoder_json_module = json
+        decoder_json_module_type = snapshot_type(decoder_json_module)
+        decoder_json_module_type_setattr = decoder_json_module_type.__setattr__
         decoder_json_namespace = vars(decoder_json_module)
         decoder_json_namespace_get = decoder_json_namespace.get
         decoder_json_namespace_set = decoder_json_namespace.__setitem__
@@ -2638,6 +2640,10 @@ class GuardedDispatcher:
         )
         decoder_json_scanner = decoder_json_decoder_init_globals_get(
             "scanner"
+        )
+        decoder_json_scanner_type = snapshot_type(decoder_json_scanner)
+        decoder_json_scanner_type_setattr = (
+            decoder_json_scanner_type.__setattr__
         )
         decoder_json_scanner_namespace = vars(decoder_json_scanner)
         decoder_json_scanner_namespace_get = (
@@ -2723,6 +2729,23 @@ class GuardedDispatcher:
 
         def restore_exact_response_authority() -> bool:
             changed = False
+            if snapshot_type(decoder_json_module) is not decoder_json_module_type:
+                decoder_json_module_type_setattr(
+                    decoder_json_module,
+                    "__class__",
+                    decoder_json_module_type,
+                )
+                changed = True
+            if (
+                snapshot_type(decoder_json_scanner)
+                is not decoder_json_scanner_type
+            ):
+                decoder_json_scanner_type_setattr(
+                    decoder_json_scanner,
+                    "__class__",
+                    decoder_json_scanner_type,
+                )
+                changed = True
             for name, expected in exact_response_module_bindings:
                 if snapshot_module_globals_get(name) is not expected:
                     snapshot_module_globals_set(name, expected)

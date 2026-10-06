@@ -1039,6 +1039,7 @@ def _require_host_expected_scope(
         transport_identity=values["transport_identity"],
     )
 
+
 def _host_canonical_utc(value: object, *, name: str) -> str:
     if type(value) is not datetime or type(value.tzinfo) is not timezone:
         raise ProviderOriginError(
@@ -1518,7 +1519,7 @@ class HostAuthenticatedReadJournalBridge:
                 or payload.get("network_policy_identity")
                 != verified.attempt.subject.network_policy_identity
                 or payload.get("host_prepared_attestation")
-                != prepared_envelope
+                != canonical_prepared
             ):
                 raise ProviderOriginError(
                     "Host Prepared replay conflicts with durable signed scope"
@@ -1726,7 +1727,7 @@ class HostAuthenticatedReadJournalBridge:
             prepared_payload.get("origin_kind") != _HOST_ATTESTED_PENDING_KIND
             or prepared_payload.get("query") != expected
             or prepared_payload.get("host_prepared_attestation")
-            != prepared_envelope
+            != canonical_prepared
             or prepared_payload.get("transport_identity")
             != verified.attempt.subject.transport_identity
             or prepared_payload.get("network_policy_identity")

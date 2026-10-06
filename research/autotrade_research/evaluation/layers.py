@@ -30,6 +30,7 @@ from ..forward_paper import (
     ForwardPaperEvidence,
     ForwardPaperProtocol,
     OperationalObservation,
+    PaperDecisionEconomics,
     SealedPrediction,
     assess_forward_paper,
 )
@@ -177,9 +178,13 @@ def _detached_forward_inputs(
     if (
         type(protocol.required_provider_capabilities) is not tuple
         or type(protocol.required_operational_cases) is not tuple
+        or type(protocol.required_regimes) is not tuple
+        or type(protocol.required_simulation_limitations) is not tuple
         or type(evidence.predictions) is not tuple
         or type(evidence.outcomes) is not tuple
         or type(evidence.operational_observations) is not tuple
+        or type(evidence.paper_economics) is not tuple
+        or type(evidence.simulation_limitations) is not tuple
         or type(evidence.costs_by_currency) is not MappingProxyType
         or type(assessment.reasons) is not tuple
     ):
@@ -196,6 +201,12 @@ def _detached_forward_inputs(
         maximum_decision_latency_ms=protocol.maximum_decision_latency_ms,
         required_provider_capabilities=tuple(protocol.required_provider_capabilities),
         required_operational_cases=tuple(protocol.required_operational_cases),
+        required_regimes=tuple(protocol.required_regimes),
+        minimum_decision_units_per_regime=protocol.minimum_decision_units_per_regime,
+        required_simulation_limitations=tuple(protocol.required_simulation_limitations),
+        reporting_currency=protocol.reporting_currency,
+        maximum_drawdown=protocol.maximum_drawdown,
+        evaluation_profile_hash=protocol.evaluation_profile_hash,
     )
 
     clean_predictions = []
@@ -215,6 +226,8 @@ def _detached_forward_inputs(
                 decision_deadline_at=item.decision_deadline_at,
                 outcome_horizon_end_at=item.outcome_horizon_end_at,
                 decision_latency_ms=item.decision_latency_ms,
+                regime=item.regime,
+                dependence_unit_id=item.dependence_unit_id,
             )
         )
 
@@ -249,6 +262,29 @@ def _detached_forward_inputs(
             )
         )
 
+    clean_economics = []
+    for item in evidence.paper_economics:
+        if type(item) is not PaperDecisionEconomics:
+            raise TypeError(
+                "forward evidence economics must contain exact PaperDecisionEconomics"
+            )
+        clean_economics.append(
+            PaperDecisionEconomics(
+                prediction_id=item.prediction_id,
+                currency=item.currency,
+                sequence=item.sequence,
+                realized_at=item.realized_at,
+                gross_pnl=item.gross_pnl,
+                fees=item.fees,
+                spread_cost=item.spread_cost,
+                slippage_cost=item.slippage_cost,
+                net_pnl=item.net_pnl,
+                equity_before=item.equity_before,
+                equity_after=item.equity_after,
+                peak_equity_before=item.peak_equity_before,
+            )
+        )
+
     clean_evidence = ForwardPaperEvidence(
         exact_build_sha=evidence.exact_build_sha,
         protocol_hash=evidence.protocol_hash,
@@ -259,6 +295,9 @@ def _detached_forward_inputs(
         costs_by_currency=dict(evidence.costs_by_currency),
         costs_complete=evidence.costs_complete,
         account_reconciliation_complete=evidence.account_reconciliation_complete,
+        paper_economics=tuple(clean_economics),
+        simulation_limitations=tuple(evidence.simulation_limitations),
+        evaluation_profile_hash=evidence.evaluation_profile_hash,
     )
     clean_assessment = ForwardPaperAssessment(
         evidence_status=assessment.evidence_status,
@@ -304,6 +343,8 @@ def _forward_evidence_payload(evidence: ForwardPaperEvidence) -> dict[str, objec
                 "decision_deadline_at": item.decision_deadline_at,
                 "outcome_horizon_end_at": item.outcome_horizon_end_at,
                 "decision_latency_ms": item.decision_latency_ms,
+                "regime": item.regime,
+                "dependence_unit_id": item.dependence_unit_id,
             }
             for item in evidence.predictions
         ),
@@ -329,6 +370,25 @@ def _forward_evidence_payload(evidence: ForwardPaperEvidence) -> dict[str, objec
             key: str(value)
             for key, value in sorted(evidence.costs_by_currency.items())
         },
+        "paper_economics": tuple(
+            {
+                "prediction_id": item.prediction_id,
+                "currency": item.currency,
+                "sequence": item.sequence,
+                "realized_at": item.realized_at,
+                "gross_pnl": str(item.gross_pnl),
+                "fees": str(item.fees),
+                "spread_cost": str(item.spread_cost),
+                "slippage_cost": str(item.slippage_cost),
+                "net_pnl": str(item.net_pnl),
+                "equity_before": str(item.equity_before),
+                "equity_after": str(item.equity_after),
+                "peak_equity_before": str(item.peak_equity_before),
+            }
+            for item in evidence.paper_economics
+        ),
+        "simulation_limitations": tuple(evidence.simulation_limitations),
+        "evaluation_profile_hash": evidence.evaluation_profile_hash,
         "costs_complete": evidence.costs_complete,
         "account_reconciliation_complete": evidence.account_reconciliation_complete,
     }
@@ -503,6 +563,18 @@ class EvaluationLayerReceipt:
             raise EvaluationLayersError(
                 "GateDecision status contradicts its own check statuses"
             )
+
+        # A bare GateDecision is a public value, not independent scientific
+        # authority.  WP-36 issue #1116 remains open on current main: callers
+        # can self-publish internally consistent PASS material without an
+        # issuer-owned authenticated evidence graph.  Preserve negative FAIL
+        # evidence, but never promote an unissued historical PASS through this
+        # composition.  Once WP-36 exposes a non-caller-forgeable accepted
+        # result, this boundary must consume that authority rather than infer it
+        # from provenance fields supplied by the caller.
+        receipt_status = (
+            "INCONCLUSIVE" if decision.status == "PASS" else decision.status
+        )
         return cls(
             layer=layer,
             candidate_id=candidate_id,
@@ -511,7 +583,7 @@ class EvaluationLayerReceipt:
             protocol_sha256=protocol_sha256,
             evidence_sha256=evidence_sha256,
             authority_result_sha256=_digest(payload),
-            status=decision.status,
+            status=receipt_status,
             evidence_class=_LAYER_EVIDENCE_CLASS[layer],
             information_mode=_LAYER_INFORMATION_MODE[layer],
             forward_events_unavailable_at_selection=False,

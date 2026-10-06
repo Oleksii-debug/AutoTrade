@@ -66,3 +66,41 @@ predictions, actual costs and deadlines, reconnect/history-lag/manual-activity
 evidence, full account reconciliation and a separately locked statistical
 evaluation. If the available evidence is insufficient, the correct result is
 `INCONCLUSIVE`, not an inferred edge claim.
+
+## Product item 22 hardening — current branch
+
+The Product Specification's paper-trading requirement now has stricter
+source-level mechanics on this lineage. A mechanically complete campaign must
+pre-register regime coverage, a minimum number of distinct decision-dependence
+units per regime, a content-addressed evaluation profile, the reporting
+currency, a maximum drawdown bound, and the simulator/test-environment
+limitations that are expected to apply.
+
+Each sealed prediction is assigned to a registered regime and dependence unit.
+Those unit identifiers are de-duplication structure only: they do not by
+themselves prove statistical independence. Independence, uncertainty,
+stability, power/precision and promotion semantics remain the responsibility of
+the separately frozen evaluation profile and scientific qualification gates.
+
+Paper economics are recorded per decision with exact decimal gross P&L, fees,
+spread cost, slippage cost, net P&L, realized time, equity-before/equity-after
+and prior peak equity. The evaluator rejects inconsistent accounting identities,
+missing or duplicate economics sequence steps, chronological regression,
+economics recorded before the corresponding forward outcome is available,
+balance/peak resets and per-decision execution costs that exceed the aggregate
+reporting-currency cost ledger. Drawdown is evaluated on one continuous campaign
+equity path; a registered-limit breach is retained as valid negative operational
+evidence rather than discarded.
+
+Unexpected simulator limitations make the campaign incomplete until the
+qualification protocol is explicitly reconsidered. Legacy protocol hashes remain
+readable, but a legacy campaign without these Product item 22 registrations is
+INCONCLUSIVE.
+
+This hardening still does **not** make a provider campaign qualified. Terminal
+WP-57 acceptance additionally requires independently trusted immutable evidence,
+accepted qualification trust, independent occurrence chronology and complete
+provider/financial/reconciliation source-universe evidence. No result in this
+foundation grants trading authority, and economic_edge_status remains
+NOT_ESTABLISHED.
+

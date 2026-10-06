@@ -16,6 +16,7 @@ from research.autotrade_research.forward_paper import (
     ForwardPaperEvidence,
     ForwardPaperProtocol,
     OperationalObservation,
+    PaperDecisionEconomics,
     SealedPrediction,
     assess_forward_paper,
     forward_paper_protocol_hash,
@@ -64,6 +65,12 @@ def forward_fixture(*, minimum_predictions=1, missed_deadline=False):
         maximum_decision_latency_ms=100,
         required_provider_capabilities=("MARKET_DATA",),
         required_operational_cases=("NETWORK_RECOVERY",),
+        required_regimes=("TREND",),
+        minimum_decision_units_per_regime=1,
+        required_simulation_limitations=("QUEUE_PRIORITY_UNOBSERVED",),
+        reporting_currency="USD",
+        maximum_drawdown="50",
+        evaluation_profile_hash=h("a"),
     )
     protocol = ForwardPaperProtocol.create(
         campaign_id="campaign-1",
@@ -76,6 +83,12 @@ def forward_fixture(*, minimum_predictions=1, missed_deadline=False):
         maximum_decision_latency_ms=100,
         required_provider_capabilities=("MARKET_DATA",),
         required_operational_cases=("NETWORK_RECOVERY",),
+        required_regimes=("TREND",),
+        minimum_decision_units_per_regime=1,
+        required_simulation_limitations=("QUEUE_PRIORITY_UNOBSERVED",),
+        reporting_currency="USD",
+        maximum_drawdown="50",
+        evaluation_profile_hash=h("a"),
     )
     prediction = SealedPrediction.create(
         prediction_id="prediction-1",
@@ -91,6 +104,8 @@ def forward_fixture(*, minimum_predictions=1, missed_deadline=False):
         ),
         outcome_horizon_end_at="2026-10-02T13:00:00Z",
         decision_latency_ms=50,
+        regime="TREND",
+        dependence_unit_id="wave-1",
     )
     outcome = ForwardOutcome.create(
         prediction_id="prediction-1",
@@ -114,6 +129,24 @@ def forward_fixture(*, minimum_predictions=1, missed_deadline=False):
         costs_by_currency={"USD": "1.00"},
         costs_complete=True,
         account_reconciliation_complete=True,
+        paper_economics=(
+            PaperDecisionEconomics.create(
+                prediction_id="prediction-1",
+                currency="USD",
+                sequence=1,
+                realized_at="2026-10-02T13:01:00Z",
+                gross_pnl="2.00",
+                fees="0.25",
+                spread_cost="0.25",
+                slippage_cost="0.25",
+                net_pnl="1.25",
+                equity_before="100.00",
+                equity_after="101.25",
+                peak_equity_before="100.00",
+            ),
+        ),
+        simulation_limitations=("QUEUE_PRIORITY_UNOBSERVED",),
+        evaluation_profile_hash=h("a"),
     )
     assessment = assess_forward_paper(protocol, evidence)
     return protocol, evidence, assessment
@@ -170,13 +203,24 @@ class ThreeEvaluationLayerTests(unittest.TestCase):
                 FORWARD_PAPER,
             ),
         )
-        self.assertEqual(result.evaluation_status, "PASS")
-        self.assertTrue(result.all_three_layers_passed)
+        self.assertEqual(result.historical_status, "INCONCLUSIVE")
+        self.assertEqual(result.evaluation_status, "INCONCLUSIVE")
+        self.assertFalse(result.all_three_layers_passed)
 
     def test_all_three_pass_still_does_not_establish_economic_edge(self):
         result = self.compose()
         self.assertEqual(result.economic_edge_status, "NOT_ESTABLISHED")
         self.assertTrue(result.forward_required_for_complete_evaluation)
+
+    def test_self_authored_historical_pass_stays_inconclusive_without_issuer(self):
+        receipt = historical(
+            BLINDED_MARKET_REPLAY,
+            "PASS",
+            evidence_char="1",
+            protocol_char="2",
+        )
+        self.assertEqual(receipt.status, "INCONCLUSIVE")
+        self.assertEqual(receipt.economic_edge_status, "NOT_ESTABLISHED")
 
     def test_historical_pass_cannot_substitute_for_forward_layer(self):
         a, b, _ = complete_layers()
@@ -424,7 +468,7 @@ class ThreeEvaluationLayerTests(unittest.TestCase):
         )
         c = forward_receipt(minimum_predictions=2)
         result = self.compose((a, b, c))
-        self.assertEqual(result.historical_status, "PASS")
+        self.assertEqual(result.historical_status, "INCONCLUSIVE")
         self.assertEqual(result.forward_status, "INCONCLUSIVE")
         self.assertEqual(result.evaluation_status, "INCONCLUSIVE")
 
@@ -474,6 +518,12 @@ class ThreeEvaluationLayerTests(unittest.TestCase):
             maximum_decision_latency_ms=protocol.maximum_decision_latency_ms,
             required_provider_capabilities=protocol.required_provider_capabilities,
             required_operational_cases=protocol.required_operational_cases,
+            required_regimes=protocol.required_regimes,
+            minimum_decision_units_per_regime=protocol.minimum_decision_units_per_regime,
+            required_simulation_limitations=protocol.required_simulation_limitations,
+            reporting_currency=protocol.reporting_currency,
+            maximum_drawdown=protocol.maximum_drawdown,
+            evaluation_profile_hash=protocol.evaluation_profile_hash,
         )
         with self.assertRaisesRegex(TypeError, "exact ForwardPaperProtocol"):
             EvaluationLayerReceipt.from_forward_paper(

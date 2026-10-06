@@ -146,9 +146,15 @@ def _exclusive_nonce_send_lock(thread_lock, lock_path):
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    # Provider scope text is authority-bearing input. Reject str subclasses
+    # before strip() so caller-controlled virtual string behavior cannot run
+    # inside the provider admission boundary.
+    if type(value) is not str:
         raise ProviderTransportScopeError(f"{name} is required")
-    return value.strip()
+    text = value.strip()
+    if not text:
+        raise ProviderTransportScopeError(f"{name} is required")
+    return text
 
 
 def _canonical_text(value: object, *, name: str) -> str:

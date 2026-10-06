@@ -1036,6 +1036,16 @@ def _install_submission_response_binding_authority(loader):
     loader_code = loader.__code__
     canonical_journal_snapshot = _canonical_journal_authority_snapshot
     journal_snapshot_code = canonical_journal_snapshot.__code__
+    canonical_journal_call = _journal_store_call
+    journal_call_code = canonical_journal_call.__code__
+    canonical_binding_init = SubmissionResponseBinding.__init__
+    canonical_binding_post_init = SubmissionResponseBinding.__post_init__
+    binding_init_code = canonical_binding_init.__code__
+    binding_post_init_code = canonical_binding_post_init.__code__
+    canonical_json_function = canonical_json
+    canonical_json_module = json
+    canonical_re_module = re
+    canonical_sha256 = sha256
     canonical_attempt_id = submission_attempt_aggregate_id
     attempt_id_code = canonical_attempt_id.__code__
     canonical_decode = _decode_exact_json_bytes
@@ -1123,6 +1133,19 @@ def _install_submission_response_binding_authority(loader):
             or _canonical_journal_authority_snapshot is not canonical_journal_snapshot
             or canonical_getattr(canonical_journal_snapshot, "__code__", None)
             is not journal_snapshot_code
+            or _journal_store_call is not canonical_journal_call
+            or canonical_getattr(canonical_journal_call, "__code__", None)
+            is not journal_call_code
+            or SubmissionResponseBinding.__init__ is not canonical_binding_init
+            or canonical_getattr(canonical_binding_init, "__code__", None)
+            is not binding_init_code
+            or SubmissionResponseBinding.__post_init__ is not canonical_binding_post_init
+            or canonical_getattr(canonical_binding_post_init, "__code__", None)
+            is not binding_post_init_code
+            or canonical_json is not canonical_json_function
+            or json is not canonical_json_module
+            or re is not canonical_re_module
+            or sha256 is not canonical_sha256
             or submission_attempt_aggregate_id is not canonical_attempt_id
             or canonical_getattr(canonical_attempt_id, "__code__", None)
             is not attempt_id_code

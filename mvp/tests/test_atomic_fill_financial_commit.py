@@ -253,6 +253,60 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             self.assertEqual(reopened_economics.position("ABC"), Decimal("1"))
             self.assertEqual(len(reopened_economics.transactions), 1)
 
+    def test_same_financial_command_isolated_by_provider_environment(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            domains = {}
+
+            for suffix, provider_environment in (
+                ("a", "DOMAIN-A"),
+                ("b", "DOMAIN-B"),
+            ):
+                reservation_id = f"reservation-{suffix}"
+                reservations.reserve(
+                    command_id=f"reserve-domain-{suffix}",
+                    idempotency_key=f"reserve-domain-{suffix}",
+                    reservation_id=reservation_id,
+                    intent_id=f"intent-{suffix}",
+                    requirements={"CASH:USD": "120"},
+                    available={"CASH:USD": "1000"},
+                )
+                domains[provider_environment] = (
+                    DurableProviderEconomicBook(
+                        store,
+                        provider_id=PROVIDER,
+                        account_id=ACCOUNT,
+                        environment=ENVIRONMENT,
+                        provider_environment=provider_environment,
+                    ),
+                    reservation_id,
+                )
+
+            transaction = fill_transaction()
+            for provider_environment in ("DOMAIN-A", "DOMAIN-B"):
+                economics, reservation_id = domains[provider_environment]
+                self.assertTrue(
+                    commit_economic_batch_with_reservation_consumption(
+                        economics,
+                        reservations,
+                        command_id="shared-financial-command",
+                        idempotency_key="shared-financial-idempotency",
+                        reservation_id=reservation_id,
+                        usage={"CASH:USD": "100"},
+                        transactions=(transaction,),
+                        committed_at="2026-09-25T09:00:02Z",
+                    )
+                )
+                snapshot = reservations.get(reservation_id)
+                self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("100"))
+                self.assertEqual(economics.position("ABC"), Decimal("1"))
+
+            self.assertNotEqual(
+                domains["DOMAIN-A"][0].book_id,
+                domains["DOMAIN-B"][0].book_id,
+            )
+
     def test_failure_before_shared_commit_leaves_neither_projection_mutated(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

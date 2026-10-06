@@ -595,6 +595,7 @@ def _install_kraken_futures_prepared_request_authority(builder):
     capability_admits_code = capability_admits.__code__
     datetime_type = datetime
     timezone_type = timezone
+    bool_type = bool
     canonical_text = _text
     canonical_text_code = canonical_text.__code__
     canonical_client_id = _client_order_id
@@ -664,6 +665,7 @@ def _install_kraken_futures_prepared_request_authority(builder):
             or TypeError is not type_error
             or datetime is not datetime_type
             or timezone is not timezone_type
+            or bool is not bool_type
             or type is not canonical_type
             or id is not canonical_id
             or tuple is not canonical_tuple
@@ -771,7 +773,7 @@ def _install_kraken_futures_prepared_request_authority(builder):
         ):
             if canonical_type(value) is not canonical_str:
                 raise type_error(f"{name} must be exact str")
-        if canonical_type(reduce_only) is not bool:
+        if canonical_type(reduce_only) is not bool_type:
             raise type_error("reduce_only must be exact bool")
         prepared = builder(
             capability=capability,

@@ -1913,7 +1913,7 @@ class AblationTests(unittest.TestCase):
             )
             self.assertEqual(
                 shadow_result.reason,
-                "canonical_population_evidence_unavailable",
+                "canonical_utility_cost_owner_evidence_unavailable",
             )
             self.assertEqual(shadow_calls, [])
 

@@ -50,14 +50,20 @@ _CANONICAL_PROVIDER_ORIGIN_MAX_RESPONSE_BASE64_CHARS = (
 )
 
 
-def _require_provider_origin_response_resource_authority() -> None:
+def _require_provider_origin_response_resource_authority(
+    _helper=require_provider_response_bytes,
+    _helper_code=require_provider_response_bytes.__code__,
+    _hard_max=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+    _encoded_max=4 * ((HARD_MAX_PROVIDER_RESPONSE_BYTES + 2) // 3),
+) -> None:
     if (
-        require_provider_response_bytes
-        is not _CANONICAL_PROVIDER_ORIGIN_REQUIRE_RESPONSE_BYTES
-        or require_provider_response_bytes.__code__
-        is not _CANONICAL_PROVIDER_ORIGIN_REQUIRE_RESPONSE_BYTES_CODE
-        or HARD_MAX_PROVIDER_RESPONSE_BYTES
-        != _CANONICAL_PROVIDER_ORIGIN_HARD_MAX_RESPONSE_BYTES
+        require_provider_response_bytes is not _helper
+        or require_provider_response_bytes.__code__ is not _helper_code
+        or HARD_MAX_PROVIDER_RESPONSE_BYTES != _hard_max
+        or _CANONICAL_PROVIDER_ORIGIN_REQUIRE_RESPONSE_BYTES is not _helper
+        or _CANONICAL_PROVIDER_ORIGIN_REQUIRE_RESPONSE_BYTES_CODE is not _helper_code
+        or _CANONICAL_PROVIDER_ORIGIN_HARD_MAX_RESPONSE_BYTES != _hard_max
+        or _CANONICAL_PROVIDER_ORIGIN_MAX_RESPONSE_BASE64_CHARS != _encoded_max
     ):
         raise ProviderOriginError(
             "provider-origin response resource authority changed"

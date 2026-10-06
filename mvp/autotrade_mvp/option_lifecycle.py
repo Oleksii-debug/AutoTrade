@@ -399,15 +399,16 @@ def canonical_option_lifecycle_observation(
     return payload
 
 
-def _standard_physical_exercise_cash(version: InstrumentVersion) -> Decimal:
-    """Return strike cash only when standard terms are explicit in registry data.
+def _physical_exercise_cash(version: InstrumentVersion) -> Decimal:
+    """Resolve physical exercise cash from immutable instrument terms.
 
-    The existing option core intentionally forbids inferring adjusted-contract
-    exercise cash from strike * multiplier.  InstrumentVersion currently has no
-    independent adjusted exercise-cash field, so any non-standard deliverable
-    fails closed here instead of silently inventing economics.
+    Adjusted contracts must carry the cash leg explicitly in InstrumentVersion.
+    Standard one-leg contracts may retain the deterministic strike × multiplier
+    derivation for backwards-compatible canonical terms.
     """
 
+    if version.exercise_cash_per_contract is not None:
+        return version.exercise_cash_per_contract
     if version.strike is None:
         raise OptionLifecycleError("option strike is missing from instrument version")
     if len(version.deliverable) != 1:
@@ -443,7 +444,7 @@ def _contract_from_version(version: InstrumentVersion) -> OptionContract:
 
     cutoff = version.delivery_cutoff or version.expiry
     if version.settlement_method == "PHYSICAL":
-        cash = _standard_physical_exercise_cash(version)
+        cash = _physical_exercise_cash(version)
         deliverable = tuple(
             DeliverableLeg(
                 asset_id=leg.asset_id,

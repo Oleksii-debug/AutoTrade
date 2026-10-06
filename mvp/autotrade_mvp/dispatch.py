@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+import builtins as _builtins
 import json
 import re
 from pathlib import Path
@@ -2641,6 +2642,7 @@ class GuardedDispatcher:
         snapshot_module_globals_pop = snapshot_module_globals.pop
         snapshot_builtin_missing = object()
         snapshot_postsend_global_names = (
+            "_builtins",
             "type",
             "id",
             "tuple",
@@ -2679,6 +2681,25 @@ class GuardedDispatcher:
             )
             for name in snapshot_postsend_global_names
         )
+        snapshot_builtin_namespace = snapshot_getattr(
+            _builtins,
+            "__dict__",
+            None,
+        )
+        if snapshot_type(snapshot_builtin_namespace) is not snapshot_dict:
+            raise RuntimeError(
+                "post-send builtin namespace authority is unavailable"
+            )
+        snapshot_postsend_builtin_state = snapshot_tuple(
+            snapshot_dict.items(snapshot_builtin_namespace)
+        )
+        if any(
+            snapshot_type(name) is not snapshot_str
+            for name, _value in snapshot_postsend_builtin_state
+        ):
+            raise RuntimeError(
+                "post-send builtin namespace keys are unavailable"
+            )
         snapshot_postsend_helper_names = (
             "_canonical_journal_authority_snapshot",
             "_journal_store_call",
@@ -3600,6 +3621,23 @@ class GuardedDispatcher:
                         changed = True
             return changed
 
+        def restore_postsend_builtin_namespace() -> bool:
+            changed = False
+            for name, expected in snapshot_postsend_builtin_state:
+                current = snapshot_dict.get(
+                    snapshot_builtin_namespace,
+                    name,
+                    snapshot_builtin_missing,
+                )
+                if current is not expected:
+                    snapshot_dict.__setitem__(
+                        snapshot_builtin_namespace,
+                        name,
+                        expected,
+                    )
+                    changed = True
+            return changed
+
         def restore_postsend_builtin_globals() -> bool:
             changed = False
             for name, expected in snapshot_postsend_global_state:
@@ -3617,13 +3655,15 @@ class GuardedDispatcher:
             return changed
 
         def require_transport_module_authority() -> None:
+            builtin_namespace_changed = restore_postsend_builtin_namespace()
             helper_changed = restore_postsend_helper_authority()
             restore_postsend_builtin_globals()
-            if helper_changed:
+            if builtin_namespace_changed or helper_changed:
                 raise snapshot_dispatch_authority_changed(
                     "dispatcher module authority changed before final send barrier"
                 )
 
+        postsend_builtin_authority_changed = False
         postsend_helper_authority_changed = False
         exact_response_authority_changed = False
         try:
@@ -3634,6 +3674,10 @@ class GuardedDispatcher:
                     final_guard,
                 )
             finally:
+                postsend_builtin_authority_changed = (
+                    restore_postsend_builtin_namespace()
+                    or postsend_builtin_authority_changed
+                )
                 postsend_helper_authority_changed = (
                     restore_postsend_helper_authority()
                     or postsend_helper_authority_changed
@@ -3643,7 +3687,10 @@ class GuardedDispatcher:
                     or exact_response_authority_changed
                 )
                 restore_postsend_builtin_globals()
-            if postsend_helper_authority_changed:
+            if (
+                postsend_builtin_authority_changed
+                or postsend_helper_authority_changed
+            ):
                 if barrier_passed:
                     return authority_change_after_send_outcome()
                 raise snapshot_dispatch_authority_changed(
@@ -3664,7 +3711,10 @@ class GuardedDispatcher:
                 return authority_change_after_send_outcome()
             raise
         except snapshot_dispatch_blocked as error:
-            if postsend_helper_authority_changed:
+            if (
+                postsend_builtin_authority_changed
+                or postsend_helper_authority_changed
+            ):
                 if barrier_passed:
                     return authority_change_after_send_outcome()
                 raise snapshot_dispatch_authority_changed(
@@ -3699,7 +3749,10 @@ class GuardedDispatcher:
                     )
             return DispatchOutcome("BLOCKED", client_order_id, None, snapshot_str(error))
         except snapshot_exception as error:
-            if postsend_helper_authority_changed:
+            if (
+                postsend_builtin_authority_changed
+                or postsend_helper_authority_changed
+            ):
                 if barrier_passed:
                     return authority_change_after_send_outcome()
                 raise snapshot_dispatch_authority_changed(

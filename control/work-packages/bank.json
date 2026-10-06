@@ -329,8 +329,8 @@
         "Exclusive mutation key: INSTRUMENT / instrument-registry",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Immutable instrument-version registry foundation is present on main and covers stable identities, effective-dated symbol versions, calendars, exact price/quantity steps and derivative descriptors. Remaining work: provider metadata/lifecycle ingestion, broader DST/delisting/adjusted-deliverable qualification and production placement."
+      "proposed_status": "DONE",
+      "status_note": "DONE on main through Section-5 final closure PR #2155, merge commit 3e28de127dea011a73c6000e46b0513ed2ba8ea9. Canonical InstrumentRegistry now has stable immutable/effective-dated identities, causal knowledge lookup, calendars/DST evidence, exact units/price/quantity bounds, derivative descriptors, adjusted-option explicit exercise cash, immutable inverse-futures settlement conventions, and hostile executable metadata ingress rejection. WP-07 hardening #2192 was mechanically converged into #2155 with zero overlapping base hunks and is superseded."
     },
     {
       "id": "WP-08",
@@ -421,8 +421,8 @@
         "Exclusive mutation key: DATA / market-normalization",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Market normalization foundation is present on main in mvp/autotrade_mvp/market_data.py with raw evidence binding, canonical normalized events, explicit causal timestamps, exact decimal fields and sequence/conflict handling. Remaining work: provider-stream integration, broader gap/freshness qualification and production placement."
+      "proposed_status": "DONE",
+      "status_note": "DONE for the provider-free market-normalization authority used by Section 5. Main retains the #1615 canonical normalized MarketEvent/raw-evidence chronology semantics, adapter-build identity, exact decimal fields, causal timestamps, sequence/conflict handling and verified snapshot recovery behavior. Live provider acquisition/route qualification remains owned by provider WPs and is not part of WP-09 normalization closure."
     },
     {
       "id": "WP-10",
@@ -468,8 +468,8 @@
         "Exclusive mutation key: DATA / historical-vintages",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Immutable historical-vintage foundation is present on main in research/autotrade_research/data/vintages.py with point-in-time revisions/universes, explicit missingness, raw/adjusted consistency, rights-aware manifests and append-only version storage. Remaining work: deeper causal lineage hardening, large-dataset storage integration and production qualification."
+      "proposed_status": "DONE",
+      "status_note": "DONE for immutable historical-vintage/source-population authority. Main retains the #1615/#1441 lineage: append-only point-in-time vintages, causal revision visibility, authenticated ArtifactStore-bound source populations, exact rights/evidence binding, deterministic population fingerprints, and authoritative fold population re-resolution. Issue #974's final caller-selected replay-fingerprint seam is closed by #2155's verified product-side runtime-cut bridge."
     },
     {
       "id": "WP-11",
@@ -514,8 +514,8 @@
         "Exclusive mutation key: INFORMATION / news-macro-claims",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Evidence-bound information-claim foundation is present on main in mvp/autotrade_mvp/information_claims.py with source documents, availability times, provenance digests, immutable claim identity and store ingestion. Remaining work: source-policy breadth, contradiction/supersession qualification and production information pipelines."
+      "proposed_status": "DONE",
+      "status_note": "DONE for evidence/time/rights-bound internal information claims. Main retains the Section-5 convergence semantics for immutable source documents/claim identity, publication and availability chronology, provenance digests, contradiction/supersession history and fail-closed evidence handling. External source breadth/feed onboarding remains a provider/information-source integration concern rather than a second claim authority."
     },
     {
       "id": "WP-12",
@@ -565,7 +565,7 @@
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
       "proposed_status": "IN_PROGRESS",
-      "status_note": "Deterministic causal replay foundation is present on main in mvp/autotrade_mvp/replay.py with availability-time ordering, frozen dataset digest, monotonic simulation clock and checkpoint/resume primitives. Remaining work: pending-event/RNG/strategy/account state completeness, hostile-process isolation and exact resume-equivalence qualification."
+      "status_note": "Section-5-required replay/common-cut authority is complete on main via #2155: a detached CompositeReplayCheckpoint is verified by the product-selected RuntimeStateVerifier before research fit/transform, and the authoritative frozen fold receives only the verified checkpoint fingerprint. Broader WP-12 whole-runtime checkpoint/resume equivalence, recovery portability and hostile-process isolation remain open under #699 and are outside Section-5 data-authority closure."
     },
     {
       "id": "WP-13",

@@ -110,7 +110,11 @@ def format_accessible_status(
         status = {}
 
     state_value = status.get("status", "corrupt")
-    state = state_value if type(state_value) is str else "corrupt"
+    state = (
+        state_value
+        if type(state_value) is str and state_value in STATE_TEXT
+        else "corrupt"
+    )
     lines = [
         "AutoTrade status",
         "Mode: simulation only",
@@ -165,7 +169,8 @@ def format_accessible_status(
             "Action required: recovery or reconciliation is needed before trusting current state"
         )
 
-    if status.get("state_format") == "canonical_journal":
+    state_format = status.get("state_format")
+    if type(state_format) is str and state_format == "canonical_journal":
         lines.extend(
             [
                 f"Episode: {_value(status, 'episode_id')}",
@@ -192,7 +197,8 @@ def format_accessible_status(
             lines.append(
                 "Action required: confirm the terminal order state; a reconciled fill does not confirm order completion"
             )
-        if status.get("session_status") == "BLOCKED":
+        session_status = status.get("session_status")
+        if type(session_status) is str and session_status == "BLOCKED":
             lines.append(f"Blocked reason: {_value(status, 'reason')}")
 
     if type(economic_report) is dict:
@@ -206,7 +212,8 @@ def format_accessible_status(
                 f"Economic reconciliation: {'passed' if economic_report.get('reconciled') is True else 'not confirmed'}",
             ]
         )
-        if economic_report.get("valuation_status") == "MARK_UNAVAILABLE":
+        valuation_status = economic_report.get("valuation_status")
+        if type(valuation_status) is str and valuation_status == "MARK_UNAVAILABLE":
             lines.append(
                 "Portfolio valuation and profit or loss: unavailable; no retained current market mark"
             )

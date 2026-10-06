@@ -734,10 +734,25 @@ def _install_submission_response_parser_authority(parser):
     mapping_helper_code = mapping_helper.__code__
     exact_json_decoder = _decode_exact_json
     exact_json_decoder_code = exact_json_decoder.__code__
+    canonical_text = _text
+    canonical_text_code = canonical_text.__code__
+    short_uuid_pattern = _SHORT_UUID
+    free_client_id_pattern = _FREE_CLIENT_ID
+    canonical_uuid = UUID
+    value_error_type = ValueError
+    base_url_resolver = futures_base_url
+    base_url_resolver_code = base_url_resolver.__code__
+    base_urls = KRAKEN_FUTURES_BASE_URLS
+    runtime_environment_map = _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT
+    canonical_uuid5 = uuid5
+    canonical_uuid5_code = canonical_uuid5.__code__
+    canonical_namespace = NAMESPACE_URL
     error_type = ProviderCoreError
     canonical_type = type
     canonical_bool = bool
     canonical_isinstance = isinstance
+    canonical_dict = dict
+    canonical_dict_get = canonical_dict.get
     mapping_type = Mapping
     canonical_str = str
     unicode_error_type = UnicodeEncodeError
@@ -772,10 +787,35 @@ def _install_submission_response_parser_authority(parser):
             or _decode_exact_json is not exact_json_decoder
             or canonical_getattr(exact_json_decoder, "__code__", None)
             is not exact_json_decoder_code
+            or _text is not canonical_text
+            or canonical_getattr(canonical_text, "__code__", None)
+            is not canonical_text_code
+            or _SHORT_UUID is not short_uuid_pattern
+            or _FREE_CLIENT_ID is not free_client_id_pattern
+            or UUID is not canonical_uuid
+            or ValueError is not value_error_type
+            or futures_base_url is not base_url_resolver
+            or canonical_getattr(base_url_resolver, "__code__", None)
+            is not base_url_resolver_code
+            or KRAKEN_FUTURES_BASE_URLS is not base_urls
+            or _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT
+            is not runtime_environment_map
+            or canonical_type(base_urls) is not canonical_dict
+            or canonical_type(runtime_environment_map) is not canonical_dict
+            or canonical_dict_get(base_urls, "LIVE") != "https://futures.kraken.com"
+            or canonical_dict_get(base_urls, "DEMO")
+            != "https://demo-futures.kraken.com"
+            or canonical_dict_get(runtime_environment_map, "LIVE") != "LIVE"
+            or canonical_dict_get(runtime_environment_map, "DEMO") != "PAPER"
+            or uuid5 is not canonical_uuid5
+            or canonical_getattr(canonical_uuid5, "__code__", None)
+            is not canonical_uuid5_code
+            or NAMESPACE_URL is not canonical_namespace
             or ProviderCoreError is not error_type
             or type is not canonical_type
             or bool is not canonical_bool
             or isinstance is not canonical_isinstance
+            or dict is not canonical_dict
             or Mapping is not mapping_type
             or str is not canonical_str
             or UnicodeEncodeError is not unicode_error_type

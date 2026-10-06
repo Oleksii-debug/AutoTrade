@@ -218,22 +218,29 @@ def _run_configuration(
     max_abs_position: Decimal,
     max_notional: Decimal,
     fee_rate: Decimal,
+    _configuration_schema_version: int = _RUN_CONFIGURATION_SCHEMA_VERSION,
+    _checkpoint_schema_version: int = _CHECKPOINT_SCHEMA_VERSION,
+    _money_quantum: Decimal = MONEY_QUANTUM,
+    _strategy_id: str = _STRATEGY_ID,
+    _strategy_version: int = _STRATEGY_VERSION,
+    _strategy_fast: int = _STRATEGY_FAST,
+    _strategy_slow: int = _STRATEGY_SLOW,
 ) -> dict[str, object]:
     return {
-        "schema_version": _RUN_CONFIGURATION_SCHEMA_VERSION,
-        "checkpoint_schema_version": _CHECKPOINT_SCHEMA_VERSION,
+        "schema_version": _configuration_schema_version,
+        "checkpoint_schema_version": _checkpoint_schema_version,
         "symbol": symbol,
         "initial_cash": str(initial_cash),
         "order_quantity": str(order_quantity),
         "max_abs_position": str(max_abs_position),
         "max_notional": str(max_notional),
         "fee_rate": str(fee_rate),
-        "money_quantum": str(MONEY_QUANTUM),
+        "money_quantum": str(_money_quantum),
         "strategy": {
-            "id": _STRATEGY_ID,
-            "version": _STRATEGY_VERSION,
-            "fast": _STRATEGY_FAST,
-            "slow": _STRATEGY_SLOW,
+            "id": _strategy_id,
+            "version": _strategy_version,
+            "fast": _strategy_fast,
+            "slow": _strategy_slow,
         },
     }
 
@@ -256,6 +263,8 @@ def _has_durable_run_state(root: Path) -> bool:
 def _require_run_configuration(
     root: Path,
     expected: dict[str, object],
+    *,
+    _schema_version: int = _RUN_CONFIGURATION_SCHEMA_VERSION,
 ) -> str:
     path = root / "run-configuration.json"
     expected_digest = _configuration_digest(expected)
@@ -268,7 +277,7 @@ def _require_run_configuration(
         _atomic_json(
             path,
             {
-                "schema_version": _RUN_CONFIGURATION_SCHEMA_VERSION,
+                "schema_version": _schema_version,
                 "configuration_digest": expected_digest,
                 "configuration": expected,
             },
@@ -282,7 +291,7 @@ def _require_run_configuration(
     if type(envelope) is not dict:
         raise ValueError("Corrupt run configuration")
     if type(envelope.get("schema_version")) is not int or (
-        envelope["schema_version"] != _RUN_CONFIGURATION_SCHEMA_VERSION
+        envelope["schema_version"] != _schema_version
     ):
         raise ValueError("Unsupported or corrupt run configuration schema")
     configuration = envelope.get("configuration")
@@ -575,7 +584,12 @@ class EconomicLedger:
         )
 
 
-def _read_state(path: Path, initial_cash: Decimal) -> tuple[dict, bool]:
+def _read_state(
+    path: Path,
+    initial_cash: Decimal,
+    *,
+    _checkpoint_schema_version: int = _CHECKPOINT_SCHEMA_VERSION,
+) -> tuple[dict, bool]:
     if not path.exists():
         return {"initial_cash": str(initial_cash), "postings": [], "fills": {}, "evidence_ids": []}, False
     try:
@@ -590,7 +604,7 @@ def _read_state(path: Path, initial_cash: Decimal) -> tuple[dict, bool]:
             "Legacy checkpoint lacks configuration identity; "
             "explicit migration or a new state directory is required"
         )
-    if type(schema_version) is not int or schema_version != _CHECKPOINT_SCHEMA_VERSION:
+    if type(schema_version) is not int or schema_version != _checkpoint_schema_version:
         raise ValueError("Unsupported or corrupt checkpoint schema")
     if type(data.get("configuration_digest")) is not str:
         raise ValueError("Corrupt checkpoint configuration identity")
@@ -981,7 +995,7 @@ def run_vertical_slice(
     evidence_ids.add(evidence["evidence_id"])
     evidence_records[evidence_id] = evidence
     checkpoint = {
-        "schema_version": _CHECKPOINT_SCHEMA_VERSION,
+        "schema_version": configuration["checkpoint_schema_version"],
         "configuration_digest": configuration_digest,
         "symbol": symbol,
         "initial_cash": str(ledger.initial_cash),

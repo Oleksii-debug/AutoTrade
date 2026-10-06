@@ -200,15 +200,79 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
             BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
             "BYBIT_OPTION_DELIVERY_V5_JSON_V1",
         )
-        self.assertEqual(BYBIT_OPTION_DELIVERY_PARSER_VERSION, "1.1.0")
+        self.assertEqual(BYBIT_OPTION_DELIVERY_PARSER_VERSION, "1.2.0")
         self.assertEqual(
             BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
-            "sha256:b26269b85ed6ae54339092502a678ddaf8b046ce65cddb0e4553aceabd2a94e7",
+            "sha256:89ec7fade832492c068d3f67e11e6a6ff77764e59950c2195c9e8848920c3e3f",
         )
         parsed = parse_option_delivery_page(observation(response()))
         self.assertIsInstance(parsed, BybitOptionDeliveryPage)
         self.assertEqual(len(parsed.records), 1)
         self.assertFalse(hasattr(parsed.records[0], "event_kind"))
+
+    def test_parser_binds_provider_symbol_to_canonical_instrument_version(self):
+        parsed = parse_option_delivery_page(observation(response()))
+        self.assertEqual(parsed.instrument_version, _INSTRUMENT_VERSION)
+        self.assertEqual(parsed.provider_symbol, "BTC-29DEC22-16000-P")
+
+        for registry, message in (
+            (
+                option_registry(provider_symbol="ETH-29DEC22-1000-P"),
+                "symbol does not match canonical instrument_version",
+            ),
+            (
+                option_registry(provider_id="OTHER"),
+                "symbol does not match canonical instrument_version",
+            ),
+            (
+                option_registry(venue_id="OTHER"),
+                "symbol does not match canonical instrument_version",
+            ),
+            (
+                option_registry(
+                    instrument_id="97777777-7777-4777-8777-777777777777"
+                ),
+                "instrument_version is not present in canonical registry",
+            ),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                ProviderCoreError,
+                message,
+            ):
+                parse_option_delivery_page(
+                    observation(response()),
+                    instrument_registry=registry,
+                )
+
+    def test_parser_rejects_registry_subclass_before_virtual_lookup(self):
+        class HostileRegistry(InstrumentRegistry):
+            exact_called = False
+
+            def exact(self, instrument_version):
+                type(self).exact_called = True
+                raise AssertionError("hostile registry callback executed")
+
+        forged = object.__new__(HostileRegistry)
+        with self.assertRaisesRegex(
+            TypeError,
+            "instrument_registry must be exact InstrumentRegistry",
+        ):
+            _parse_option_delivery_page(
+                observation(response()),
+                instrument_registry=forged,
+            )
+        self.assertFalse(HostileRegistry.exact_called)
+
+    def test_parser_class_qualifies_instrument_registry_lookup(self):
+        registry = option_registry()
+        registry.exact = lambda _instrument_version: (_ for _ in ()).throw(
+            AssertionError("instance method shadow must not execute")
+        )
+        parsed = parse_option_delivery_page(
+            observation(response()),
+            instrument_registry=registry,
+        )
+        self.assertEqual(parsed.instrument_version, _INSTRUMENT_VERSION)
 
     def test_documented_delivery_row_preserves_exact_provider_facts(self):
         source = observation(response())

@@ -1364,6 +1364,33 @@ class IbkrWebAdapterTests(unittest.TestCase):
             )
         self.assertFalse(ExecutableFields.iter_called)
 
+    def test_normalized_order_exact_numeric_evidence_requires_text(self):
+        base = {
+            "acctId": "U1234567",
+            "orderType": "MKT",
+            "side": "BUY",
+            "tif": "DAY",
+            "cOID": "at-exact-text",
+            "conid": 265598,
+        }
+        with self.assertRaisesRegex(TypeError, "exact_quantity_text must be exact text"):
+            IbkrNormalizedOrder(
+                endpoint="/iserver/account/U1234567/orders",
+                fields=base,
+                exact_quantity_text=1,
+                exact_limit_price_text=None,
+                exact_stop_price_text=None,
+                capability_snapshot_id="capability-1",
+                documentation_refs=tuple(
+                    (
+                        "https://www.interactivebrokers.com/docs/web-api/trading/trading-sessions-in-the-web-api",
+                        "https://www.interactivebrokers.com/docs/web-api/v1/endpoints/orders/place-order",
+                        "https://www.interactivebrokers.com/docs/web-api/api-reference/trading/trading-orders/modify-open-order",
+                        "https://www.interactivebrokers.com/docs/tws-api/ref/execution",
+                    )
+                ),
+            )
+
     def test_normalized_order_rejects_shape_that_implies_unqualified_serialization(self):
         base = {
             "acctId": "U1234567",

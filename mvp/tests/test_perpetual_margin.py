@@ -903,6 +903,48 @@ class PerpetualMarginTests(unittest.TestCase):
             evidence(provider_id=HostileText("TEST_PROVIDER"))
         self.assertFalse(HostileText.strip_called)
 
+    def test_margin_artifact_refs_require_canonical_lowercase_uuid(self):
+        for field, value in (
+            ("evidence_bundle_ref", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"),
+            ("tier_table_evidence_ref", "{33333333-3333-4333-8333-333333333333}"),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    PerpetualMarginError,
+                    "canonical lowercase artifact UUID",
+                ):
+                    evidence(**{field: value})
+
+    def test_freshness_budget_requires_exact_int_before_artifact_io(self):
+        class HostileInt(int):
+            comparison_called = False
+
+            def __lt__(self, other):
+                type(self).comparison_called = True
+                raise AssertionError("integer subclass comparison must not run")
+
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+            with patch(
+                "mvp.autotrade_mvp.perpetual_margin."
+                "_READ_AUTHENTICATED_ARTIFACT_SNAPSHOT",
+                side_effect=AssertionError(
+                    "artifact reader must not run before freshness-budget admission"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    PerpetualMarginError,
+                    "maximum_evidence_age_seconds must be a non-negative integer",
+                ):
+                    evaluate(
+                        evidence=trusted,
+                        artifact_store=store,
+                        maximum_evidence_age_seconds=HostileInt(30),
+                    )
+        self.assertFalse(HostileInt.comparison_called)
+
     def test_margin_artifacts_use_one_authenticated_snapshot_per_artifact(self):
         trusted = evidence()
         with TemporaryDirectory() as directory:
@@ -915,10 +957,9 @@ class PerpetualMarginTests(unittest.TestCase):
                 calls.append(artifact_id)
                 return original(instance, artifact_id)
 
-            with patch.object(
-                ArtifactStore,
-                "read_authenticated_snapshot",
-                autospec=True,
+            with patch(
+                "mvp.autotrade_mvp.perpetual_margin."
+                "_READ_AUTHENTICATED_ARTIFACT_SNAPSHOT",
                 side_effect=read_snapshot,
             ):
                 result = evaluate(evidence=trusted, artifact_store=store)
@@ -942,6 +983,21 @@ class PerpetualMarginTests(unittest.TestCase):
             result = evaluate(evidence=trusted, artifact_store=store)
             self.assertEqual(result.verdict, "ALLOW_NEW_RISK")
 
+    def test_class_rebinding_cannot_replace_margin_artifact_reader(self):
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+            with patch.object(
+                ArtifactStore,
+                "read_authenticated_snapshot",
+                side_effect=AssertionError(
+                    "late ArtifactStore class rebinding must not become financial authority"
+                ),
+            ):
+                result = evaluate(evidence=trusted, artifact_store=store)
+            self.assertEqual(result.verdict, "ALLOW_NEW_RISK")
+
     def test_margin_artifact_snapshot_requires_exact_builtin_bytes(self):
         class HostileBytes(bytes):
             pass
@@ -956,10 +1012,9 @@ class PerpetualMarginTests(unittest.TestCase):
                 manifest, payload = original(instance, artifact_id)
                 return manifest, HostileBytes(payload)
 
-            with patch.object(
-                ArtifactStore,
-                "read_authenticated_snapshot",
-                autospec=True,
+            with patch(
+                "mvp.autotrade_mvp.perpetual_margin."
+                "_READ_AUTHENTICATED_ARTIFACT_SNAPSHOT",
                 side_effect=hostile_snapshot,
             ):
                 with self.assertRaisesRegex(
@@ -980,10 +1035,9 @@ class PerpetualMarginTests(unittest.TestCase):
                 ValueError("value"),
             ):
                 with self.subTest(error=type(error).__name__):
-                    with patch.object(
-                        ArtifactStore,
-                        "read_authenticated_snapshot",
-                        autospec=True,
+                    with patch(
+                        "mvp.autotrade_mvp.perpetual_margin."
+                        "_READ_AUTHENTICATED_ARTIFACT_SNAPSHOT",
                         side_effect=error,
                     ):
                         with self.assertRaisesRegex(

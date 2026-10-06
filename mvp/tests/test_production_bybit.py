@@ -427,6 +427,95 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
                 before,
             )
 
+    def test_successful_quota_wait_emits_exactly_one_wire_request(self) -> None:
+        with TemporaryDirectory() as root:
+            runtime, _host, _boundary = self._runtime(root)
+            capability = write_capability(
+                family="LINEAR_DERIVATIVES",
+                position_mode="HEDGE",
+                account_id="account-1",
+                environment="PAPER",
+                instrument_version="BTCUSDT@1",
+                permission_scope="BYBIT.LINEAR.ORDER.WRITE",
+                additional_permission_scopes=("ORDER_WRITE",),
+                provider_environment="TESTNET",
+                expires_at=_NOW + timedelta(minutes=5),
+            )
+            registry = CapabilityRegistry()
+            registry.add(capability)
+            quota_calls = 0
+            wire = _RecordingWire(
+                b'{"retCode":0,"retMsg":"OK","result":{"orderId":"quota-ok"}}'
+            )
+
+            def quota_gate(*_args):
+                nonlocal quota_calls
+                quota_calls += 1
+
+            sender = self._sender(
+                runtime,
+                capability_registry=registry,
+                capability_snapshot_id=capability.snapshot_id,
+                wire_client=wire,
+                quota_gate=quota_gate,
+            )
+            intent_id = "intent-quota-success"
+            client_order_id = stable_client_order_id(
+                "BYBIT",
+                intent_id,
+                environment="PAPER",
+                account_id="account-1",
+                max_length=36,
+                client_id_format="TOKEN",
+            )
+            prepared = prepare_order_submission(
+                capability=capability,
+                at=_NOW,
+                provider_environment="TESTNET",
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.001",
+                client_order_id=client_order_id,
+                time_in_force="GTC",
+                price="50000",
+                reduce_only=False,
+                position_side="LONG",
+                position_idx=1,
+            )
+            self._mark_ready(runtime)
+            dispatch_now = _NOW.isoformat().replace("+00:00", "Z")
+            outcome = sender.dispatch(
+                attempt_id="attempt-quota-success",
+                intent_id=intent_id,
+                intent_hash="sha256:" + "7" * 64,
+                request=guarded_order_projection(prepared),
+                now=dispatch_now,
+                authority_check=lambda *_args: (True, "allowed"),
+                final_barrier_clock=lambda: dispatch_now,
+                submission_scope={
+                    "endpoint": prepared.endpoint,
+                    "prepared_request_sha256": guarded_order_request_sha256(prepared),
+                    "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
+                    "instrument_versions": list(prepared.instrument_versions),
+                    "provider_environment": prepared.provider_environment,
+                },
+            )
+            self.assertEqual(outcome.status, "SENT")
+            self.assertEqual(outcome.client_order_id, client_order_id)
+            self.assertEqual(quota_calls, 1)
+            self.assertEqual(len(wire.requests), 1)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in runtime.journal.load_events_by_aggregate_type(
+                        "submission_attempt"
+                    )
+                ],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
+            )
+
     def test_capability_expiry_during_quota_wait_is_zero_wire(self) -> None:
         with TemporaryDirectory() as root:
             runtime, _host, _boundary = self._runtime(root)

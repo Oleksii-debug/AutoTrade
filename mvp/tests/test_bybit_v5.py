@@ -1686,6 +1686,15 @@ class BybitV5AdapterTests(unittest.TestCase):
         evidence = bound_execution_response(response, instrument_version="ETHPERP@v1")
         with self.assertRaisesRegex(ProviderCoreError, "fee currency is unresolved"):
             parse_executions(evidence, instrument_versions={"ETHPERP": "ETHPERP@v1"})
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "qualified fee currency must be canonical exact text",
+        ):
+            parse_executions(
+                evidence,
+                instrument_versions={"ETHPERP": "ETHPERP@v1"},
+                qualified_fee_currencies={"ETHPERP@v1": " USDT "},
+            )
         fills = parse_executions(
             evidence,
             instrument_versions={"ETHPERP": "ETHPERP@v1"},

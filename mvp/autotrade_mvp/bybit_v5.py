@@ -1299,15 +1299,20 @@ def parse_executions(
                     "fee-currency evidence is required"
                 )
             try:
-                fee_currency = qualified_fee_currencies[instrument]
+                qualified_fee_currency = qualified_fee_currencies[instrument]
             except KeyError as error:
                 raise ProviderCoreError(
                     "Bybit execution fee currency is unresolved for instrument"
                 ) from error
-            fee_currency = _text(
-                fee_currency,
-                name="qualified fee currency",
-            )
+            if (
+                type(qualified_fee_currency) is not str
+                or not qualified_fee_currency
+                or qualified_fee_currency != qualified_fee_currency.strip()
+            ):
+                raise ProviderCoreError(
+                    "qualified fee currency must be canonical exact text"
+                )
+            fee_currency = qualified_fee_currency
         else:
             if (
                 type(provider_fee_currency) is not str

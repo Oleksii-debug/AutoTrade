@@ -76,6 +76,65 @@ class VerticalSliceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 run_vertical_slice([100, 101, 102], directory)
 
+    def test_resume_rejects_extra_checkpoint_field_before_mutation(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            checkpoint_path = root / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint["unexpected_authority"] = "forged"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            checkpoint_before = checkpoint_path.read_bytes()
+            evidence_before = (root / "learning-evidence.jsonl").read_bytes()
+            journal_before = (root / "journal.sqlite3").read_bytes()
+            intents_before = {
+                path.name: path.read_bytes()
+                for path in (root / "order-intents").glob("*.json")
+            }
+
+            self.assertFalse(verify_replay(directory))
+            with self.assertRaisesRegex(ValueError, "Corrupt checkpoint structure"):
+                run_vertical_slice([100, 100, 100], directory)
+
+            self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertEqual(
+                (root / "learning-evidence.jsonl").read_bytes(),
+                evidence_before,
+            )
+            self.assertEqual((root / "journal.sqlite3").read_bytes(), journal_before)
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in (root / "order-intents").glob("*.json")
+                },
+                intents_before,
+            )
+
+    def test_resume_rejects_missing_checkpoint_field_at_schema_boundary(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            checkpoint_path = root / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            del checkpoint["evidence_records"]
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            checkpoint_before = checkpoint_path.read_bytes()
+            evidence_before = (root / "learning-evidence.jsonl").read_bytes()
+            journal_before = (root / "journal.sqlite3").read_bytes()
+
+            self.assertFalse(verify_replay(directory))
+            with self.assertRaisesRegex(ValueError, "Corrupt checkpoint structure"):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+            self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertEqual(
+                (root / "learning-evidence.jsonl").read_bytes(),
+                evidence_before,
+            )
+            self.assertEqual((root / "journal.sqlite3").read_bytes(), journal_before)
+
     def test_multi_episode_buy_hold_sell_and_replay(self):
         with TemporaryDirectory() as directory:
             episodes = [[100, 101, 102, 103], [100, 100, 100], [103, 102, 101, 100]]

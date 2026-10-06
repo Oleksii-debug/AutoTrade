@@ -1387,6 +1387,11 @@ def unknown_submissions_from_dispatch(
         store,
         subject="reconciliation JournalStore",
     )
+    # Recovery identity is financial authority.  Do not traverse an arbitrary
+    # caller iterable before its elements have been reduced to inert exact
+    # built-ins: an Iterable subclass may execute caller code from __iter__.
+    if type(attempt_ids) not in {list, tuple}:
+        raise TypeError("attempt_ids must be an exact list or tuple")
     normalized = tuple(_text(value, name="attempt_id") for value in attempt_ids)
     if len(normalized) != len(set(normalized)):
         raise ValueError("attempt_ids must be unique")
@@ -1411,9 +1416,12 @@ def unknown_submissions_from_dispatch(
                 attempt_id=attempt_key,
             )
     elif aggregate_ids is not None:
-        if not isinstance(aggregate_ids, Mapping):
-            raise TypeError("aggregate_ids must be a mapping")
-        for raw_attempt_id, raw_aggregate_id in aggregate_ids.items():
+        # A generic Mapping is executable caller input: __iter__/items/getitem
+        # can run before durable attempt identity is established.  Recovery
+        # accepts only a detached exact built-in dictionary at this boundary.
+        if type(aggregate_ids) is not dict:
+            raise TypeError("aggregate_ids must be an exact dict")
+        for raw_attempt_id, raw_aggregate_id in dict.items(aggregate_ids):
             attempt_key = _text(raw_attempt_id, name="aggregate_ids attempt_id")
             aggregate_id = _text(raw_aggregate_id, name="aggregate_id")
             if attempt_key in durable_ids and durable_ids[attempt_key] != aggregate_id:

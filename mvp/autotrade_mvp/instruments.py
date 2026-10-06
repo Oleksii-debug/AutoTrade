@@ -22,11 +22,15 @@ from .exact_decimal import (
     ExactDecimalError,
     canonical_decimal_text,
     is_exact_decimal_multiple,
+    parse_bounded_exact_decimal,
 )
 
 
 class InstrumentRegistryError(ValueError):
     """Base error for invalid instrument metadata or lookups."""
+
+
+from .settlement_convention import SettlementConvention
 
 
 class InstrumentConflict(InstrumentRegistryError):
@@ -47,8 +51,8 @@ def _decimal(value: Decimal | str | int, field: str, *, positive: bool = False) 
     if isinstance(value, bool) or isinstance(value, float):
         raise InstrumentRegistryError(f"{field} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
+        result = parse_bounded_exact_decimal(value)
+    except (ExactDecimalError, InvalidOperation, ValueError, TypeError) as error:
         raise InstrumentRegistryError(f"{field} must be a finite decimal") from error
     if not result.is_finite():
         raise InstrumentRegistryError(f"{field} must be a finite decimal")
@@ -322,6 +326,7 @@ class InstrumentVersion:
     deliverable: tuple[DeliverableLeg, ...] = ()
     margin_model_id: str | None = None
     metadata_evidence: tuple[Mapping[str, object], ...] = ()
+    settlement_convention: SettlementConvention | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -416,6 +421,29 @@ class InstrumentVersion:
         object.__setattr__(self, "deliverable", tuple(canonical_deliverable))
         frozen_evidence = tuple(_evidence_ref(item) for item in self.metadata_evidence)
         object.__setattr__(self, "metadata_evidence", frozen_evidence)
+
+        convention = self.settlement_convention
+        if self.asset_class == "FUTURE" and self.payoff == "INVERSE" and convention is None:
+            raise InstrumentRegistryError("INVERSE future requires a settlement convention")
+        if convention is not None:
+            if type(convention) is not SettlementConvention:
+                raise InstrumentRegistryError("settlement_convention must be exact SettlementConvention")
+            if self.asset_class != "FUTURE" or self.payoff != "INVERSE":
+                raise InstrumentRegistryError("settlement convention requires an INVERSE future")
+            convention = SettlementConvention(**{
+                field.name: getattr(convention, field.name)
+                for field in fields(SettlementConvention)
+            })
+            if (convention.provider_id != self.provider_id
+                or convention.instrument_id != self.instrument_id
+                or convention.instrument_version != self.version
+                or convention.settlement_currency != self.settlement_currency):
+                raise InstrumentRegistryError("settlement convention scope must match InstrumentVersion")
+            if not any(evidence["artifact_id"] == convention.evidence_artifact_id
+                       and evidence["sha256"] == convention.evidence_sha256
+                       for evidence in frozen_evidence):
+                raise InstrumentRegistryError("settlement convention evidence must be covered by metadata_evidence")
+            object.__setattr__(self, "settlement_convention", convention)
 
         derivative = self.asset_class in {"FUTURE", "PERPETUAL", "OPTION"}
         if derivative:
@@ -561,6 +589,8 @@ class InstrumentVersion:
             "last_trade_at": _utc_text(self.last_trade_at) if self.last_trade_at else None,
             "delivery_cutoff": _utc_text(self.delivery_cutoff) if self.delivery_cutoff else None,
             "settlement_method": self.settlement_method,
+            "settlement_convention": (SettlementConvention.payload(self.settlement_convention)
+                                      if self.settlement_convention is not None else None),
             "funding_schedule": (
                 _thaw_jsonish(self.funding_schedule)
                 if self.funding_schedule is not None

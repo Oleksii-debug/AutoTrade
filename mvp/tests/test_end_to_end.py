@@ -1,5 +1,6 @@
 import json
 from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, localcontext
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -233,6 +234,58 @@ class VerticalSliceTests(unittest.TestCase):
                 "durable order intent does not match fill",
             ):
                 run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_rejects_forged_intent_identity_before_new_durable_write(self):
+        with TemporaryDirectory() as directory:
+            result = run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            checkpoint_path = root / "checkpoint.json"
+            evidence_path = root / "learning-evidence.jsonl"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            original_id = result.order_id
+            self.assertIsNotNone(original_id)
+            forged_id = "intent-" + "f" * 20
+            if forged_id == original_id:
+                forged_id = "intent-" + "e" * 20
+            forged_fill_id = "fill-" + sha256(
+                forged_id.encode("utf-8")
+            ).hexdigest()[:20]
+
+            fill = checkpoint["fills"].pop(original_id)
+            fill["client_order_id"] = forged_id
+            fill["fill_id"] = forged_fill_id
+            checkpoint["fills"][forged_id] = fill
+            checkpoint["postings"][0]["fill_id"] = forged_fill_id
+            evidence_id = checkpoint["evidence_ids"][0]
+            checkpoint_evidence = checkpoint["evidence_records"][evidence_id]
+            checkpoint_evidence["order_id"] = forged_id
+            checkpoint_evidence["fill_id"] = forged_fill_id
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            original_intent_path = root / "order-intents" / f"{original_id}.json"
+            forged_intent = json.loads(
+                original_intent_path.read_text(encoding="utf-8")
+            )
+            forged_intent["client_order_id"] = forged_id
+            forged_intent_path = root / "order-intents" / f"{forged_id}.json"
+            forged_intent_path.write_text(json.dumps(forged_intent), encoding="utf-8")
+            original_intent_path.unlink()
+
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence["order_id"] = forged_id
+            evidence["fill_id"] = forged_fill_id
+            evidence_path.write_text(
+                json.dumps(evidence, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "deterministic intent identity does not match evidence",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+            self.assertFalse(original_intent_path.exists())
 
     def test_restart_requires_durable_intent_for_each_restored_fill(self):
         with TemporaryDirectory() as directory:

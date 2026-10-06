@@ -116,9 +116,9 @@ class DurableReservationStoreAuthorityTests(unittest.TestCase):
         snapshot = SnapshotSubclass(
             reservation_id="reservation-subclass",
             intent_id="intent-subclass",
-            original={"CASH:USD": reservation_authority.Decimal("10")},
-            remaining={"CASH:USD": reservation_authority.Decimal("10")},
-            consumed={"CASH:USD": reservation_authority.Decimal("0")},
+            original={},
+            remaining={},
+            consumed={},
             state="WORKING",
         )
         with self.assertRaisesRegex(

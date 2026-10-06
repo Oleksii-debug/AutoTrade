@@ -4,6 +4,8 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.bybit_v5 import (
+    guarded_order_projection,
+    guarded_order_request_sha256,
     parse_submission_response,
     prepare_order_submission,
 )
@@ -112,7 +114,7 @@ class ProviderRouteResponseCompositionTests(unittest.TestCase):
             account_id="paper-account",
             runtime_environment="PAPER",
             endpoint=prepared.endpoint,
-            prepared_request_sha256=prepared.body_sha256,
+            prepared_request_sha256=guarded_order_request_sha256(prepared),
             capability_snapshot_ids=prepared.capability_snapshot_ids,
             instrument_versions=prepared.instrument_versions,
         )
@@ -175,7 +177,7 @@ class ProviderRouteResponseCompositionTests(unittest.TestCase):
                 intent_id=intent_id,
                 intent_hash="sha256:" + "2" * 64,
                 provider="BYBIT",
-                request=dict(prepared.body),
+                request=dict(guarded_order_projection(prepared)),
                 now=NOW.isoformat().replace("+00:00", "Z"),
                 authority_check=route_guard,
                 transport_send=lambda _cid, _request, final_guard: (
@@ -197,7 +199,7 @@ class ProviderRouteResponseCompositionTests(unittest.TestCase):
                 response_binding=binding,
                 provider_id="BYBIT",
                 endpoint=prepared.endpoint,
-                prepared_request_sha256=prepared.body_sha256,
+                prepared_request_sha256=guarded_order_request_sha256(prepared),
                 capability_snapshot_ids=prepared.capability_snapshot_ids,
                 instrument_versions=prepared.instrument_versions,
             )
@@ -274,7 +276,7 @@ class ProviderRouteResponseCompositionTests(unittest.TestCase):
                 intent_id=intent_id,
                 intent_hash="sha256:" + "3" * 64,
                 provider="BYBIT",
-                request=dict(prepared.body),
+                request=dict(guarded_order_projection(prepared)),
                 now=NOW.isoformat().replace("+00:00", "Z"),
                 authority_check=route_guard,
                 transport_send=lambda _cid, _request, final_guard: (
@@ -307,7 +309,7 @@ class ProviderRouteResponseCompositionTests(unittest.TestCase):
                     response_binding=binding,
                     provider_id="BYBIT",
                     endpoint=prepared.endpoint,
-                    prepared_request_sha256=prepared.body_sha256,
+                    prepared_request_sha256=guarded_order_request_sha256(prepared),
                     capability_snapshot_ids=prepared.capability_snapshot_ids,
                     instrument_versions=prepared.instrument_versions,
                 )

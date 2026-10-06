@@ -10,9 +10,17 @@ import unittest
 
 from mvp.autotrade_mvp import production_host
 from mvp.autotrade_mvp.authority import AuthorityService
-from mvp.autotrade_mvp.bybit_v5 import guarded_order_projection, prepare_order_submission
+from mvp.autotrade_mvp.bybit_v5 import (
+    guarded_order_projection,
+    guarded_order_request_sha256,
+    parse_submission_response,
+    prepare_order_submission,
+)
 from mvp.autotrade_mvp.capabilities import CapabilityRegistry
-from mvp.autotrade_mvp.dispatch import stable_client_order_id
+from mvp.autotrade_mvp.dispatch import (
+    load_submission_response_binding,
+    stable_client_order_id,
+)
 from mvp.autotrade_mvp.durable_financial_bybit_sender import (
     DurableFinanciallyBoundBybitOrderSender,
 )
@@ -33,6 +41,7 @@ from mvp.autotrade_mvp.production_bybit import (
 )
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
+from mvp.autotrade_mvp.provider_core import observe_submission_json_response
 from mvp.autotrade_mvp.provider_transport import ProviderTransportScopeError
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
@@ -494,12 +503,21 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
                 return True, "authorized"
 
             dispatch_now = _NOW.isoformat().replace("+00:00", "Z")
+            prepared_request_sha256 = guarded_order_request_sha256(prepared)
+            submission_scope = {
+                "endpoint": prepared.endpoint,
+                "prepared_request_sha256": prepared_request_sha256,
+                "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
+                "instrument_versions": list(prepared.instrument_versions),
+                "provider_environment": prepared.provider_environment,
+            }
             outcome = sender.dispatch(
                 attempt_id="attempt-e2e", intent_id=intent_id,
                 intent_hash="sha256:" + "2" * 64,
                 request=guarded_order_projection(prepared), now=dispatch_now,
                 authority_check=authority_check,
                 final_barrier_clock=lambda: dispatch_now,
+                submission_scope=submission_scope,
             )
 
             self.assertEqual(outcome.status, "SENT")
@@ -522,6 +540,31 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
                 events[-1]["payload"]["response_sha256"],
                 "sha256:" + sha256(raw_response).hexdigest(),
             )
+
+            binding = load_submission_response_binding(
+                runtime.journal,
+                environment="PAPER",
+                account_id="account-1",
+                attempt_id="attempt-e2e",
+            )
+            self.assertEqual(binding.request_hash, prepared_request_sha256)
+            observation = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="BYBIT",
+                endpoint=prepared.endpoint,
+                prepared_request_sha256=prepared_request_sha256,
+                capability_snapshot_ids=prepared.capability_snapshot_ids,
+                instrument_versions=prepared.instrument_versions,
+            )
+            normalized = parse_submission_response(
+                attempt_id="attempt-e2e",
+                prepared_request=prepared,
+                observation=observation,
+            )
+            self.assertEqual(normalized["outcome"], "ACKNOWLEDGED")
+            self.assertEqual(normalized["provider_order_id"], "provider-1")
+            self.assertEqual(normalized["retry_disposition"], "NEVER")
+            self.assertNotIn("fill", repr(normalized).lower())
 
 
 if __name__ == "__main__":

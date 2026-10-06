@@ -925,6 +925,33 @@ class GuardedDispatcher:
             ("SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"),
         }
 
+    def _terminal_outcome_from_existing_history(
+        self,
+        *,
+        events: list[dict[str, Any]],
+        attempt_id: str,
+        client_order_id: str,
+    ) -> DispatchOutcome:
+        if not self._existing_history_is_canonical(
+            events=events,
+            attempt_id=attempt_id,
+            client_order_id=client_order_id,
+        ):
+            return DispatchOutcome(
+                "UNKNOWN",
+                client_order_id,
+                None,
+                "durable_submission_history_invalid",
+            )
+        last = events[-1]
+        if last["event_type"] not in {
+            "SubmissionSent",
+            "SubmissionBlocked",
+            "SubmissionUnknown",
+        }:
+            raise ValueError("durable submission history is not terminal")
+        return self._outcome_from_terminal(last, client_order_id)
+
     def _recover_existing(
         self,
         *,
@@ -948,7 +975,11 @@ class GuardedDispatcher:
             )
         last = events[-1]
         if last["event_type"] in {"SubmissionSent", "SubmissionBlocked", "SubmissionUnknown"}:
-            return self._outcome_from_terminal(last, client_order_id)
+            return self._terminal_outcome_from_existing_history(
+                events=events,
+                attempt_id=attempt_id,
+                client_order_id=client_order_id,
+            )
         if last["event_type"] == "SubmissionSending":
             # Recovery time is caller/process input, but the durable Sending row
             # is already a causal lower bound. Never let a restarted or skewed
@@ -984,12 +1015,18 @@ class GuardedDispatcher:
                     "SubmissionBlocked",
                     "SubmissionUnknown",
                 }:
-                    return self._outcome_from_terminal(
-                        current_last,
-                        client_order_id,
+                    return self._terminal_outcome_from_existing_history(
+                        events=current,
+                        attempt_id=attempt_id,
+                        client_order_id=client_order_id,
                     )
                 raise
-            return self._outcome_from_terminal(self._events(attempt_id)[-1], client_order_id)
+            current = self._events(attempt_id)
+            return self._terminal_outcome_from_existing_history(
+                events=current,
+                attempt_id=attempt_id,
+                client_order_id=client_order_id,
+            )
         if last["event_type"] != "SubmissionPrepared":
             raise RuntimeError(f"unsupported submission attempt state: {last['event_type']}")
 
@@ -1032,7 +1069,11 @@ class GuardedDispatcher:
                 "SubmissionBlocked",
                 "SubmissionUnknown",
             }:
-                return self._outcome_from_terminal(current_last, client_order_id)
+                return self._terminal_outcome_from_existing_history(
+                    events=current,
+                    attempt_id=attempt_id,
+                    client_order_id=client_order_id,
+                )
             if current_last["event_type"] == "SubmissionSending":
                 return self._recover_existing(
                     attempt_id=attempt_id,
@@ -1374,7 +1415,11 @@ class GuardedDispatcher:
                     "SubmissionBlocked",
                     "SubmissionUnknown",
                 }:
-                    return self._outcome_from_terminal(last, client_order_id)
+                    return self._terminal_outcome_from_existing_history(
+                        events=events,
+                        attempt_id=attempt_id,
+                        client_order_id=client_order_id,
+                    )
             return DispatchOutcome("BLOCKED", client_order_id, None, str(error))
         except Exception as error:
             events = self._events(attempt_id)

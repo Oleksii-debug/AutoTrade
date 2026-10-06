@@ -159,6 +159,7 @@ class ScientificFinancialCutTests(unittest.TestCase):
             provider_id="test_provider",
             account_id="test-account",
             environment="paper",
+            provider_environment="paper",
             reconciliation_event_id="checkpoint-1",
             reconciliation_journal_sequence=2,
             journal_sequence=3,

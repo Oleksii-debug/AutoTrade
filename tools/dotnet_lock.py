@@ -136,8 +136,13 @@ def dotnet_restore_tokens_are_locked(tokens: tuple[str, ...] | list[str]) -> boo
 
     locked_flag = '--locked-mode' in arguments
     force_evaluate_flag = '--force-evaluate' in arguments
+    custom_lock_path_flag = any(
+        token == '--lock-file-path' or token.startswith('--lock-file-path=')
+        for token in arguments
+    )
     property_values: list[str] = []
     force_evaluate_values: list[str] = []
+    custom_lock_path_values: list[str] = []
     prefixes = ('-p:', '/p:', '-property:', '/property:')
     for token in arguments:
         lowered = token.casefold()
@@ -158,6 +163,13 @@ def dotnet_restore_tokens_are_locked(tokens: tuple[str, ...] | list[str]) -> boo
                 property_values.append(folded_value)
             elif folded_name == 'restoreforceevaluate':
                 force_evaluate_values.append(folded_value)
+            elif folded_name == 'nugetlockfilepath':
+                custom_lock_path_values.append(value)
+
+    # This gate validates the committed sibling packages.lock.json. A custom
+    # lock-file path would make restore consume different authority.
+    if custom_lock_path_flag or custom_lock_path_values:
+        return False
 
     # RestoreForceEvaluate overrides RestoreLockedMode and permits regenerating
     # the package lock graph. Any enabled or non-canonical force-evaluate

@@ -106,6 +106,25 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             )
         )
 
+    def test_custom_lock_path_defeats_committed_lock_authority(self):
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    "run: dotnet restore src/App/App.csproj "
+                    "--locked-mode --lock-file-path artifacts/other.lock.json"
+                )
+            )
+        )
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    "run: dotnet restore src/App/App.csproj "
+                    "-p:RestoreLockedMode=true;"
+                    "NuGetLockFilePath=artifacts/other.lock.json"
+                )
+            )
+        )
+
     def test_force_evaluate_defeats_locked_restore_authority(self):
         self.assertFalse(
             dotnet_restore_tokens_are_locked(

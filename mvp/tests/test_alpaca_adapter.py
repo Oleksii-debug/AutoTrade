@@ -774,6 +774,84 @@ class AlpacaAdapterTests(unittest.TestCase):
             object.__getattribute__(prepared, "body_sha256"),
         )
 
+    def test_guarded_projection_rejects_post_mint_exact_digest_retarget(self):
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="LIMIT",
+            time_in_force="DAY",
+            quantity="1",
+            limit_price="220.10",
+        )
+        prepared = prepare_order_request(
+            intent,
+            client_order_id="alpaca-post-mint-digest-retarget",
+            account_id="paper-account",
+            environment="PAPER",
+            capability=capability(),
+            at=NOW,
+        )
+        object.__setattr__(
+            prepared,
+            "body_sha256",
+            "sha256:" + "0" * 64,
+        )
+        with self.assertRaisesRegex(
+            AlpacaAdapterError,
+            "prepared request authority changed",
+        ):
+            guarded_order_projection(prepared)
+
+    def test_submission_consumer_rejects_exact_unissued_prepared_clone(self):
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        issued = prepare_order_request(
+            intent,
+            client_order_id="alpaca-exact-unissued-clone",
+            account_id="paper-account",
+            environment="PAPER",
+            capability=capability(),
+            at=NOW,
+        )
+        forged = object.__new__(AlpacaPreparedRequest)
+        for field_name in (
+            "endpoint",
+            "body",
+            "account_id",
+            "environment",
+            "capability_snapshot_id",
+            "documentation_refs",
+            "instrument_versions",
+            "capability_snapshot_ids",
+            "body_sha256",
+            "_factory_token",
+        ):
+            object.__setattr__(
+                forged,
+                field_name,
+                object.__getattribute__(issued, field_name),
+            )
+
+        with self.assertRaisesRegex(
+            AlpacaAdapterError,
+            "prepared request authority changed",
+        ):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=forged,
+                observation=None,
+                transport_ambiguous=True,
+            )
+
     def test_guarded_projection_rejects_hostile_scope_tuple_before_iteration(self):
         intent = AlpacaOrderIntent.create(
             instrument_version="AAPL:v1",

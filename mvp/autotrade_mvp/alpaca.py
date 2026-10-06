@@ -17,6 +17,7 @@ import re
 from types import MappingProxyType
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
+from weakref import ref as weakref_ref
 
 from .capabilities import CapabilitySnapshot
 from .provider_core import (
@@ -367,6 +368,193 @@ def prepare_order_request(
     )
 
 
+def _install_alpaca_prepared_request_authority(builder):
+    """Bind prepared orders to the exact canonical factory result."""
+
+    prepared_type = AlpacaPreparedRequest
+    prepared_ref = weakref_ref
+    prepared_init = prepared_type.__init__
+    prepared_init_code = prepared_init.__code__
+    prepared_post_init = prepared_type.__post_init__
+    prepared_post_init_code = prepared_post_init.__code__
+    builder_code = builder.__code__
+    intent_type = AlpacaOrderIntent
+    capability_type = CapabilitySnapshot
+    capability_admits = capability_type.admits
+    capability_admits_code = capability_admits.__code__
+    canonical_instant = _instant
+    canonical_instant_code = canonical_instant.__code__
+    canonical_client_id = validate_client_order_id
+    canonical_client_id_code = canonical_client_id.__code__
+    canonical_text = _text
+    canonical_text_code = canonical_text.__code__
+    canonical_decimal_text = _decimal_text
+    canonical_decimal_text_code = canonical_decimal_text.__code__
+    canonical_docs = ALPACA_DOCS
+    error_type = AlpacaAdapterError
+    type_error = TypeError
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_str = str
+    canonical_getattr = getattr
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    attribute_error_type = AttributeError
+    mapping_proxy_type = MappingProxyType
+
+    bindings: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+    def authority_changed():
+        raise error_type("Alpaca prepared request authority changed")
+
+    def implementation_changed():
+        if (
+            AlpacaPreparedRequest is not prepared_type
+            or AlpacaOrderIntent is not intent_type
+            or CapabilitySnapshot is not capability_type
+            or capability_type.admits is not capability_admits
+            or canonical_getattr(capability_admits, "__code__", None)
+            is not capability_admits_code
+            or prepared_type.__init__ is not prepared_init
+            or canonical_getattr(prepared_init, "__code__", None)
+            is not prepared_init_code
+            or prepared_type.__post_init__ is not prepared_post_init
+            or canonical_getattr(prepared_post_init, "__code__", None)
+            is not prepared_post_init_code
+            or canonical_getattr(builder, "__code__", None) is not builder_code
+            or _instant is not canonical_instant
+            or canonical_getattr(canonical_instant, "__code__", None)
+            is not canonical_instant_code
+            or validate_client_order_id is not canonical_client_id
+            or canonical_getattr(canonical_client_id, "__code__", None)
+            is not canonical_client_id_code
+            or _text is not canonical_text
+            or canonical_getattr(canonical_text, "__code__", None)
+            is not canonical_text_code
+            or _decimal_text is not canonical_decimal_text
+            or canonical_getattr(canonical_decimal_text, "__code__", None)
+            is not canonical_decimal_text_code
+            or ALPACA_DOCS is not canonical_docs
+            or AlpacaAdapterError is not error_type
+            or TypeError is not type_error
+            or type is not canonical_type
+            or id is not canonical_id
+            or tuple is not canonical_tuple
+            or str is not canonical_str
+            or getattr is not canonical_getattr
+            or object is not canonical_object
+            or AttributeError is not attribute_error_type
+            or MappingProxyType is not mapping_proxy_type
+            or weakref_ref is not prepared_ref
+        ):
+            authority_changed()
+
+    def snapshot(value):
+        try:
+            return (
+                object_getattribute(value, "endpoint"),
+                object_getattribute(value, "body"),
+                object_getattribute(value, "account_id"),
+                object_getattribute(value, "environment"),
+                object_getattribute(value, "capability_snapshot_id"),
+                object_getattribute(value, "documentation_refs"),
+                object_getattribute(value, "instrument_versions"),
+                object_getattribute(value, "capability_snapshot_ids"),
+                object_getattribute(value, "body_sha256"),
+            )
+        except attribute_error_type:
+            authority_changed()
+
+    def same_text(value, expected):
+        if canonical_type(value) is not canonical_str or value != expected:
+            authority_changed()
+
+    def same_text_tuple(value, expected):
+        if canonical_type(value) is not canonical_tuple:
+            authority_changed()
+        for item in value:
+            if canonical_type(item) is not canonical_str:
+                authority_changed()
+        if value != expected:
+            authority_changed()
+
+    def require_canonical_alpaca_prepared_request(value):
+        implementation_changed()
+        if canonical_type(value) is not prepared_type:
+            raise type_error("prepared_request must be exact AlpacaPreparedRequest")
+        binding = bindings.get(canonical_id(value))
+        if binding is None:
+            authority_changed()
+        bound_ref, expected = binding
+        if bound_ref() is not value:
+            authority_changed()
+        current = snapshot(value)
+        same_text(current[0], expected[0])
+        if (
+            current[1] is not expected[1]
+            or canonical_type(current[1]) is not mapping_proxy_type
+        ):
+            authority_changed()
+        same_text(current[2], expected[2])
+        same_text(current[3], expected[3])
+        same_text(current[4], expected[4])
+        same_text_tuple(current[5], expected[5])
+        same_text_tuple(current[6], expected[6])
+        same_text_tuple(current[7], expected[7])
+        same_text(current[8], expected[8])
+        return value
+
+    def canonical_prepare_order_request(
+        intent: AlpacaOrderIntent,
+        *,
+        client_order_id: str,
+        account_id: str,
+        environment: str,
+        capability: CapabilitySnapshot,
+        at: datetime,
+    ) -> AlpacaPreparedRequest:
+        implementation_changed()
+        prepared = builder(
+            intent,
+            client_order_id=client_order_id,
+            account_id=account_id,
+            environment=environment,
+            capability=capability,
+            at=at,
+        )
+        implementation_changed()
+        if canonical_type(prepared) is not prepared_type:
+            authority_changed()
+
+        dead = [
+            key
+            for key, (existing_ref, _snapshot) in canonical_tuple(bindings.items())
+            if existing_ref() is None
+        ]
+        for key in dead:
+            bindings.pop(key, None)
+
+        object_id = canonical_id(prepared)
+        previous = bindings.get(object_id)
+        if previous is not None and previous[0]() is not None:
+            authority_changed()
+        bindings[object_id] = (prepared_ref(prepared), snapshot(prepared))
+        require_canonical_alpaca_prepared_request(prepared)
+        return prepared
+
+    return canonical_prepare_order_request, require_canonical_alpaca_prepared_request
+
+
+_unissued_prepare_order_request = prepare_order_request
+(
+    prepare_order_request,
+    require_canonical_alpaca_prepared_request,
+) = _install_alpaca_prepared_request_authority(_unissued_prepare_order_request)
+del _unissued_prepare_order_request
+del _install_alpaca_prepared_request_authority
+
+
 def guarded_order_projection(
     prepared_request: AlpacaPreparedRequest,
     *,
@@ -451,10 +639,11 @@ def guarded_order_projection(
     )
 
 
-def _install_guarded_order_projection_authority(projector):
+def _install_guarded_order_projection_authority(projector, verifier):
     """Seal the final transport projector against mutable function defaults."""
 
     projector_code = projector.__code__
+    verifier_code = verifier.__code__
     prepared_type = AlpacaPreparedRequest
     canonical_type = type
     object_getattribute = object.__getattribute__
@@ -464,14 +653,20 @@ def _install_guarded_order_projection_authority(projector):
     canonical_str = str
     canonical_tuple = tuple
     canonical_any = any
+    canonical_getattr = getattr
     type_error = TypeError
     error_type = AlpacaAdapterError
 
     def sealed_guarded_order_projection(
         prepared_request: AlpacaPreparedRequest,
     ) -> Mapping[str, object]:
-        if projector.__code__ is not projector_code:
+        if (
+            projector.__code__ is not projector_code
+            or require_canonical_alpaca_prepared_request is not verifier
+            or canonical_getattr(verifier, "__code__", None) is not verifier_code
+        ):
             raise error_type("Alpaca guarded projection authority is unavailable")
+        verifier(prepared_request)
         return projector(
             prepared_request,
             _prepared_type=prepared_type,
@@ -492,7 +687,8 @@ def _install_guarded_order_projection_authority(projector):
 
 _unsealed_guarded_order_projection = guarded_order_projection
 guarded_order_projection = _install_guarded_order_projection_authority(
-    _unsealed_guarded_order_projection
+    _unsealed_guarded_order_projection,
+    require_canonical_alpaca_prepared_request,
 )
 del _unsealed_guarded_order_projection
 del _install_guarded_order_projection_authority
@@ -692,10 +888,11 @@ def _prepared_submission_projection(
     )
 
 
-def _install_prepared_submission_projection_authority(projector):
+def _install_prepared_submission_projection_authority(projector, verifier):
     """Keep prepared-scope authority outside mutable keyword defaults."""
 
     projector_code = projector.__code__
+    verifier_code = verifier.__code__
     prepared_type = AlpacaPreparedRequest
     canonical_type = type
     canonical_str = str
@@ -705,12 +902,18 @@ def _install_prepared_submission_projection_authority(projector):
     error_type = AlpacaAdapterError
     object_getattribute = object.__getattribute__
     mapping_proxy_type = MappingProxyType
+    canonical_getattr = getattr
 
     def sealed_prepared_submission_projection(
         prepared_request: AlpacaPreparedRequest,
     ) -> Mapping[str, object]:
-        if projector.__code__ is not projector_code:
+        if (
+            projector.__code__ is not projector_code
+            or require_canonical_alpaca_prepared_request is not verifier
+            or canonical_getattr(verifier, "__code__", None) is not verifier_code
+        ):
             raise error_type("Alpaca prepared response authority is unavailable")
+        verifier(prepared_request)
         return projector(
             prepared_request,
             _prepared_type=prepared_type,
@@ -729,7 +932,8 @@ def _install_prepared_submission_projection_authority(projector):
 
 _unsealed_prepared_submission_projection = _prepared_submission_projection
 _prepared_submission_projection = _install_prepared_submission_projection_authority(
-    _unsealed_prepared_submission_projection
+    _unsealed_prepared_submission_projection,
+    require_canonical_alpaca_prepared_request,
 )
 del _unsealed_prepared_submission_projection
 del _install_prepared_submission_projection_authority

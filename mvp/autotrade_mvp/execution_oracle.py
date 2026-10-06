@@ -356,7 +356,6 @@ def assert_conservative_execution(
         order.order_type == "STOP_LIMIT"
         and not order.already_triggered
         and market_time > arrival
-        and independent_capacity > zero
     ):
         causal_stop_evidence = True
         if model.data_fidelity == "BAR":
@@ -410,7 +409,7 @@ def assert_conservative_execution(
                 raise ExecutionOracleError(
                     "triggered state uses BAR evidence from before venue arrival"
                 )
-        if independent_capacity <= zero or not _oracle_stop_touched(
+        if not _oracle_stop_touched(
             order=order,
             observation=observation,
             model=model,

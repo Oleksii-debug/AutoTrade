@@ -1395,6 +1395,48 @@ class ScientificRegistry:
             created_at=row["created_at"],
         )
 
+    @contextmanager
+    def candidate_promotion_evidence_guard(
+        self,
+        *,
+        evaluation_id: str,
+        protocol_id: str,
+        protocol_hash: str,
+        result_hash: str,
+        candidate_id: str,
+        artifact_hash: str,
+        evaluation_status: str,
+        retention_passed: bool,
+        risk_passed: bool,
+        authority_scope_id: str,
+        evidence_valid_until: str,
+    ):
+        """Hold scientific writer authority through a dependent promotion commit.
+
+        A preflight validation is not a commit fence. Another process could append
+        holdout access or trial state after the untouched/complete checks and before
+        ChampionRegistry durably changes routing. BEGIN IMMEDIATE serializes
+        ScientificRegistry writers while ordinary WAL readers remain available.
+        The caller must keep this context open through its dependent durable commit.
+        """
+
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            evidence = self.verify_candidate_promotion_evidence(
+                evaluation_id=evaluation_id,
+                protocol_id=protocol_id,
+                protocol_hash=protocol_hash,
+                result_hash=result_hash,
+                candidate_id=candidate_id,
+                artifact_hash=artifact_hash,
+                evaluation_status=evaluation_status,
+                retention_passed=retention_passed,
+                risk_passed=risk_passed,
+                authority_scope_id=authority_scope_id,
+                evidence_valid_until=evidence_valid_until,
+            )
+            yield evidence
+
     def verify_candidate_promotion_evidence(
         self,
         *,
@@ -1481,22 +1523,9 @@ class ScientificRegistry:
             ).fetchall()
         candidate_trial_found = False
         for row in trial_rows:
+            payload = _registered_trial_payload(row)
             if row["status"] != "COMPLETED":
                 continue
-            try:
-                payload = json.loads(row["payload_json"])
-            except json.JSONDecodeError as error:
-                raise ProtocolViolation(
-                    "registered trial payload is corrupt"
-                ) from error
-            if (
-                not isinstance(payload, dict)
-                or _canonical(payload) != row["payload_json"]
-                or _hash(payload) != row["payload_hash"]
-            ):
-                raise ProtocolViolation(
-                    "registered trial payload integrity mismatch"
-                )
             if (
                 payload.get("candidate_id") == candidate_id
                 and payload.get("artifact_hash") == artifact_hash

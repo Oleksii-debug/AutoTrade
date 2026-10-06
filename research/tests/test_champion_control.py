@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone, tzinfo
 from hashlib import sha256
 import json
+import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -546,6 +547,87 @@ class ChampionRegistryTests(unittest.TestCase):
                     existing_position_policy=None,
                 )
             self.assertEqual(registry.state().generation, 0)
+
+    def test_scientific_promotion_guard_holds_writer_reservation(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            candidate = approval(science)
+
+            with science.candidate_promotion_evidence_guard(
+                evaluation_id=candidate.evaluation_id,
+                protocol_id=candidate.protocol_id,
+                protocol_hash=candidate.protocol_hash,
+                result_hash=candidate.evaluation_result_hash,
+                candidate_id=candidate.candidate_id,
+                artifact_hash=candidate.artifact_hash,
+                evaluation_status=candidate.evaluation_status,
+                retention_passed=candidate.retention_passed,
+                risk_passed=candidate.risk_passed,
+                authority_scope_id=candidate.authority_scope_id,
+                evidence_valid_until=candidate.evidence_valid_until.isoformat(),
+            ):
+                contender = sqlite3.connect(science.path, timeout=0)
+                try:
+                    with self.assertRaises(sqlite3.OperationalError):
+                        contender.execute("BEGIN IMMEDIATE")
+                finally:
+                    contender.close()
+
+            contender = sqlite3.connect(science.path, timeout=0)
+            try:
+                contender.execute("BEGIN IMMEDIATE")
+                contender.rollback()
+            finally:
+                contender.close()
+
+    def test_promotion_keeps_scientific_guard_through_routing_commit(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            candidate = approval(science)
+            guard_active = []
+            commit_observations = []
+
+            original_guard = science.candidate_promotion_evidence_guard
+
+            @contextmanager
+            def observed_guard(**kwargs):
+                with original_guard(**kwargs) as evidence:
+                    guard_active.append(True)
+                    try:
+                        yield evidence
+                    finally:
+                        guard_active.pop()
+
+            science.candidate_promotion_evidence_guard = observed_guard
+            authority = FakeObligationAuthority()
+            original_commit_guard = authority.commit_guard
+
+            @contextmanager
+            def observed_commit_guard(expected):
+                commit_observations.append(tuple(guard_active))
+                self.assertEqual(guard_active, [True])
+                with original_commit_guard(expected) as current:
+                    self.assertEqual(guard_active, [True])
+                    yield current
+
+            authority.commit_guard = observed_commit_guard
+            registry = champion_registry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+                obligation_authority=authority,
+            )
+
+            state = registry.promote(
+                candidate,
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+
+            self.assertEqual(state.generation, 1)
+            self.assertEqual(commit_observations, [(True,)])
+            self.assertEqual(guard_active, [])
 
     def test_promotion_with_unused_trial_budget_requires_registered_stop_evidence(self):
         with TemporaryDirectory() as directory:

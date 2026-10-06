@@ -981,6 +981,12 @@ class SettlementBook:
             canonical_book,
             EconomicBook,
         )
+        if any(type(transaction) is not JournalTransaction for transaction in transactions):
+            raise TypeError(
+                "economic projection requires exact JournalTransaction values"
+            )
+        for transaction in transactions:
+            _require_exact_transaction_graph(transaction)
 
         if type(obligations) not in {tuple, list}:
             raise TypeError(
@@ -994,6 +1000,19 @@ class SettlementBook:
                 "economic-book settlement evidence must use an exact dict"
             )
         items = tuple(obligations)
+        if any(type(item) is not SettlementObligation for item in items):
+            raise TypeError(
+                "economic-book obligations must contain exact SettlementObligation values"
+            )
+        if settled_obligation_evidence is not None:
+            if any(
+                type(obligation_id) is not str
+                or type(record) is not SettlementEvidence
+                for obligation_id, record in settled_obligation_evidence.items()
+            ):
+                raise TypeError(
+                    "economic-book settlement evidence must contain exact str/SettlementEvidence entries"
+                )
         if owner_scope is not None:
             provider, account, environment, provider_environment = owner_scope
             for item in items:

@@ -1081,6 +1081,62 @@ class EconomicSettlementCapitalTests(unittest.TestCase):
         )
         self.assertEqual(rebuilt.available_to_spend("USD"), Decimal("1000"))
 
+    def test_economic_projection_rejects_polymorphic_graph_before_callbacks(self):
+        class HostileTransaction(JournalTransaction):
+            calls = 0
+
+            def __getattribute__(self, name):
+                if name in {"transaction_id", "cause_event_id", "postings"}:
+                    type(self).calls += 1
+                    raise AssertionError(
+                        "economic projection read polymorphic transaction"
+                    )
+                return super().__getattribute__(name)
+
+        hostile_transaction = HostileTransaction(
+            transaction_id="hostile-transaction",
+            cause_event_id="hostile-event",
+            postings=(),
+        )
+        economic = EconomicBook()
+        object.__getattribute__(economic, "_transactions").append(
+            hostile_transaction
+        )
+        HostileTransaction.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact JournalTransaction"):
+            SettlementBook.from_economic_book(
+                economic_book=economic,
+                obligations=(),
+            )
+        self.assertEqual(HostileTransaction.calls, 0)
+
+        class HostileObligation(SettlementObligation):
+            calls = 0
+
+            def __getattribute__(self, name):
+                if name in {"rule_binding", "obligation_id", "source_transaction_id"}:
+                    type(self).calls += 1
+                    raise AssertionError(
+                        "economic projection read polymorphic obligation"
+                    )
+                return super().__getattribute__(name)
+
+        hostile_obligation = HostileObligation(
+            obligation_id="hostile-obligation",
+            cause_event_id="hostile-event",
+            currency="USD",
+            amount=Decimal("-1"),
+            trade_date=date(2026, 9, 24),
+            settlement_date=date(2026, 9, 25),
+        )
+        HostileObligation.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact SettlementObligation"):
+            SettlementBook.from_economic_book(
+                economic_book=EconomicBook(),
+                obligations=(hostile_obligation,),
+            )
+        self.assertEqual(HostileObligation.calls, 0)
+
     def test_durable_economic_book_obligations_require_exact_provider_domain(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

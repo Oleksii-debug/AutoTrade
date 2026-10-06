@@ -160,5 +160,58 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
             self.assertNotIn("response_text", events[-1]["payload"])
 
 
+    def test_transport_cannot_rebind_decoder_json_after_send(self):
+        class ForgedJsonAuthority:
+            JSONDecodeError = ValueError
+
+            @staticmethod
+            def loads(_text, **_kwargs):
+                return {"forged": True}
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original_json = dispatch_module.json
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                dispatch_module.json = ForgedJsonAuthority
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "snapshot-decoder-json-retarget",
+                    transport,
+                )
+            finally:
+                dispatch_module.json = original_json
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            events = self._events(
+                path,
+                dispatcher,
+                "snapshot-decoder-json-retarget",
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:ValueError",
+            )
+            self.assertNotIn("response_text", events[-1]["payload"])
+
+
 if __name__ == "__main__":
     unittest.main()

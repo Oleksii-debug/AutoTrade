@@ -2500,6 +2500,36 @@ class GuardedDispatcher:
             snapshot_getattr(dependency, "__code__", None)
             for dependency in snapshot_defaults
         )
+        decoder_json_module = json
+        decoder_json_loads = snapshot_getattr(
+            decoder_json_module,
+            "loads",
+            None,
+        )
+        decoder_json_decode_error = snapshot_getattr(
+            decoder_json_module,
+            "JSONDecodeError",
+            None,
+        )
+        decoder_depth_guard = require_provider_json_depth
+        decoder_depth_guard_code = snapshot_getattr(
+            decoder_depth_guard,
+            "__code__",
+            None,
+        )
+        decoder_number_parser = parse_bounded_json_number_token
+        decoder_number_parser_code = snapshot_getattr(
+            decoder_number_parser,
+            "__code__",
+            None,
+        )
+        decoder_integer_parser = parse_bounded_json_integer_token
+        decoder_integer_parser_code = snapshot_getattr(
+            decoder_integer_parser,
+            "__code__",
+            None,
+        )
+        decoder_exact_decimal_error = ExactDecimalError
 
         try:
             response = transport_send(client_order_id, request_frozen, final_guard)
@@ -2757,6 +2787,33 @@ class GuardedDispatcher:
                         for dependency in snapshot_defaults
                     )
                     != snapshot_dependency_codes
+                    or json is not decoder_json_module
+                    or snapshot_getattr(json, "loads", None)
+                    is not decoder_json_loads
+                    or snapshot_getattr(json, "JSONDecodeError", None)
+                    is not decoder_json_decode_error
+                    or require_provider_json_depth is not decoder_depth_guard
+                    or snapshot_getattr(
+                        require_provider_json_depth,
+                        "__code__",
+                        None,
+                    )
+                    is not decoder_depth_guard_code
+                    or parse_bounded_json_number_token is not decoder_number_parser
+                    or snapshot_getattr(
+                        parse_bounded_json_number_token,
+                        "__code__",
+                        None,
+                    )
+                    is not decoder_number_parser_code
+                    or parse_bounded_json_integer_token is not decoder_integer_parser
+                    or snapshot_getattr(
+                        parse_bounded_json_integer_token,
+                        "__code__",
+                        None,
+                    )
+                    is not decoder_integer_parser_code
+                    or ExactDecimalError is not decoder_exact_decimal_error
                 ):
                     raise ValueError(
                         "exact transport response authority changed after send"

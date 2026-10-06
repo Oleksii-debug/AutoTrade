@@ -1277,14 +1277,14 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
     def test_decision_copies_measured_mapping_and_rejects_boolean_downtime(self):
         measured = {scenario: 10 for scenario in RecoveryScenario}
         decision = RecoveryQualificationDecision(
-            status=RecoveryEvidenceStatus.PASS,
+            status=RecoveryEvidenceStatus.FAIL,
             source_sha=SOURCE_SHA,
             release_artifact_id=RELEASE_ARTIFACT_ID,
             release_artifact_sha256=ARTIFACT_SHA,
             evidence_schema_version=EVIDENCE_SCHEMA,
             protocol_id=PROTOCOL_ID,
             evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
-            blockers=(),
+            blockers=("test:nonpass",),
             measured_downtime_ms=measured,
         )
         measured[RecoveryScenario.POWER_LOSS] = 999

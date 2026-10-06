@@ -1228,6 +1228,29 @@ def verify_qualification_attestation(
         raise TypeError(
             "evidence_store must be the canonical ArtifactStore"
         )
+
+    # SignedQualificationAttestation is frozen, but caller-retained instances can
+    # still be mutated via object.__setattr__(). Capture and revalidate the exact
+    # signature text before any evidence I/O callback so the accepted snapshot
+    # cannot report a different signature from the bytes actually verified.
+    signature_b64 = receipt.signature_b64
+    if type(signature_b64) is not str:
+        raise TypeError("receipt signature_b64 must be exact str")
+    signature_b64 = _text(signature_b64, name="signature_b64")
+    try:
+        signature = base64.b64decode(signature_b64, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise QualificationTrustError(
+            "signature_b64 is not canonical base64"
+        ) from error
+    if (
+        not signature
+        or base64.b64encode(signature).decode("ascii") != signature_b64
+    ):
+        raise QualificationTrustError(
+            "signature_b64 is not canonical base64"
+        )
+
     try:
         evidence_reader = trusted_authenticated_reader(
             evidence_root,
@@ -1409,9 +1432,6 @@ def verify_qualification_attestation(
         raise QualificationTrustError(
             "attestation is outside trust root validity"
         )
-    signature = base64.b64decode(
-        receipt.signature_b64, validate=True
-    )
     _verify_rsa_pkcs1v15_sha256(
         payload=attestation.canonical_bytes(),
         signature=signature,
@@ -1467,7 +1487,7 @@ def verify_qualification_attestation(
         unresolved_limits=tuple(str(item) for item in attestation.unresolved_limits),
         verification_method=str(attestation.verification_method),
         attestation_json=attestation.canonical_bytes().decode("utf-8"),
-        signature_b64=str(receipt.signature_b64),
+        signature_b64=signature_b64,
     )
 
 

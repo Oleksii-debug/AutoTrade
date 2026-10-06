@@ -665,12 +665,24 @@ class BybitV5AdapterTests(unittest.TestCase):
                         prepared.capability_snapshot_ids
                     ),
                     "instrument_versions": list(prepared.instrument_versions),
+                    "provider_route_qualification_id": (
+                        "provider-qualification:sha256:" + "7" * 64
+                    ),
                     "provider_route_capability_snapshot_id": (
                         submission_scope_capability_snapshot_id
                         if submission_scope_capability_snapshot_id is not None
                         else prepared.capability_snapshot_id
                     ),
+                    "provider_route_decision_journal_sequence_cut": 41,
                     "provider_route_provider_environment": provider_environment,
+                    "provider_route_adapter_code_sha": "adapter-code-sha",
+                    "provider_route_packaged_artifact_digest": (
+                        "sha256:" + "8" * 64
+                    ),
+                    "provider_route_protocol_id": "bybit-v5",
+                    "provider_route_protocol_version": "1",
+                    "provider_route_entity_policy_id": "linear-order-v1",
+                    "provider_route_entity_id": "BTCUSDT",
                 },
             )
             self.assertEqual(outcome.status, "SENT")
@@ -815,6 +827,52 @@ class BybitV5AdapterTests(unittest.TestCase):
                 attempt_id=attempt,
                 prepared_request=prepared,
                 observation=observation,
+            )
+
+    def test_submission_observation_rejects_partial_financial_route_scope(self):
+        prepared, response_binding = self._durable_write_response_binding(
+            {"retCode": 0, "retMsg": "OK", "result": {}},
+            provider_environment="TESTNET",
+            intent_id="bybit-partial-route-scope",
+        )
+        partial_scope = dict(response_binding.submission_scope)
+        partial_scope.pop("provider_route_protocol_version")
+        rebound = replace(
+            response_binding,
+            submission_scope=partial_scope,
+            submission_scope_hash=payload_digest(partial_scope),
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "financial route submission scope is incomplete",
+        ):
+            observe_submission_json_response(
+                prepared,
+                rebound,
+                provider_id="BYBIT",
+            )
+
+    def test_submission_observation_rejects_unknown_scope_axis(self):
+        prepared, response_binding = self._durable_write_response_binding(
+            {"retCode": 0, "retMsg": "OK", "result": {}},
+            provider_environment="TESTNET",
+            intent_id="bybit-unknown-scope-axis",
+        )
+        expanded_scope = dict(response_binding.submission_scope)
+        expanded_scope["caller_extension"] = "forged"
+        rebound = replace(
+            response_binding,
+            submission_scope=expanded_scope,
+            submission_scope_hash=payload_digest(expanded_scope),
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "unknown authority axes",
+        ):
+            observe_submission_json_response(
+                prepared,
+                rebound,
+                provider_id="BYBIT",
             )
 
     def test_submission_observation_rejects_route_capability_retarget(self):

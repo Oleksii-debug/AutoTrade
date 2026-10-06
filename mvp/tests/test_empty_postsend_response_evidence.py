@@ -94,6 +94,24 @@ class EmptyPostSendResponseEvidenceTests(unittest.TestCase):
         self.assertIs(type(failure), TradingWireResponse)
         self.assertEqual((failure.http_status, failure.body), (503, b""))
 
+    def test_empty_raw_legacy_wire_stays_status_unknown_for_all_write_classifiers(self):
+        cases = (
+            (_bybit_exact_trading_response, "bybit_http_status_unavailable_execution_unknown"),
+            (_kraken_spot_exact_trading_response, "kraken_spot_http_status_unavailable_execution_unknown"),
+            (_alpaca_exact_trading_response, "alpaca_http_status_unavailable_execution_unknown"),
+            (_binance_exact_trading_response, "binance_spot_http_status_unavailable_execution_unknown"),
+            (_whitebit_exact_trading_response, "whitebit_http_status_unavailable_execution_unknown"),
+        )
+        with self.assertRaises(ValueError):
+            ExactJsonTransportResponse(b"")
+        for classifier, reason in cases:
+            with self.subTest(classifier=classifier.__name__):
+                response = classifier(b"")
+                self.assertEqual(response.response_bytes, b"")
+                self.assertIsNone(response.http_status)
+                self.assertTrue(response.requires_reconciliation)
+                self.assertEqual(response.ambiguity_reason, reason)
+
     def test_empty_2xx_is_never_definitive_json_for_any_write_classifier(self):
         cases = (
             (_bybit_exact_trading_response, "bybit_empty_response_execution_unknown"),

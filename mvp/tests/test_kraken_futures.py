@@ -245,6 +245,18 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 )
         self.assertEqual(callbacks, [])
 
+    def test_preparation_rejects_rebound_digest_authority_before_callback(self):
+        with patch(
+            "mvp.autotrade_mvp.kraken_futures.sha256",
+            side_effect=AssertionError("rebound digest callback executed"),
+        ) as rebound:
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "prepared request authority changed",
+            ):
+                prepared_futures_request("futures-rebound-digest")
+        rebound.assert_not_called()
+
     def test_payload_numeric_admission_uses_shared_bounded_exact_authority(self):
         arguments = dict(environment="LIVE", symbol="PI_XBTUSD", side="BUY",
                          order_type="LIMIT", size="1.0001", price="70000.01",

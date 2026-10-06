@@ -212,6 +212,32 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             )
         self.assertEqual(callbacks, [])
 
+    def test_preparation_rejects_rebound_digest_authority_before_callback(self):
+        intent = KrakenSpotOrderIntent.create(
+            instrument_version="XBTUSD:v1",
+            pair="XBTUSD",
+            side="BUY",
+            order_type="MARKET",
+            volume="0.01",
+        )
+        with patch(
+            "mvp.autotrade_mvp.kraken_spot.sha256",
+            side_effect=AssertionError("rebound digest callback executed"),
+        ) as rebound:
+            with self.assertRaisesRegex(
+                KrakenSpotAdapterError,
+                "prepared request authority changed",
+            ):
+                prepare_spot_order_request(
+                    intent,
+                    client_order_id="spot-rebound-digest",
+                    account_id="spot-account",
+                    environment="PAPER",
+                    capability=capability(),
+                    at=NOW,
+                )
+        rebound.assert_not_called()
+
     def test_direct_prepared_request_requires_canonical_factory(self):
         with self.assertRaisesRegex(
             KrakenSpotAdapterError,

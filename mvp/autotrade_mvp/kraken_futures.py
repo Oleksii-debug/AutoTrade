@@ -623,6 +623,13 @@ def _install_kraken_futures_prepared_request_authority(builder):
     object_getattribute = canonical_object.__getattribute__
     attribute_error_type = AttributeError
     mapping_proxy_type = MappingProxyType
+    canonical_isinstance = isinstance
+    mapping_type = Mapping
+    canonical_json_module = json
+    canonical_json_dumps = json.dumps
+    canonical_sha256 = sha256
+    value_error_type = ValueError
+    factory_token = _KRAKEN_FUTURES_PREPARED_REQUEST_FACTORY_TOKEN
 
     bindings: dict[int, tuple[object, tuple[object, ...]]] = {}
 
@@ -663,6 +670,13 @@ def _install_kraken_futures_prepared_request_authority(builder):
             or KRAKEN_FUTURES_ENDPOINTS is not endpoints
             or ProviderCoreError is not error_type
             or TypeError is not type_error
+            or ValueError is not value_error_type
+            or isinstance is not canonical_isinstance
+            or Mapping is not mapping_type
+            or json is not canonical_json_module
+            or json.dumps is not canonical_json_dumps
+            or sha256 is not canonical_sha256
+            or _KRAKEN_FUTURES_PREPARED_REQUEST_FACTORY_TOKEN is not factory_token
             or datetime is not datetime_type
             or timezone is not timezone_type
             or bool is not bool_type

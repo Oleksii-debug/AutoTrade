@@ -1,5 +1,5 @@
 from collections import UserDict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
@@ -17,6 +17,24 @@ EVIDENCE = {
     "sha256": "sha256:" + "a" * 64,
     "observed_at": "2026-09-24T16:00:00Z",
 }
+
+
+class CallbackTimezone(tzinfo):
+    def __init__(self):
+        self.calls = 0
+
+    def _fail(self):
+        self.calls += 1
+        raise AssertionError("caller timezone code must not execute")
+
+    def utcoffset(self, dt):
+        return self._fail()
+
+    def dst(self, dt):
+        return self._fail()
+
+    def tzname(self, dt):
+        return self._fail()
 
 
 def at(second: int = 0) -> datetime:
@@ -189,20 +207,35 @@ class CausalImmutableMarketPayloadTests(unittest.TestCase):
                 evidence=evidence,
             )
 
-    def test_payload_datetime_is_detached_from_custom_timezone_authority(self):
-        # Python's built-in timezone is final in ordinary construction; use an
-        # exact datetime with the canonical UTC tzinfo and prove snapshot output
-        # retains only the canonical built-in timezone object.
+    def test_payload_datetime_rejects_custom_timezone_without_callbacks(self):
+        hostile = CallbackTimezone()
+        provider_time = datetime(2026, 9, 24, 16, 0, tzinfo=hostile)
+        with self.assertRaisesRegex(MarketDataError, "exact built-in timezone"):
+            update(
+                "STATUS",
+                {
+                    "status": "OPEN",
+                    "provider_time": provider_time,
+                },
+            )
+        self.assertEqual(hostile.calls, 0)
+
+    def test_payload_datetime_builtin_fixed_offset_is_detached_to_utc(self):
+        plus_two = timezone(timedelta(hours=2))
         admitted = update(
             "STATUS",
             {
                 "status": "OPEN",
                 "provider_time": datetime(
-                    2026, 9, 24, 16, 0, tzinfo=timezone.utc
+                    2026, 9, 24, 18, 0, tzinfo=plus_two
                 ),
             },
         )
         self.assertIs(admitted.payload["provider_time"].tzinfo, timezone.utc)
+        self.assertEqual(
+            admitted.payload["provider_time"],
+            datetime(2026, 9, 24, 16, 0, tzinfo=timezone.utc),
+        )
 
     def test_causal_boundary_and_decimal_context_preserve_event_identity(self):
         observed = []

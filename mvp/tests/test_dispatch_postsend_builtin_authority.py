@@ -1738,5 +1738,263 @@ class PostSendBuiltinAuthorityTests(unittest.TestCase):
             self.assertEqual(event_types, ["SubmissionPrepared"])
 
 
+    def test_post_send_persistence_sqlite_connect_mutation_is_restored_unknown(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original_connect = persistence_module.sqlite3.connect
+            hostile_calls = 0
+            outbound = 0
+
+            def hostile_connect(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("mutated sqlite3.connect executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                persistence_module.sqlite3.connect = hostile_connect
+                return response
+
+            try:
+                first = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-persistence-sqlite-connect-a1",
+                    transport=transport,
+                )
+                self.assertIs(
+                    persistence_module.sqlite3.connect,
+                    original_connect,
+                )
+            finally:
+                persistence_module.sqlite3.connect = original_connect
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(outbound, 1)
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(
+                first.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-persistence-sqlite-connect-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
+            restarted = GuardedDispatcher(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner-b",
+            )
+            replay = restarted.dispatch(
+                attempt_id="postsend-persistence-sqlite-connect-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T19:56:01Z",
+                authority_check=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not re-authorize")),
+                transport_send=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not resend")),
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(replay.status, "UNKNOWN")
+            self.assertEqual(
+                replay.reason,
+                "recovered_after_send_barrier_without_terminal_result",
+            )
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(outbound, 1)
+
+    def test_persistence_sqlite_connect_mutation_before_guard_is_zero_wire(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original_connect = persistence_module.sqlite3.connect
+            hostile_calls = 0
+            outbound = 0
+
+            def hostile_connect(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("mutated sqlite3.connect executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                persistence_module.sqlite3.connect = hostile_connect
+                final_guard()
+                outbound += 1
+                return ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+
+            try:
+                with self.assertRaises(PermissionError):
+                    self._dispatch(
+                        dispatcher,
+                        attempt_id="preguard-persistence-sqlite-connect-a1",
+                        transport=transport,
+                    )
+                self.assertIs(
+                    persistence_module.sqlite3.connect,
+                    original_connect,
+                )
+            finally:
+                persistence_module.sqlite3.connect = original_connect
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(outbound, 0)
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "preguard-persistence-sqlite-connect-a1",
+            )
+            self.assertEqual(event_types, ["SubmissionPrepared"])
+
+
+    def test_post_send_persistence_helper_code_mutation_is_restored_unknown(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            helper = persistence_module._require_exact_journal_store_state
+            original_code = helper.__code__
+            probe = []
+            outbound = 0
+            persistence_module._journal_helper_probe = probe
+
+            def forged_state(value, *, subject):
+                _journal_helper_probe.append(subject)
+                raise AssertionError("mutated persistence helper code executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                helper.__code__ = forged_state.__code__
+                return response
+
+            try:
+                first = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-persistence-helper-code-a1",
+                    transport=transport,
+                )
+                self.assertIs(helper.__code__, original_code)
+            finally:
+                helper.__code__ = original_code
+                vars(persistence_module).pop("_journal_helper_probe", None)
+
+            self.assertEqual(probe, [])
+            self.assertEqual(outbound, 1)
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(
+                first.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-persistence-helper-code-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
+            restarted = GuardedDispatcher(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner-b",
+            )
+            replay = restarted.dispatch(
+                attempt_id="postsend-persistence-helper-code-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T20:00:01Z",
+                authority_check=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not re-authorize")),
+                transport_send=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not resend")),
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(replay.status, "UNKNOWN")
+            self.assertEqual(
+                replay.reason,
+                "recovered_after_send_barrier_without_terminal_result",
+            )
+            self.assertEqual(probe, [])
+            self.assertEqual(outbound, 1)
+
+    def test_persistence_helper_code_mutation_before_guard_is_zero_wire(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            helper = persistence_module._require_exact_journal_store_state
+            original_code = helper.__code__
+            probe = []
+            outbound = 0
+            persistence_module._journal_helper_probe = probe
+
+            def forged_state(value, *, subject):
+                _journal_helper_probe.append(subject)
+                raise AssertionError("mutated persistence helper code executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                helper.__code__ = forged_state.__code__
+                final_guard()
+                outbound += 1
+                return ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+
+            try:
+                with self.assertRaises(PermissionError):
+                    self._dispatch(
+                        dispatcher,
+                        attempt_id="preguard-persistence-helper-code-a1",
+                        transport=transport,
+                    )
+                self.assertIs(helper.__code__, original_code)
+            finally:
+                helper.__code__ = original_code
+                vars(persistence_module).pop("_journal_helper_probe", None)
+
+            self.assertEqual(probe, [])
+            self.assertEqual(outbound, 0)
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "preguard-persistence-helper-code-a1",
+            )
+            self.assertEqual(event_types, ["SubmissionPrepared"])
+
+
 if __name__ == "__main__":
     unittest.main()

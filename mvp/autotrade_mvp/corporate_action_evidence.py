@@ -1082,32 +1082,38 @@ class DurableCorporateActionEvidenceStore:
     _AGGREGATE_TYPE = "corporate_action_evidence"
     _EVENT_TYPE = "CorporateActionEvidenceAccepted"
     _ACTOR = "corporate-action-evidence"
+    _UUID5 = staticmethod(uuid5)
+    _UUID_NAMESPACE = NAMESPACE_URL
+    _PAYLOAD_DIGEST = staticmethod(payload_digest)
+    _UTC_TEXT = staticmethod(_utc_text)
 
-    def __init__(
+    def _initialize(
         self,
         store: JournalStore,
         *,
         provider_id: str,
         account_id: str,
         environment: str,
+        _require_unbound,
+        _require_store_authority,
+        _text_fn,
+        _environments,
+        _payload_digest_fn,
+        _register_binding,
     ) -> None:
-        if type(self) is not DurableCorporateActionEvidenceStore:
-            raise TypeError(
-                "durable corporate-action evidence store must be exact canonical type"
-            )
-        _require_unbound_durable_corporate_action_store(self)
-        store_identity = require_exact_journal_store_authority(
+        _require_unbound(self)
+        store_identity = _require_store_authority(
             store,
             subject="corporate-action evidence JournalStore",
         )
-        provider = _text(provider_id, "provider_id").upper()
-        account = _text(account_id, "account_id")
-        environment_value = _text(environment, "environment").upper()
-        if environment_value not in _ENVIRONMENTS:
+        provider = _text_fn(provider_id, "provider_id").upper()
+        account = _text_fn(account_id, "account_id")
+        environment_value = _text_fn(environment, "environment").upper()
+        if environment_value not in _environments:
             raise CorporateActionEvidenceError("environment must be canonical")
         aggregate_id = (
             "corporate-action-evidence:"
-            + payload_digest(
+            + _payload_digest_fn(
                 {
                     "provider_id": provider,
                     "account_id": account,
@@ -1115,7 +1121,7 @@ class DurableCorporateActionEvidenceStore:
                 }
             )[7:]
         )
-        _register_durable_corporate_action_store(
+        _register_binding(
             self,
             store=store,
             store_identity=store_identity,
@@ -1133,7 +1139,12 @@ class DurableCorporateActionEvidenceStore:
         self.environment = environment_value
         self.aggregate_id = aggregate_id
 
-    def _composition(self):
+    def _composition(
+        self,
+        *,
+        _binding,
+        _require_store_authority,
+    ):
         (
             store,
             expected_identity,
@@ -1141,7 +1152,7 @@ class DurableCorporateActionEvidenceStore:
             account_id,
             environment,
             aggregate_id,
-        ) = _durable_corporate_action_store_binding(self)
+        ) = _binding(self)
         visible = vars(self)
         if (
             visible.get("store") is not store
@@ -1154,7 +1165,7 @@ class DurableCorporateActionEvidenceStore:
             raise CorporateActionEvidenceConflict(
                 "corporate-action evidence composition was modified"
             )
-        current_identity = require_exact_journal_store_authority(
+        current_identity = _require_store_authority(
             store,
             subject="corporate-action evidence JournalStore",
         )
@@ -1173,7 +1184,7 @@ class DurableCorporateActionEvidenceStore:
 
     def _validated_store(self):
         store, identity, _, _, _, _ = (
-            DurableCorporateActionEvidenceStore._composition(self)
+            type(self)._composition(self)
         )
         return store, identity
 
@@ -1185,11 +1196,11 @@ class DurableCorporateActionEvidenceStore:
             account_id,
             environment,
             aggregate_id,
-        ) = DurableCorporateActionEvidenceStore._composition(self)
+        ) = type(self)._composition(self)
         with journal_store_authority_scope(store, identity):
             events = JournalStore.load_events(
                 store,
-                self._AGGREGATE_TYPE,
+                type(self)._AGGREGATE_TYPE,
                 aggregate_id,
             )
         expected_version = 1
@@ -1199,7 +1210,7 @@ class DurableCorporateActionEvidenceStore:
                     "corporate-action evidence versions are not contiguous"
                 )
             expected_version += 1
-            if event.get("event_type") != self._EVENT_TYPE:
+            if event.get("event_type") != type(self)._EVENT_TYPE:
                 raise CorporateActionEvidenceConflict(
                     "corporate-action evidence journal contains unsupported event"
                 )
@@ -1229,11 +1240,11 @@ class DurableCorporateActionEvidenceStore:
 
     def _command_id(self, external_event_id: str) -> str:
         _, _, provider_id, account_id, environment, _ = (
-            DurableCorporateActionEvidenceStore._composition(self)
+            type(self)._composition(self)
         )
         return str(
-            uuid5(
-                NAMESPACE_URL,
+            type(self)._UUID5(
+                type(self)._UUID_NAMESPACE,
                 "https://commands.autotrade.local/corporate-action-evidence/"
                 + provider_id
                 + "/"
@@ -1247,11 +1258,11 @@ class DurableCorporateActionEvidenceStore:
 
     def _idempotency_key(self, external_event_id: str) -> str:
         _, _, provider_id, account_id, environment, _ = (
-            DurableCorporateActionEvidenceStore._composition(self)
+            type(self)._composition(self)
         )
         return (
             "corporate-action-evidence:"
-            + payload_digest(
+            + type(self)._PAYLOAD_DIGEST(
                 {
                     "provider_id": provider_id,
                     "account_id": account_id,
@@ -1268,7 +1279,7 @@ class DurableCorporateActionEvidenceStore:
         """Prepare source evidence for a shared JournalStore transaction."""
 
         _, _, provider_id, account_id, environment, aggregate_id = (
-            DurableCorporateActionEvidenceStore._composition(self)
+            type(self)._composition(self)
         )
         if (
             accepted.provider_id != provider_id
@@ -1279,11 +1290,11 @@ class DurableCorporateActionEvidenceStore:
                 "accepted corporate action does not match durable scope"
             )
 
-        events = DurableCorporateActionEvidenceStore._events(self)
+        events = type(self)._events(self)
         same_identity = [
             event
             for event in events
-            if DurableCorporateActionEvidenceStore._payload(event).get("external_event_id")
+            if type(self)._payload(event).get("external_event_id")
             == accepted.external_event_id
         ]
         if same_identity:
@@ -1291,7 +1302,7 @@ class DurableCorporateActionEvidenceStore:
                 raise CorporateActionEvidenceConflict(
                     "external corporate-action identity appears more than once"
                 )
-            saved = DurableCorporateActionEvidenceStore._payload(same_identity[0])
+            saved = type(self)._payload(same_identity[0])
             if (
                 saved.get("provenance_digest") != accepted.provenance_digest
                 or saved.get("evidence_ref") != accepted.evidence_ref
@@ -1325,8 +1336,8 @@ class DurableCorporateActionEvidenceStore:
                 envelope=None,
                 request=request,
                 result=result,
-                command_id=DurableCorporateActionEvidenceStore._command_id(self, accepted.external_event_id),
-                idempotency_key=DurableCorporateActionEvidenceStore._idempotency_key(self, accepted.external_event_id),
+                command_id=type(self)._command_id(self, accepted.external_event_id),
+                idempotency_key=type(self)._idempotency_key(self, accepted.external_event_id),
                 already_committed=True,
             )
 
@@ -1339,18 +1350,18 @@ class DurableCorporateActionEvidenceStore:
             prior = [
                 event
                 for event in events
-                if DurableCorporateActionEvidenceStore._payload(event).get("external_event_id")
+                if type(self)._payload(event).get("external_event_id")
                 == accepted.corrects_external_event_id
             ]
             if len(prior) != 1:
                 raise CorporateActionEvidenceConflict(
                     "corporate-action correction target must identify one retained event"
                 )
-            prior_payload = DurableCorporateActionEvidenceStore._payload(prior[0])
+            prior_payload = type(self)._payload(prior[0])
             already_corrected = [
                 event
                 for event in events
-                if DurableCorporateActionEvidenceStore._payload(event).get("corrects_external_event_id")
+                if type(self)._payload(event).get("corrects_external_event_id")
                 == accepted.corrects_external_event_id
             ]
             if already_corrected:
@@ -1382,8 +1393,8 @@ class DurableCorporateActionEvidenceStore:
 
         next_version = 1 if not events else int(events[-1]["aggregate_version"]) + 1
         event_id = str(
-            uuid5(
-                NAMESPACE_URL,
+            type(self)._UUID5(
+                type(self)._UUID_NAMESPACE,
                 "https://events.autotrade.local/corporate-action-evidence/"
                 + provider_id
                 + "/"
@@ -1405,7 +1416,7 @@ class DurableCorporateActionEvidenceStore:
             "instrument_id": accepted.event.instrument_id,
             "instrument_version": accepted.event.instrument_version,
             "kind": accepted.event.kind,
-            "effective_at": _utc_text(accepted.event.effective_at),
+            "effective_at": type(self)._UTC_TEXT(accepted.event.effective_at),
             "observed_at": accepted.observed_at,
             "source_sequence": accepted.event.source_sequence,
             "evidence_ref": accepted.evidence_ref,
@@ -1419,13 +1430,13 @@ class DurableCorporateActionEvidenceStore:
         }
         envelope = {
             "event_id": event_id,
-            "event_type": self._EVENT_TYPE,
-            "aggregate_type": self._AGGREGATE_TYPE,
+            "event_type": type(self)._EVENT_TYPE,
+            "aggregate_type": type(self)._AGGREGATE_TYPE,
             "aggregate_id": aggregate_id,
             "aggregate_version": str(next_version),
             "committed_at": accepted.observed_at,
             "payload": durable_payload,
-            "payload_hash": payload_digest(durable_payload),
+            "payload_hash": type(self)._PAYLOAD_DIGEST(durable_payload),
         }
         request = {
             "schema_version": "1.0.0",
@@ -1447,15 +1458,15 @@ class DurableCorporateActionEvidenceStore:
             envelope=envelope,
             request=request,
             result=result,
-            command_id=DurableCorporateActionEvidenceStore._command_id(self, accepted.external_event_id),
-            idempotency_key=DurableCorporateActionEvidenceStore._idempotency_key(self, accepted.external_event_id),
+            command_id=type(self)._command_id(self, accepted.external_event_id),
+            idempotency_key=type(self)._idempotency_key(self, accepted.external_event_id),
         )
 
     def record(
         self,
         accepted: AuthoritativeCorporateAction,
     ) -> DurableCorporateActionEvidenceResult:
-        plan = DurableCorporateActionEvidenceStore.prepare_record_mutation(
+        plan = type(self).prepare_record_mutation(
             self,
             accepted,
         )
@@ -1473,13 +1484,13 @@ class DurableCorporateActionEvidenceStore:
                 "fresh corporate-action evidence plan lacks durable envelope"
             )
         store, identity, _, _, environment, _ = (
-            DurableCorporateActionEvidenceStore._composition(self)
+            type(self)._composition(self)
         )
         with journal_store_authority_scope(store, identity):
             _, inserted, _ = JournalStore.commit_command(
                 store,
                 command_id=plan.command_id,
-                actor=self._ACTOR,
+                actor=type(self)._ACTOR,
                 environment=environment,
                 idempotency_key=plan.idempotency_key,
                 request=plan.request,
@@ -1495,6 +1506,89 @@ class DurableCorporateActionEvidenceStore:
             provenance_digest=accepted.provenance_digest,
             corrects_external_event_id=accepted.corrects_external_event_id,
         )
+
+def _bind_durable_corporate_action_initializer(
+    initialize,
+    canonical_type,
+    require_unbound,
+    require_store_authority,
+    text_fn,
+    environments,
+    payload_digest_fn,
+    register_binding,
+):
+    def canonical_init(
+        self,
+        store: JournalStore,
+        *,
+        provider_id: str,
+        account_id: str,
+        environment: str,
+    ) -> None:
+        if type(self) is not canonical_type:
+            raise TypeError(
+                "durable corporate-action evidence store must be exact canonical type"
+            )
+        return initialize(
+            self,
+            store,
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            _require_unbound=require_unbound,
+            _require_store_authority=require_store_authority,
+            _text_fn=text_fn,
+            _environments=environments,
+            _payload_digest_fn=payload_digest_fn,
+            _register_binding=register_binding,
+        )
+
+    return canonical_init
+
+
+DurableCorporateActionEvidenceStore.__init__ = (
+    _bind_durable_corporate_action_initializer(
+        DurableCorporateActionEvidenceStore._initialize,
+        DurableCorporateActionEvidenceStore,
+        _require_unbound_durable_corporate_action_store,
+        require_exact_journal_store_authority,
+        _text,
+        _ENVIRONMENTS,
+        payload_digest,
+        _register_durable_corporate_action_store,
+    )
+)
+del DurableCorporateActionEvidenceStore._initialize
+del _bind_durable_corporate_action_initializer
+
+
+def _bind_durable_corporate_action_composition(
+    composition,
+    binding,
+    require_store_authority,
+):
+    def bound_composition(self):
+        return composition(
+            self,
+            _binding=binding,
+            _require_store_authority=require_store_authority,
+        )
+
+    return bound_composition
+
+
+DurableCorporateActionEvidenceStore._composition = (
+    _bind_durable_corporate_action_composition(
+        DurableCorporateActionEvidenceStore._composition,
+        _durable_corporate_action_store_binding,
+        require_exact_journal_store_authority,
+    )
+)
+del _bind_durable_corporate_action_composition
+del _require_unbound_durable_corporate_action_store
+del _register_durable_corporate_action_store
+del _durable_corporate_action_store_binding
+
 
 def _bind_durable_corporate_action_verifier(
     prepare_record_mutation,

@@ -705,6 +705,27 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             with self.subTest(helper=helper.__name__):
                 self.assertIsNone(helper.__kwdefaults__)
 
+    def test_submission_consumer_rejects_rebound_issuer_verifier_without_callback(self):
+        prepared = prepared_futures_request(
+            "kraken-futures-rebound-issuer-verifier",
+            provider_environment="LIVE",
+        )
+        with patch(
+            "mvp.autotrade_mvp.kraken_futures.require_canonical_kraken_futures_prepared_request",
+            side_effect=AssertionError("rebound issuer verifier executed"),
+        ) as rebound:
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "prepared response authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=str(uuid4()),
+                    prepared_request=prepared,
+                    observation=None,
+                    transport_ambiguous=True,
+                )
+        rebound.assert_not_called()
+
     def test_preparation_rejects_in_place_provider_domain_map_mutation(self):
         mutations = (
             (

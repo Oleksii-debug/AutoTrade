@@ -740,6 +740,27 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             with self.subTest(helper=helper.__name__):
                 self.assertIsNone(helper.__kwdefaults__)
 
+    def test_submission_consumer_rejects_rebound_issuer_verifier_without_callback(self):
+        prepared = self._prepared_submission_request(
+            intent_id="kraken-spot-rebound-issuer-verifier",
+        )
+        with patch(
+            "mvp.autotrade_mvp.kraken_spot.require_canonical_kraken_spot_prepared_request",
+            side_effect=AssertionError("rebound issuer verifier executed"),
+        ) as rebound:
+            with self.assertRaisesRegex(
+                KrakenSpotAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_spot_submission_response(
+                    attempt_id=str(uuid4()),
+                    prepared_request=prepared,
+                    source_uri="https://api.kraken.com/0/private/AddOrder",
+                    observation=None,
+                    transport_ambiguous=True,
+                )
+        rebound.assert_not_called()
+
     def test_submission_consumer_rejects_post_mint_prepared_digest_retarget(self):
         prepared = self._prepared_submission_request(
             intent_id="kraken-spot-post-mint-digest-retarget",

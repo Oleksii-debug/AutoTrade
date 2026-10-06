@@ -921,6 +921,36 @@ class AlpacaAdapterTests(unittest.TestCase):
             guarded_order_projection(prepared)
 
 
+    def test_guarded_projection_rejects_rebound_issuer_verifier_without_callback(self):
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="LIMIT",
+            time_in_force="DAY",
+            quantity="1",
+            limit_price="220.10",
+        )
+        prepared = prepare_order_request(
+            intent,
+            client_order_id="alpaca-rebound-issuer-verifier",
+            account_id="paper-account",
+            environment="PAPER",
+            capability=capability(),
+            at=NOW,
+        )
+        with patch(
+            "mvp.autotrade_mvp.alpaca.require_canonical_alpaca_prepared_request",
+            side_effect=AssertionError("rebound issuer verifier executed"),
+        ) as rebound:
+            with self.assertRaisesRegex(
+                AlpacaAdapterError,
+                "guarded projection authority is unavailable",
+            ):
+                guarded_order_projection(prepared)
+        rebound.assert_not_called()
+
     def test_submission_authority_helpers_hide_mutable_keyword_defaults(self):
         for helper in (
             alpaca_module.guarded_order_projection,

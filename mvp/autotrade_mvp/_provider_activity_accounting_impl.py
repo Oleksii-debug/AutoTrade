@@ -142,31 +142,90 @@ def _scoped_identity(kind: str, *parts: str) -> str:
     return f"{normalized_kind}:{digest}"
 
 
+def _provider_environment(
+    *,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    provider = _text(provider_id, name="provider_id").upper()
+    runtime = _environment(environment)
+    if provider == "BYBIT" and provider_environment is None:
+        raise AccountingConflict(
+            "BYBIT durable economic authority requires explicit provider_environment"
+        )
+    normalized = (
+        runtime
+        if provider_environment is None
+        else _text(provider_environment, name="provider_environment").upper()
+    )
+    if provider == "BYBIT" and normalized not in {"MAINNET", "TESTNET", "DEMO"}:
+        raise AccountingConflict(
+            "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+        )
+    if provider == "BYBIT":
+        expected_runtime = "LIVE" if normalized == "MAINNET" else "PAPER"
+        if runtime != expected_runtime:
+            raise AccountingConflict(
+                "BYBIT provider_environment does not match runtime environment"
+            )
+    return normalized
+
+
+def _provider_environment_payload(
+    *,
+    provider_environment: str,
+    environment: str,
+) -> str | None:
+    return (
+        provider_environment
+        if provider_environment != environment
+        else None
+    )
+
+
 def _activity_identity(
     *,
     provider_id: str,
     account_id: str,
     environment: str,
     activity_id: str,
+    provider_environment: str | None = None,
 ) -> str:
     provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")
     scope = _environment(environment)
-    activity = _text(activity_id, name="activity_id")
-    return _scoped_identity(
-        "provider-activity",
-        provider,
-        account,
-        scope,
-        activity,
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
     )
+    parts = [provider, account, scope]
+    if provider_scope != scope:
+        parts.append(provider_scope)
+    parts.append(_text(activity_id, name="activity_id"))
+    return _scoped_identity("provider-activity", *parts)
 
 
-def _book_id(*, provider_id: str, account_id: str, environment: str) -> str:
+def _book_id(
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    provider_environment: str | None = None,
+) -> str:
     provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")
     scope = _environment(environment)
-    return _scoped_identity("economic-book", provider, account, scope)
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
+    )
+    parts = [provider, account, scope]
+    if provider_scope != scope:
+        parts.append(provider_scope)
+    return _scoped_identity("economic-book", *parts)
 
 
 def _transaction_payload(transaction: JournalTransaction) -> dict[str, Any]:
@@ -1749,6 +1808,7 @@ class _DurableProviderEconomicBookAuthority:
     provider_id: str
     account_id: str
     environment: str
+    provider_environment: str
     book_id: str
     projection_digest: str
 
@@ -1836,6 +1896,7 @@ def _install_durable_provider_economic_book_authority():
             state.get("provider_id") != authority.provider_id
             or state.get("account_id") != authority.account_id
             or state.get("environment") != authority.environment
+            or state.get("provider_environment") != authority.provider_environment
             or state.get("book_id") != authority.book_id
         ):
             raise AccountingConflict(
@@ -1868,6 +1929,7 @@ def _install_durable_provider_economic_book_authority():
             provider_id=authority.provider_id,
             account_id=authority.account_id,
             environment=authority.environment,
+            provider_environment=authority.provider_environment,
             book_id=authority.book_id,
             projection_digest=authority.projection_digest,
         )
@@ -1895,6 +1957,7 @@ def _install_durable_provider_economic_book_authority():
         provider_id: str,
         account_id: str,
         environment: str,
+        provider_environment: str | None = None,
     ) -> None:
         if type(value) is not DurableProviderEconomicBook:
             raise TypeError("economic_book must be exact DurableProviderEconomicBook")
@@ -1921,6 +1984,12 @@ def _install_durable_provider_economic_book_authority():
             environment=environment,
             account_id=account_id,
         )
+        provider_environment_value = _provider_environment(
+            provider_id=object.__getattribute__(value, "provider_id"),
+            environment=object.__getattribute__(value, "environment"),
+            provider_environment=provider_environment,
+        )
+        object.__setattr__(value, "provider_environment", provider_environment_value)
         object.__setattr__(
             value,
             "book_id",
@@ -1940,6 +2009,7 @@ def _install_durable_provider_economic_book_authority():
                 provider_id=state["provider_id"],
                 account_id=state["account_id"],
                 environment=state["environment"],
+                provider_environment=state["provider_environment"],
                 book_id=state["book_id"],
                 projection_digest=_economic_projection_digest(state["_book"]),
             ),
@@ -2047,7 +2117,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
     _SINGLE_EVENT = "EconomicTransactionBooked"
     _ACTOR = "provider-economic-accounting"
     _AUTHORITY_STATE_NAMES = frozenset(
-        {"store", "provider_id", "account_id", "environment", "book_id", "_book"}
+        {"store", "provider_id", "account_id", "environment", "provider_environment", "book_id", "_book"}
     )
 
     def __getattribute__(self, name: str):
@@ -2094,6 +2164,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         provider_id: str,
         account_id: str,
         environment: str,
+        provider_environment: str | None = None,
     ):
         _initialize_durable_provider_economic_book(
             self,
@@ -2101,6 +2172,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=provider_id,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         )
 
     def _events(self) -> list[dict[str, Any]]:

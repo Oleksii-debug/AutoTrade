@@ -134,10 +134,13 @@ class ExactJsonTransportResponse:
 
     def __post_init__(self) -> None:
         raw = self.response_bytes
+        if type(self.requires_reconciliation) is not bool:
+            raise TypeError("requires_reconciliation must be boolean")
         try:
             require_provider_response_bytes(
                 raw,
                 max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=self.requires_reconciliation,
             )
         except (TypeError, ValueError) as error:
             raise ValueError(
@@ -149,8 +152,6 @@ class ExactJsonTransportResponse:
             or self.http_status > 599
         ):
             raise ValueError("http_status must be an integer 100..599 when provided")
-        if type(self.requires_reconciliation) is not bool:
-            raise TypeError("requires_reconciliation must be boolean")
         if self.requires_reconciliation:
             if (
                 type(self.ambiguity_reason) is not str
@@ -234,6 +235,7 @@ class SubmissionResponseBinding:
             require_provider_response_bytes(
                 self.response_bytes,
                 max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
             )
         except (TypeError, ValueError) as error:
             raise ValueError(
@@ -545,13 +547,16 @@ def load_submission_response_binding(
     response_encoding = sent_payload.get("response_encoding")
     if (
         not isinstance(response_text, str)
-        or not response_text
         or not isinstance(response_sha256, str)
     ):
         raise ValueError(
             "durable exact provider response bytes are unavailable"
         )
     if response_encoding == "utf-8-json":
+        if not response_text:
+            raise ValueError(
+                "durable exact provider response bytes are unavailable"
+            )
         response_bytes = response_text.encode("utf-8")
         _decode_exact_json_bytes(response_bytes)
     elif (
@@ -559,7 +564,8 @@ def load_submission_response_binding(
         and sent.get("event_type") == "SubmissionUnknown"
         and sent_payload.get("retry_disposition") == "RECONCILE_FIRST"
         and type(sent_payload.get("reason")) is str
-        and bool(sent_payload["reason"])
+        and bool(sent_payload["reason"].strip())
+        and sent_payload["reason"] == sent_payload["reason"].strip()
     ):
         # Fence attacker/corruption-controlled journal text before bytes.fromhex
         # can allocate the decoded opaque response. The canonical lowercase
@@ -577,13 +583,14 @@ def load_submission_response_binding(
             raise ValueError(
                 "durable exact provider response bytes are unavailable"
             ) from error
-        if not response_bytes or response_text != response_bytes.hex():
+        if response_text != response_bytes.hex():
             raise ValueError(
                 "durable exact provider response bytes are unavailable"
             )
         require_provider_response_bytes(
             response_bytes,
             max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+            allow_empty=True,
         )
     else:
         raise ValueError(

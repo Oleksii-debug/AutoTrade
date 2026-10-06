@@ -982,7 +982,11 @@ class TradingWireResponse:
         ):
             raise ProviderTransportScopeError("HTTP status must be an integer 100..599")
         try:
-            require_provider_response_bytes(self.body, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+            require_provider_response_bytes(
+                self.body,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
+            )
         except (TypeError, ValueError) as error:
             raise ProviderTransportError("invalid or oversized trading response") from error
 
@@ -1175,6 +1179,7 @@ def _trading_response_evidence(
             raw = require_provider_response_bytes(
                 value.body,
                 max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
             )
         except (TypeError, ValueError) as error:
             raise ProviderTransportError(

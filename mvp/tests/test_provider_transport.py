@@ -894,8 +894,8 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
             "whitebit_http_status_unavailable_execution_unknown",
         )
 
-    def test_whitebit_non_json_429_and_5xx_require_reconciliation(self):
-        for status in (429, 500, 503):
+    def test_whitebit_non_json_408_429_and_5xx_require_reconciliation(self):
+        for status in (408, 429, 500, 503):
             with self.subTest(status=status):
                 exact = _whitebit_exact_trading_response(
                     TradingWireResponse(
@@ -4950,6 +4950,75 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
             exact.ambiguity_reason,
             "bybit_http_status_unavailable_execution_unknown",
         )
+
+    def test_bybit_empty_http_503_persists_exact_unknown_and_never_resends(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="bybit-empty-account",
+                owner_token="owner-bybit-empty",
+            )
+            exact = _bybit_exact_trading_response(
+                TradingWireResponse(http_status=503, body=b"")
+            )
+            self.assertEqual(exact.response_bytes, b"")
+            self.assertEqual(exact.http_status, 503)
+            self.assertTrue(exact.requires_reconciliation)
+            sends = []
+
+            def send(_client_order_id, _request, final_guard):
+                final_guard()
+                sends.append(True)
+                return exact
+
+            common = dict(
+                attempt_id="attempt-bybit-empty-503",
+                intent_id="intent-bybit-empty-503",
+                intent_hash="intent-hash-bybit-empty-503",
+                provider="BYBIT",
+                request={"symbol": "BTCUSDT", "side": "BUY", "quantity": "1"},
+                now="2026-10-06T00:20:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                submission_scope={},
+            )
+            first = dispatcher.dispatch(**common, transport_send=send)
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(first.reason, "bybit_http_5xx_execution_unknown")
+            self.assertEqual(sends, [True])
+
+            terminal = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("attempt-bybit-empty-503"),
+            )[-1]["payload"]
+            self.assertEqual(terminal["response_encoding"], "hex")
+            self.assertEqual(terminal["response_text"], "")
+            self.assertEqual(
+                terminal["response_sha256"],
+                "sha256:" + __import__("hashlib").sha256(b"").hexdigest(),
+            )
+            self.assertEqual(terminal["http_status"], 503)
+            self.assertEqual(terminal["retry_disposition"], "RECONCILE_FIRST")
+
+            binding = load_submission_response_binding(
+                store,
+                environment="SIMULATION",
+                account_id="bybit-empty-account",
+                attempt_id="attempt-bybit-empty-503",
+            )
+            self.assertEqual(binding.response_bytes, b"")
+            self.assertEqual(binding.response_encoding, "hex")
+            self.assertEqual(binding.http_status, 503)
+            with self.assertRaisesRegex(ValueError, "no JSON payload"):
+                binding.payload
+
+            repeated = dispatcher.dispatch(
+                **{**common, "now": "2026-10-06T00:20:01Z"},
+                transport_send=lambda *_args: self.fail("blind provider retry"),
+            )
+            self.assertEqual(repeated.status, "UNKNOWN")
+            self.assertEqual(sends, [True])
 
     def test_bybit_http_503_persists_unknown_and_never_resends(self):
         from mvp.tests.test_bybit_transport import (

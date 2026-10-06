@@ -10,11 +10,25 @@ DEFAULT_MAX_PROVIDER_RESPONSE_BYTES = 8 * 1024 * 1024
 HARD_MAX_PROVIDER_RESPONSE_BYTES = 16 * 1024 * 1024
 
 
-def require_provider_response_bytes(raw: bytes, *, max_bytes: int = DEFAULT_MAX_PROVIDER_RESPONSE_BYTES) -> bytes:
-    """Validate exact raw bytes before JSON parsing, journal, or provider projection."""
+def require_provider_response_bytes(
+    raw: bytes,
+    *,
+    max_bytes: int = DEFAULT_MAX_PROVIDER_RESPONSE_BYTES,
+    allow_empty: bool = False,
+) -> bytes:
+    """Validate exact raw bytes before JSON parsing, journal, or provider projection.
+
+    Empty bytes are admitted only by callers that have already classified an
+    observed post-SEND result as reconciliation evidence. JSON/read consumers
+    retain the historical non-empty default.
+    """
     if type(max_bytes) is not int or not 1 <= max_bytes <= HARD_MAX_PROVIDER_RESPONSE_BYTES:
         raise ValueError("provider response byte budget is invalid")
-    if type(raw) is not bytes or not raw:
+    if type(allow_empty) is not bool:
+        raise TypeError("allow_empty must be boolean")
+    if type(raw) is not bytes:
+        raise ValueError("provider response must be exact bytes")
+    if not raw and not allow_empty:
         raise ValueError("provider response must be nonempty exact bytes")
     if len(raw) > max_bytes:
         raise ValueError("provider response exceeds byte budget")

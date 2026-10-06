@@ -911,6 +911,45 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             before_lifecycle,
         )
 
+    def test_simulation_resolver_cannot_rebind_lifecycle_decimal_parser_dependency(self):
+        reference = self.evidence(
+            external_event_id="resolver-decimal-parser-rebind-life",
+        )
+        original_decimal = option_lifecycle_module._decimal
+
+        def rebind_decimal_then_resolve(evidence_ref):
+            option_lifecycle_module._decimal = (
+                lambda _value, _name: Decimal("1")
+            )
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=rebind_decimal_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", authority.aggregate_id)
+        )
+        try:
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "financial authority changed during evidence resolution",
+            ):
+                authority.apply(reference)
+        finally:
+            option_lifecycle_module._decimal = original_decimal
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            before_lifecycle,
+        )
+
     def test_simulation_resolver_cannot_rebind_provider_response_authority_guard(self):
         reference = self.evidence(
             external_event_id="resolver-provider-response-guard-rebind-life",

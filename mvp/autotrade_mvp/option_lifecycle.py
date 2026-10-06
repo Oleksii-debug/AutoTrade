@@ -737,6 +737,22 @@ def _callback_financial_authority_fingerprint() -> tuple[tuple[object, object], 
         JournalStore.load_events,
         JournalStore.commit_command,
         canonical_option_lifecycle_observation,
+        _canonical_observation_from_sealed_response,
+        OptionLifecycleObservation,
+        OptionLifecycleObservation.__post_init__,
+        _text,
+        _provider_environment,
+        _decimal,
+        _utc,
+        parse_bounded_exact_decimal,
+        canonical_decimal_text,
+        _DIGEST,
+        _ENVIRONMENTS,
+        _EVENT_KINDS,
+        datetime,
+        timezone,
+        Mapping,
+        Decimal,
         _bind_version,
         _require_consumable_option_position,
         _require_physical_delivery_borrow_safety,
@@ -903,6 +919,16 @@ class DurableOptionLifecycleAuthority:
         # Pin the exact sealed-response scope validator and normalization helper
         # before crossing it so callback-time class/module mutation cannot turn
         # neutral evidence into a different lifecycle fact.
+        response_scope_validator = ProviderResponseObservation.require_scope
+        response_scope_validator_code = getattr(
+            response_scope_validator, "__code__", None
+        )
+        query_scope_validator = (
+            provider_core_module.AuthenticatedReadQueryBinding.require_scope
+        )
+        query_scope_validator_code = getattr(
+            query_scope_validator, "__code__", None
+        )
         response_authority_guard = (
             provider_core_module._require_provider_response_observation_authority
         )
@@ -1001,7 +1027,20 @@ class DurableOptionLifecycleAuthority:
             )
         self._require_canonical_authorities()
         if (
-            provider_core_module._require_provider_response_observation_authority
+            ProviderResponseObservation.require_scope is not response_scope_validator
+            or provider_core_module.AuthenticatedReadQueryBinding.require_scope
+            is not query_scope_validator
+            or (
+                response_scope_validator_code is not None
+                and getattr(response_scope_validator, "__code__", None)
+                is not response_scope_validator_code
+            )
+            or (
+                query_scope_validator_code is not None
+                and getattr(query_scope_validator, "__code__", None)
+                is not query_scope_validator_code
+            )
+            or provider_core_module._require_provider_response_observation_authority
             is not response_authority_guard
             or provider_core_module._require_authenticated_read_query_binding_authority
             is not query_authority_guard

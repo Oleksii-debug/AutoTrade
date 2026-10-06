@@ -2053,40 +2053,53 @@ class GuardedDispatcher:
         dispatcher_class_executable_states = []
         for _base, members in dispatcher_class_surfaces:
             for _name, member in members:
-                member_code = getattr(member, "__code__", None)
-                if member_code is None:
-                    continue
-                member_kwdefaults = getattr(member, "__kwdefaults__", None)
-                if (
-                    member_kwdefaults is not None
-                    and type(member_kwdefaults) is not dict
-                ):
-                    raise RuntimeError(
-                        "dispatcher method keyword defaults are unavailable"
+                member_executables = [member]
+                descriptor_function = getattr(member, "__func__", None)
+                if descriptor_function is not None:
+                    member_executables.append(descriptor_function)
+                for accessor_name in ("fget", "fset", "fdel"):
+                    accessor = getattr(member, accessor_name, None)
+                    if accessor is not None:
+                        member_executables.append(accessor)
+                for executable in member_executables:
+                    member_code = getattr(executable, "__code__", None)
+                    if member_code is None:
+                        continue
+                    member_kwdefaults = getattr(
+                        executable,
+                        "__kwdefaults__",
+                        None,
                     )
-                member_kwdefaults_copy = (
-                    dict(member_kwdefaults)
-                    if type(member_kwdefaults) is dict
-                    else None
-                )
-                member_kwdefaults_fingerprint = (
-                    tuple(
-                        (id(key), id(value))
-                        for key, value in dict.items(member_kwdefaults)
+                    if (
+                        member_kwdefaults is not None
+                        and type(member_kwdefaults) is not dict
+                    ):
+                        raise RuntimeError(
+                            "dispatcher method keyword defaults are unavailable"
+                        )
+                    member_kwdefaults_copy = (
+                        dict(member_kwdefaults)
+                        if type(member_kwdefaults) is dict
+                        else None
                     )
-                    if type(member_kwdefaults) is dict
-                    else None
-                )
-                dispatcher_class_executable_states.append(
-                    (
-                        member,
-                        member_code,
-                        getattr(member, "__defaults__", None),
-                        member_kwdefaults,
-                        member_kwdefaults_copy,
-                        member_kwdefaults_fingerprint,
+                    member_kwdefaults_fingerprint = (
+                        tuple(
+                            (id(key), id(value))
+                            for key, value in dict.items(member_kwdefaults)
+                        )
+                        if type(member_kwdefaults) is dict
+                        else None
                     )
-                )
+                    dispatcher_class_executable_states.append(
+                        (
+                            executable,
+                            member_code,
+                            getattr(executable, "__defaults__", None),
+                            member_kwdefaults,
+                            member_kwdefaults_copy,
+                            member_kwdefaults_fingerprint,
+                        )
+                    )
         dispatcher_class_executable_states = tuple(
             dispatcher_class_executable_states
         )

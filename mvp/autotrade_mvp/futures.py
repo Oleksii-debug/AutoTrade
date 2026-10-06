@@ -12,6 +12,7 @@ from decimal import Decimal
 from fractions import Fraction
 from hashlib import sha256
 import json
+import weakref
 from typing import Literal
 from weakref import ref as weakref_ref
 
@@ -27,7 +28,7 @@ from .exact_decimal import (
     is_exact_decimal_multiple,
     parse_bounded_exact_decimal,
 )
-from .instruments import InstrumentVersion, _detached_instrument_version
+from .instruments import InstrumentRegistry, InstrumentRegistryError, InstrumentVersion, _detached_instrument_version
 from .settlement_convention import SettlementConvention
 
 
@@ -119,8 +120,81 @@ def _decimal_identity(value: Decimal) -> str:
         ) from error
 
 
+def _install_futures_contract_lifecycle_authority():
+    """Return a construction metaclass plus an integrity verifier.
+
+    Registration occurs only after type.__call__ completes the ordinary
+    __new__ -> generated dataclass __init__ -> __post_init__ path.  Calling
+    object.__new__, __new__, __init__, or __post_init__ directly therefore
+    cannot mint lifecycle authority.
+    """
+
+    authorities: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            tuple[str, str, datetime, datetime, datetime],
+        ],
+    ] = {}
+
+    def prune_dead() -> None:
+        dead = [
+            object_id
+            for object_id, (value_ref, _snapshot) in tuple(authorities.items())
+            if value_ref() is None
+        ]
+        for object_id in dead:
+            authorities.pop(object_id, None)
+
+    class LifecycleAuthorityMeta(type):
+        def __call__(cls, *args, **kwargs):
+            value = super().__call__(*args, **kwargs)
+            if type(value) is cls:
+                prune_dead()
+                object_id = id(value)
+                current = authorities.get(object_id)
+                if current is not None and current[0]() is not None:
+                    raise FuturesError(
+                        "futures lifecycle authority identity collision"
+                    )
+                snapshot = (
+                    value.instrument,
+                    value.settlement_method,
+                    value.expiry,
+                    value.last_trade_at,
+                    value.delivery_cutoff,
+                )
+                authorities[object_id] = (weakref.ref(value), snapshot)
+            return value
+
+    def snapshot_for(
+        value: object,
+    ) -> tuple[str, str, datetime, datetime, datetime]:
+        prune_dead()
+        entry = authorities.get(id(value))
+        if entry is None:
+            raise FuturesError("futures lifecycle authority is not established")
+        value_ref, snapshot = entry
+        current = value_ref()
+        if current is value:
+            return snapshot
+        if current is None:
+            authorities.pop(id(value), None)
+            raise FuturesError("futures lifecycle authority is not established")
+        raise FuturesError("futures lifecycle authority identity collision")
+
+    return LifecycleAuthorityMeta, snapshot_for
+
+
+(
+    _FuturesContractLifecycleMeta,
+    _futures_contract_lifecycle_snapshot_for,
+) = _install_futures_contract_lifecycle_authority()
+del _install_futures_contract_lifecycle_authority
+
+
 @dataclass(frozen=True)
-class FuturesContract:
+class FuturesContract(metaclass=_FuturesContractLifecycleMeta):
     instrument: str
     payoff: Literal["LINEAR", "INVERSE"]
     multiplier: Decimal
@@ -132,7 +206,6 @@ class FuturesContract:
     settlement_method: Literal["CASH", "PHYSICAL"]
     price_base_currency: str | None = None
     canonical_instrument: InstrumentVersion | None = None
-
     def __post_init__(self) -> None:
         object.__setattr__(self, "instrument", _text(self.instrument, "instrument"))
         payoff = _text(self.payoff, "payoff")
@@ -265,6 +338,9 @@ class FuturesContract:
                 detached.settlement_convention,
             )
         return contract
+
+
+del _FuturesContractLifecycleMeta
 
 
 def _install_futures_contract_settlement_authority():
@@ -410,7 +486,8 @@ class FuturesSettlementEvidence:
         if type(self.scope) is not FuturesSettlementScope:
             raise FuturesError("settlement scope must be exact FuturesSettlementScope")
         object.__setattr__(
-            self, "effective_at", _utc(self.effective_at, "effective_at")
+            self,
+            "effective_at", _utc(self.effective_at, "effective_at")
         )
         for name in ("sequence", "revision"):
             value = getattr(self, name)
@@ -989,20 +1066,208 @@ def lifecycle_gate(
     contract: FuturesContract,
     at: datetime,
     *,
-    physical_delivery_authorized: bool = False,
+    instrument_registry: InstrumentRegistry | None = None,
 ) -> str:
-    """Return a conservative lifecycle state for holding/trading the contract."""
+    """Return the conservative lifecycle state for holding/trading the contract.
+
+    Physical delivery is intentionally not authorizable in this provider-neutral
+    primitive. Until a separately qualified canonical authority/provider path
+    exists, reaching the delivery cutoff is a hard fail-closed boundary.
+    """
+
+    if type(contract) is not FuturesContract:
+        raise FuturesError("lifecycle gate requires exact FuturesContract")
+
+    for field_name in (
+        "instrument",
+        "payoff",
+        "quote_currency",
+        "settlement_currency",
+        "settlement_method",
+    ):
+        if type(getattr(contract, field_name)) is not str:
+            raise FuturesError(
+                f"lifecycle contract {field_name} must be exact text"
+            )
+    if type(contract.multiplier) is not Decimal:
+        raise FuturesError("lifecycle contract multiplier must be exact Decimal")
+    if (
+        contract.price_base_currency is not None
+        and type(contract.price_base_currency) is not str
+    ):
+        raise FuturesError(
+            "lifecycle contract price_base_currency must be exact text or None"
+        )
+    for field_name in ("expiry", "last_trade_at", "delivery_cutoff"):
+        value = getattr(contract, field_name)
+        if type(value) is not datetime or value.tzinfo is not timezone.utc:
+            raise FuturesError(
+                f"lifecycle contract {field_name} must be exact UTC datetime"
+            )
+
+    version = contract.canonical_instrument
+    if type(version) is not InstrumentVersion:
+        raise FuturesError(
+            "futures lifecycle requires exact canonical InstrumentVersion"
+        )
+    if (
+        type(version.instrument_id) is not str
+        or type(version.version) is not int
+        or type(version.asset_class) is not str
+        or type(version.payoff) is not str
+        or type(version.contract_multiplier) is not Decimal
+        or type(version.quote_currency) is not str
+        or type(version.settlement_currency) is not str
+        or type(version.base_currency) is not str
+        or type(version.settlement_method) is not str
+        or type(version.expiry) is not datetime
+        or type(version.last_trade_at) is not datetime
+        or type(version.delivery_cutoff) is not datetime
+        or version.expiry.tzinfo is not timezone.utc
+        or version.last_trade_at.tzinfo is not timezone.utc
+        or version.delivery_cutoff.tzinfo is not timezone.utc
+    ):
+        raise FuturesError(
+            "canonical lifecycle instrument fields must retain exact UTC types"
+        )
+    if (
+        version.asset_class != "FUTURE"
+        or contract.instrument != f"{version.instrument_id}@{version.version}"
+        or contract.payoff != version.payoff
+        or contract.multiplier != version.contract_multiplier
+        or contract.quote_currency != version.quote_currency
+        or contract.settlement_currency != version.settlement_currency
+        or contract.expiry != version.expiry
+        or contract.last_trade_at != version.last_trade_at
+        or contract.delivery_cutoff != version.delivery_cutoff
+        or contract.settlement_method != version.settlement_method
+        or (
+            contract.payoff == "INVERSE"
+            and contract.price_base_currency != version.base_currency
+        )
+    ):
+        raise FuturesError(
+            "futures lifecycle contract no longer matches canonical InstrumentVersion"
+        )
+
+    snapshot = _futures_contract_lifecycle_snapshot_for(contract)
+    current_lifecycle = (
+        contract.instrument,
+        contract.settlement_method,
+        contract.expiry,
+        contract.last_trade_at,
+        contract.delivery_cutoff,
+    )
+    if type(snapshot) is not tuple or len(snapshot) != 5 or snapshot != current_lifecycle:
+        raise FuturesError(
+            "futures lifecycle contract no longer matches construction authority"
+        )
+
+    # Exact object shape and a construction snapshot establish integrity only.
+    # This registry resolution is deliberately diagnostic: InstrumentRegistry
+    # construction is public, so the object supplied here does not by itself
+    # prove product/composition selection authority for opening exposure.
+    if type(instrument_registry) is not InstrumentRegistry:
+        raise FuturesError(
+            "futures lifecycle requires exact canonical InstrumentRegistry"
+        )
+    try:
+        selected_version = InstrumentRegistry.exact(
+            instrument_registry,
+            contract.instrument,
+        )
+    except InstrumentRegistryError as error:
+        raise FuturesError(
+            "futures lifecycle instrument is not selected by canonical InstrumentRegistry"
+        ) from error
+    if type(selected_version) is not InstrumentVersion:
+        raise FuturesError(
+            "canonical registry returned invalid InstrumentVersion authority"
+        )
+
+    selected_contract_cut = (
+        selected_version.instrument_id,
+        selected_version.version,
+        selected_version.asset_class,
+        selected_version.payoff,
+        selected_version.contract_multiplier,
+        selected_version.quote_currency,
+        selected_version.settlement_currency,
+        selected_version.base_currency,
+        selected_version.settlement_method,
+        selected_version.expiry,
+        selected_version.last_trade_at,
+        selected_version.delivery_cutoff,
+    )
+    supplied_contract_cut = (
+        version.instrument_id,
+        version.version,
+        version.asset_class,
+        version.payoff,
+        version.contract_multiplier,
+        version.quote_currency,
+        version.settlement_currency,
+        version.base_currency,
+        version.settlement_method,
+        version.expiry,
+        version.last_trade_at,
+        version.delivery_cutoff,
+    )
+    if selected_contract_cut != supplied_contract_cut:
+        raise FuturesError(
+            "futures lifecycle InstrumentVersion differs from canonical registry selection"
+        )
+    if (
+        contract.instrument
+        != f"{selected_version.instrument_id}@{selected_version.version}"
+        or contract.payoff != selected_version.payoff
+        or contract.multiplier != selected_version.contract_multiplier
+        or contract.quote_currency != selected_version.quote_currency
+        or contract.settlement_currency != selected_version.settlement_currency
+        or contract.expiry != selected_version.expiry
+        or contract.last_trade_at != selected_version.last_trade_at
+        or contract.delivery_cutoff != selected_version.delivery_cutoff
+        or contract.settlement_method != selected_version.settlement_method
+        or (
+            contract.payoff == "INVERSE"
+            and contract.price_base_currency != selected_version.base_currency
+        )
+    ):
+        raise FuturesError(
+            "futures lifecycle contract differs from canonical registry selection"
+        )
 
     point = _utc(at, "at")
-    if type(physical_delivery_authorized) is not bool:
-        raise FuturesError("physical_delivery_authorized must be boolean")
+    try:
+        effective_version = InstrumentRegistry.at(
+            instrument_registry,
+            selected_version.instrument_id,
+            point,
+        )
+    except InstrumentRegistryError as error:
+        raise FuturesError(
+            "futures lifecycle InstrumentVersion is not effective at requested instant"
+        ) from error
+    if type(effective_version) is not InstrumentVersion:
+        raise FuturesError(
+            "canonical registry returned invalid effective InstrumentVersion authority"
+        )
+    if (
+        effective_version.instrument_id != selected_version.instrument_id
+        or effective_version.version != selected_version.version
+    ):
+        raise FuturesError(
+            "futures lifecycle InstrumentVersion is not effective at requested instant"
+        )
+
+    if selected_version.status != "ACTIVE":
+        return f"INSTRUMENT_{selected_version.status}"
     if point >= contract.expiry:
         return "EXPIRED"
     if point >= contract.last_trade_at:
         return "TRADING_ENDED"
     if (
         contract.settlement_method == "PHYSICAL"
-        and not physical_delivery_authorized
         and point >= contract.delivery_cutoff
     ):
         return "DELIVERY_BLOCKED"
@@ -1013,12 +1278,24 @@ def require_open_for_new_exposure(
     contract: FuturesContract,
     at: datetime,
     *,
-    physical_delivery_authorized: bool = False,
+    instrument_registry: InstrumentRegistry | None = None,
 ) -> None:
+    """Fail closed unless lifecycle blocks first or product authority is proven.
+
+    ``lifecycle_gate`` can validate an exact registry/version cut, but callers can
+    construct ``InstrumentRegistry`` themselves. Until the real order-admission
+    composition owns and re-resolves a selected registry authority, an ``OPEN``
+    diagnostic state is not permission to create financial exposure.
+    """
+
     state = lifecycle_gate(
         contract,
         at,
-        physical_delivery_authorized=physical_delivery_authorized,
+        instrument_registry=instrument_registry,
     )
     if state != "OPEN":
         raise FuturesError(f"new futures exposure is blocked: {state}")
+    raise FuturesError(
+        "new futures exposure requires product-selected instrument registry "
+        "composition authority; caller-supplied InstrumentRegistry is diagnostic only"
+    )

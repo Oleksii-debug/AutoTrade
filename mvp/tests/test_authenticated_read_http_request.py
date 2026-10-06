@@ -253,6 +253,61 @@ class AuthenticatedReadHttpRequestTests(unittest.TestCase):
         self.assertIsNone(outbound.data)
         self.assertEqual(timeout, 5)
 
+    def test_wire_client_preserves_canonical_credential_header_values(self):
+        class Response:
+            status = 200
+
+            def __init__(self):
+                self.body = BytesIO(b'{"ok":true}')
+
+            def read(self, size=-1):
+                return self.body.read(size)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class Opener:
+            def __init__(self):
+                self.requests = []
+
+            def open(self, request, *, timeout):
+                self.requests.append((request, timeout))
+                return Response()
+
+        request = AuthenticatedReadHttpRequest(
+            url="https://api.example.test/account",
+            headers={
+                "Authorization": "Bearer abc+/_-.=~",
+                "X-BAPI-SIGN": "ABCDEF0123456789",
+            },
+            timeout_seconds=5,
+            method="GET",
+        )
+        client = UrllibJsonWireClient(max_response_bytes=1024)
+        opener = Opener()
+        client._opener = opener
+
+        response = client.send(request)
+
+        self.assertIs(type(response), AuthenticatedReadWireResponse)
+        outbound, timeout = opener.requests[0]
+        actual_headers = {
+            name.lower(): value
+            for name, value in outbound.header_items()
+        }
+        self.assertEqual(
+            actual_headers["authorization"],
+            "Bearer abc+/_-.=~",
+        )
+        self.assertEqual(
+            actual_headers["x-bapi-sign"],
+            "ABCDEF0123456789",
+        )
+        self.assertEqual(timeout, 5)
+
     def test_wire_client_preserves_explicit_empty_body_post_method(self):
         class Response:
             status = 200

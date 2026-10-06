@@ -1458,5 +1458,104 @@ class PostSendBuiltinAuthorityTests(unittest.TestCase):
             )
 
 
+    def test_post_send_builtin_shadow_and_journal_code_mutation_compose_safely(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            operation = JournalStore.load_events
+            original_code = operation.__code__
+            sentinel = object()
+            original_zip = vars(dispatch_module).get("zip", sentinel)
+            hostile_calls = 0
+            outbound = 0
+
+            def hostile_zip(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("module-global zip shadow executed")
+
+            def forged_load_events(self, aggregate_type, aggregate_id):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("forged JournalStore.load_events code executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                dispatch_module.zip = hostile_zip
+                operation.__code__ = forged_load_events.__code__
+                return response
+
+            try:
+                first = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-composed-builtin-journal-a1",
+                    transport=transport,
+                )
+                self.assertIs(JournalStore.load_events, operation)
+                self.assertIs(operation.__code__, original_code)
+                if original_zip is sentinel:
+                    self.assertNotIn("zip", vars(dispatch_module))
+                else:
+                    self.assertIs(dispatch_module.zip, original_zip)
+            finally:
+                operation.__code__ = original_code
+                if original_zip is sentinel:
+                    vars(dispatch_module).pop("zip", None)
+                else:
+                    dispatch_module.zip = original_zip
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(outbound, 1)
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(
+                first.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-composed-builtin-journal-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
+            restarted = GuardedDispatcher(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner-b",
+            )
+            replay = restarted.dispatch(
+                attempt_id="postsend-composed-builtin-journal-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T19:48:01Z",
+                authority_check=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not re-authorize")),
+                transport_send=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not resend")),
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(replay.status, "UNKNOWN")
+            self.assertEqual(
+                replay.reason,
+                "recovered_after_send_barrier_without_terminal_result",
+            )
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(outbound, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

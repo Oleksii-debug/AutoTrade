@@ -143,10 +143,12 @@ closed both on this canonical Section-6 lineage:
   `timedelta` chronology, and `prepared_lease_seconds` must be an exact
   built-in positive integer.
 
-Focused regressions now cover both race orders (BLOCKED wins and Sending wins),
-two recoveries converging through durable truth, hostile integer lease input,
-and the exact microsecond expiry boundary immediately before and at lease
-expiration.
+Focused regressions now cover both Prepared/send race orders (BLOCKED wins
+and Sending wins), repeated Prepared recovery owners converging through durable
+truth, concurrent recovery owners racing from the same SubmissionSending cut
+and converging on one SubmissionUnknown terminal, no repeated recovery authority
+call, hostile integer lease input, and the exact microsecond expiry boundary
+immediately before and at lease expiration.
 
 These changes preserve the fail-closed rule: before `SubmissionSending`, an
 expired Prepared can be proven zero-wire and BLOCKED; once `SubmissionSending`

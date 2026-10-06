@@ -79,7 +79,11 @@ def observation(
         capability=capability(),
         surface=surface,
         endpoint=endpoint,
-        query={"category": "option"} if query is None else query,
+        query=(
+            {"category": "option", "symbol": "BTC-29DEC22-16000-P"}
+            if query is None
+            else query
+        ),
         at=NOW,
         permission_scope=permission_scope,
     )
@@ -206,8 +210,21 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
                 "provenance surface mismatch",
             ),
             (
-                {"query": {"category": "linear"}},
+                {"query": {"category": "linear", "symbol": "BTC-29DEC22-16000-P"}},
                 "requires ACCOUNT.READ category=option",
+            ),
+            (
+                {"query": {"category": "option"}},
+                "requires an exact symbol filter",
+            ),
+            (
+                {
+                    "query": {
+                        "category": "option",
+                        "symbol": "BTC-29DEC22-16000-C",
+                    }
+                },
+                "query symbol does not match instrument_version",
             ),
         )
         for kwargs, message in cases:
@@ -250,6 +267,76 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
                     },
                 )
             )
+
+    def test_parser_rejects_instrument_version_aliasing_requested_symbol(self):
+        cases = (
+            "BTC-29DEC22-16000-P",
+            "BTC-29DEC22-16000-P@",
+            "btc-29DEC22-16000-P@1",
+            "@1",
+        )
+        for instrument_version in cases:
+            with self.subTest(instrument_version=instrument_version):
+                observed = NOW - timedelta(minutes=2)
+                expires = NOW + timedelta(minutes=10)
+                claims = tuple(
+                    CapabilityClaim(
+                        source=source,
+                        provider_id="BYBIT",
+                        account_id="acct-option",
+                        entity_id="option-lifecycle-btc",
+                        environment="PAPER",
+                        provider_environment="TESTNET",
+                        instrument_version=instrument_version,
+                        observed_at=observed,
+                        expires_at=expires,
+                        supported_order_types=frozenset({"LIMIT"}),
+                        time_in_force=frozenset({"GTC"}),
+                        permission_scopes=frozenset({"ACCOUNT.READ"}),
+                        position_mode="NET",
+                        native_protection=frozenset(),
+                        rate_limit_policy_id="bybit-option-delivery-test-v1",
+                        data_entitlements=frozenset({"ACTIVITIES"}),
+                        evidence_ref={
+                            "artifact_id": _ARTIFACT_IDS[source],
+                            "sha256": "sha256:" + "b" * 64,
+                            "observed_at": observed.isoformat().replace("+00:00", "Z"),
+                        },
+                    )
+                    for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+                )
+                capability_snapshot = derive_capability_snapshot(
+                    snapshot_id="99999999-9999-4999-8999-999999999999",
+                    claims=claims,
+                    observed_at=NOW - timedelta(minutes=1),
+                    evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+                )
+                prepared = prepare_authenticated_read_query(
+                    capability=capability_snapshot,
+                    surface=Surface.ACTIVITIES,
+                    endpoint=ENDPOINT,
+                    query={
+                        "category": "option",
+                        "symbol": "BTC-29DEC22-16000-P",
+                    },
+                    at=NOW,
+                    permission_scope="ACCOUNT.READ",
+                )
+                source = observe_authenticated_json_response(
+                    query_binding=prepared,
+                    http_status=200,
+                    response_bytes=json.dumps(
+                        response(),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8"),
+                    observed_at=NOW + timedelta(seconds=1),
+                )
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "(?:instrument_version is not canonical|query symbol does not match instrument_version)",
+                ):
+                    parse_option_delivery_page(source)
 
     def test_parser_binds_rows_to_requested_time_window(self):
         delivery_time = response()["result"]["list"][0]["deliveryTime"]

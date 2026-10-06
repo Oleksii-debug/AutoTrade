@@ -2608,6 +2608,41 @@ class GuardedDispatcher:
             for name, member in decoder_json_decoder_surface
             if name in {"__init__", "decode", "raw_decode"}
         )
+        decoder_json_decoder_signature_bindings = []
+        for name, member in decoder_json_decoder_surface:
+            if name not in {"__init__", "decode", "raw_decode"}:
+                continue
+            member_defaults = snapshot_getattr(
+                member,
+                "__defaults__",
+                None,
+            )
+            member_kwdefaults = snapshot_getattr(
+                member,
+                "__kwdefaults__",
+                None,
+            )
+            if snapshot_type(member_kwdefaults) is snapshot_dict:
+                member_kwdefaults_copy = snapshot_dict(member_kwdefaults)
+                member_kwdefaults_fingerprint = snapshot_tuple(
+                    (snapshot_id(key), snapshot_id(value))
+                    for key, value in snapshot_dict.items(member_kwdefaults)
+                )
+            else:
+                member_kwdefaults_copy = None
+                member_kwdefaults_fingerprint = None
+            decoder_json_decoder_signature_bindings.append(
+                (
+                    member,
+                    member_defaults,
+                    member_kwdefaults,
+                    member_kwdefaults_copy,
+                    member_kwdefaults_fingerprint,
+                )
+            )
+        decoder_json_decoder_signature_bindings = snapshot_tuple(
+            decoder_json_decoder_signature_bindings
+        )
         decoder_json_decoder_init = decoder_json_decoder.__dict__.get(
             "__init__"
         )
@@ -2862,6 +2897,54 @@ class GuardedDispatcher:
                 if decoder_json_decoder.__dict__.get(name) is not member:
                     snapshot_setattr(decoder_json_decoder, name, member)
                     changed = True
+
+            for (
+                member,
+                expected_defaults,
+                expected_kwdefaults,
+                expected_kwdefaults_copy,
+                expected_kwdefaults_fingerprint,
+            ) in decoder_json_decoder_signature_bindings:
+                if (
+                    snapshot_getattr(member, "__defaults__", None)
+                    is not expected_defaults
+                ):
+                    snapshot_setattr(
+                        member,
+                        "__defaults__",
+                        expected_defaults,
+                    )
+                    changed = True
+                if (
+                    snapshot_getattr(member, "__kwdefaults__", None)
+                    is not expected_kwdefaults
+                ):
+                    snapshot_setattr(
+                        member,
+                        "__kwdefaults__",
+                        expected_kwdefaults,
+                    )
+                    changed = True
+                if (
+                    expected_kwdefaults_fingerprint is not None
+                    and snapshot_type(expected_kwdefaults) is snapshot_dict
+                ):
+                    current_member_kwdefaults_fingerprint = snapshot_tuple(
+                        (snapshot_id(key), snapshot_id(value))
+                        for key, value in snapshot_dict.items(
+                            expected_kwdefaults
+                        )
+                    )
+                    if (
+                        current_member_kwdefaults_fingerprint
+                        != expected_kwdefaults_fingerprint
+                    ):
+                        snapshot_dict.clear(expected_kwdefaults)
+                        snapshot_dict.update(
+                            expected_kwdefaults,
+                            expected_kwdefaults_copy,
+                        )
+                        changed = True
 
             for name, expected in decoder_json_init_global_bindings:
                 if decoder_json_decoder_init_globals_get(name) is not expected:

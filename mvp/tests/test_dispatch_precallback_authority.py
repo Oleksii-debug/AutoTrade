@@ -86,6 +86,55 @@ class PreCallbackAuthorityTests(unittest.TestCase):
                 ["SubmissionPrepared"],
             )
 
+    def test_initial_authority_callback_cannot_poison_exact_response_snapshot_authority(self):
+        original = dispatch_module._snapshot_exact_transport_response
+        forged_calls = 0
+        outbound = 0
+
+        def forged(*_args, **_kwargs):
+            nonlocal forged_calls
+            forged_calls += 1
+            raise AssertionError("forged exact-response snapshot executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+
+            def authority_check(_intent_hash, _now):
+                dispatch_module._snapshot_exact_transport_response = forged
+                return True, "allowed"
+
+            def transport(_client_order_id, _request, _final_guard):
+                nonlocal outbound
+                outbound += 1
+                raise AssertionError("transport must remain zero-wire")
+
+            try:
+                with self.assertRaises(dispatch_module._DispatchAuthorityChanged):
+                    self._dispatch(
+                        dispatcher,
+                        "precallback-exact-response-a1",
+                        authority_check,
+                        transport,
+                    )
+            finally:
+                dispatch_module._snapshot_exact_transport_response = original
+
+            self.assertIs(
+                dispatch_module._snapshot_exact_transport_response,
+                original,
+            )
+            self.assertEqual(forged_calls, 0)
+            self.assertEqual(outbound, 0)
+            self.assertEqual(
+                self._event_types(
+                    path,
+                    dispatcher,
+                    "precallback-exact-response-a1",
+                ),
+                ["SubmissionPrepared"],
+            )
+
     def test_final_barrier_clock_cannot_execute_rebound_instant_helper(self):
         original = dispatch_module._instant
         forged_calls = 0

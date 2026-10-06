@@ -304,5 +304,79 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 )
 
 
+    def test_authority_result_rejects_polymorphic_tuple_and_reason_before_transport(self):
+        class TrapTuple(tuple):
+            def __len__(self):
+                raise AssertionError("caller-controlled tuple length executed")
+
+            def __iter__(self):
+                raise AssertionError("caller-controlled tuple iteration executed")
+
+        class TrapReason(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("caller-controlled reason strip executed")
+
+        for authority_result, expected_reason in (
+            (TrapTuple((True, "allowed")), "authority_check_invalid_result"),
+            ((True, TrapReason("allowed")), "authority_check_invalid_reason"),
+        ):
+            with self.subTest(expected_reason=expected_reason), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+                transport_calls = 0
+
+                def transport(_cid, _request, _guard):
+                    nonlocal transport_calls
+                    transport_calls += 1
+                    raise AssertionError("transport must not execute")
+
+                result = dispatcher.dispatch(
+                    attempt_id="authority-shape-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T14:00:00Z",
+                    authority_check=lambda _hash, _now, value=authority_result: value,
+                    transport_send=transport,
+                )
+                self.assertEqual(result.status, "BLOCKED")
+                self.assertEqual(result.reason, expected_reason)
+                self.assertEqual(transport_calls, 0)
+
+    def test_dispatch_rejects_polymorphic_timestamp_before_timestamp_methods_execute(self):
+        class TrapTimestamp(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("caller-controlled timestamp strip executed")
+
+            def replace(self, *args, **kwargs):
+                raise AssertionError("caller-controlled timestamp replace executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            with self.assertRaisesRegex(ValueError, "now must be an ISO timestamp"):
+                dispatcher.dispatch(
+                    attempt_id="timestamp-shape-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now=TrapTimestamp("2026-10-06T14:00:00Z"),
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=lambda _cid, _request, _guard: None,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

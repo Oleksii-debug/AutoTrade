@@ -224,5 +224,54 @@ class JsonDecoderTransitiveAuthorityTests(unittest.TestCase):
             )
 
 
+    def test_transport_cannot_retarget_json_decoder_scanner_make_scanner(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            decoder_init = dispatch_module.json.JSONDecoder.__dict__["__init__"]
+            decoder_globals = decoder_init.__globals__
+            scanner_module = decoder_globals["scanner"]
+            original_make_scanner = scanner_module.make_scanner
+            forged_calls = 0
+
+            def forged_make_scanner(_context):
+                def forged_scan_once(text, _index):
+                    nonlocal forged_calls
+                    forged_calls += 1
+                    return {"forged": True}, len(text)
+
+                return forged_scan_once
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                scanner_module.make_scanner = forged_make_scanner
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "json-decoder-scanner-retarget",
+                    transport,
+                )
+                self.assertIs(
+                    scanner_module.make_scanner,
+                    original_make_scanner,
+                )
+                self.assertEqual(forged_calls, 0)
+            finally:
+                scanner_module.make_scanner = original_make_scanner
+
+            self._assert_unknown_after_send(
+                path,
+                dispatcher,
+                "json-decoder-scanner-retarget",
+                result,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -413,6 +413,38 @@ class BackupRestoreTests(unittest.TestCase):
             )
             self.assertTrue(restore_requires_reconciliation(restored))
 
+
+    def test_quarantined_runtime_checkpoint_keeps_restore_gate_closed_until_reconstitution(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_autonomous_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            marker = json.loads(
+                (
+                    restored / "RESTORE_RECONCILIATION_REQUIRED.json"
+                ).read_text(encoding="utf-8")
+            )
+
+            self.assertTrue(marker["runtime_checkpoint_reconstitution_required"])
+            self.assertTrue(restore_requires_reconciliation(restored))
+            with self.assertRaisesRegex(
+                BackupError,
+                "fresh runtime checkpoint authority reconstitution",
+            ):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=None,
+                    reconciliation_checkpoint_event_id="unused",
+                    fencing_evidence=(),
+                    completed_at=marker["restored_at"],
+                )
+
+            self.assertTrue(restore_requires_reconciliation(restored))
+            self.assertFalse(
+                (restored / "RESTORE_RECONCILIATION_COMPLETE.json").exists()
+            )
+
     def test_runtime_checkpoint_created_during_sqlite_snapshot_aborts_backup(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

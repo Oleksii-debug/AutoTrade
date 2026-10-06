@@ -1652,6 +1652,15 @@ def complete_restore_reconciliation(
 
     root = Path(destination_root)
     marker = _read_restore_marker(root)
+    if marker["runtime_checkpoint_reconstitution_required"] is True:
+        # Portable checkpoint bytes are evidence only.  Their source-local
+        # signing key is deliberately absent after restore, and this module
+        # does not mint replacement runtime authority.  Keep the global restore
+        # gate closed until a canonical composition explicitly reconstitutes
+        # and durably binds fresh checkpoint authority to the restored JournalStore.
+        raise BackupError(
+            "Restore completion requires fresh runtime checkpoint authority reconstitution"
+        )
     if marker["status"] == "RECONCILIATION_COMPLETE":
         if restore_requires_reconciliation(root):
             raise BackupIntegrityError(
@@ -1796,6 +1805,8 @@ def restore_requires_reconciliation(destination_root: str | Path) -> bool:
     try:
         marker = _read_restore_marker(root)
     except BackupIntegrityError:
+        return True
+    if marker["runtime_checkpoint_reconstitution_required"] is True:
         return True
     if marker["status"] != "RECONCILIATION_COMPLETE":
         return True

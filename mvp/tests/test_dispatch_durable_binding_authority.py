@@ -181,6 +181,10 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 "response_bytes",
                 "response_sha256",
                 "http_status",
+                "terminal_state",
+                "response_encoding",
+                "ambiguity_reason",
+                "retry_disposition",
                 "_factory_token",
             ):
                 object.__setattr__(
@@ -710,6 +714,10 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 type(self).callbacks += 1
                 raise AssertionError("caller-controlled encode executed")
 
+            def __eq__(self, other):
+                type(self).callbacks += 1
+                raise AssertionError("caller-controlled equality executed")
+
         scope = {}
         response = b"{}"
         kwargs = {
@@ -739,9 +747,26 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             "account_id",
             "submission_scope_hash",
             "response_sha256",
+            "terminal_state",
+            "response_encoding",
         ):
             TrapText.callbacks = 0
             forged = dict(kwargs)
+            forged[field] = TrapText(forged[field])
+            with self.subTest(field=field):
+                with self.assertRaises((TypeError, ValueError)):
+                    SubmissionResponseBinding(**forged)
+                self.assertEqual(TrapText.callbacks, 0)
+
+        unknown_kwargs = dict(kwargs)
+        unknown_kwargs.update(
+            terminal_state="UNKNOWN",
+            ambiguity_reason="provider_response_ambiguous",
+            retry_disposition="RECONCILE_FIRST",
+        )
+        for field in ("ambiguity_reason", "retry_disposition"):
+            TrapText.callbacks = 0
+            forged = dict(unknown_kwargs)
             forged[field] = TrapText(forged[field])
             with self.subTest(field=field):
                 with self.assertRaises((TypeError, ValueError)):

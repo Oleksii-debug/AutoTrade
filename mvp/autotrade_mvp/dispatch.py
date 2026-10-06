@@ -246,8 +246,8 @@ class SubmissionResponseBinding:
             if (
                 type(self.ambiguity_reason) is not str
                 or not self.ambiguity_reason
-                or self.retry_disposition != "RECONCILE_FIRST"
                 or type(self.retry_disposition) is not str
+                or self.retry_disposition != "RECONCILE_FIRST"
             ):
                 raise ValueError(
                     "durable UNKNOWN response requires exact reconciliation metadata"
@@ -645,6 +645,8 @@ def _install_submission_response_binding_authority(loader):
     canonical_id = id
     canonical_tuple = tuple
     canonical_range = range
+    canonical_len = len
+    canonical_enumerate = enumerate
     canonical_frozenset = frozenset
     canonical_str = str
     canonical_int = int
@@ -712,6 +714,8 @@ def _install_submission_response_binding_authority(loader):
             or id is not canonical_id
             or tuple is not canonical_tuple
             or range is not canonical_range
+            or len is not canonical_len
+            or enumerate is not canonical_enumerate
             or frozenset is not canonical_frozenset
             or str is not canonical_str
             or int is not canonical_int
@@ -810,7 +814,7 @@ def _install_submission_response_binding_authority(loader):
         expected = state[1]
         current = raw_snapshot(value)
         validate_snapshot(current)
-        for index in canonical_range(len(field_names)):
+        for index in canonical_range(canonical_len(field_names)):
             if index in {9, 11, 18}:
                 if current[index] is not expected[index]:
                     authority_changed()
@@ -824,7 +828,7 @@ def _install_submission_response_binding_authority(loader):
         return mapping_proxy_type(
             {
                 name: current[index]
-                for index, name in enumerate(field_names[:-1])
+                for index, name in canonical_enumerate(field_names[:-1])
             }
         )
 

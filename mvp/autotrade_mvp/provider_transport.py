@@ -1074,9 +1074,10 @@ class SignedHttpRequest:
 class AuthenticatedReadHttpRequest:
     """One immutable authenticated provider read request.
 
-    GET keeps the exact signed-query contract used by Binance. POST supports
-    providers such as Kraken whose private read APIs authenticate a form body.
-    The envelope remains separate from SignedHttpRequest so read responses keep
+    GET supports both exact signed-query reads and session-authenticated
+    queryless reads. POST supports both signed form bodies and exact empty-body
+    session reads. Provider route/capability authority remains outside this
+    envelope, which stays separate from SignedHttpRequest so read responses keep
     their typed observation lifecycle and never acquire write authority.
     """
 
@@ -1108,9 +1109,9 @@ class AuthenticatedReadHttpRequest:
                 "authenticated-read body must be exact bytes"
             )
         if method == "GET":
-            if not parsed.query or self.body:
+            if self.body:
                 raise ProviderTransportScopeError(
-                    "authenticated GET requires an exact signed query and no body"
+                    "authenticated GET requires no body"
                 )
         elif parsed.query:
             raise ProviderTransportScopeError(

@@ -356,6 +356,21 @@ def _build_provider_borrow_evidence_verifier():
     availability_type = BorrowAvailabilityEvidence
     recall_type = BorrowRecallEvidence
     resolution_type = BorrowRecallResolutionEvidence
+    availability_implementation = (
+        availability_type.__new__,
+        availability_type.__init__,
+        availability_type.__post_init__,
+    )
+    recall_implementation = (
+        recall_type.__new__,
+        recall_type.__init__,
+        recall_type.__post_init__,
+    )
+    resolution_implementation = (
+        resolution_type.__new__,
+        resolution_type.__init__,
+        resolution_type.__post_init__,
+    )
     artifact_store_type = ArtifactStore
     artifact_integrity_error = ArtifactIntegrityError
     availability_detail = BorrowAvailabilityEvidence.resource_detail
@@ -381,6 +396,24 @@ def _build_provider_borrow_evidence_verifier():
         }:
             raise TypeError(
                 "securities-borrow evidence must use an exact canonical type"
+            )
+        expected_implementation = (
+            availability_implementation
+            if evidence_type_obj is availability_type
+            else (
+                recall_implementation
+                if evidence_type_obj is recall_type
+                else resolution_implementation
+            )
+        )
+        current_implementation = (
+            evidence_type_obj.__new__,
+            evidence_type_obj.__init__,
+            evidence_type_obj.__post_init__,
+        )
+        if current_implementation != expected_implementation:
+            raise BorrowEvidenceError(
+                "provider borrow evidence implementation changed after verifier binding"
             )
         evidence = replace_evidence(evidence)
         if type(artifact_store) is not artifact_store_type:

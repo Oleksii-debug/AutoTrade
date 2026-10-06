@@ -229,6 +229,35 @@ class ReconciliationJournalTests(unittest.TestCase):
 
             self.assertEqual(calls, [])
 
+    def test_checkpoint_writer_rejects_polymorphic_text_before_callback(self):
+        class ExplosiveText(str):
+            calls = 0
+
+            def strip(self):
+                type(self).calls += 1
+                raise AssertionError("reconciliation ingress invoked polymorphic text")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            ExplosiveText.calls = 0
+            with self.assertRaisesRegex(ValueError, "reconciliation_id is required"):
+                record_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id=ExplosiveText("hostile-reconciliation"),
+                    result=reconciliation(),
+                    observed_at="2026-09-24T19:00:00Z",
+                    host_id="test-host",
+                    owner_epoch="epoch-1",
+                )
+            self.assertEqual(ExplosiveText.calls, 0)
+            self.assertEqual(
+                JournalStore.load_events_by_aggregate_type(
+                    store,
+                    "account_reconciliation",
+                ),
+                [],
+            )
+
     def test_scoped_checkpoint_identity_cannot_collide_on_separator_characters(self):
         left = _reconciliation_aggregate_id(
             reconciliation_id="rid",

@@ -1070,6 +1070,25 @@ def _install_submission_response_binding_authority(loader):
     journal_require_text_code = canonical_journal_require_text.__code__
     canonical_journal_store_identity = JournalStore.store_identity
     canonical_journal_schema_version = JournalStore.SCHEMA_VERSION
+    canonical_event_instant = _canonical_submission_event_instant
+    event_instant_code = canonical_event_instant.__code__
+    canonical_terminal_semantics = _exact_response_terminal_semantics_are_canonical
+    terminal_semantics_code = canonical_terminal_semantics.__code__
+    canonical_event_id = _event_id
+    event_id_code = canonical_event_id.__code__
+    canonical_identity_digest = _identity_digest
+    identity_digest_code = canonical_identity_digest.__code__
+    canonical_marker_helper = _has_exact_response_markers
+    marker_helper_code = canonical_marker_helper.__code__
+    canonical_response_markers = _EXACT_RESPONSE_MARKERS
+    canonical_uuid5 = uuid5
+    canonical_namespace_url = NAMESPACE_URL
+    canonical_isinstance = isinstance
+    canonical_len = len
+    canonical_any = any
+    canonical_set = set
+    canonical_datetime = datetime
+    canonical_timezone = timezone
 
     states: dict[int, tuple[object, tuple[object, ...]]] = {}
     field_names = (
@@ -1130,6 +1149,31 @@ def _install_submission_response_binding_authority(loader):
             or canonical_journal_require_text.__code__ is not journal_require_text_code
             or JournalStore.store_identity is not canonical_journal_store_identity
             or JournalStore.SCHEMA_VERSION != canonical_journal_schema_version
+            or _canonical_submission_event_instant is not canonical_event_instant
+            or canonical_getattr(canonical_event_instant, "__code__", None)
+            is not event_instant_code
+            or _exact_response_terminal_semantics_are_canonical
+            is not canonical_terminal_semantics
+            or canonical_getattr(canonical_terminal_semantics, "__code__", None)
+            is not terminal_semantics_code
+            or _event_id is not canonical_event_id
+            or canonical_getattr(canonical_event_id, "__code__", None)
+            is not event_id_code
+            or _identity_digest is not canonical_identity_digest
+            or canonical_getattr(canonical_identity_digest, "__code__", None)
+            is not identity_digest_code
+            or _has_exact_response_markers is not canonical_marker_helper
+            or canonical_getattr(canonical_marker_helper, "__code__", None)
+            is not marker_helper_code
+            or _EXACT_RESPONSE_MARKERS is not canonical_response_markers
+            or uuid5 is not canonical_uuid5
+            or NAMESPACE_URL is not canonical_namespace_url
+            or isinstance is not canonical_isinstance
+            or len is not canonical_len
+            or any is not canonical_any
+            or set is not canonical_set
+            or datetime is not canonical_datetime
+            or timezone is not canonical_timezone
             or _canonical_journal_authority_snapshot is not canonical_journal_snapshot
             or canonical_getattr(canonical_journal_snapshot, "__code__", None)
             is not journal_snapshot_code
@@ -1278,16 +1322,6 @@ def _install_submission_response_binding_authority(loader):
         require_canonical_submission_response_binding,
         submission_response_binding_projection,
     )
-
-
-(
-    load_submission_response_binding,
-    require_canonical_submission_response_binding,
-    submission_response_binding_projection,
-) = _install_submission_response_binding_authority(
-    load_submission_response_binding
-)
-del _install_submission_response_binding_authority
 
 
 def stable_client_order_id(
@@ -1457,6 +1491,16 @@ def _envelope(
         "payload_hash": payload_digest(canonical_payload),
         "evidence_refs": [],
     }
+
+
+(
+    load_submission_response_binding,
+    require_canonical_submission_response_binding,
+    submission_response_binding_projection,
+) = _install_submission_response_binding_authority(
+    load_submission_response_binding
+)
+del _install_submission_response_binding_authority
 
 
 class GuardedDispatcher:

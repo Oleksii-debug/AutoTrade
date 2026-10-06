@@ -476,5 +476,62 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
 
 
 
+    def test_dispatch_rejects_polymorphic_text_before_caller_methods_execute(self):
+        class TrapText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("caller-controlled strip executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            authority_calls = 0
+            transport_calls = 0
+
+            def authority(_intent_hash, _now):
+                nonlocal authority_calls
+                authority_calls += 1
+                return True, "allowed"
+
+            def transport(_client_order_id, _request, _guard):
+                nonlocal transport_calls
+                transport_calls += 1
+                raise AssertionError("transport must not execute")
+
+            base_values = {
+                "attempt_id": "attempt-a1",
+                "intent_id": "intent-1",
+                "intent_hash": "sha256:" + "1" * 64,
+                "provider": "provider",
+            }
+            for field_name in (
+                "attempt_id",
+                "intent_id",
+                "intent_hash",
+                "provider",
+            ):
+                values = dict(base_values)
+                values[field_name] = TrapText(values[field_name])
+                with self.subTest(field_name=field_name):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        f"{field_name} is required",
+                    ):
+                        dispatcher.dispatch(
+                            **values,
+                            request={"side": "BUY"},
+                            now="2026-10-06T14:00:00Z",
+                            authority_check=authority,
+                            transport_send=transport,
+                        )
+
+            self.assertEqual(authority_calls, 0)
+            self.assertEqual(transport_calls, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

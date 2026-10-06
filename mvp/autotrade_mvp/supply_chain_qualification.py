@@ -21,6 +21,8 @@ from autotrade_runtime.artifacts import (
 from autotrade_runtime.strict_json import strict_json_loads
 
 from mvp.autotrade_mvp.qualification_attestation import (
+    EvidenceArtifactRef,
+    QualificationAttestation,
     QualificationTrustError,
     QualificationTrustUnavailable,
     SignedQualificationAttestation,
@@ -859,6 +861,14 @@ def qualify_supply_chain(
         raise TypeError(
             "trust_receipt must be SignedQualificationAttestation"
         )
+    if trust_receipt is not None and (
+        type(trust_receipt.attestation) is not QualificationAttestation
+        or any(
+            type(ref) is not EvidenceArtifactRef
+            for ref in trust_receipt.attestation.evidence_refs
+        )
+    ):
+        raise TypeError("trust_receipt must contain canonical attestation evidence")
     checks: list[tuple[str, str]] = []
     reasons: list[str] = []
     trusted_read = None
@@ -1046,8 +1056,14 @@ def qualify_supply_chain(
         )
     else:
         try:
+            receipt = parse_signed_qualification_attestation(
+                {
+                    "attestation": trust_receipt.attestation.canonical_payload(),
+                    "signature_b64": trust_receipt.signature_b64,
+                }
+            )
             accepted_trust = verify_canonical_qualification_attestation(
-                trust_receipt,
+                receipt,
                 evidence_store=evidence_store,
                 evidence_root=evidence_root,
                 expected_source_sha=evidence.release_commit_sha,
@@ -1067,9 +1083,9 @@ def qualify_supply_chain(
                 accepted_trust.trust_root_id,
             )
             subject_identity = None
-            if subject_requirement in accepted_trust.requirement_ids:
+            if subject_requirement in receipt.attestation.requirement_ids:
                 accepted_subject = verify_canonical_qualification_attestation(
-                    trust_receipt,
+                    receipt,
                     evidence_store=evidence_store,
                     evidence_root=evidence_root,
                     expected_source_sha=evidence.release_commit_sha,
@@ -1146,7 +1162,7 @@ def qualify_supply_chain(
                     ref.media_type,
                     ref.evidence_kind,
                 )
-                for ref in accepted_trust.evidence_refs
+                for ref in receipt.attestation.evidence_refs
             }
             if subject_identity is None or review_identity != subject_identity:
                 record(

@@ -231,6 +231,22 @@ ExpectFailure<ArgumentException>(
     }),
     "callback without symbol identity must fail closed");
 
+var whitespaceSymbol = new Symbol(
+    SecurityIdentifier.GenerateEquity("SPY", Market.USA, mapSymbol: false),
+    " ");
+ExpectFailure<ArgumentException>(
+    () => callbacks.Observe(new OrderEvent
+    {
+        OrderId = 41,
+        Id = 2,
+        Symbol = whitespaceSymbol,
+        UtcTime = instant,
+        Status = OrderStatus.Submitted,
+        FillQuantity = decimal.Zero,
+        FillPrice = decimal.Zero
+    }),
+    "callback with whitespace symbol identity must fail closed");
+
 var submitted = callbacks.Observe(new OrderEvent
 {
     OrderId = 42,
@@ -405,6 +421,13 @@ var emptySymbolCheckpoint = RehashRestartState(
 ExpectFailure<InvalidDataException>(
     () => LeanCallbackCharacterizer.RestoreRestartState(emptySymbolCheckpoint),
     "rehash-valid restart state with empty symbol must fail closed");
+
+var whitespaceSymbolCheckpoint = RehashRestartState(
+    zeroFeeCheckpoint,
+    root => root["Callbacks"]!.AsArray()[0]!.AsObject()["Symbol"] = " ");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(whitespaceSymbolCheckpoint),
+    "rehash-valid restart state with whitespace symbol must fail closed");
 
 var nullFillCurrencyCheckpoint = RehashRestartState(
     zeroFeeCheckpoint,

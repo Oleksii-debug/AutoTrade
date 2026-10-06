@@ -279,6 +279,69 @@ class BybitFeeCurrencyAuthorityTests(unittest.TestCase):
             (observation.evidence_ref,),
         )
 
+    def test_authority_cannot_outlive_provider_qualification(self):
+        instrument = linear_instrument()
+        registry = InstrumentRegistry(versions=(instrument,))
+        capability = read_capability(
+            instrument_version=INSTRUMENT_REF,
+            provider_environment="TESTNET",
+            at=NOW,
+        )
+        extended_rule_until = datetime(
+            2026, 10, 6, 5, 0, tzinfo=timezone.utc
+        )
+        claim_key, claim_digest = bybit_execution_fee_currency_semantic_claim(
+            provider_environment="TESTNET",
+            product_family="LINEAR_DERIVATIVES",
+            category="linear",
+            instrument=instrument,
+            fee_currency="USDT",
+            rule_id="BYBIT_EXECUTION_FEE_CURRENCY",
+            rule_version="2026-10-extended",
+            rule_valid_from=RULE_FROM,
+            rule_valid_until=extended_rule_until,
+        )
+        qualification, _receipt, _protocol = accepted_spot_q(
+            ordinal=190,
+            product_family="LINEAR_DERIVATIVES",
+            extra_route_semantics={claim_key: claim_digest},
+        )
+        authority = issue_bybit_execution_fee_currency_authority(
+            qualification=qualification,
+            capability=capability,
+            instrument_registry=registry,
+            venue_id="BYBIT",
+            provider_symbol="ETHPERP",
+            fee_currency="USDT",
+            rule_id="BYBIT_EXECUTION_FEE_CURRENCY",
+            rule_version="2026-10-extended",
+            rule_valid_from=RULE_FROM,
+            rule_valid_until=extended_rule_until,
+            at=NOW,
+        )
+        projection = project_bybit_execution_fee_currency_authority(authority)
+        self.assertEqual(
+            projection.qualification_valid_until,
+            datetime(2026, 10, 5, 5, 0, tzinfo=timezone.utc),
+        )
+        with self.assertRaisesRegex(
+            BybitFeeCurrencyAuthorityError,
+            "provider qualification is not valid at execution time",
+        ):
+            projection.require_execution_scope(
+                provider_id="BYBIT",
+                runtime_environment=capability.environment,
+                account_id=capability.account_id,
+                entity_id=capability.entity_id,
+                capability_snapshot_id=capability.snapshot_id,
+                category="linear",
+                instrument_version=INSTRUMENT_REF,
+                provider_symbol="ETHPERP",
+                trade_time=datetime(
+                    2026, 10, 5, 5, 0, tzinfo=timezone.utc
+                ),
+            )
+
     def test_authority_is_bound_to_capability_identity_and_rule_interval(self):
         _instrument, _registry, capability, _qualification, authority = (
             issued_fixture()

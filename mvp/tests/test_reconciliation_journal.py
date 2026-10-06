@@ -120,6 +120,20 @@ def reconciliation(**overrides):
 
 class ReconciliationJournalTests(unittest.TestCase):
     def test_scoped_checkpoint_identity_cannot_collide_on_separator_characters(self):
+        left = _reconciliation_aggregate_id(
+            reconciliation_id="rid",
+            provider_id="PROVIDER/A",
+            account_id="B",
+            environment="PAPER",
+        )
+        right = _reconciliation_aggregate_id(
+            reconciliation_id="rid",
+            provider_id="PROVIDER",
+            account_id="A/B",
+            environment="PAPER",
+        )
+        self.assertNotEqual(left, right)
+
     def test_bybit_checkpoint_identity_separates_testnet_and_demo(self):
         testnet = reconciliation(
             provider_id="BYBIT",
@@ -191,19 +205,6 @@ class ReconciliationJournalTests(unittest.TestCase):
                     provider_environment="DEMO",
                 )
             )
-        left = _reconciliation_aggregate_id(
-            reconciliation_id="rid",
-            provider_id="PROVIDER/A",
-            account_id="B",
-            environment="PAPER",
-        )
-        right = _reconciliation_aggregate_id(
-            reconciliation_id="rid",
-            provider_id="PROVIDER",
-            account_id="A/B",
-            environment="PAPER",
-        )
-        self.assertNotEqual(left, right)
 
     def test_unexpected_fill_checkpoint_binds_exact_normalized_provider_evidence(self):
         with TemporaryDirectory() as directory:

@@ -90,18 +90,6 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
         ):
             JournalStore(hostile)
 
-    def test_sequence_text_subclass_is_not_durable_sequence_authority(self):
-        with TemporaryDirectory() as directory:
-            store = JournalStore(f"{directory}/journal.sqlite3")
-            candidate = _event("evt-hostile-sequence")
-            candidate["aggregate_version"] = _HostileText("1")
-            with self.assertRaisesRegex(
-                ValueError,
-                "aggregate_version must be a positive canonical integer sequence string",
-            ):
-                store.append_event(candidate)
-            self.assertEqual(store.current_journal_sequence(), 0)
-
     def test_outer_event_subclass_is_rejected_before_virtual_get(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
@@ -148,45 +136,6 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
                     environment="PAPER",
                     idempotency_key="key-load-hostile-request",
                     request=_HostileDict(request),
-                )
-            self.assertEqual(store.whole_store_state_counts(), before)
-
-    def test_record_command_rejects_executable_state_version_before_write(self):
-        with TemporaryDirectory() as directory:
-            store = JournalStore(f"{directory}/journal.sqlite3")
-            before = store.whole_store_state_counts()
-            with self.assertRaisesRegex(
-                ValueError,
-                "state_version must be a non-negative integer",
-            ):
-                store.record_command(
-                    command_id="cmd-hostile-state-version",
-                    actor="operator",
-                    environment="PAPER",
-                    idempotency_key="key-hostile-state-version",
-                    request={"action": "TEST"},
-                    result={"status": "ACCEPTED"},
-                    state_version=_HostileInt(0),
-                )
-            self.assertEqual(store.whole_store_state_counts(), before)
-
-    def test_commit_command_rejects_executable_state_version_before_write(self):
-        with TemporaryDirectory() as directory:
-            store = JournalStore(f"{directory}/journal.sqlite3")
-            before = store.whole_store_state_counts()
-            with self.assertRaisesRegex(
-                ValueError,
-                "state_version must be a non-negative integer",
-            ):
-                store.commit_command(
-                    command_id="cmd-hostile-commit-state-version",
-                    actor="operator",
-                    environment="PAPER",
-                    idempotency_key="key-hostile-commit-state-version",
-                    request={"action": "ORDER.SUBMIT"},
-                    result={"status": "ACCEPTED"},
-                    state_version=_HostileInt(0),
-                    events=[(_event("evt-hostile-commit-state-version"), None)],
                 )
             self.assertEqual(store.whole_store_state_counts(), before)
 
@@ -312,6 +261,52 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
                 store.append_event(candidate)
             self.assertEqual(store.current_journal_sequence(), 0)
 
+    def test_record_command_rejects_executable_state_version_before_write(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(
+                ValueError,
+                "state_version must be a non-negative integer",
+            ):
+                store.record_command(
+                    command_id="cmd-hostile-state-version",
+                    actor="operator",
+                    environment="PAPER",
+                    idempotency_key="key-hostile-state-version",
+                    request={"action": "TEST"},
+                    result={"status": "ACCEPTED"},
+                    state_version=_HostileInt(0),
+                )
+            self.assertEqual(store.whole_store_state_counts()["command_dedupe"], 0)
+
+    def test_commit_command_rejects_executable_state_version_before_write(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(
+                ValueError,
+                "state_version must be a non-negative integer",
+            ):
+                store.commit_command(
+                    command_id="cmd-hostile-commit-state-version",
+                    actor="operator",
+                    environment="PAPER",
+                    idempotency_key="key-hostile-commit-state-version",
+                    request={"action": "ORDER.SUBMIT"},
+                    result={"status": "ACCEPTED"},
+                    state_version=_HostileInt(0),
+                    events=[(_event("evt-hostile-commit-state-version"), None)],
+                )
+            self.assertEqual(
+                store.whole_store_state_counts(),
+                {
+                    "events": 0,
+                    "outbox": 0,
+                    "command_dedupe": 0,
+                    "projection_checkpoints": 0,
+                    "global_projection_checkpoints": 0,
+                },
+            )
+
     def test_projection_rejects_executable_aggregate_version_before_write(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
@@ -333,6 +328,274 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
             store = JournalStore(f"{directory}/journal.sqlite3")
             with self.assertRaisesRegex(ValueError, "limit must be between 1 and 1000"):
                 store.pending_outbox(limit=_HostileInt(1))
+
+    def test_outbox_delivery_state_rejects_noncanonical_requested_route(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            store.append_event(
+                _event("evt-exact-recovery-route"),
+                outbox_topic="fills",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "event_id must be canonical non-empty text",
+            ):
+                store.outbox_delivery_state(
+                    " evt-exact-recovery-route ",
+                    topic="fills",
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox topic must be canonical non-empty text",
+            ):
+                store.outbox_delivery_state(
+                    "evt-exact-recovery-route",
+                    topic=" fills ",
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox topic must be canonical non-empty text",
+            ):
+                store.outbox_delivery_state(
+                    "evt-exact-recovery-route",
+                    topic=_HostileText("fills"),
+                )
+
+    def test_outbox_delivery_ack_rejects_noncanonical_requested_identity(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            store.append_event(
+                _event("evt-exact-delivery-ack"),
+                outbox_topic="fills",
+            )
+            pending = store.pending_outbox()
+            self.assertEqual(len(pending), 1)
+            outbox_id = pending[0]["outbox_id"]
+            envelope_hash = pending[0]["envelope_hash"]
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox_id must be canonical non-empty text",
+            ):
+                store.mark_outbox_delivered(
+                    f" {outbox_id} ",
+                    expected_envelope_hash=envelope_hash,
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "expected_envelope_hash must be canonical non-empty text",
+            ):
+                store.mark_outbox_delivered(
+                    outbox_id,
+                    expected_envelope_hash=f" {envelope_hash} ",
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox_id must be canonical non-empty text",
+            ):
+                store.mark_outbox_delivered(
+                    _HostileText(outbox_id),
+                    expected_envelope_hash=envelope_hash,
+                )
+
+            self.assertEqual(len(store.pending_outbox()), 1)
+
+    def test_delivered_ack_retry_revalidates_requested_journal_cut(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            store.append_event(
+                _event("evt-delivered-cut-1"),
+                outbox_topic="fills",
+            )
+            pending = store.pending_outbox()[0]
+            self.assertTrue(
+                store.mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=pending["envelope_hash"],
+                    expected_journal_sequence=1,
+                )
+            )
+
+            later = _event("evt-delivered-cut-2")
+            later["aggregate_version"] = "2"
+            later["payload"] = {"kind": "fill", "quantity": "2"}
+            later["payload_hash"] = payload_digest(later["payload"])
+            store.append_event(later)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "journal sequence changed after whole-store validation",
+            ):
+                store.mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=pending["envelope_hash"],
+                    expected_journal_sequence=1,
+                )
+
+    def test_delivered_ack_retry_rejects_corrupt_delivery_marker(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(
+                _event("evt-delivered-marker"),
+                outbox_topic="fills",
+            )
+            pending = store.pending_outbox()[0]
+            self.assertTrue(
+                store.mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=pending["envelope_hash"],
+                )
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE outbox SET delivered_at = ? WHERE outbox_id = ?",
+                    (
+                        sqlite3.Binary(b"2026-10-06T13:00:00+00:00"),
+                        pending["outbox_id"],
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox delivered_at must be canonical non-empty text",
+            ):
+                store.mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=pending["envelope_hash"],
+                )
+
+    def test_outbox_reads_and_ack_reject_blob_payload_authority(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(
+                _event("evt-outbox-blob-payload"),
+                outbox_topic="fills",
+            )
+            pending = store.pending_outbox()
+            self.assertEqual(len(pending), 1)
+            outbox_id = pending[0]["outbox_id"]
+            envelope_hash = pending[0]["envelope_hash"]
+
+            connection = sqlite3.connect(path)
+            try:
+                raw_payload = connection.execute(
+                    "SELECT payload_json FROM outbox WHERE outbox_id = ?",
+                    (outbox_id,),
+                ).fetchone()[0]
+                connection.execute(
+                    "UPDATE outbox SET payload_json = ? WHERE outbox_id = ?",
+                    (sqlite3.Binary(raw_payload.encode("utf-8")), outbox_id),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox payload authority is not exact text",
+            ):
+                store.pending_outbox()
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox payload authority is not exact text",
+            ):
+                store.mark_outbox_delivered(
+                    outbox_id,
+                    expected_envelope_hash=envelope_hash,
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox payload authority is not exact text",
+            ):
+                store.outbox_delivery_state(
+                    "evt-outbox-blob-payload",
+                    topic="fills",
+                )
+
+    def test_outbox_reads_and_ack_reject_blob_topic_authority(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(
+                _event("evt-outbox-blob-topic"),
+                outbox_topic="fills",
+            )
+            pending = store.pending_outbox()
+            self.assertEqual(len(pending), 1)
+            outbox_id = pending[0]["outbox_id"]
+            envelope_hash = pending[0]["envelope_hash"]
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE outbox SET topic = ? WHERE outbox_id = ?",
+                    (sqlite3.Binary(b"fills"), outbox_id),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox topic must be canonical non-empty text",
+            ):
+                store.pending_outbox()
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox topic must be canonical non-empty text",
+            ):
+                store.mark_outbox_delivered(
+                    outbox_id,
+                    expected_envelope_hash=envelope_hash,
+                )
+
+    def test_outbox_reads_reject_blob_identity_and_timestamp(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(
+                _event("evt-outbox-blob-identity"),
+                outbox_topic="fills",
+            )
+            original = store.pending_outbox()
+            self.assertEqual(len(original), 1)
+            outbox_id = original[0]["outbox_id"]
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE outbox SET outbox_id = ?, created_at = ? WHERE outbox_id = ?",
+                    (
+                        sqlite3.Binary(outbox_id.encode("utf-8")),
+                        sqlite3.Binary(b"2026-10-06T13:00:00+00:00"),
+                        outbox_id,
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox_id must be canonical non-empty text",
+            ):
+                store.pending_outbox()
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox_id must be canonical non-empty text",
+            ):
+                store.outbox_delivery_state(
+                    "evt-outbox-blob-identity",
+                    topic="fills",
+                )
 
     def test_command_text_subclasses_cannot_dispatch_strip_or_upper(self):
         with TemporaryDirectory() as directory:
@@ -480,6 +743,45 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
             ):
                 reopened.get_event("evt-restart-canonical")
 
+    def test_restart_rejects_semantically_equal_noncanonical_payload_bytes(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            candidate = _event("evt-noncanonical-payload-bytes")
+            store.append_event(candidate)
+
+            connection = sqlite3.connect(path)
+            try:
+                raw_payload = connection.execute(
+                    "SELECT payload_json FROM events WHERE event_id = ?",
+                    ("evt-noncanonical-payload-bytes",),
+                ).fetchone()[0]
+                payload = json.loads(raw_payload)
+                replacement_payload_json = json.dumps(
+                    payload,
+                    sort_keys=False,
+                    separators=(", ", ": "),
+                    ensure_ascii=False,
+                )
+                self.assertNotEqual(replacement_payload_json, canonical_json(payload))
+                connection.execute(
+                    "UPDATE events SET payload_json = ? WHERE event_id = ?",
+                    (
+                        replacement_payload_json,
+                        "evt-noncanonical-payload-bytes",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(
+                ValueError,
+                "journal event payload is not canonical JSON",
+            ):
+                reopened.get_event("evt-noncanonical-payload-bytes")
+
     def test_exact_tuple_keeps_legacy_json_array_semantics(self):
         self.assertEqual(
             canonical_json(("a", {"b": 1}, [True, None])),
@@ -497,6 +799,18 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
                 "persistent JSON values must use exact built-in JSON containers and scalars",
             ):
                 store.claim_first_event(candidate)
+            self.assertEqual(store.current_journal_sequence(), 0)
+
+    def test_sequence_text_subclass_is_not_durable_sequence_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            candidate = _event("evt-hostile-sequence")
+            candidate["aggregate_version"] = _HostileText("1")
+            with self.assertRaisesRegex(
+                ValueError,
+                "aggregate_version must be a positive canonical integer sequence string",
+            ):
+                store.append_event(candidate)
             self.assertEqual(store.current_journal_sequence(), 0)
 
 

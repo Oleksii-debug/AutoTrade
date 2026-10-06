@@ -1380,6 +1380,72 @@ class HostNetworkTests(unittest.TestCase):
         self.assertEqual(payload["reason_codes"], ["stale_state_version"])
         self.assertEqual(self.app.store.state_version, 0)
 
+    def test_ui_command_contract_rejects_unknown_or_missing_top_level_fields(self):
+        extra = self.command(unexpected="forbidden")
+        response = self.post(extra)
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.app.store.state_version, 0)
+
+        missing = self.command()
+        missing.pop("payload")
+        response = self.post(missing)
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.app.store.state_version, 0)
+
+    def test_ui_command_contract_rejects_noncanonical_identity_and_sequence(self):
+        canonical_uuid = "11111111-1111-1111-1111-111111111111"
+        invalid_commands = (
+            self.command(command_id="not-a-uuid"),
+            self.command(command_id="{" + canonical_uuid + "}"),
+            self.command(command_id="urn:uuid:" + canonical_uuid),
+            self.command(command_id=canonical_uuid.replace("-", "")),
+            self.command(expected_state_version="00"),
+            self.command(expected_state_version="+0"),
+            self.command(expected_state_version=" 0"),
+            self.command(idempotency_key="x" * 129),
+            self.command(session="sid-" + "A" * 64),
+            self.command(environment="paper"),
+            self.command(action="UNKNOWN_FUTURE_ACTION"),
+            self.command(payload=[]),
+        )
+        for command in invalid_commands:
+            with self.subTest(command=command):
+                response = self.post(command)
+                self.assertEqual(response.status, 400)
+                self.assertEqual(self.app.store.state_version, 0)
+
+    def test_ui_command_account_id_scope_is_not_whitespace_aliased(self):
+        response = self.post(
+            self.command(account_id=" paper-account-1 ")
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.app.store.state_version, 0)
+        self.assertEqual(JournalStore(self.path).current_journal_sequence(), 0)
+
+    def test_ui_command_distinct_schema_valid_idempotency_keys_do_not_alias(self):
+        first = self.command(idempotency_key="host-network-key-distinct")
+        first_response = self.post(first)
+        self.assertEqual(first_response.status, 200)
+        self.assertEqual(self.body(first_response)["status"], "ACCEPTED")
+        self.assertEqual(self.app.store.state_version, 1)
+
+        second = self.command(
+            command_id="22222222-2222-4222-8222-222222222222",
+            expected_state_version="1",
+            idempotency_key=" host-network-key-distinct ",
+        )
+        second_response = self.post(second)
+        self.assertEqual(second_response.status, 200)
+        self.assertEqual(self.body(second_response)["status"], "ACCEPTED")
+        self.assertEqual(self.app.store.state_version, 2)
+
+    def test_ui_command_contract_accepts_exact_v5_shape(self):
+        command = self.command()
+        response = self.post(command)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.body(response)["status"], "ACCEPTED")
+        self.assertEqual(self.app.store.state_version, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

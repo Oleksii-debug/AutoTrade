@@ -278,25 +278,19 @@ def _prepare_authenticated_read_query_impl(
     permission_scope: str = "ORDER.READ",
     _register_authority,
 ) -> AuthenticatedReadQueryBinding:
-    """Prepare one exact provider-read query from canonical capability identity.
+    """Prepare one authenticated query from canonical capability identity.
 
-    PUBLIC_DATA is a neutral exact-byte observation surface only; this factory
-    does not prove production wire origin or provider qualification. Account
-    and environment are intentionally inherited from the VERIFIED capability
-    snapshot before any provider response exists.
+    Account/environment are intentionally not parameters: they are inherited
+    from the VERIFIED capability snapshot before any provider response exists.
     """
 
     if type(capability) is not CapabilitySnapshot:
         raise TypeError("capability must be exact CapabilitySnapshot")
     if type(surface) is not Surface:
         raise TypeError("surface must be exact Surface")
-    if surface not in {
-        Surface.PUBLIC_DATA,
-        Surface.AUTHENTICATED_READ,
-        Surface.ACTIVITIES,
-    }:
+    if surface not in {Surface.AUTHENTICATED_READ, Surface.ACTIVITIES}:
         raise ProviderCoreError(
-            "provider-read binding requires PUBLIC_DATA, AUTHENTICATED_READ or ACTIVITIES"
+            "authenticated-read binding requires AUTHENTICATED_READ or ACTIVITIES"
         )
     if type(at) is not datetime or type(at.tzinfo) is not timezone:
         raise ProviderCoreError("at must be an exact timezone-aware datetime")
@@ -314,7 +308,7 @@ def _prepare_authenticated_read_query_impl(
         or scope not in capability.permission_scopes
     ):
         raise ProviderCoreError(
-            "exact verified capability does not admit provider read"
+            "exact verified capability does not admit authenticated provider read"
         )
     provider = capability.provider_id.upper()
     if provider not in PROVIDERS:

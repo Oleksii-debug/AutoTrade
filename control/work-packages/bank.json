@@ -42,8 +42,8 @@
         "Exclusive mutation key: CONTRACT / core-schemas",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Canonical JSON Schema coverage now materializes common, event, instrument/market, information/dataset, decision/portfolio, authority/risk, execution, provider results, persistence/reconciliation, learning/science/jobs, model gateway and UI contracts; OpenAPI host entrypoint and common fixtures committed. Remaining WP-01 work: cross-language generated bindings/corpus equivalence, OpenAPI validation/codegen and version-change enforcement. Finalization repaired invalid execution JSON and added whole-schema reference resolution; no generated binding completion claimed."
+      "proposed_status": "DONE",
+      "status_note": "DONE on main via PR #1440, merge commit 57f1064fbdf0e13ecdf563da6f0ebdbf3ab0131a. Canonical contract v6 (6.0.0) now includes complete JSON Schema/OpenAPI authority, cross-language Python/C#/TypeScript conformance corpora (51 common-scalar cases, 13 DatasetManifest semantic cases, 201 closed-object shape cases across 48 definitions), major-version breaking-change enforcement, exact-numeric package identity 0.0.2, Host canonical Sequence contract/runtime convergence, MarketEvent adapter-build identity, and exact-head CI evidence generation that records source SHA, input/schema versions, tested commands and unresolved qualification limits. Historical duplicate Section-1 lineages were superseded by #1440."
     },
     {
       "id": "WP-02",
@@ -189,8 +189,8 @@
         "Exclusive mutation key: REUSE / neutral-first-party",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Three neutral research primitives migrated from Autosport into AutoTrade with focused local 6/6 migration tests; Windows CI, full characterization and release rights qualification remain open."
+      "proposed_status": "DONE",
+      "status_note": "DONE on main as the neutral production primitive prerequisite for Section 3. Strict JSON, ResourceLock and durable publication have one neutral runtime authority under autotrade_runtime with research compatibility aliases. Historical exact-head #843 and merged #1022 each passed baseline, research-primitives and full Verify AutoTrade; current main additionally contains 13 durable-publication hardening tests, 22 ResourceLock race/Windows path-fence tests, bounded JSON size/depth/node/integer semantics, exact built-in str/bytes ingress, and the 2026-10-06 float-domain repair rejecting lossy nonzero underflow and unbounded significand/exponent lexemes. Canonical float repair commits: a2dbfa41702837163fde3dec6cdf7b1b92a3b290 and 54e8eed276296ae8f4d27e62453d06e9c97e4aa6."
     },
     {
       "id": "WP-05",
@@ -234,8 +234,8 @@
         "Exclusive mutation key: PERSISTENCE / journal-outbox",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "SQLite WAL journal/outbox and command-dedupe primitive implemented in mvp/autotrade_mvp/persistence.py with focused tests covering atomic event/outbox commit, idempotent replay, payload tamper rejection, aggregate-version gaps, event-ID conflicts, command idempotency conflicts and reopen persistence. Focused standalone suite passed 5/5 locally before commit. Remaining WP-05 work: integrate canonical EventEnvelope/UiCommand validation into the runtime, crash-at-each-commit-boundary qualification, projection rebuild equivalence, migration rollback/upgrade tests, Windows/exact-head CI and production placement under src/AutoTrade.Persistence/."
+      "proposed_status": "DONE",
+      "status_note": "DONE on main via Section-4 closure PR #2196, merge commit c0f929e25fbfc2df1f33b2746f5f486d9819ee74. Canonical JournalStore now covers atomic journal/outbox and command effects, exact dedupe/replay identity, one-snapshot journal/checkpoint cuts, full replay versus checkpoint-tail equivalence, hard-process crash boundaries, migration rollback/upgrade, canonical EventEnvelope and UiCommand persistence admission, exact durable storage-class/text ingress, first-event ownership, and physical backing-file authority with callback-safe JournalStoreIdentity/path fencing. Historical #1577/#1612/#2030/#2163 integration roles are superseded by #2196. Hosted exact-head jobs were queued without runner assignment at closure and are not recorded as PASS; broader WP-48/WP-49 recovery remains a separate gate."
     },
     {
       "id": "WP-06",
@@ -282,8 +282,8 @@
         "Exclusive mutation key: ARTIFACT / immutable-store",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Content-addressed artifact store implemented under research/autotrade_research/artifacts/store.py using the migrated durable publication and resource-lock primitives. It verifies SHA-256 and size, enforces explicit storage/export rights, rejects immutable identity conflicts, audits missing/corrupt/unreferenced objects and removes only unreferenced objects/staging leftovers under a store lock. Focused tests cover idempotent publication, corruption, rights-aware export, orphan recovery and denied storage. Remaining WP-06 work: crash-injection qualification at every publication boundary, manifest schema/version contract, lawful dataset/model integration, Windows exact-head evidence and production integration."
+      "proposed_status": "DONE",
+      "status_note": "DONE on main as Section 3 sealed ArtifactStore / neutral installed runtime. The selected sealed-reader source #1098 passed baseline, research-primitives and full dual-OS Verify on exact head 55d97774e8c3225374f1fff9cdb0c62f7ee157eb. Neutral materialization #1313 is a direct ancestor of current main and establishes autotrade_runtime.artifacts as the single canonical store identity with research aliases, exact-source 30-file staging and isolated python -I -S publish/authenticated-read/audit tests. Current main carries stronger root-authority generation pinning and hostile ingress tests. The current corpus includes 55 ArtifactStore tests plus crash-atomic manifest/publication, retained recovery, generation-bound read and 18 trusted-reader falsifiers. Acceptance is covered explicitly by restart_after_manifest_commit_exposes_only_verified_complete_artifact and recovery_removes_only_unreferenced_objects. #1313 GitHub artifact/WP-04 suites passed on Ubuntu/Windows before unrelated update-producer failures. Historical #1573 is fully absorbed: all 38 paths exist on main, 33 byte-identical and 5 replaced by stronger versions."
     },
     {
       "id": "WP-07",

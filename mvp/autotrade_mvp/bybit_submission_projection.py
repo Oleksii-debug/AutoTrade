@@ -81,6 +81,7 @@ def _bind_authenticated_bybit_submission_projection():
             _load_submission_response_binding,
             _submission_response_binding_projection,
             _require_exact_order_projection_authority,
+            _journal_store_authority_scope,
             _payload_digest,
             _observe_submission_json_response,
             _provider_submission_observation_projection,
@@ -190,6 +191,10 @@ def _bind_authenticated_bybit_submission_projection():
             prepared_request=prepared_request,
             observation=observation,
         )
+        if _type(normalized) is not _dict_type:
+            raise _error_type(
+                "Bybit submission normalizer returned non-canonical result"
+            )
         if normalized.get("client_order_id") != client_order_id:
             raise _error_type(
                 "normalized Bybit response changed client order identity"

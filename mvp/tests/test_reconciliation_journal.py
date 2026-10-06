@@ -1,3 +1,5 @@
+from copy import deepcopy
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -15,6 +17,10 @@ from mvp.autotrade_mvp.reconciliation import (
     SnapshotConsistencyEvidence,
     UnknownSubmission,
     reconcile_account,
+)
+from mvp.autotrade_mvp.settlement import (
+    BuyingPowerEvidence,
+    SettlementAccountScope,
 )
 from mvp.autotrade_mvp.reconciliation_journal import (
     _reconciliation_aggregate_id,
@@ -140,6 +146,116 @@ class ReconciliationJournalTests(unittest.TestCase):
                 available_resources={"MARGIN_CREDIT:USD": "250"},
                 evidence_refs=("provider:margin-credit-missing-detail",),
             )
+
+
+    def test_margin_credit_refs_must_be_bound_to_provider_snapshot(self):
+        buying_power = BuyingPowerEvidence(
+            evidence_id="margin-credit-boundary",
+            scope=SettlementAccountScope(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            ),
+            currency="USD",
+            additional_credit="250",
+            observed_at=datetime(
+                2026, 9, 24, 18, 59, 30, tzinfo=timezone.utc
+            ),
+            valid_until=datetime(
+                2026, 9, 24, 19, 5, 0, tzinfo=timezone.utc
+            ),
+            evidence_refs=("provider:margin-credit:typed",),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "margin-credit evidence_refs must be bound",
+        ):
+            ResourceAvailabilityEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                snapshot_id="margin-credit-unbound-ref",
+                query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+                provider_as_of="2026-09-24T18:59:59Z",
+                valid_until="2026-09-24T19:05:00Z",
+                available_resources={"MARGIN_CREDIT:USD": "250"},
+                resource_details={
+                    buying_power.resource_key: buying_power.resource_detail(),
+                },
+                evidence_refs=("provider:snapshot-only",),
+            )
+
+    def test_persisted_margin_credit_ref_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            buying_power = BuyingPowerEvidence(
+                evidence_id="margin-credit-persisted",
+                scope=SettlementAccountScope(
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                ),
+                currency="USD",
+                additional_credit="250",
+                observed_at=datetime(
+                    2026, 9, 24, 18, 59, 30, tzinfo=timezone.utc
+                ),
+                valid_until=datetime(
+                    2026, 9, 24, 19, 5, 0, tzinfo=timezone.utc
+                ),
+                evidence_refs=("provider:margin-credit:persisted",),
+            )
+            resource = ResourceAvailabilityEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                snapshot_id="margin-credit-persisted",
+                query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+                provider_as_of="2026-09-24T18:59:59Z",
+                valid_until="2026-09-24T19:05:00Z",
+                available_resources={"MARGIN_CREDIT:USD": "250"},
+                resource_details={
+                    buying_power.resource_key: buying_power.resource_detail(),
+                },
+                evidence_refs=(
+                    "provider:snapshot:persisted",
+                    "provider:margin-credit:persisted",
+                ),
+            )
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="margin-credit-ref-tamper",
+                result=reconciliation(resource_availability=resource),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            tampered = deepcopy(checkpoint)
+            tampered["payload"]["resource_availability"]["resource_details"][
+                "MARGIN_CREDIT:USD"
+            ]["evidence_ref_0"] = "provider:margin-credit:detached"
+
+            with patch.object(
+                JournalStore,
+                "get_event",
+                return_value=tampered,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "not bound to provider snapshot",
+                ):
+                    load_account_resource_availability_evidence(
+                        store,
+                        checkpoint_event_id=checkpoint["event_id"],
+                        provider_id="TEST_PROVIDER",
+                        account_id="test-account",
+                        environment="PAPER",
+                        resources=("MARGIN_CREDIT:USD",),
+                        now="2026-09-24T19:01:00Z",
+                        max_age_seconds="120",
+                    )
 
     def test_checkpoint_writer_rejects_journal_store_subclass_before_callbacks(self):
         class ExplosiveJournalStore(JournalStore):

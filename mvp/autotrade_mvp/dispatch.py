@@ -1083,6 +1083,19 @@ def _install_submission_response_binding_authority(loader):
             canonical_getattr(member, "__code__", None),
             canonical_getattr(member, "__defaults__", None),
             canonical_getattr(member, "__kwdefaults__", None),
+            (
+                canonical_tuple(
+                    (canonical_id(key), canonical_id(value))
+                    for key, value in canonical_dict.items(
+                        canonical_getattr(member, "__kwdefaults__", None)
+                    )
+                )
+                if canonical_type(
+                    canonical_getattr(member, "__kwdefaults__", None)
+                )
+                is canonical_dict
+                else None
+            ),
         )
         for name, member in canonical_json_decoder_surface
         if name in {"__init__", "decode", "raw_decode"}
@@ -1318,7 +1331,24 @@ def _install_submission_response_binding_authority(loader):
                 is not defaults
                 or canonical_getattr(member, "__kwdefaults__", None)
                 is not kwdefaults
-                for member, code, defaults, kwdefaults
+                or (
+                    kwdefaults_fingerprint is not None
+                    and (
+                        canonical_type(kwdefaults) is not canonical_dict
+                        or canonical_tuple(
+                            (canonical_id(key), canonical_id(value))
+                            for key, value in canonical_dict.items(kwdefaults)
+                        )
+                        != kwdefaults_fingerprint
+                    )
+                )
+                for (
+                    member,
+                    code,
+                    defaults,
+                    kwdefaults,
+                    kwdefaults_fingerprint,
+                )
                 in canonical_json_decoder_codes
             )
             or canonical_getattr(

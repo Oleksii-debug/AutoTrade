@@ -1335,6 +1335,8 @@ class AcceptedQualificationAttestation:
     verification_method: str
     release_artifact_id: str | None
     release_artifact_sha256: str | None
+    signature_b64: str
+    signed_attestation_payload_json: str
 
 
 def _verify_rsa_pkcs1v15_sha256(
@@ -1579,6 +1581,13 @@ def verify_qualification_attestation(
         verification_method=attestation.verification_method,
         release_artifact_id=attestation.release_artifact_id,
         release_artifact_sha256=attestation.release_artifact_sha256,
+        signature_b64=receipt.signature_b64,
+        signed_attestation_payload_json=json.dumps(
+            _qualification_attestation_payload_exact(attestation),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ),
     )
 
 def verify_canonical_qualification_attestation(

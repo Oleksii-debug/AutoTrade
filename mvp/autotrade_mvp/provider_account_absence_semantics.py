@@ -489,7 +489,7 @@ def _install_absence_semantics_authority():
                     "provider absence semantics Q is not exact current authority"
                 ) from error
             if (
-                current_reconciliation.content_digest
+                _RECONCILIATION_DIGEST_FGET(current_reconciliation)
                 != value.reconciliation_semantics_digest
                 or current_reconciliation.qualification_route_semantics_digest
                 != value.qualification_route_semantics_digest
@@ -511,6 +511,9 @@ def _install_absence_semantics_authority():
     require_provider_account_absence_semantics_authority,
 ) = _install_absence_semantics_authority()
 del _install_absence_semantics_authority
+_REGISTER_ABSENCE_AUTHORITY = (
+    _register_provider_account_absence_semantics_authority
+)
 _REQUIRE_ABSENCE_AUTHORITY = (
     require_provider_account_absence_semantics_authority
 )
@@ -671,10 +674,10 @@ def resolve_current_provider_account_absence_semantics(
     object.__setattr__(
         value,
         "reconciliation_semantics_digest",
-        accepted_reconciliation.content_digest,
+        _RECONCILIATION_DIGEST_FGET(accepted_reconciliation),
     )
     object.__setattr__(value, "rules_json", rules_json)
-    _register_provider_account_absence_semantics_authority(
+    _REGISTER_ABSENCE_AUTHORITY(
         value,
         store,
     )

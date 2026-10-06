@@ -35,6 +35,7 @@ from mvp.autotrade_mvp.dispatch import (
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_core import (
     AuthenticatedReadQueryBinding,
+    ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
@@ -60,6 +61,7 @@ from mvp.autotrade_mvp.provider_transport import (
     direct_authenticated_read_execution_receipt,
     direct_authenticated_read_execution_receipt_snapshot,
     direct_authenticated_read_network_policy_identity,
+    direct_authenticated_read_observation_receipt,
     direct_authenticated_read_transport_identity,
     direct_trading_write_execution_receipt,
     direct_trading_write_exact_response_receipt,
@@ -4675,6 +4677,44 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
             "construction authority is unavailable",
         ):
             direct_authenticated_read_execution_receipt_snapshot(forged)
+
+    def test_plain_provider_observation_has_no_direct_wire_authority(self):
+        query = authenticated_read_binding()
+        observation = observe_authenticated_json_response(
+            query_binding=query,
+            http_status=200,
+            response_bytes=b'{"ok":true}',
+            observed_at=READ_NOW + timedelta(seconds=1),
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "lacks direct authenticated-read wire authority",
+        ):
+            direct_authenticated_read_observation_receipt(observation)
+
+    def test_forged_provider_observation_cannot_gain_direct_wire_authority(self):
+        query = authenticated_read_binding()
+        canonical = observe_authenticated_json_response(
+            query_binding=query,
+            http_status=200,
+            response_bytes=b'{"ok":true}',
+            observed_at=READ_NOW + timedelta(seconds=1),
+        )
+        forged = object.__new__(ProviderResponseObservation)
+        for field in (
+            "query_binding",
+            "observed_at",
+            "http_status",
+            "response_sha256",
+            "evidence_ref",
+            "payload",
+        ):
+            object.__setattr__(forged, field, object.__getattribute__(canonical, field))
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "canonical provider response observation authority is unavailable",
+        ):
+            direct_authenticated_read_observation_receipt(forged)
 
     def test_direct_trading_write_receipt_constructor_is_sealed(self):
         with self.assertRaisesRegex(

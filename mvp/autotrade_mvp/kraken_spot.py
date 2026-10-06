@@ -892,6 +892,48 @@ def parse_spot_submission_response(
     }
 
 
+def _install_spot_submission_response_parser(parser, prepared_projection):
+    """Pin the prepared-scope verifier across Spot response normalization."""
+
+    parser_code = parser.__code__
+    projection_code = prepared_projection.__code__
+    error_type = KrakenSpotAdapterError
+    canonical_getattr = getattr
+
+    def sealed_parse_spot_submission_response(
+        *,
+        attempt_id: str,
+        prepared_request: KrakenSpotPreparedRequest,
+        source_uri: str,
+        observation: ProviderSubmissionObservation | None = None,
+        transport_ambiguous: bool = False,
+    ) -> dict[str, object]:
+        if (
+            _prepared_submission_projection is not prepared_projection
+            or canonical_getattr(prepared_projection, "__code__", None)
+            is not projection_code
+            or canonical_getattr(parser, "__code__", None) is not parser_code
+        ):
+            raise error_type(
+                "Kraken Spot prepared response authority is unavailable"
+            )
+        return parser(
+            attempt_id=attempt_id,
+            prepared_request=prepared_request,
+            source_uri=source_uri,
+            observation=observation,
+            transport_ambiguous=transport_ambiguous,
+        )
+
+    return sealed_parse_spot_submission_response
+
+
+parse_spot_submission_response = _install_spot_submission_response_parser(
+    parse_spot_submission_response,
+    _prepared_submission_projection,
+)
+del _install_spot_submission_response_parser
+
 def _install_spot_submission_response_parser_authority(parser):
     """Fence mutable parser dependencies before financial normalization."""
 

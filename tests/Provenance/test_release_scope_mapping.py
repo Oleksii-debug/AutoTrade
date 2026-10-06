@@ -373,6 +373,45 @@ class ReleaseScopeMappingTests(unittest.TestCase):
         ):
             self._build(sbom_override=(document, raw))
 
+
+    def test_orphan_package_rights_record_fails(self):
+        orphan = {
+            "name": "Unused.Package",
+            "version": "9.9.9",
+            "content_hash_sha512_base64": base64.b64encode(
+                sha512(b"unused").digest()
+            ).decode("ascii"),
+            "license_id": "MIT",
+        }
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError, "outside the locked graph"
+        ):
+            self._build(rights=RIGHTS + [orphan])
+
+    def test_same_package_version_with_multiple_rights_hashes_fails(self):
+        conflicting = dict(RIGHTS[0])
+        conflicting["content_hash_sha512_base64"] = base64.b64encode(
+            sha512(b"different").digest()
+        ).decode("ascii")
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError, "multiple content hashes"
+        ):
+            self._build(rights=RIGHTS + [conflicting])
+
+    def test_orphan_external_runtime_rights_record_fails(self):
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError, "do not exactly match SBOM runtime scope"
+        ):
+            self._build(external_rights=EXTERNAL_RIGHTS)
+
+    def test_duplicate_provenance_component_name_fails(self):
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError, "component name is duplicated"
+        ):
+            self._build(
+                provenance=PROVENANCE + [dict(PROVENANCE[0])]
+            )
+
     def test_mapping_is_order_stable(self):
         first = self._build()
         second = self._build(provenance=list(reversed(PROVENANCE)))

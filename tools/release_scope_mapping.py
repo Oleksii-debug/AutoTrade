@@ -298,6 +298,7 @@ def build_mapping(
     sbom_packages = normalize_spdx_packages(sbom)
 
     rights = {}
+    rights_by_name_version = {}
     for record in package_rights:
         if type(record) is not dict:
             raise ReleaseScopeMappingError("package rights record must be object")
@@ -311,6 +312,14 @@ def build_mapping(
         )
         if key in rights:
             raise ReleaseScopeMappingError("duplicate package-rights identity")
+        name_version = (key[0], key[1])
+        previous_hash = rights_by_name_version.get(name_version)
+        if previous_hash is not None and previous_hash != key[2]:
+            raise ReleaseScopeMappingError(
+                "package-rights identity has multiple content hashes: "
+                f"{key[0]}@{key[1]}"
+            )
+        rights_by_name_version[name_version] = key[2]
         rights[key] = record
 
     packages = []
@@ -362,6 +371,10 @@ def build_mapping(
             "content_hash_sha512_base64": content_hash,
             "sbom_spdx_id": package["spdx_id"],
         })
+    if set(rights) != seen:
+        raise ReleaseScopeMappingError(
+            "package-rights contains records outside the locked graph"
+        )
     locked_purls = {item["purl"] for item in packages}
     external_rights = {}
     for record in external_runtime_rights:
@@ -375,9 +388,14 @@ def build_mapping(
                 "external runtime rights identity is duplicated"
             )
         external_rights[purl] = record
+    expected_external_purls = set(sbom_packages) - locked_purls
+    if set(external_rights) != expected_external_purls:
+        raise ReleaseScopeMappingError(
+            "external runtime rights do not exactly match SBOM runtime scope"
+        )
     external_components = []
     unresolved_external = []
-    for purl in sorted(set(sbom_packages) - locked_purls):
+    for purl in sorted(expected_external_purls):
         package = sbom_packages[purl]
         rights = external_rights.get(purl)
         if rights is None:
@@ -429,10 +447,17 @@ def build_mapping(
 
     scope = []
     unresolved_rights = []
+    seen_provenance_names = set()
     for item in provenance_components:
         if type(item) is not dict:
             raise ReleaseScopeMappingError("provenance component must be object")
         name = _text(item.get("name"), name="provenance component name")
+        name_key = name.casefold()
+        if name_key in seen_provenance_names:
+            raise ReleaseScopeMappingError(
+                f"provenance component name is duplicated: {name}"
+            )
+        seen_provenance_names.add(name_key)
         classification = _text(
             item.get("release_scope_classification"),
             name=f"{name} release_scope_classification",

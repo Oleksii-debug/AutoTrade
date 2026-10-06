@@ -320,6 +320,7 @@ class InstrumentVersion:
     option_right: str | None = None
     exercise_style: str | None = None
     deliverable: tuple[DeliverableLeg, ...] = ()
+    exercise_cash_per_contract: Decimal | None = None
     margin_model_id: str | None = None
     metadata_evidence: tuple[Mapping[str, object], ...] = ()
 
@@ -458,6 +459,7 @@ class InstrumentVersion:
                 self.strike,
                 self.option_right,
                 self.exercise_style,
+                self.exercise_cash_per_contract,
                 self.margin_model_id,
             )
         ) or self.deliverable:
@@ -498,7 +500,40 @@ class InstrumentVersion:
             )
             if not self.deliverable:
                 raise InstrumentRegistryError("option deliverable is required")
-        elif self.strike is not None or self.option_right is not None or self.exercise_style is not None:
+            exercise_cash = self.exercise_cash_per_contract
+            if exercise_cash is not None:
+                exercise_cash = _decimal(
+                    exercise_cash,
+                    "exercise_cash_per_contract",
+                )
+                if exercise_cash < 0:
+                    raise InstrumentRegistryError(
+                        "exercise_cash_per_contract cannot be negative"
+                    )
+                object.__setattr__(
+                    self,
+                    "exercise_cash_per_contract",
+                    exercise_cash,
+                )
+            if self.settlement_method == "CASH" and exercise_cash is not None:
+                raise InstrumentRegistryError(
+                    "cash-settled option cannot carry physical exercise cash"
+                )
+            if self.settlement_method == "PHYSICAL":
+                adjusted = (
+                    len(self.deliverable) != 1
+                    or self.deliverable[0].quantity != self.contract_multiplier
+                )
+                if adjusted and exercise_cash is None:
+                    raise InstrumentRegistryError(
+                        "adjusted physical option requires explicit exercise_cash_per_contract"
+                    )
+        elif (
+            self.strike is not None
+            or self.option_right is not None
+            or self.exercise_style is not None
+            or self.exercise_cash_per_contract is not None
+        ):
             raise InstrumentRegistryError("option-only fields are not valid for this asset class")
 
     def contains(self, instant: datetime, implicit_end: datetime | None = None) -> bool:
@@ -569,6 +604,11 @@ class InstrumentVersion:
             "strike": _decimal_text(self.strike) if self.strike is not None else None,
             "option_right": self.option_right,
             "exercise_style": self.exercise_style,
+            "exercise_cash_per_contract": (
+                _decimal_text(self.exercise_cash_per_contract)
+                if self.exercise_cash_per_contract is not None
+                else None
+            ),
             "margin_model_id": self.margin_model_id,
         }
         payload.update({key: value for key, value in optional.items() if value is not None})

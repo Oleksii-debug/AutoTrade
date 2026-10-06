@@ -25,7 +25,7 @@ from .provider_core import (
 
 
 BYBIT_POSITION_MARGIN_PARSER_IDENTITY = "BYBIT_POSITION_MARGIN_V5_JSON_V1"
-BYBIT_POSITION_MARGIN_PARSER_VERSION = "1.0.0"
+BYBIT_POSITION_MARGIN_PARSER_VERSION = "1.0.1"
 BYBIT_POSITION_MARGIN_PARSER_CONTRACT_DIGEST = (
     "sha256:"
     + sha256(
@@ -45,6 +45,12 @@ BYBIT_POSITION_MARGIN_PARSER_CONTRACT_DIGEST = (
                 },
                 "row_identity": {
                     "positionIdx": [0, 1, 2],
+                    "positionIdx_side": {
+                        "0": ["", "Buy", "Sell"],
+                        "1": ["", "Buy"],
+                        "2": ["", "Sell"],
+                    },
+                    "position_mode_topology": "ONE_WAY_IDX_0_XOR_HEDGE_IDX_1_2",
                     "symbol": "EXACT_QUERY_SYMBOL",
                     "side": ["", "Buy", "Sell"],
                     "seq": "EXACT_JSON_INTEGER_GTE_NEGATIVE_ONE",
@@ -269,6 +275,14 @@ def parse_bybit_position_margin_page(
             raise BybitPositionMarginError(
                 "Bybit position side must be empty, Buy or Sell"
             )
+        if position_idx == 1 and side not in {"", "Buy"}:
+            raise BybitPositionMarginError(
+                "hedge positionIdx=1 requires empty or Buy side"
+            )
+        if position_idx == 2 and side not in {"", "Sell"}:
+            raise BybitPositionMarginError(
+                "hedge positionIdx=2 requires empty or Sell side"
+            )
         risk_id = _integer(
             row.get("riskId"),
             name=f"result.list[{index}].riskId",
@@ -348,6 +362,11 @@ def parse_bybit_position_margin_page(
                 ),
                 is_reduce_only=is_reduce_only,
             )
+        )
+
+    if 0 in position_indices and len(position_indices) != 1:
+        raise BybitPositionMarginError(
+            "Bybit position page cannot mix one-way and hedge-mode positionIdx values"
         )
 
     return BybitPositionMarginPage(

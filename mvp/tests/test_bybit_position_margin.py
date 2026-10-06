@@ -29,7 +29,14 @@ from mvp.tests.test_bybit_v5 import read_capability
 NOW = datetime(2026, 10, 6, 10, 0, tzinfo=timezone.utc)
 
 
-def _response(row, *, category="linear", query_symbol="BTCUSDT", cursor=""):
+def _response(
+    row,
+    *,
+    category="linear",
+    query_symbol="BTCUSDT",
+    cursor="",
+    extra_rows=(),
+):
     capability = read_capability(
         account_id="paper-position",
         environment="PAPER",
@@ -52,7 +59,7 @@ def _response(row, *, category="linear", query_symbol="BTCUSDT", cursor=""):
             "retMsg": "OK",
             "result": {
                 "category": category,
-                "list": [row],
+                "list": [row, *extra_rows],
                 "nextPageCursor": cursor,
             },
             "retExtInfo": {},
@@ -160,6 +167,41 @@ class BybitPositionMarginParserTests(unittest.TestCase):
                     "positive riskId requires positive riskLimitValue",
                 ):
                     parse_bybit_position_margin_page(_response(_row(riskLimitValue=value)))
+
+    def test_hedge_position_idx_requires_documented_side(self):
+        for position_idx, side in ((1, "Sell"), (2, "Buy")):
+            with self.subTest(position_idx=position_idx, side=side):
+                with self.assertRaisesRegex(
+                    BybitPositionMarginError,
+                    f"hedge positionIdx={position_idx} requires",
+                ):
+                    parse_bybit_position_margin_page(
+                        _response(_row(positionIdx=position_idx, side=side))
+                    )
+
+    def test_position_page_cannot_mix_one_way_and_hedge_modes(self):
+        with self.assertRaisesRegex(
+            BybitPositionMarginError,
+            "cannot mix one-way and hedge-mode",
+        ):
+            parse_bybit_position_margin_page(
+                _response(
+                    _row(positionIdx=0, side="Buy"),
+                    extra_rows=(_row(positionIdx=1, side="Buy"),),
+                )
+            )
+
+    def test_valid_hedge_legs_preserve_documented_position_identity(self):
+        page = parse_bybit_position_margin_page(
+            _response(
+                _row(positionIdx=1, side="Buy"),
+                extra_rows=(_row(positionIdx=2, side="Sell"),),
+            )
+        )
+        self.assertEqual(
+            tuple((fact.position_idx, fact.side) for fact in page.positions),
+            ((1, "Buy"), (2, "Sell")),
+        )
 
     def test_position_row_must_match_exact_query_symbol(self):
         with self.assertRaisesRegex(

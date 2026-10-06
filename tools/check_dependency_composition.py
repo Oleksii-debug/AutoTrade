@@ -189,6 +189,28 @@ def _python_blockers(root: Path) -> tuple[list[str], list[str]]:
     except (OSError, UnicodeError, tomllib.TOMLDecodeError):
         blockers.append("UNREADABLE_ROOT_PYPROJECT")
     else:
+        root_build_system = root_document.get("build-system")
+        if not isinstance(root_build_system, dict):
+            blockers.append("MALFORMED_ROOT_BUILD_SYSTEM")
+            root_build_requires_raw = None
+        else:
+            root_build_requires_raw = root_build_system.get("requires")
+        if not isinstance(root_build_requires_raw, list) or not root_build_requires_raw:
+            blockers.append("MISSING_ROOT_BUILD_REQUIREMENTS")
+        else:
+            root_build_requires: list[str] = []
+            for requirement in root_build_requires_raw:
+                if not isinstance(requirement, str):
+                    blockers.append("MALFORMED_ROOT_BUILD_REQUIREMENT")
+                    continue
+                root_build_requires.append(requirement)
+                if not is_exact_python_requirement(requirement):
+                    blockers.append(
+                        f"NON_EXACT_ROOT_BUILD_REQUIREMENT:{requirement}"
+                    )
+            if not set(root_build_requires).issubset(set(dev_requirements)):
+                blockers.append("ROOT_BUILD_REQUIREMENTS_DRIFT")
+
         root_project = root_document.get("project")
         if not isinstance(root_project, dict):
             blockers.append("MALFORMED_ROOT_PROJECT")

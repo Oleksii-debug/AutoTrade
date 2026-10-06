@@ -1019,6 +1019,210 @@ class PostSendBuiltinAuthorityTests(unittest.TestCase):
             self.assertEqual(probe, [])
             self.assertEqual(outbound, 1)
 
+    def test_post_send_staticmethod_code_mutation_is_restored_and_unknown(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            descriptor = GuardedDispatcher.__dict__["_outcome_from_terminal"]
+            helper = descriptor.__func__
+            original_code = helper.__code__
+            probe = []
+            outbound = 0
+            dispatch_module._dispatcher_descriptor_probe = probe
+
+            def forged_outcome(event, client_order_id):
+                _dispatcher_descriptor_probe.append(client_order_id)
+                raise AssertionError("forged staticmethod code executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                helper.__code__ = forged_outcome.__code__
+                return response
+
+            try:
+                first = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-staticmethod-code-a1",
+                    transport=transport,
+                )
+                self.assertIs(
+                    GuardedDispatcher.__dict__["_outcome_from_terminal"],
+                    descriptor,
+                )
+                self.assertIs(helper.__code__, original_code)
+            finally:
+                helper.__code__ = original_code
+                vars(dispatch_module).pop("_dispatcher_descriptor_probe", None)
+
+            self.assertEqual(probe, [])
+            self.assertEqual(outbound, 1)
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(
+                first.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-staticmethod-code-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
+            restarted = GuardedDispatcher(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner-b",
+            )
+            replay = restarted.dispatch(
+                attempt_id="postsend-staticmethod-code-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T18:15:01Z",
+                authority_check=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not re-authorize")),
+                transport_send=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not resend")),
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(replay.status, "UNKNOWN")
+            self.assertEqual(
+                replay.reason,
+                "recovered_after_send_barrier_without_terminal_result",
+            )
+            self.assertEqual(probe, [])
+            self.assertEqual(outbound, 1)
+
+    def test_postsend_builtin_module_shadows_are_restored_before_firebreak(self):
+        callbacks = 0
+        sentinel = object()
+        originals = {
+            name: vars(dispatch_module).get(name, sentinel)
+            for name in ("list", "zip", "KeyError", "UnicodeError")
+        }
+
+        def hostile_list(*_args, **_kwargs):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("module-global list shadow executed")
+
+        def hostile_zip(*_args, **_kwargs):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("module-global zip shadow executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                dispatch_module.list = hostile_list
+                dispatch_module.zip = hostile_zip
+                dispatch_module.KeyError = object
+                dispatch_module.UnicodeError = object
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-builtin-global-firebreak-a1",
+                    transport=transport,
+                )
+                self.assertEqual(callbacks, 0)
+                self.assertEqual(result.status, "SENT")
+                self.assertEqual(result.reason, "sent_confirmed")
+                for name, original in originals.items():
+                    if original is sentinel:
+                        self.assertNotIn(name, vars(dispatch_module))
+                    else:
+                        self.assertIs(getattr(dispatch_module, name), original)
+            finally:
+                for name, original in originals.items():
+                    if original is sentinel:
+                        vars(dispatch_module).pop(name, None)
+                    else:
+                        setattr(dispatch_module, name, original)
+
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-builtin-global-firebreak-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
+            )
+            self.assertEqual(callbacks, 0)
+
+    def test_dispatcher_staticmethod_code_mutation_before_guard_is_zero_wire(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            descriptor = GuardedDispatcher.__dict__["_outcome_from_terminal"]
+            original_outcome = descriptor.__func__
+            original_code = original_outcome.__code__
+            probe = []
+            outbound = 0
+            dispatch_module._dispatcher_staticmethod_executable_probe = probe
+
+            def forged_outcome(event, client_order_id):
+                _dispatcher_staticmethod_executable_probe.append(
+                    (event, client_order_id)
+                )
+                raise AssertionError("forged dispatcher staticmethod code executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                original_outcome.__code__ = forged_outcome.__code__
+                final_guard()
+                outbound += 1
+                return ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+
+            try:
+                with self.assertRaises(PermissionError):
+                    self._dispatch(
+                        dispatcher,
+                        attempt_id="preguard-dispatcher-staticmethod-code-a1",
+                        transport=transport,
+                    )
+                self.assertIs(original_outcome.__code__, original_code)
+            finally:
+                original_outcome.__code__ = original_code
+                vars(dispatch_module).pop(
+                    "_dispatcher_staticmethod_executable_probe",
+                    None,
+                )
+
+            self.assertEqual(probe, [])
+            self.assertEqual(outbound, 0)
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "preguard-dispatcher-staticmethod-code-a1",
+            )
+            self.assertEqual(event_types, ["SubmissionPrepared"])
+
     def test_transport_helper_rebinding_before_final_guard_is_zero_wire(self):
         surfaces = (
             "_canonical_journal_authority_snapshot",
@@ -1126,6 +1330,183 @@ class PostSendBuiltinAuthorityTests(unittest.TestCase):
                 "preguard-helper-code-a1",
             )
             self.assertEqual(event_types, ["SubmissionPrepared"])
+
+
+    def test_post_send_journal_load_code_mutation_is_restored_and_unknown(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            operation = JournalStore.load_events
+            original_code = operation.__code__
+            outbound = 0
+
+            def forged_load_events(self, aggregate_type, aggregate_id):
+                raise AssertionError("forged JournalStore.load_events code executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                operation.__code__ = forged_load_events.__code__
+                return response
+
+            try:
+                first = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-journal-load-code-a1",
+                    transport=transport,
+                )
+                self.assertIs(JournalStore.load_events, operation)
+                self.assertIs(operation.__code__, original_code)
+            finally:
+                operation.__code__ = original_code
+
+            self.assertEqual(outbound, 1)
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(
+                first.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-journal-load-code-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
+            restarted = GuardedDispatcher(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner-b",
+            )
+            replay = restarted.dispatch(
+                attempt_id="postsend-journal-load-code-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T18:15:01Z",
+                authority_check=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not re-authorize")),
+                transport_send=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not resend")),
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(replay.status, "UNKNOWN")
+            self.assertEqual(
+                replay.reason,
+                "recovered_after_send_barrier_without_terminal_result",
+            )
+            self.assertEqual(outbound, 1)
+
+    def test_journal_append_code_mutation_before_final_guard_is_zero_wire(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            operation = JournalStore.append_event
+            original_code = operation.__code__
+            outbound = 0
+
+            def forged_append_event(
+                self,
+                envelope,
+                *,
+                outbox_topic=None,
+                expected_journal_sequence=None,
+                expected_whole_store_counts=None,
+            ):
+                raise AssertionError("forged JournalStore.append_event code executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                operation.__code__ = forged_append_event.__code__
+                final_guard()
+                outbound += 1
+                return ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+
+            try:
+                with self.assertRaises(PermissionError):
+                    self._dispatch(
+                        dispatcher,
+                        attempt_id="preguard-journal-append-code-a1",
+                        transport=transport,
+                    )
+                self.assertIs(JournalStore.append_event, operation)
+                self.assertIs(operation.__code__, original_code)
+            finally:
+                operation.__code__ = original_code
+
+            self.assertEqual(outbound, 0)
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "preguard-journal-append-code-a1",
+            )
+            self.assertEqual(event_types, ["SubmissionPrepared"])
+
+
+    def test_post_send_journal_kwdefaults_mutation_is_restored_and_unknown(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            operation = JournalStore.append_event
+            original_kwdefaults = operation.__kwdefaults__
+            self.assertIsInstance(original_kwdefaults, dict)
+            baseline = dict(original_kwdefaults)
+            outbound = 0
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                original_kwdefaults["expected_journal_sequence"] = 7
+                return response
+
+            try:
+                first = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-journal-kwdefaults-a1",
+                    transport=transport,
+                )
+                self.assertIs(operation.__kwdefaults__, original_kwdefaults)
+                self.assertEqual(operation.__kwdefaults__, baseline)
+            finally:
+                operation.__kwdefaults__ = original_kwdefaults
+                original_kwdefaults.clear()
+                original_kwdefaults.update(baseline)
+
+            self.assertEqual(outbound, 1)
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(
+                first.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-journal-kwdefaults-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import timedelta
+from dataclasses import replace
 from hashlib import sha256
 from tempfile import TemporaryDirectory
 import unittest
@@ -365,17 +366,13 @@ class ProviderOriginHostBridgeTests(unittest.TestCase):
                 attempt_id=attempt_id,
                 response=response,
             )
-            wrong_subject = HostAuthenticatedReadSubject(
-                **{
-                    **vars(verified.prepared.attempt.subject),
-                    "data_entitlement": "BALANCES",
-                }
+            wrong_subject = replace(
+                verified.prepared.attempt.subject,
+                data_entitlement="BALANCES",
             )
-            wrong_attempt = HostAuthenticatedReadAttempt(
-                **{
-                    **vars(verified.prepared.attempt),
-                    "subject": wrong_subject,
-                }
+            wrong_attempt = replace(
+                verified.prepared.attempt,
+                subject=wrong_subject,
             )
             wrong_prepared = VerifiedHostPreparedAttestation(
                 issuer_session=verified.prepared.issuer_session,

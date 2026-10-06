@@ -272,6 +272,17 @@ def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
             except (OSError, ET.ParseError):
                 blockers.append(f'DOTNET_MSBUILD_PROJECT_INVALID:{relative}')
                 continue
+            project_root = tree.getroot()
+            sdk_attribute = project_root.attrib.get('Sdk')
+            if sdk_attribute is not None and sdk_attribute != 'Microsoft.NET.Sdk':
+                blockers.append(
+                    f'DOTNET_PROJECT_SDK_AUTHORITY_UNSUPPORTED:'
+                    f'{relative}:{sdk_attribute}'
+                )
+            if _xml_elements(tree, 'Sdk'):
+                blockers.append(
+                    f'DOTNET_PROJECT_SDK_ELEMENT_UNSUPPORTED:{relative}'
+                )
             if _xml_elements(tree, 'Import'):
                 blockers.append(
                     f'DOTNET_EXPLICIT_MSBUILD_IMPORT_UNSUPPORTED:{relative}'

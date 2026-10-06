@@ -879,6 +879,54 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 ['DOTNET_PROJECT_LOCK_MISSING:src/AutoTrade.Desktop/AutoTrade.Desktop.csproj'],
             )
 
+    def test_third_party_project_sdk_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'PluginHost' / 'PluginHost.csproj'
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                '<Project Sdk="Third.Party.Sdk/1.2.3" />',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [
+                    'DOTNET_PROJECT_SDK_AUTHORITY_UNSUPPORTED:'
+                    'src/PluginHost/PluginHost.csproj:Third.Party.Sdk/1.2.3'
+                ],
+            )
+
+    def test_child_sdk_declaration_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'PluginHost' / 'PluginHost.csproj'
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                '<Project><Sdk Name="Third.Party.Sdk" Version="1.2.3" /></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [
+                    'DOTNET_PROJECT_SDK_ELEMENT_UNSUPPORTED:'
+                    'src/PluginHost/PluginHost.csproj'
+                ],
+            )
+
+    def test_canonical_microsoft_dotnet_sdk_is_not_blocked(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'App' / 'App.csproj'
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                '<Project Sdk="Microsoft.NET.Sdk" />',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [],
+            )
+
     def test_explicit_project_import_fails_closed(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

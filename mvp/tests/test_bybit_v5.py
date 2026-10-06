@@ -944,6 +944,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             BybitFeeCurrencyAuthority(
                 provider_id="BYBIT",
                 provider_environment="TESTNET",
+                account_id="paper-1",
                 entity_id="bybit-test",
                 product_category="linear",
                 instrument_version="ETHPERP@v1",

@@ -871,6 +871,18 @@ class DurableOptionLifecycleAuthority:
         expected_endpoints = self.lifecycle_endpoints
         expected_permission_scope = self.permission_scope
         expected_resolver = self.evidence_resolver
+        expected_aggregate_id = self.aggregate_id
+        expected_actor = self._ACTOR
+        expected_aggregate_type = self._AGGREGATE_TYPE
+        lifecycle_methods = (
+            type(self)._require_canonical_authorities,
+            type(self)._events,
+            type(self)._payload,
+        )
+        expected_lifecycle_methods = tuple(
+            (method, getattr(method, "__code__", None))
+            for method in lifecycle_methods
+        )
         try:
             source = expected_resolver(reference)
         except Exception as error:
@@ -894,7 +906,21 @@ class DurableOptionLifecycleAuthority:
             or self.lifecycle_endpoints != expected_endpoints
             or self.permission_scope != expected_permission_scope
             or self.evidence_resolver is not expected_resolver
-            or "_require_canonical_authorities" in vars(self)
+            or self.aggregate_id != expected_aggregate_id
+            or self._ACTOR != expected_actor
+            or self._AGGREGATE_TYPE != expected_aggregate_type
+            or {"_require_canonical_authorities", "_events", "_payload"}.intersection(
+                vars(self)
+            )
+            or tuple(
+                (method, getattr(method, "__code__", None))
+                for method in (
+                    type(self)._require_canonical_authorities,
+                    type(self)._events,
+                    type(self)._payload,
+                )
+            )
+            != expected_lifecycle_methods
         ):
             raise OptionLifecycleError(
                 "option lifecycle authority changed during evidence resolution"

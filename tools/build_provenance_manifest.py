@@ -784,6 +784,15 @@ def dotnet_package_projects() -> list[Path]:
 
 def build_manifest() -> dict[str, object]:
     components_path = ROOT / "provenance" / "components.json"
+    dotnet_package_rights_path = (
+        ROOT / "provenance" / "dotnet-package-rights.json"
+    )
+    external_runtime_rights_path = (
+        ROOT / "provenance" / "external-runtime-rights.json"
+    )
+    autosport_reuse_manifest_path = (
+        ROOT / "provenance" / "reuse" / "autosport-neutral-primitives.json"
+    )
     requirements_path = ROOT / "requirements-dev.txt"
     research_pyproject_path = ROOT / "research" / "pyproject.toml"
     global_path = ROOT / "global.json"
@@ -1122,6 +1131,15 @@ def build_manifest() -> dict[str, object]:
 
     source_inventory = {
         "components_blob_sha": git_blob_sha(components_path),
+        "dotnet_package_rights_blob_sha": git_blob_sha(
+            dotnet_package_rights_path
+        ),
+        "external_runtime_rights_blob_sha": git_blob_sha(
+            external_runtime_rights_path
+        ),
+        "autosport_reuse_manifest_blob_sha": git_blob_sha(
+            autosport_reuse_manifest_path
+        ),
         "requirements_dev_blob_sha": git_blob_sha(requirements_path),
         "research_pyproject_blob_sha": git_blob_sha(research_pyproject_path),
         "global_json_blob_sha": git_blob_sha(global_path),

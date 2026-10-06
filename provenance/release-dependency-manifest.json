@@ -33,7 +33,18 @@
       "detail": "Exact release dependency graph has no qualified vulnerability/advisory review."
     }
   ],
-  "dotnet_package_dependencies": [],
+  "dotnet_package_dependencies": [
+    {
+      "project": "src/AutoTrade.Desktop/AutoTrade.Desktop.csproj",
+      "target": "net10.0-windows7.0",
+      "name": "Microsoft.Web.WebView2",
+      "type": "Direct",
+      "version": "1.0.4258.31",
+      "content_hash_sha512_base64": "sHVZ2MQrHT1J3q5/6csn0fIP27rzpTO/RRC+wPQDrZheB7T4t2n+vVbY6SdCKr4WRV9s/gmBM3PPMWWJtoDzMg==",
+      "dependencies": [],
+      "requested": "[1.0.4258.31, )"
+    }
+  ],
   "dotnet_sdk": "10.0.100",
   "inspected_components": [
     {
@@ -146,9 +157,12 @@
   "release_eligible": false,
   "schema_version": "1.0.0",
   "source_inventory": {
-    "components_blob_sha": "cba907e56f9442e2be0073955d97c5b52fbeac60",
+    "components_blob_sha": "66a73b3e3b8b919e850c0cd41772c8c2ed6e5f7f",
     "global_json_blob_sha": "b4ffa1877d371d285f4a7ddf850071845a8dfe27",
     "requirements_dev_blob_sha": "76f5d233cc243db2e17262533de69e75f66163ef",
-    "research_pyproject_blob_sha": "dbd409f7ab882e44cb9afb4b664da8a6aea7a86e"
+    "research_pyproject_blob_sha": "dbd409f7ab882e44cb9afb4b664da8a6aea7a86e",
+    "dotnet_package_rights_blob_sha": "dbe2da17b30bddbc910b7acc55f294a0ddfbeac2",
+    "external_runtime_rights_blob_sha": "7ed0761bf8591492cdd8f7e4a4ee47e718ff23f4",
+    "autosport_reuse_manifest_blob_sha": "01892835e09f2c1b7e1446b89e465c9a2a274d9e"
   }
 }

@@ -27,6 +27,21 @@ _DOTNET_RESTORE_ENVIRONMENT_AUTHORITY = (
 )
 
 
+def _nuget_identity_component_is_path_safe(value: object) -> bool:
+    """Reject package identity text that can escape a restored package directory."""
+
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip()
+        and value not in {".", ".."}
+        and "/" not in value
+        and "\\" not in value
+        and ":" not in value
+        and all(ord(character) >= 32 and ord(character) != 127 for character in value)
+    )
+
+
 def _strict_json(text: str):
     def reject_duplicates(pairs):
         result = {}
@@ -59,6 +74,29 @@ def _xml_elements(tree: ET.ElementTree, local_name: str):
     )
 
 
+def _workflow_block_scalar_content_lines(workflow_text: str) -> set[int]:
+    """Return physical lines that are YAML block-scalar content."""
+
+    lines = workflow_text.splitlines()
+    content_lines: set[int] = set()
+    scalar_indent: int | None = None
+    scalar_header = re.compile(r":\s*[|>][+-]?\s*(?:#.*)?$")
+    for index, raw in enumerate(lines, start=1):
+        stripped = raw.strip()
+        indent = len(raw) - len(raw.lstrip(" "))
+        if scalar_indent is not None:
+            if not stripped:
+                content_lines.add(index)
+                continue
+            if indent > scalar_indent:
+                content_lines.add(index)
+                continue
+            scalar_indent = None
+        if stripped and scalar_header.search(stripped):
+            scalar_indent = indent
+    return content_lines
+
+
 def dotnet_restore_workflow_commands(
     workflow_text: str,
 ) -> tuple[list[str], list[int]]:
@@ -73,6 +111,7 @@ def dotnet_restore_workflow_commands(
 
     commands: list[str] = []
     unscoped_lines: list[int] = []
+    block_scalar_lines = _workflow_block_scalar_content_lines(workflow_text)
     unscoped_line_set: set[int] = set()
     for line_number, raw in enumerate(workflow_text.splitlines(), start=1):
         command = raw.strip()
@@ -84,7 +123,10 @@ def dotnet_restore_workflow_commands(
             or _DOTNET_RESTORE_TEXT.search(command) is None
         ):
             continue
-        if command.startswith("run: dotnet restore "):
+        if (
+            line_number not in block_scalar_lines
+            and command.startswith("run: dotnet restore ")
+        ):
             commands.append(command)
         else:
             unscoped_lines.append(line_number)
@@ -400,8 +442,13 @@ def _package_references(project: Path) -> dict[str, str]:
     """
     refs: dict[str, tuple[str, str]] = {}
     for name, version in dotnet_project_package_references(project):
-        if not name or not version:
-            raise ValueError('PackageReference must have canonical name and exact version')
+        if (
+            not _nuget_identity_component_is_path_safe(name)
+            or not _nuget_identity_component_is_path_safe(version)
+        ):
+            raise ValueError(
+                'PackageReference must have path-safe canonical name and exact version'
+            )
         folded = name.casefold()
         if folded in refs:
             previous_name, previous_version = refs[folded]
@@ -450,6 +497,7 @@ def _lock_dependency_edges(
             not isinstance(dependency_name, str)
             or not dependency_name
             or dependency_name != dependency_name.strip()
+            or not _nuget_identity_component_is_path_safe(dependency_name)
         ):
             raise ValueError(
                 f'invalid NuGet dependency edge name for '
@@ -524,6 +572,7 @@ def dotnet_lock_content_blockers(root: Path, project: Path) -> list[str]:
                 not isinstance(package_name, str)
                 or not package_name
                 or package_name != package_name.strip()
+                or not _nuget_identity_component_is_path_safe(package_name)
                 or not isinstance(record, dict)
             ):
                 blockers.append(f'DOTNET_PROJECT_LOCK_RECORD_INVALID:{relative}:{target_name}')
@@ -550,11 +599,7 @@ def dotnet_lock_content_blockers(root: Path, project: Path) -> list[str]:
 
             resolved = record.get('resolved')
             content_hash = record.get('contentHash')
-            if (
-                not isinstance(resolved, str)
-                or not resolved
-                or resolved != resolved.strip()
-            ):
+            if not _nuget_identity_component_is_path_safe(resolved):
                 blockers.append(
                     f'DOTNET_PROJECT_LOCK_RESOLVED_INVALID:'
                     f'{relative}:{target_name}:{package_name}'
@@ -680,7 +725,12 @@ def dotnet_locked_dependency_graph(root: Path, package_projects: list[Path]) -> 
             if not isinstance(target_name, str) or not target_name or not isinstance(target, dict):
                 raise ValueError(f'invalid NuGet lock target for {relative}')
             for package_name, record in sorted(target.items(), key=lambda item: str(item[0]).casefold()):
-                if not isinstance(package_name, str) or not package_name or not isinstance(record, dict):
+                if (
+                    not isinstance(package_name, str)
+                    or not package_name
+                    or not _nuget_identity_component_is_path_safe(package_name)
+                    or not isinstance(record, dict)
+                ):
                     raise ValueError(f'invalid NuGet lock record for {relative}:{target_name}')
                 kind = record.get('type')
                 # Project references are source composition, not NuGet package artifacts.
@@ -692,7 +742,7 @@ def dotnet_locked_dependency_graph(root: Path, package_projects: list[Path]) -> 
                     )
                 resolved = record.get('resolved')
                 content_hash = record.get('contentHash')
-                if not isinstance(resolved, str) or not resolved or resolved != resolved.strip():
+                if not _nuget_identity_component_is_path_safe(resolved):
                     raise ValueError(
                         f'invalid NuGet resolved version for {relative}:{target_name}:{package_name}'
                     )

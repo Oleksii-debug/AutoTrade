@@ -292,6 +292,22 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 instrument_registry=forged,
             )
 
+    def test_instrument_registry_instance_shadow_is_rejected_before_dispatch(self):
+        source = sealed_dividend()
+        registry = canonical_registry()
+        registry.exact = lambda _version_ref: (_ for _ in ()).throw(
+            AssertionError("shadowed exact must not execute")
+        )
+        registry.at = lambda _instrument_id, _at: (_ for _ in ()).throw(
+            AssertionError("shadowed at must not execute")
+        )
+
+        with self.assertRaisesRegex(TypeError, "must not be shadowed"):
+            resolve(
+                source,
+                instrument_registry=registry,
+            )
+
     def test_allowed_endpoints_subclass_is_rejected_before_iteration(self):
         class ForgedEndpoints(frozenset):
             def __iter__(self):

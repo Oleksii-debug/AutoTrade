@@ -2521,6 +2521,7 @@ class GuardedDispatcher:
         snapshot_len = len
         snapshot_dict = dict
         snapshot_id = id
+        snapshot_frozenset = frozenset
         snapshot_delattr = delattr
         snapshot_module_globals = globals()
         snapshot_module_globals_get = snapshot_module_globals.get
@@ -2772,6 +2773,154 @@ class GuardedDispatcher:
             None,
         )
         decoder_exact_decimal_error = ExactDecimalError
+
+        # The depth/numeric callbacks execute again after untrusted transport
+        # returns.  Freezing only their function identity/code leaves their
+        # mutable defaults, globals, builtins and same-module helper graph able
+        # to redirect exact-response decoding.  Snapshot that bounded graph
+        # before crossing the transport boundary and restore it before any
+        # exact provider response is consumed.
+        decoder_function_type = snapshot_type(decoder_number_parser)
+        decoder_trusted_modules = snapshot_frozenset(
+            (
+                snapshot_getattr(decoder_depth_guard, "__module__", None),
+                snapshot_getattr(decoder_number_parser, "__module__", None),
+                snapshot_getattr(decoder_integer_parser, "__module__", None),
+            )
+        )
+        decoder_graph_missing = object()
+        decoder_graph_function_states = []
+        decoder_graph_global_bindings = []
+        decoder_graph_builtin_bindings = []
+        decoder_graph_seen_functions = set()
+        decoder_graph_seen_globals = set()
+        decoder_graph_seen_builtins = set()
+
+        def capture_decoder_function(function) -> None:
+            if snapshot_type(function) is not decoder_function_type:
+                return
+            function_identity = snapshot_id(function)
+            if function_identity in decoder_graph_seen_functions:
+                return
+            decoder_graph_seen_functions.add(function_identity)
+
+            function_code = snapshot_getattr(function, "__code__", None)
+            function_defaults = snapshot_getattr(
+                function,
+                "__defaults__",
+                None,
+            )
+            function_kwdefaults = snapshot_getattr(
+                function,
+                "__kwdefaults__",
+                None,
+            )
+            if snapshot_type(function_kwdefaults) is snapshot_dict:
+                function_kwdefaults_copy = snapshot_dict(function_kwdefaults)
+                function_kwdefaults_fingerprint = snapshot_tuple(
+                    (snapshot_id(key), snapshot_id(value))
+                    for key, value in snapshot_dict.items(
+                        function_kwdefaults
+                    )
+                )
+            else:
+                function_kwdefaults_copy = None
+                function_kwdefaults_fingerprint = None
+            decoder_graph_function_states.append(
+                (
+                    function,
+                    function_code,
+                    function_defaults,
+                    function_kwdefaults,
+                    function_kwdefaults_copy,
+                    function_kwdefaults_fingerprint,
+                )
+            )
+
+            function_globals = snapshot_getattr(
+                function,
+                "__globals__",
+                None,
+            )
+            function_builtins = snapshot_getattr(
+                function,
+                "__builtins__",
+                None,
+            )
+            if (
+                snapshot_type(function_globals) is not snapshot_dict
+                or snapshot_type(function_builtins) is not snapshot_dict
+            ):
+                raise RuntimeError(
+                    "exact response decoder function namespace is unavailable"
+                )
+
+            for dependency_name in function_code.co_names:
+                if dependency_name in function_globals:
+                    binding_key = (
+                        snapshot_id(function_globals),
+                        dependency_name,
+                    )
+                    dependency = snapshot_dict.get(
+                        function_globals,
+                        dependency_name,
+                    )
+                    if binding_key not in decoder_graph_seen_globals:
+                        decoder_graph_seen_globals.add(binding_key)
+                        decoder_graph_global_bindings.append(
+                            (
+                                function_globals,
+                                dependency_name,
+                                dependency,
+                            )
+                        )
+                    if (
+                        snapshot_type(dependency) is decoder_function_type
+                        and snapshot_getattr(
+                            dependency,
+                            "__module__",
+                            None,
+                        )
+                        in decoder_trusted_modules
+                    ):
+                        capture_decoder_function(dependency)
+                    continue
+                if dependency_name in function_builtins:
+                    binding_key = (
+                        snapshot_id(function_builtins),
+                        dependency_name,
+                    )
+                    dependency = snapshot_dict.get(
+                        function_builtins,
+                        dependency_name,
+                    )
+                    if binding_key not in decoder_graph_seen_builtins:
+                        decoder_graph_seen_builtins.add(binding_key)
+                        decoder_graph_builtin_bindings.append(
+                            (
+                                function_builtins,
+                                dependency_name,
+                                dependency,
+                            )
+                        )
+
+        for decoder_root in (
+            decoder_depth_guard,
+            decoder_number_parser,
+            decoder_integer_parser,
+        ):
+            capture_decoder_function(decoder_root)
+
+        decoder_graph_function_states = snapshot_tuple(
+            decoder_graph_function_states
+        )
+        decoder_graph_global_bindings = snapshot_tuple(
+            decoder_graph_global_bindings
+        )
+        decoder_graph_builtin_bindings = snapshot_tuple(
+            decoder_graph_builtin_bindings
+        )
+
         exact_response_module_bindings = (
             ("ExactJsonTransportResponse", exact_response_type),
             ("_snapshot_exact_transport_response", exact_response_snapshot),
@@ -2876,6 +3025,85 @@ class GuardedDispatcher:
                         "__code__",
                         expected_code,
                     )
+                    changed = True
+
+            for (
+                function,
+                expected_code,
+                expected_defaults,
+                expected_kwdefaults,
+                expected_kwdefaults_copy,
+                expected_kwdefaults_fingerprint,
+            ) in decoder_graph_function_states:
+                if (
+                    expected_code is not None
+                    and snapshot_getattr(function, "__code__", None)
+                    is not expected_code
+                ):
+                    snapshot_setattr(function, "__code__", expected_code)
+                    changed = True
+                if (
+                    snapshot_getattr(function, "__defaults__", None)
+                    is not expected_defaults
+                ):
+                    snapshot_setattr(
+                        function,
+                        "__defaults__",
+                        expected_defaults,
+                    )
+                    changed = True
+                if (
+                    snapshot_getattr(function, "__kwdefaults__", None)
+                    is not expected_kwdefaults
+                ):
+                    snapshot_setattr(
+                        function,
+                        "__kwdefaults__",
+                        expected_kwdefaults,
+                    )
+                    changed = True
+                if (
+                    expected_kwdefaults_fingerprint is not None
+                    and snapshot_type(expected_kwdefaults) is snapshot_dict
+                ):
+                    current_kwdefaults_fingerprint = snapshot_tuple(
+                        (snapshot_id(key), snapshot_id(value))
+                        for key, value in snapshot_dict.items(
+                            expected_kwdefaults
+                        )
+                    )
+                    if (
+                        current_kwdefaults_fingerprint
+                        != expected_kwdefaults_fingerprint
+                    ):
+                        snapshot_dict.clear(expected_kwdefaults)
+                        snapshot_dict.update(
+                            expected_kwdefaults,
+                            expected_kwdefaults_copy,
+                        )
+                        changed = True
+
+            for namespace, name, expected in decoder_graph_global_bindings:
+                if (
+                    snapshot_dict.get(
+                        namespace,
+                        name,
+                        decoder_graph_missing,
+                    )
+                    is not expected
+                ):
+                    snapshot_dict.__setitem__(namespace, name, expected)
+                    changed = True
+            for namespace, name, expected in decoder_graph_builtin_bindings:
+                if (
+                    snapshot_dict.get(
+                        namespace,
+                        name,
+                        decoder_graph_missing,
+                    )
+                    is not expected
+                ):
+                    snapshot_dict.__setitem__(namespace, name, expected)
                     changed = True
 
             for member, expected_defaults, expected_kwdefaults in (

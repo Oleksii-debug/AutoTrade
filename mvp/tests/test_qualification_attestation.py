@@ -187,6 +187,30 @@ def verify(receipt, store, trust_policy, *, evidence_root=None, **overrides):
 
 
 class QualificationAttestationTests(unittest.TestCase):
+    def test_verifier_rejects_mutated_scalar_without_executable_str_coercion(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        receipt = SignedQualificationAttestation(original, sign(original))
+
+        class ExecutableString:
+            def __init__(self):
+                self.called = False
+
+            def __str__(self):
+                self.called = True
+                return "qualification-runner-1"
+
+        executable = ExecutableString()
+        object.__setattr__(original, "runner_id", executable)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with self.assertRaises(QualificationTrustError):
+                verify(receipt, store, policy(trust_root))
+
+        self.assertFalse(executable.called)
+
     def test_evidence_resolution_uses_one_canonical_authenticated_snapshot_only(self):
         ref = evidence_ref()
         with TemporaryDirectory() as directory:

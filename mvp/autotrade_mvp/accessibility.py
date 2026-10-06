@@ -31,6 +31,8 @@ def _plain_text(value: Any, default: str = "Unavailable") -> str:
     """
 
     if type(value) is str:
+        if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            return default
         return value
     if type(value) is int:
         return str(value)

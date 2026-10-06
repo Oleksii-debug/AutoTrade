@@ -95,7 +95,7 @@ class AuthenticatedReadHttpRequestTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             TypeError,
-            "exact SignedHttpRequest or AuthenticatedReadHttpRequest",
+            "SignedHttpRequest or exact AuthenticatedReadHttpRequest",
         ):
             client.send(forged)
 

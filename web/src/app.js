@@ -29,14 +29,16 @@
   });
 
   const TABLE_TOOLS = Object.freeze([
-    Object.freeze({bodyId: "permissions-body", filterId: "permissions-filter", copyId: "permissions-copy", statusId: "permissions-filter-status", label: "permission and capability"}),
-    Object.freeze({bodyId: "strategy-body", filterId: "strategy-filter", copyId: "strategy-copy", statusId: "strategy-filter-status", label: "strategy and decision"}),
-    Object.freeze({bodyId: "portfolio-body", filterId: "portfolio-filter", copyId: "portfolio-copy", statusId: "portfolio-filter-status", label: "portfolio"}),
-    Object.freeze({bodyId: "operations-body", filterId: "operations-filter", copyId: "operations-copy", statusId: "operations-filter-status", label: "current host operation"}),
-    Object.freeze({bodyId: "risk-body", filterId: "risk-filter", copyId: "risk-copy", statusId: "risk-filter-status", label: "risk and authority"}),
-    Object.freeze({bodyId: "jobs-body", filterId: "jobs-filter", copyId: "jobs-copy", statusId: "jobs-filter-status", label: "research and replay jobs"}),
-    Object.freeze({bodyId: "event-history-body", filterId: "event-history-filter", copyId: "event-history-copy", statusId: "event-history-filter-status", label: "received host events"})
+    Object.freeze({bodyId: "permissions-body", filterId: "permissions-filter", copyId: "permissions-copy", sortId: "permissions-sort", previousId: "permissions-previous", nextId: "permissions-next", statusId: "permissions-filter-status", label: "permission and capability"}),
+    Object.freeze({bodyId: "strategy-body", filterId: "strategy-filter", copyId: "strategy-copy", sortId: "strategy-sort", previousId: "strategy-previous", nextId: "strategy-next", statusId: "strategy-filter-status", label: "strategy and decision"}),
+    Object.freeze({bodyId: "portfolio-body", filterId: "portfolio-filter", copyId: "portfolio-copy", sortId: "portfolio-sort", previousId: "portfolio-previous", nextId: "portfolio-next", statusId: "portfolio-filter-status", label: "portfolio"}),
+    Object.freeze({bodyId: "operations-body", filterId: "operations-filter", copyId: "operations-copy", sortId: "operations-sort", previousId: "operations-previous", nextId: "operations-next", statusId: "operations-filter-status", label: "current host operation"}),
+    Object.freeze({bodyId: "risk-body", filterId: "risk-filter", copyId: "risk-copy", sortId: "risk-sort", previousId: "risk-previous", nextId: "risk-next", statusId: "risk-filter-status", label: "risk and authority"}),
+    Object.freeze({bodyId: "jobs-body", filterId: "jobs-filter", copyId: "jobs-copy", sortId: "jobs-sort", previousId: "jobs-previous", nextId: "jobs-next", statusId: "jobs-filter-status", label: "research and replay jobs"}),
+    Object.freeze({bodyId: "event-history-body", filterId: "event-history-filter", copyId: "event-history-copy", sortId: "event-history-sort", previousId: "event-history-previous", nextId: "event-history-next", statusId: "event-history-filter-status", label: "received host events"})
   ]);
+  const TABLE_PAGE_SIZE = 25;
+  const tableViewState = new Map();
 
   const state = {
     cursor: 0n,
@@ -84,6 +86,27 @@
     "jobs-copy",
     "event-history-filter",
     "event-history-copy",
+    "permissions-sort",
+    "permissions-previous",
+    "permissions-next",
+    "strategy-sort",
+    "strategy-previous",
+    "strategy-next",
+    "portfolio-sort",
+    "portfolio-previous",
+    "portfolio-next",
+    "operations-sort",
+    "operations-previous",
+    "operations-next",
+    "risk-sort",
+    "risk-previous",
+    "risk-next",
+    "jobs-sort",
+    "jobs-previous",
+    "jobs-next",
+    "event-history-sort",
+    "event-history-previous",
+    "event-history-next",
     "host-action",
     "authority-policy-id",
     "authority-instrument-id",
@@ -820,26 +843,102 @@
     return [...body.querySelectorAll('tr[data-filterable-row="true"]')];
   }
 
-  function applyTableFilter(tool, {announce = true} = {}) {
+  function tableViewFor(tool) {
+    let view = tableViewState.get(tool.bodyId);
+    if (view === undefined) {
+      view = {page: 0};
+      tableViewState.set(tool.bodyId, view);
+    }
+    return view;
+  }
+
+  function tableSortMode(tool) {
+    const control = byId(tool.sortId);
+    const value = control ? control.value : "host";
+    return ["host", "text-asc", "text-desc"].includes(value) ? value : "host";
+  }
+
+  function ensureTableHostOrder(rows) {
+    rows.forEach((row, index) => {
+      if (row.dataset.tableHostOrder === undefined) {
+        row.dataset.tableHostOrder = String(index);
+      }
+    });
+  }
+
+  function compareHostOrder(tool, left, right) {
+    if (tool.bodyId === "event-history-body") {
+      const a = BigInt(left.dataset.tableHostOrder);
+      const b = BigInt(right.dataset.tableHostOrder);
+      return a === b ? 0 : (a > b ? -1 : 1);
+    }
+    return Number(left.dataset.tableHostOrder) - Number(right.dataset.tableHostOrder);
+  }
+
+  function orderedTableRows(tool, rows, mode) {
+    const ordered = [...rows];
+    ordered.sort((left, right) => {
+      if (mode === "host") return compareHostOrder(tool, left, right);
+      const a = tableSearchText(left);
+      const b = tableSearchText(right);
+      const primary = a < b ? -1 : (a > b ? 1 : 0);
+      if (primary !== 0) return mode === "text-desc" ? -primary : primary;
+      return compareHostOrder(tool, left, right);
+    });
+    return ordered;
+  }
+
+  function tableSortDescription(mode) {
+    if (mode === "text-asc") return "rendered text ascending";
+    if (mode === "text-desc") return "rendered text descending";
+    return "host order";
+  }
+
+  function applyTableFilter(tool, {announce = true, resetPage = false} = {}) {
     const body = byId(tool.bodyId);
     const filter = byId(tool.filterId);
-    if (!body || !filter) return;
+    const previous = byId(tool.previousId);
+    const next = byId(tool.nextId);
+    if (!body || !filter || !previous || !next) return;
     const rows = filterableRows(body);
     const query = normalizedTableQuery(filter.value);
-    let visible = 0;
-    for (const row of rows) {
+    const view = tableViewFor(tool);
+    if (resetPage) view.page = 0;
+    ensureTableHostOrder(rows);
+    const mode = tableSortMode(tool);
+    const ordered = orderedTableRows(tool, rows, mode);
+    for (const row of ordered) body.appendChild(row);
+
+    const matching = [];
+    for (const row of ordered) {
       const matches = query === "" || tableSearchText(row).includes(query);
       row.hidden = !matches;
-      if (matches) visible += 1;
+      if (matches) matching.push(row);
     }
+
+    const pageCount = Math.max(1, Math.ceil(matching.length / TABLE_PAGE_SIZE));
+    view.page = Math.min(Math.max(0, view.page), pageCount - 1);
+    const pageStart = view.page * TABLE_PAGE_SIZE;
+    const pageEnd = Math.min(pageStart + TABLE_PAGE_SIZE, matching.length);
+    matching.forEach((row, index) => {
+      if (index < pageStart || index >= pageEnd) row.hidden = true;
+    });
+    previous.disabled = matching.length === 0 || view.page === 0;
+    next.disabled = matching.length === 0 || view.page >= pageCount - 1;
+
     let statusMessage;
     if (rows.length === 0) {
       statusMessage = "No host rows are available to filter.";
-    } else if (query === "") {
-      statusMessage = String(rows.length) + " rows shown.";
+    } else if (matching.length === 0) {
+      statusMessage = "0 of " + String(rows.length) +
+        " rows match the current filter. Sort: " + tableSortDescription(mode) + ".";
     } else {
-      statusMessage = String(visible) + " of " + String(rows.length) +
-        " rows match the current filter.";
+      statusMessage =
+        "Rows " + String(pageStart + 1) + "-" + String(pageEnd) +
+        " of " + String(matching.length) +
+        (query === "" ? " rows" : " matching rows") +
+        " shown. Page " + String(view.page + 1) + " of " + String(pageCount) +
+        ". Sort: " + tableSortDescription(mode) + ".";
     }
     text(tool.statusId, statusMessage);
     if (announce) queuePoliteAnnouncement(statusMessage);
@@ -853,10 +952,13 @@
   function resetTableFiltersForScopeChange() {
     for (const tool of TABLE_TOOLS) {
       const filter = byId(tool.filterId);
+      const sort = byId(tool.sortId);
       if (filter) filter.value = "";
-      text(tool.statusId, "Filter cleared for new account/environment scope.");
+      if (sort) sort.value = "host";
+      tableViewFor(tool).page = 0;
+      text(tool.statusId, "Table view reset for new account/environment scope.");
     }
-    queuePoliteAnnouncement("Table filters cleared for new account/environment scope.");
+    queuePoliteAnnouncement("Table filters, sort order, and pages reset for new account/environment scope.");
   }
 
   function visibleTableRows(tool) {
@@ -867,6 +969,15 @@
 
   function tabSeparatedRowText(row) {
     return [...row.cells]
+      .map((cell) => cell.textContent.replace(/\s+/g, " ").trim())
+      .join("\t");
+  }
+
+  function tabSeparatedTableHeaderText(tool) {
+    const body = byId(tool.bodyId);
+    const table = body ? body.closest("table") : null;
+    if (!table) return "";
+    return [...table.querySelectorAll("thead th")]
       .map((cell) => cell.textContent.replace(/\s+/g, " ").trim())
       .join("\t");
   }
@@ -886,19 +997,18 @@
       queuePoliteAnnouncement(message);
       return;
     }
-    const payload = rows.map((row) => tabSeparatedRowText(row)).join("\n");
+    const rowPayload = rows.map((row) => tabSeparatedRowText(row));
+    const header = tabSeparatedTableHeaderText(tool);
+    const payload = (header === "" ? rowPayload : [header, ...rowPayload]).join("\n");
     try {
       await navigator.clipboard.writeText(payload);
-      if (scopeEpoch !== state.scopeEpoch) {
-        return;
-      }
-      const message = String(rows.length) + " visible " + tool.label + " rows copied.";
+      if (scopeEpoch !== state.scopeEpoch) return;
+      const message = String(rows.length) + " visible " + tool.label + " rows copied." +
+        (header === "" ? "" : " Column headings included.");
       text(tool.statusId, message);
       queuePoliteAnnouncement(message);
     } catch {
-      if (scopeEpoch !== state.scopeEpoch) {
-        return;
-      }
+      if (scopeEpoch !== state.scopeEpoch) return;
       const message = "Clipboard copy was not permitted. Use normal text selection and copy.";
       text(tool.statusId, message);
       queuePoliteAnnouncement(message);
@@ -909,8 +1019,24 @@
     for (const tool of TABLE_TOOLS) {
       const filter = byId(tool.filterId);
       const copy = byId(tool.copyId);
-      if (!filter || !copy) continue;
-      filter.addEventListener("input", () => applyTableFilter(tool));
+      const sort = byId(tool.sortId);
+      const previous = byId(tool.previousId);
+      const next = byId(tool.nextId);
+      if (!filter || !copy || !sort || !previous || !next) continue;
+      filter.addEventListener("input", () =>
+        applyTableFilter(tool, {resetPage: true}));
+      sort.addEventListener("change", () =>
+        applyTableFilter(tool, {resetPage: true}));
+      previous.addEventListener("click", () => {
+        const view = tableViewFor(tool);
+        view.page = Math.max(0, view.page - 1);
+        applyTableFilter(tool);
+      });
+      next.addEventListener("click", () => {
+        const view = tableViewFor(tool);
+        view.page += 1;
+        applyTableFilter(tool);
+      });
       copy.addEventListener("click", () => { void copyVisibleTableRows(tool); });
       applyTableFilter(tool, {announce: false});
     }
@@ -1005,6 +1131,7 @@
       }
       row = document.createElement("tr");
       row.dataset.operationId = operation.operationId;
+      row.dataset.tableHostOrder = String(filterableRows(body).length);
       const rowHeader = document.createElement("th");
       rowHeader.scope = "row";
       row.appendChild(rowHeader);
@@ -1073,6 +1200,7 @@
     const row = document.createElement("tr");
     row.dataset.hostEventCursor = cursor.toString();
     row.dataset.filterableRow = "true";
+    row.dataset.tableHostOrder = cursor.toString();
     const rowHeader = document.createElement("th");
     rowHeader.scope = "row";
     row.appendChild(rowHeader);

@@ -1627,15 +1627,20 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertLess(history, command)
 
 
-    def test_live_projection_tables_have_keyboard_filter_and_copy_controls(self):
+    def test_live_projection_tables_have_keyboard_filter_copy_sort_and_page_controls(self):
         html = INDEX.read_text(encoding="utf-8")
         js = APP.read_text(encoding="utf-8")
         for prefix in ("permissions", "strategy", "portfolio", "operations", "risk", "jobs", "event-history"):
             self.assertIn(f'id="{prefix}-filter" type="search"', html)
             self.assertIn(f'id="{prefix}-copy" type="button"', html)
+            self.assertIn(f'id="{prefix}-sort"', html)
+            self.assertIn(f'id="{prefix}-previous" type="button"', html)
+            self.assertIn(f'id="{prefix}-next" type="button"', html)
             self.assertIn(f'id="{prefix}-filter-status"', html)
-        self.assertIn("const TABLE_TOOLS = Object.freeze([", js)
-        self.assertIn("function applyTableFilter(tool, {announce = true} = {})", js)
+        self.assertIn("const TABLE_PAGE_SIZE = 25", js)
+        self.assertIn("const tableViewState = new Map()", js)
+        self.assertIn("function applyTableFilter(tool, {announce = true, resetPage = false} = {})", js)
+        self.assertIn("function orderedTableRows(tool, rows, mode)", js)
         self.assertIn("function copyVisibleTableRows(tool)", js)
         self.assertIn("function bindTableTools()", js)
         self.assertIn("bindTableTools();", js)
@@ -1721,6 +1726,20 @@ class SemanticWebClientContractTests(unittest.TestCase):
             "event-history-filter", "event-history-copy",
         ):
             self.assertIn(f'"{target}"', js)
+
+    def test_table_sort_pagination_event_order_and_clipboard_headers_are_deterministic(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("Math.ceil(matching.length / TABLE_PAGE_SIZE)", js)
+        self.assertIn('tool.bodyId === "event-history-body"', js)
+        self.assertIn("BigInt(left.dataset.tableHostOrder)", js)
+        self.assertIn("BigInt(right.dataset.tableHostOrder)", js)
+        self.assertIn("function tabSeparatedTableHeaderText(tool)", js)
+        self.assertIn('table.querySelectorAll("thead th")', js)
+        self.assertIn("[header, ...rowPayload]", js)
+        self.assertIn("Column headings included.", js)
+        for prefix in ("permissions", "strategy", "portfolio", "operations", "risk", "jobs", "event-history"):
+            for suffix in ("sort", "previous", "next"):
+                self.assertIn(f'"{prefix}-{suffix}"', js)
 
     def test_table_tools_reflow_without_horizontal_viewport_locking(self):
         css = CSS.read_text(encoding="utf-8")

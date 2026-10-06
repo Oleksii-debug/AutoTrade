@@ -118,6 +118,26 @@ def observation(**overrides):
 
 
 class ExecutionOracleTests(unittest.TestCase):
+    def test_oracle_independently_requires_registry_price_grid(self):
+        exact_order = order()
+        exact_observation = observation()
+        exact_model = model()
+        exact_result = simulate_execution(
+            exact_order,
+            exact_observation,
+            exact_model,
+        )
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "requires canonical InstrumentRegistry price grid",
+        ):
+            assert_conservative_execution(
+                order=exact_order,
+                observation=exact_observation,
+                model=model(price_grid=None),
+                result=exact_result,
+            )
+
     def test_oracle_rejects_domain_subclasses_before_economic_checks(self):
         class DerivedOrder(SimulatedOrder):
             pass

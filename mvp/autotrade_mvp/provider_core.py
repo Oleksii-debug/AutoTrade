@@ -16,6 +16,7 @@ from hashlib import sha256
 import json
 from types import MappingProxyType
 from typing import Iterable, Literal, Mapping
+from weakref import ref as weakref_ref
 import re
 
 from autotrade_numeric.exact_decimal import (
@@ -653,6 +654,84 @@ class ProviderSubmissionObservation:
             raise ProviderCoreError("provider-write provenance client-order mismatch")
 
 
+def _install_provider_submission_observation_authority():
+    """Issue provider-write observations as exact-instance financial authority.
+
+    The durable response binding remains the restart-compatible source of truth.
+    This registry only authenticates the in-process observation object that is
+    handed to downstream parsers, preventing subclasses/uninitialized clones or
+    mutated nested payloads from impersonating a real observation.
+    """
+
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+    def prune() -> None:
+        for object_id, (value_ref, _snapshot) in tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def register(value: object) -> None:
+        if type(value) is not ProviderSubmissionObservation:
+            raise ProviderCoreError(
+                "provider submission observation registration requires exact observation"
+            )
+        prune()
+        object_id = id(value)
+        current = states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise ProviderCoreError(
+                "provider submission observation identity collision"
+            )
+        states[object_id] = (
+            weakref_ref(value),
+            (
+                value.response_binding,
+                value.endpoint,
+                value.capability_snapshot_ids,
+                value.instrument_versions,
+                value.evidence_ref,
+                value.payload,
+            ),
+        )
+
+    def require(value: object) -> ProviderSubmissionObservation:
+        if type(value) is not ProviderSubmissionObservation:
+            raise ProviderCoreError(
+                "provider submission observation must be canonical exact type"
+            )
+        prune()
+        state = states.get(id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderCoreError(
+                "provider submission observation authority is unavailable"
+            )
+        expected = state[1]
+        current = (
+            value.response_binding,
+            value.endpoint,
+            value.capability_snapshot_ids,
+            value.instrument_versions,
+            value.evidence_ref,
+            value.payload,
+        )
+        if current != expected:
+            raise ProviderCoreError(
+                "provider submission observation changed after exact issuance"
+            )
+        if value.response_binding is not expected[0]:
+            raise ProviderCoreError(
+                "provider submission observation binding changed after exact issuance"
+            )
+        return value
+
+
+(
+    _register_provider_submission_observation_authority,
+    _require_provider_submission_observation_authority,
+) = _install_provider_submission_observation_authority()
+del _install_provider_submission_observation_authority
+
+
 def observe_submission_json_response(
     *,
     response_binding: SubmissionResponseBinding,
@@ -727,7 +806,7 @@ def observe_submission_json_response(
     evidence_ref = (
         "provider-write:sha256:" + sha256(identity_material).hexdigest()
     )
-    return ProviderSubmissionObservation(
+    observation = ProviderSubmissionObservation(
         response_binding=response_binding,
         endpoint=normalized_endpoint,
         capability_snapshot_ids=capabilities,
@@ -740,6 +819,20 @@ def observe_submission_json_response(
         payload=_decode_exact_json(response_binding.response_bytes),
         _observation_token=_SUBMISSION_OBSERVED_RESPONSE_TOKEN,
     )
+    # Freeze the entire exact observation payload before handing it to consumers.
+    # The durable response bytes remain the restart-compatible source of truth;
+    # the in-process authority prevents object impersonation/mutation.
+    observation = ProviderSubmissionObservation(
+        response_binding=observation.response_binding,
+        endpoint=observation.endpoint,
+        capability_snapshot_ids=observation.capability_snapshot_ids,
+        instrument_versions=observation.instrument_versions,
+        evidence_ref=observation.evidence_ref,
+        payload=_freeze_json(observation.payload),
+        _observation_token=_SUBMISSION_OBSERVED_RESPONSE_TOKEN,
+    )
+    _register_provider_submission_observation_authority(observation)
+    return observation
 
 @dataclass(frozen=True)
 class ProviderDefinition:

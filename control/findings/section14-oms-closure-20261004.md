@@ -64,3 +64,8 @@ No provider/PAPER/LIVE, real-order, profitability, signed-release or NVDA qualif
 ## Current-main reconvergence — 2026-10-06
 
 The Section 14 source patch was re-applied to exact `main@884e573a6171a8c85fe2a3f606419d14d386f341`. All 12 source hunks applied without conflict, and the reconstructed `order_projection.py` is byte-identical to donor blob `319a66b8d991b7b90f13f5328d31ccc402636aa2`. The five focused falsifier suites are carried unchanged from the canonical lineage. The historical Verify failure on `c4934d0...` was an unrelated missing `mvp.tests.capability_test_support` import in contract tests; that support module exists on this current-main base. Fresh exact-head qualification remains required and only terminal results count.
+
+
+## Weakref authority-erasure hardening — 2026-10-06
+
+The current-main review found that the donor's `WeakKeyDictionary` aggregate seal registries inherited the same callback-erasure class already demonstrated elsewhere in financial authority code. Section 14 therefore no longer uses `WeakKeyDictionary` for book/OCO seals. Closure-owned id-keyed registries retain callback-free weakrefs, seal entries retain callback-free order weakrefs, and live aggregate reinitialization is rejected before caller-visible scope or registration state can be reset. Focused regressions require zero callable weakref removal callbacks and prove book/OCO `__init__` cannot reset a live seal. This is fail-closed OMS authority hardening; it adds no provider or economic-edge claim.

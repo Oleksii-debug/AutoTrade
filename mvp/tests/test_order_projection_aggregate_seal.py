@@ -1,5 +1,6 @@
 from decimal import Decimal
 import unittest
+import weakref
 
 from mvp.autotrade_mvp.order_projection import (
     OcoGroupProjection,
@@ -109,6 +110,56 @@ class AggregateOrderSealTests(unittest.TestCase):
 
         with self.assertRaises(OrderProjectionConflict):
             group.refresh()
+
+
+    def test_live_seal_bindings_have_no_callable_weakref_removal_callbacks(self):
+        book = OrderBookProjection(
+            provider_id="SIMULATED",
+            account_id="account-1",
+            environment="SIMULATION",
+        )
+        order = self._order()
+        book.register(order)
+        group = OcoGroupProjection("oco-1")
+        group.add(order)
+
+        for value in (book, group, order):
+            callbacks = [
+                reference.__callback__
+                for reference in weakref.getweakrefs(value)
+                if reference.__callback__ is not None
+            ]
+            self.assertEqual(callbacks, [])
+
+    def test_book_reinitialization_cannot_reset_live_registration_seal(self):
+        book = OrderBookProjection(
+            provider_id="SIMULATED",
+            account_id="account-1",
+            environment="SIMULATION",
+        )
+        order = self._order()
+        book.register(order)
+
+        with self.assertRaises(OrderProjectionConflict):
+            book.__init__(
+                provider_id="OTHER",
+                account_id="attacker-account",
+                environment="PAPER",
+            )
+
+        self.assertEqual(book.provider_id, "SIMULATED")
+        self.assertIs(book.order("order-1"), order)
+
+    def test_oco_reinitialization_cannot_reset_live_registration_seal(self):
+        group = OcoGroupProjection("oco-1")
+        order = self._order()
+        group.add(order)
+
+        with self.assertRaises(OrderProjectionConflict):
+            group.__init__("oco-2")
+
+        self.assertEqual(group.group_id, "oco-1")
+        group.refresh()
 
 
 if __name__ == "__main__":

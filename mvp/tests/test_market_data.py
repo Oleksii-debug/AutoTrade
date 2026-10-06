@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 from uuid import UUID
@@ -28,6 +28,36 @@ EVIDENCE = {
     "sha256": "sha256:" + "a" * 64,
     "observed_at": "2026-09-24T16:00:00Z",
 }
+
+
+class CallbackTimezone(tzinfo):
+    def __init__(self):
+        self.calls = 0
+
+    def _fail(self):
+        self.calls += 1
+        raise AssertionError("caller timezone code must not execute")
+
+    def utcoffset(self, dt):
+        return self._fail()
+
+    def dst(self, dt):
+        return self._fail()
+
+    def tzname(self, dt):
+        return self._fail()
+
+
+class CallbackDatetime(datetime):
+    calls = 0
+
+    def astimezone(self, tz=None):
+        type(self).calls += 1
+        raise AssertionError("caller datetime code must not execute")
+
+    def utcoffset(self):
+        type(self).calls += 1
+        raise AssertionError("caller datetime code must not execute")
 
 
 def at(month=9, day=24, hour=16, minute=0, second=0):
@@ -140,6 +170,62 @@ def begin_provider_policy(
 
 
 class MarketNormalizationTests(unittest.TestCase):
+    def test_admission_rejects_custom_timezone_without_callbacks(self):
+        hostile = CallbackTimezone()
+        source = datetime(2026, 9, 24, 16, tzinfo=hostile)
+        with self.assertRaisesRegex(MarketDataError, "built-in timezone"):
+            raw(
+                "TRADE",
+                {"price": "100.01", "quantity": "1", "side": "buy"},
+                source=source,
+                available=at(second=1),
+                ingested=at(second=2),
+            )
+        self.assertEqual(hostile.calls, 0)
+
+    def test_admission_rejects_datetime_subclass_without_callbacks(self):
+        CallbackDatetime.calls = 0
+        source = CallbackDatetime(2026, 9, 24, 16, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(MarketDataError, "exact timezone-aware datetime"):
+            raw(
+                "TRADE",
+                {"price": "100.01", "quantity": "1", "side": "buy"},
+                source=source,
+                available=at(second=1),
+                ingested=at(second=2),
+            )
+        self.assertEqual(CallbackDatetime.calls, 0)
+
+    def test_funding_payload_rejects_custom_timezone_without_callbacks(self):
+        hostile = CallbackTimezone()
+        next_funding = datetime(2026, 9, 24, 17, tzinfo=hostile)
+        normalizer = MarketNormalizer(registry())
+        update = raw(
+            "FUNDING",
+            {"rate": "0.0001", "next_funding_at": next_funding},
+        )
+        with self.assertRaisesRegex(MarketDataError, "built-in timezone"):
+            normalizer.normalize(update)
+        self.assertEqual(hostile.calls, 0)
+
+    def test_builtin_fixed_offset_timezone_remains_supported(self):
+        plus_two = timezone(timedelta(hours=2))
+        source = datetime(2026, 9, 24, 18, tzinfo=plus_two)
+        normalizer = MarketNormalizer(registry())
+        event = normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "100.01", "quantity": "1", "side": "buy"},
+                source=source,
+                available=datetime(2026, 9, 24, 18, 0, 1, tzinfo=plus_two),
+                ingested=datetime(2026, 9, 24, 18, 0, 2, tzinfo=plus_two),
+            )
+        )
+        self.assertEqual(
+            event.to_contract_dict()["source_event_at"],
+            "2026-09-24T16:00:00Z",
+        )
+
     def test_trade_normalizes_to_contract_without_binary_numbers(self):
         normalizer = MarketNormalizer(registry())
         event = normalizer.normalize(

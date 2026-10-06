@@ -548,6 +548,13 @@ Require(
     verifiedDuplicate.DuplicateIdentity && !verifiedDuplicate.IdentityConflict,
     "Integrity-bound restart checkpoint did not preserve callback identity.");
 
+var futureHighWaterCheckpoint = RehashRestartState(
+    restartCheckpoint,
+    root => root["ArrivalHighWaterUtc"] = "2026-09-24T20:00:01.0000000Z");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(futureHighWaterCheckpoint),
+    "rehash-valid restart state with future arrival high-water must fail closed");
+
 var tamperedRestartCheckpoint = restartCheckpoint.Replace(
     "\"FillPrice\":451.125",
     "\"FillPrice\":451.5",

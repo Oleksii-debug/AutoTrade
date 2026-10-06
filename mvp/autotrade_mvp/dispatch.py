@@ -1363,15 +1363,27 @@ class GuardedDispatcher:
                 )
                 raise DispatchBlocked(barrier_reason)
             durable_before_send = self._events(attempt_id)
-            if not durable_before_send or durable_before_send[-1]["event_type"] != "SubmissionPrepared":
+            if (
+                not durable_before_send
+                or durable_before_send[-1]["event_type"] != "SubmissionPrepared"
+                or not self._existing_history_is_canonical(
+                    events=durable_before_send,
+                    attempt_id=attempt_id,
+                    client_order_id=client_order_id,
+                    expected_prepared=prepared_payload,
+                )
+            ):
                 raise DispatchBlocked(
                     "submission_changed_during_final_send_validation"
                 )
-            prepared_payload = durable_before_send[0].get("payload")
-            if type(prepared_payload) is not dict or type(prepared_payload.get("prepared_at")) is not str:
+            durable_prepared_payload = durable_before_send[0].get("payload")
+            if (
+                type(durable_prepared_payload) is not dict
+                or type(durable_prepared_payload.get("prepared_at")) is not str
+            ):
                 raise DispatchBlocked("submission_prepared_chronology_invalid")
             lease_state = _prepared_lease_state(
-                prepared_at=prepared_payload["prepared_at"],
+                prepared_at=durable_prepared_payload["prepared_at"],
                 now=barrier_now,
                 lease_seconds=self.prepared_lease_seconds,
             )

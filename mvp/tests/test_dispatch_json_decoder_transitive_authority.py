@@ -621,5 +621,75 @@ class JsonDecoderTransitiveAuthorityTests(unittest.TestCase):
             )
 
 
+
+    def test_transport_cannot_replace_json_array_helper_defaults(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            decoder_init = dispatch_module.json.JSONDecoder.__dict__["__init__"]
+            json_array = decoder_init.__globals__["JSONArray"]
+            original_defaults = json_array.__defaults__
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                json_array.__defaults__ = ()
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "json-array-default-retarget",
+                    transport,
+                )
+                self.assertIs(json_array.__defaults__, original_defaults)
+            finally:
+                json_array.__defaults__ = original_defaults
+
+            self._assert_unknown_after_send(
+                path,
+                dispatcher,
+                "json-array-default-retarget",
+                result,
+            )
+
+    def test_transport_cannot_replace_json_object_helper_defaults(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            decoder_init = dispatch_module.json.JSONDecoder.__dict__["__init__"]
+            json_object = decoder_init.__globals__["JSONObject"]
+            original_defaults = json_object.__defaults__
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                json_object.__defaults__ = ()
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "json-object-default-retarget",
+                    transport,
+                )
+                self.assertIs(json_object.__defaults__, original_defaults)
+            finally:
+                json_object.__defaults__ = original_defaults
+
+            self._assert_unknown_after_send(
+                path,
+                dispatcher,
+                "json-object-default-retarget",
+                result,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

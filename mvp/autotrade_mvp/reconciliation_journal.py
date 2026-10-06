@@ -1554,6 +1554,23 @@ def unknown_submissions_from_dispatch(
             name="client_order_id",
         )
 
+        prepared_owner_token = payload.get("owner_token")
+        prepared_owner_epoch = payload.get("owner_epoch")
+        modern_owner_identity = (
+            prepared_owner_token is not None or prepared_owner_epoch is not None
+        )
+        if modern_owner_identity:
+            if (
+                type(prepared_owner_token) is not str
+                or not prepared_owner_token.strip()
+                or type(prepared_owner_epoch) is not int
+                or prepared_owner_epoch < 1
+            ):
+                raise ValueError(
+                    "SubmissionPrepared durable owner identity is invalid"
+                )
+            prepared_owner_token = prepared_owner_token.strip()
+
         # Provider financial domain is durable submission authority.  In
         # particular, runtime PAPER cannot distinguish BYBIT TESTNET from DEMO.
         # Recover that axis only from the prepared submission scope; never from
@@ -1630,6 +1647,18 @@ def unknown_submissions_from_dispatch(
                 raise ValueError(
                     "submission event client_order_id does not match SubmissionPrepared"
                 )
+            if event_type == "SubmissionSending" and modern_owner_identity:
+                sending_owner_token = event_payload.get("owner_token")
+                sending_owner_epoch = event_payload.get("owner_epoch")
+                if (
+                    type(sending_owner_token) is not str
+                    or sending_owner_token.strip() != prepared_owner_token
+                    or type(sending_owner_epoch) is not int
+                    or sending_owner_epoch != prepared_owner_epoch
+                ):
+                    raise ValueError(
+                        "SubmissionSending owner identity does not match SubmissionPrepared"
+                    )
 
         started_at = _instant(
             payload.get("prepared_at"),

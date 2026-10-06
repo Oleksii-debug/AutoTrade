@@ -405,6 +405,65 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(accepted.evidence_ref, source.evidence_ref)
 
+    def test_late_module_global_instrument_registry_cannot_replace_canonical_registry(self):
+        source = sealed_dividend()
+        calls = []
+        instrument = canonical_instrument()
+        original = corporate_action_evidence_module.InstrumentRegistry
+
+        class DecoyRegistry:
+            @staticmethod
+            def exact(_registry, _version_ref):
+                calls.append("exact")
+                return instrument
+
+            @staticmethod
+            def at(_registry, _instrument_id, _instant):
+                calls.append("at")
+                return instrument
+
+        corporate_action_evidence_module.InstrumentRegistry = DecoyRegistry
+        try:
+            with self.assertRaisesRegex(TypeError, "exact InstrumentRegistry"):
+                resolve(
+                    source,
+                    instrument_registry=DecoyRegistry(),
+                )
+        finally:
+            corporate_action_evidence_module.InstrumentRegistry = original
+        self.assertEqual(calls, [])
+
+    def test_late_module_global_event_and_action_decoys_do_not_mint_authority(self):
+        source = sealed_dividend()
+        calls = []
+        original_event = corporate_action_evidence_module.CorporateEvent
+        original_action = corporate_action_evidence_module.AuthoritativeCorporateAction
+
+        class DecoyEvent:
+            @classmethod
+            def create(cls, **_kwargs):
+                calls.append("event")
+                raise AssertionError("late CorporateEvent decoy must not execute")
+
+        class DecoyAction:
+            def __init__(self, **_kwargs):
+                calls.append("action")
+                raise AssertionError(
+                    "late AuthoritativeCorporateAction decoy must not execute"
+                )
+
+        corporate_action_evidence_module.CorporateEvent = DecoyEvent
+        corporate_action_evidence_module.AuthoritativeCorporateAction = DecoyAction
+        try:
+            accepted = resolve(source)
+        finally:
+            corporate_action_evidence_module.CorporateEvent = original_event
+            corporate_action_evidence_module.AuthoritativeCorporateAction = original_action
+
+        self.assertEqual(calls, [])
+        self.assertIs(type(accepted), AuthoritativeCorporateAction)
+        self.assertIs(type(accepted.event), CorporateEvent)
+
     def test_instrument_registry_subclass_is_rejected_before_registry_dispatch(self):
         class ForgedRegistry(InstrumentRegistry):
             def exact(self, _version_ref):

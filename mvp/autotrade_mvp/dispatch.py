@@ -1082,6 +1082,52 @@ class GuardedDispatcher:
             return DispatchOutcome("UNKNOWN", client_order_id, None, payload.get("reason", "unknown"))
         raise ValueError("event is not terminal")
 
+    def _existing_history_is_canonical(
+        self,
+        *,
+        events: list[dict[str, Any]],
+        attempt_id: str,
+        client_order_id: str,
+    ) -> bool:
+        aggregate_id = self._aggregate_id(attempt_id)
+        versions: list[int] = []
+        event_types: list[str] = []
+        for event in events:
+            if type(event) is not dict:
+                return False
+            version = event.get("aggregate_version")
+            event_type = event.get("event_type")
+            payload = event.get("payload")
+            if type(version) is not int or type(event_type) is not str:
+                return False
+            if (
+                event.get("aggregate_type") != "submission_attempt"
+                or event.get("aggregate_id") != aggregate_id
+                or event.get("environment") != self.environment
+                or type(payload) is not dict
+            ):
+                return False
+            durable_client_order_id = payload.get("client_order_id")
+            if (
+                type(durable_client_order_id) is not str
+                or durable_client_order_id != client_order_id
+            ):
+                return False
+            versions.append(version)
+            event_types.append(event_type)
+
+        if versions != list(range(1, len(events) + 1)):
+            return False
+        return tuple(event_types) in {
+            ("SubmissionPrepared",),
+            ("SubmissionPrepared", "SubmissionBlocked"),
+            ("SubmissionPrepared", "SubmissionUnknown"),
+            ("SubmissionPrepared", "SubmissionSending"),
+            ("SubmissionPrepared", "SubmissionBlocked", "SubmissionUnknown"),
+            ("SubmissionPrepared", "SubmissionSending", "SubmissionSent"),
+            ("SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"),
+        }
+
     def _recover_existing(
         self,
         *,
@@ -1092,6 +1138,17 @@ class GuardedDispatcher:
         events = self._events(attempt_id)
         if not events:
             raise RuntimeError("submission attempt disappeared")
+        if not self._existing_history_is_canonical(
+            events=events,
+            attempt_id=attempt_id,
+            client_order_id=client_order_id,
+        ):
+            return DispatchOutcome(
+                "UNKNOWN",
+                client_order_id,
+                None,
+                "durable_submission_history_invalid",
+            )
         last = events[-1]
         if last["event_type"] in {"SubmissionSent", "SubmissionBlocked", "SubmissionUnknown"}:
             return self._outcome_from_terminal(last, client_order_id)
@@ -1242,7 +1299,14 @@ class GuardedDispatcher:
 
         existing = self._events(attempt_id)
         if existing:
-            prepared = existing[0]["payload"]
+            prepared = existing[0].get("payload")
+            if type(prepared) is not dict:
+                return DispatchOutcome(
+                    "UNKNOWN",
+                    client_order_id,
+                    None,
+                    "durable_submission_history_invalid",
+                )
             expected = {
                 "attempt_id": attempt_id,
                 "intent_id": intent_id,

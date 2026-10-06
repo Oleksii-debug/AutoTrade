@@ -131,7 +131,9 @@ class PreparedZeroWireSection6Tests(unittest.TestCase):
                 provider="simulated",
                 request={"quantity": "1"},
                 now="2026-10-06T10:00:00Z",
-                authority_check=self.authority,
+                authority_check=lambda *_args: self.fail(
+                    "active Prepared recovery repeated authority"
+                ),
                 transport_send=lambda *_args: self.fail(
                     "active Prepared recovery reached provider transport"
                 ),
@@ -155,7 +157,9 @@ class PreparedZeroWireSection6Tests(unittest.TestCase):
                 provider="simulated",
                 request={"quantity": "1"},
                 now="2026-10-06T10:00:02Z",
-                authority_check=self.authority,
+                authority_check=lambda *_args: self.fail(
+                    "expired Prepared recovery repeated authority"
+                ),
                 transport_send=lambda *_args: self.fail(
                     "expired Prepared recovery reached provider transport"
                 ),

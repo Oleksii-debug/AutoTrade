@@ -379,7 +379,14 @@ def _install_alpaca_prepared_request_authority(builder):
     prepared_post_init_code = prepared_post_init.__code__
     builder_code = builder.__code__
     intent_type = AlpacaOrderIntent
+    intent_init = intent_type.__init__
+    intent_init_code = intent_init.__code__
+    intent_create = intent_type.create.__func__
+    intent_create_code = intent_create.__code__
     capability_type = CapabilitySnapshot
+    datetime_type = datetime
+    decimal_type = Decimal
+    bool_type = bool
     capability_admits = capability_type.admits
     capability_admits_code = capability_admits.__code__
     canonical_instant = _instant
@@ -412,7 +419,14 @@ def _install_alpaca_prepared_request_authority(builder):
         if (
             AlpacaPreparedRequest is not prepared_type
             or AlpacaOrderIntent is not intent_type
+            or intent_type.__init__ is not intent_init
+            or canonical_getattr(intent_init, "__code__", None) is not intent_init_code
+            or canonical_getattr(intent_type.create, "__func__", None) is not intent_create
+            or canonical_getattr(intent_create, "__code__", None) is not intent_create_code
             or CapabilitySnapshot is not capability_type
+            or datetime is not datetime_type
+            or Decimal is not decimal_type
+            or bool is not bool_type
             or capability_type.admits is not capability_admits
             or canonical_getattr(capability_admits, "__code__", None)
             is not capability_admits_code
@@ -505,6 +519,69 @@ def _install_alpaca_prepared_request_authority(builder):
         same_text(current[8], expected[8])
         return value
 
+    def canonical_intent(value):
+        if canonical_type(value) is not intent_type:
+            raise type_error("intent must be exact AlpacaOrderIntent")
+        try:
+            raw = (
+                object_getattribute(value, "instrument_version"),
+                object_getattribute(value, "asset_class"),
+                object_getattribute(value, "symbol"),
+                object_getattribute(value, "side"),
+                object_getattribute(value, "order_type"),
+                object_getattribute(value, "time_in_force"),
+                object_getattribute(value, "quantity"),
+                object_getattribute(value, "notional"),
+                object_getattribute(value, "limit_price"),
+                object_getattribute(value, "stop_price"),
+                object_getattribute(value, "extended_hours"),
+                object_getattribute(value, "position_intent"),
+            )
+        except attribute_error_type:
+            authority_changed()
+        for text_value in raw[:6]:
+            if canonical_type(text_value) is not canonical_str:
+                authority_changed()
+        for decimal_value in raw[6:10]:
+            if decimal_value is not None and canonical_type(decimal_value) is not decimal_type:
+                authority_changed()
+        if canonical_type(raw[10]) is not bool_type:
+            authority_changed()
+        if raw[11] is not None and canonical_type(raw[11]) is not canonical_str:
+            authority_changed()
+        rebuilt = intent_create(
+            intent_type,
+            instrument_version=raw[0],
+            asset_class=raw[1],
+            symbol=raw[2],
+            side=raw[3],
+            order_type=raw[4],
+            time_in_force=raw[5],
+            quantity=raw[6],
+            notional=raw[7],
+            limit_price=raw[8],
+            stop_price=raw[9],
+            extended_hours=raw[10],
+            position_intent=raw[11],
+        )
+        rebuilt_raw = (
+            object_getattribute(rebuilt, "instrument_version"),
+            object_getattribute(rebuilt, "asset_class"),
+            object_getattribute(rebuilt, "symbol"),
+            object_getattribute(rebuilt, "side"),
+            object_getattribute(rebuilt, "order_type"),
+            object_getattribute(rebuilt, "time_in_force"),
+            object_getattribute(rebuilt, "quantity"),
+            object_getattribute(rebuilt, "notional"),
+            object_getattribute(rebuilt, "limit_price"),
+            object_getattribute(rebuilt, "stop_price"),
+            object_getattribute(rebuilt, "extended_hours"),
+            object_getattribute(rebuilt, "position_intent"),
+        )
+        if rebuilt_raw != raw:
+            authority_changed()
+        return rebuilt
+
     def canonical_prepare_order_request(
         intent: AlpacaOrderIntent,
         *,
@@ -515,6 +592,18 @@ def _install_alpaca_prepared_request_authority(builder):
         at: datetime,
     ) -> AlpacaPreparedRequest:
         implementation_changed()
+        if canonical_type(capability) is not capability_type:
+            raise type_error("capability must be exact CapabilitySnapshot")
+        if canonical_type(at) is not datetime_type:
+            raise type_error("at must be exact datetime")
+        for name, value in (
+            ("client_order_id", client_order_id),
+            ("account_id", account_id),
+            ("environment", environment),
+        ):
+            if canonical_type(value) is not canonical_str:
+                raise type_error(f"{name} must be exact str")
+        intent = canonical_intent(intent)
         prepared = builder(
             intent,
             client_order_id=client_order_id,

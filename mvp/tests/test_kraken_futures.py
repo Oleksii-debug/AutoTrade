@@ -10,6 +10,7 @@ from uuid import uuid4
 import mvp.autotrade_mvp.kraken_futures as kraken_futures_module
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
+    CapabilitySnapshot,
     EvidenceVerification,
     derive_capability_snapshot,
 )
@@ -185,6 +186,30 @@ def futures_response_bytes(payload) -> bytes:
 
 
 class KrakenFuturesAdapterTests(unittest.TestCase):
+    def test_preparation_rejects_capability_subclass_before_callback(self):
+        callbacks = []
+
+        class HostileCapability(CapabilitySnapshot):
+            def __getattribute__(self, name):
+                callbacks.append(name)
+                raise AssertionError("hostile capability callback executed")
+
+        hostile = object.__new__(HostileCapability)
+        with self.assertRaisesRegex(TypeError, "exact CapabilitySnapshot"):
+            prepare_order_request(
+                capability=hostile,
+                account_id="futures-account",
+                provider_environment="DEMO",
+                instrument_version="PI_XBTUSD@v1",
+                at=NOW_DT,
+                symbol="PI_XBTUSD",
+                side="BUY",
+                order_type="MARKET",
+                size="1",
+                client_order_id="futures-hostile-cap",
+            )
+        self.assertEqual(callbacks, [])
+
     def test_payload_numeric_admission_uses_shared_bounded_exact_authority(self):
         arguments = dict(environment="LIVE", symbol="PI_XBTUSD", side="BUY",
                          order_type="LIMIT", size="1.0001", price="70000.01",
@@ -536,6 +561,37 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             intent_id=intent_id,
         )
         with self.assertRaisesRegex(ProviderCoreError, "guarded request"):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+
+    def test_submission_response_rejects_noncanonical_echoed_client_identity(self):
+        intent_id = "hedge-noncanonical-client-echo"
+        expected_client = stable_client_order_id(
+            "KRAKEN",
+            intent_id,
+            environment="PAPER",
+            account_id="futures-account",
+            max_length=36,
+            client_id_format="UUID",
+        )
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "provider-noncanonical-client",
+                    "status": "placed",
+                    "cliOrdId": " " + expected_client + " ",
+                },
+            },
+            intent_id=intent_id,
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "client identity must be canonical exact text",
+        ):
             parse_submission_response(
                 attempt_id=attempt,
                 prepared_request=prepared,

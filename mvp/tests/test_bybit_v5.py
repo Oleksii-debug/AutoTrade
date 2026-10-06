@@ -645,17 +645,25 @@ class BybitV5AdapterTests(unittest.TestCase):
                 )[1],
                 sender_check=lambda _owner, _epoch: None,
                 submission_scope={
-                    "endpoint": prepared.endpoint,
+                    "provider_id": "BYBIT",
+                    "account_id": account_id,
+                    "environment": runtime_environment,
                     "provider_environment": (
                         submission_scope_provider_environment
                         if submission_scope_provider_environment is not None
                         else provider_environment
                     ),
+                    "capability_snapshot_id": prepared.capability_snapshot_id,
+                    "endpoint": prepared.endpoint,
                     "prepared_request_sha256": prepared.body_sha256,
                     "capability_snapshot_ids": list(
                         prepared.capability_snapshot_ids
                     ),
                     "instrument_versions": list(prepared.instrument_versions),
+                    "provider_route_capability_snapshot_id": (
+                        prepared.capability_snapshot_id
+                    ),
+                    "provider_route_provider_environment": provider_environment,
                 },
             )
             self.assertEqual(outcome.status, "SENT")

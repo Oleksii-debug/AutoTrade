@@ -903,6 +903,38 @@ class AlpacaAdapterTests(unittest.TestCase):
                 )
         rebound.assert_not_called()
 
+    def test_submission_consumer_rejects_rebound_response_helpers_without_callback(self):
+        intent_id = "alpaca-response-helper-rebound"
+        client_id = stable_client_order_id(
+            "ALPACA",
+            intent_id,
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "id": str(uuid4()),
+                "client_order_id": client_id,
+            },
+            intent_id=intent_id,
+        )
+        for helper in ("_submission_projection", "_response_evidence", "_uuid_text"):
+            with self.subTest(helper=helper):
+                with patch(
+                    f"mvp.autotrade_mvp.alpaca.{helper}",
+                    side_effect=AssertionError("rebound response helper executed"),
+                ) as rebound:
+                    with self.assertRaisesRegex(
+                        AlpacaAdapterError,
+                        "prepared response authority is unavailable",
+                    ):
+                        parse_submission_response(
+                            attempt_id=attempt,
+                            prepared_request=prepared,
+                            observation=observation,
+                        )
+                rebound.assert_not_called()
+
     def test_submission_consumer_rejects_prepared_subclass_before_virtual_callback(self):
         callbacks = []
 

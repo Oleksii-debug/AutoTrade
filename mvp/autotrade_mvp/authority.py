@@ -23,13 +23,9 @@ from .allocation import (
 )
 from .durable_reservations import DurableReservationBook
 from .durable_settlement import DurableSettlementBook
+from .futures import FuturesContract, FuturesError, lifecycle_gate
+from .instruments import InstrumentRegistry, InstrumentRegistryError, InstrumentVersion
 from .exact_decimal import exact_add, exact_subtract, exact_abs
-from .instruments import (
-    InstrumentRegistry,
-    InstrumentRegistryError,
-    InstrumentVersion,
-    _registry_versions_for as _instrument_registry_versions_for,
-)
 from .provider_activity_accounting import DurableProviderEconomicBook
 from .persistence import (
     JournalStore,
@@ -608,22 +604,27 @@ def _authority_store_call(
         return method(store, *args, **kwargs)
 
 
-def _authority_service_instrument_operations():
-    """Seal one AuthorityService to one exact canonical InstrumentRegistry."""
 
-    registry_type = InstrumentRegistry
-    version_type = InstrumentVersion
-    registry_error = InstrumentRegistryError
-    registry_versions_for = _instrument_registry_versions_for
+def _authority_service_instrument_registry_operations():
+    """Retain the product-selected instrument registry outside per-call authority."""
+
     states: dict[
         int,
         tuple[weakref.ReferenceType, weakref.ReferenceType | None],
     ] = {}
     lock = threading.RLock()
 
-    def register(service: object, registry: InstrumentRegistry | None) -> None:
-        if registry is not None and type(registry) is not registry_type:
-            raise TypeError("instrument_registry must be exact InstrumentRegistry")
+    def register(
+        service: object,
+        instrument_registry: InstrumentRegistry | None,
+    ) -> None:
+        if (
+            instrument_registry is not None
+            and type(instrument_registry) is not InstrumentRegistry
+        ):
+            raise TypeError(
+                "instrument_registry must be exact InstrumentRegistry"
+            )
         object_id = id(service)
         service_ref = weakref.ref(service)
         with lock:
@@ -632,17 +633,21 @@ def _authority_service_instrument_operations():
                 current_service = current[0]()
                 if current_service is service:
                     raise AuthorityConflict(
-                        "AuthorityService instrument composition is already initialized"
+                        "AuthorityService instrument registry is already initialized"
                     )
                 if current_service is not None:
                     raise AuthorityConflict(
-                        "AuthorityService instrument binding identity collision"
+                        "AuthorityService instrument registry identity collision"
                     )
                 states.pop(object_id, None)
-            service._selected_instrument_registry = registry
+            service._selected_instrument_registry = instrument_registry
             states[object_id] = (
                 service_ref,
-                None if registry is None else weakref.ref(registry),
+                (
+                    None
+                    if instrument_registry is None
+                    else weakref.ref(instrument_registry)
+                ),
             )
 
     def binding(
@@ -654,7 +659,7 @@ def _authority_service_instrument_operations():
             state = states.get(id(service))
         if state is None or state[0]() is not service:
             raise AuthorityConflict(
-                "AuthorityService instrument process state is unavailable"
+                "AuthorityService instrument registry process state is unavailable"
             )
         registry = None if state[1] is None else state[1]()
         visible = vars(service).get("_selected_instrument_registry")
@@ -663,13 +668,37 @@ def _authority_service_instrument_operations():
             or (state[1] is not None and registry is None)
         ):
             raise AuthorityConflict(
-                "AuthorityService instrument lifetime binding was modified"
+                "AuthorityService instrument registry binding was modified"
             )
-        if registry is None and required:
+        if registry is None:
+            if required:
+                raise AuthorityConflict(
+                    "new futures exposure requires a product-selected InstrumentRegistry"
+                )
+            return None
+        if type(registry) is not InstrumentRegistry:
             raise AuthorityConflict(
-                "financial borrow authority requires canonical InstrumentRegistry"
+                "AuthorityService selected instrument registry type changed"
             )
         return registry
+
+    return register, binding
+
+
+(
+    _register_authority_service_instrument_registry,
+    _authority_service_instrument_registry,
+) = _authority_service_instrument_registry_operations()
+del _authority_service_instrument_registry_operations
+
+
+def _build_authority_service_instrument_version_resolver():
+    """Resolve one exact instrument through the product-selected registry."""
+
+    registry_type = InstrumentRegistry
+    version_type = InstrumentVersion
+    registry_error = InstrumentRegistryError
+    exact = InstrumentRegistry.exact
 
     def resolve(
         service: object,
@@ -679,38 +708,82 @@ def _authority_service_instrument_operations():
             raise TypeError(
                 "instrument identity must be exact InstrumentVersionIdentity"
             )
-        registry = binding(service, required=True)
-        assert registry is not None
+        registry = _authority_service_instrument_registry(service, required=True)
+        if type(registry) is not registry_type:
+            raise AuthorityConflict(
+                "financial instrument registry authority changed type"
+            )
         try:
-            versions = registry_versions_for(registry, identity.instrument_id)
+            selected = exact(
+                registry,
+                f"{identity.instrument_id}@{identity.version}",
+            )
         except registry_error as error:
             raise AuthorityConflict(
                 "financial borrow authority cannot resolve canonical instrument version"
             ) from error
-        matches = tuple(
-            version
-            for version in versions
-            if (
-                type(version) is version_type
-                and version.instrument_id == identity.instrument_id
-                and version.version == identity.version
-            )
-        )
-        if len(matches) != 1:
+        if (
+            type(selected) is not version_type
+            or selected.instrument_id != identity.instrument_id
+            or selected.version != identity.version
+        ):
             raise AuthorityConflict(
                 "canonical instrument registry returned mismatched instrument identity"
             )
-        return matches[0]
+        return selected
 
-    return register, binding, resolve
+    return resolve
 
 
-(
-    _register_authority_service_instrument_registry,
-    _authority_service_instrument_registry,
-    _resolve_authority_service_instrument_version,
-) = _authority_service_instrument_operations()
-del _authority_service_instrument_operations
+_resolve_authority_service_instrument_version = (
+    _build_authority_service_instrument_version_resolver()
+)
+del _build_authority_service_instrument_version_resolver
+
+
+def _require_authority_service_future_lifecycle(
+    service: object,
+    *,
+    instrument_id: str,
+    instrument_version: int,
+    provider_id: str,
+    evaluated_at: str,
+) -> InstrumentVersion:
+    """Re-resolve one FUTURE lifecycle cut from the service-owned registry."""
+
+    registry = _authority_service_instrument_registry(service, required=True)
+    assert registry is not None
+    key = f"{instrument_id}@{instrument_version}"
+    try:
+        selected = InstrumentRegistry.exact(registry, key)
+    except InstrumentRegistryError as error:
+        raise AuthorityConflict(
+            "financial FUTURE is not selected by the product InstrumentRegistry"
+        ) from error
+    if type(selected) is not InstrumentVersion or selected.asset_class != "FUTURE":
+        raise AuthorityConflict(
+            "financial FUTURE requires exact FUTURE InstrumentVersion authority"
+        )
+    if selected.provider_id != provider_id:
+        raise AuthorityConflict(
+            "financial FUTURE InstrumentVersion belongs to another provider"
+        )
+    try:
+        contract = FuturesContract.from_instrument_version(selected)
+        state = lifecycle_gate(
+            contract,
+            _instant(evaluated_at, name="evaluated_at"),
+            instrument_registry=registry,
+        )
+    except (FuturesError, InstrumentRegistryError, TypeError, ValueError) as error:
+        raise AuthorityConflict(
+            "financial FUTURE lifecycle authority is invalid"
+        ) from error
+    if state != "OPEN":
+        raise AuthorityConflict(
+            f"new futures exposure is blocked by product lifecycle authority: {state}"
+        )
+    return selected
 
 
 def _authority_service_capital_operations():
@@ -2304,7 +2377,6 @@ class AuthorityService:
         store: JournalStore | None = None,
         *,
         evidence_artifact_store: ArtifactStore | None = None,
-        instrument_registry: InstrumentRegistry | None = None,
         allocation_authority_resolver: Callable[
             [EvidenceBoundObjectiveAllocationResult],
             AllocationAuthoritySnapshot,
@@ -2318,6 +2390,7 @@ class AuthorityService:
         | None = None,
         settlement_book: DurableSettlementBook | None = None,
         economic_book: DurableProviderEconomicBook | None = None,
+        instrument_registry: InstrumentRegistry | None = None,
     ):
         # Validate all composition inputs before publishing any process binding.
         # Explicit __init__ re-entry must fail before it can reset established
@@ -2338,7 +2411,10 @@ class AuthorityService:
             raise TypeError("risk_authority_resolver must be callable")
 
         _register_authority_service_store(self, store, risk_policy_scope)
-        _register_authority_service_instrument_registry(self, instrument_registry)
+        _register_authority_service_instrument_registry(
+            self,
+            instrument_registry,
+        )
         # Capital validation reads the already sealed store binding, including
         # its diagnostic view. Publish that view before validating composition.
         self.store = store
@@ -4873,6 +4949,20 @@ class AuthorityService:
             valid_until=valid_until,
             authoritative_risk_snapshot_id=risk_snapshot_id,
         )
+
+        if (
+            decision.admitted
+            and normalized_action == "ORDER.SUBMIT"
+            and risk_intent.instrument_type == "FUTURE"
+            and not risk_intent.reduce_only
+        ):
+            _require_authority_service_future_lifecycle(
+                self,
+                instrument_id=snapshot_instrument.instrument_id,
+                instrument_version=snapshot_instrument.version,
+                provider_id=snapshot_provider_id,
+                evaluated_at=evaluated_at,
+            )
 
         normalized_requirements = normalize_reservation_requirements(
             reservation_requirements

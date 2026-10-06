@@ -2349,6 +2349,23 @@ class GuardedDispatcher:
             self.owner_epoch,
             self.prepared_lease_seconds,
         )
+        # These module-level helpers are part of the irreversible send-state
+        # authority even though GuardedDispatcher methods are class-sealed.
+        # Python function bodies resolve them dynamically from module globals,
+        # so an external callback could otherwise rebind them after
+        # SubmissionSending and redirect terminal journal reads/writes.
+        dispatch_module_globals = globals()
+        dispatch_module_get = dispatch_module_globals.get
+        dispatch_module_set = dispatch_module_globals.__setitem__
+        dispatch_module_authority = (
+            (
+                "_canonical_journal_authority_snapshot",
+                _canonical_journal_authority_snapshot,
+            ),
+            ("_journal_store_call", _journal_store_call),
+            ("_envelope", _envelope),
+            ("_detach_submission_json", _detach_submission_json),
+        )
         dispatcher_class_surfaces = tuple(
             (base, tuple(base.__dict__.items()))
             for base in type(self).__mro__
@@ -2437,6 +2454,10 @@ class GuardedDispatcher:
                 ):
                     class_surface_is_unchanged = False
                     break
+            module_surface_is_unchanged = all(
+                dispatch_module_get(name) is member
+                for name, member in dispatch_module_authority
+            )
             if (
                 self.store is authority_store
                 and self._journal_store_path is authority_path
@@ -2444,6 +2465,7 @@ class GuardedDispatcher:
                 and self._dispatch_authority_state is authority_state
                 and shadow_is_unchanged
                 and class_surface_is_unchanged
+                and module_surface_is_unchanged
                 and type(self.environment) is str
                 and type(self.account_id) is str
                 and type(self.scope_key) is str
@@ -2460,6 +2482,10 @@ class GuardedDispatcher:
             # callback retargeted.
             if not class_surface_is_unchanged:
                 restore_dispatcher_class_surface()
+            if not module_surface_is_unchanged:
+                for name, member in dispatch_module_authority:
+                    if dispatch_module_get(name) is not member:
+                        dispatch_module_set(name, member)
             self.store = authority_store
             self._journal_store_path = authority_path
             self._journal_store_identity = authority_identity

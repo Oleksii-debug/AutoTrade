@@ -2761,6 +2761,53 @@ class AblationTests(unittest.TestCase):
             )
             self.assertEqual(calls, [])
 
+    def test_caller_correction_resolver_cannot_be_erased_after_issuance(self):
+        calls: list[str] = []
+
+        def hostile_resolver(_reference):
+            calls.append("resolver")
+            raise AssertionError("caller correction evidence resolver executed")
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            science = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(
+                root / "memory.sqlite3",
+                correction_evidence_resolver=hostile_resolver,
+            )
+            artifacts = ArtifactStore(root / "artifacts")
+            authority = AblationQualificationAuthority(
+                scientific_registry=science,
+                experience_memory=memory,
+                artifact_store=artifacts,
+                protocol_id="caller-correction-resolver-erasure",
+                protocol_hash=FINGERPRINT_A,
+                source_revision="1" * 40,
+                causal_cutoff=CUT,
+                granted_permissions={"RESEARCH"},
+            )
+            memory._correction_evidence_resolver = None
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "memory correction authority changed after issuance",
+            ):
+                authority.resolve_population(
+                    [
+                        pair(
+                            "caller-resolver-erasure-a",
+                            "2",
+                            population_unit="caller-resolver-erasure-unit-a",
+                        ),
+                        pair(
+                            "caller-resolver-erasure-b",
+                            "2",
+                            population_unit="caller-resolver-erasure-unit-b",
+                        ),
+                    ]
+                )
+            self.assertEqual(calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

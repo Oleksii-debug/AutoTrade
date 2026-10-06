@@ -1510,6 +1510,7 @@ def _make_ablation_authority_policy_binding(
         int,
         tuple[tuple[str, str | None], tuple[str, str | None]],
     ] = {}
+    memory_correction_authorities: dict[int, object | None] = {}
 
     def register(
         authority: object,
@@ -1530,6 +1531,12 @@ def _make_ablation_authority_policy_binding(
         authority_id = id(authority)
         registry_path_binding = path_binding(scientific_registry, "registry")
         memory_path_binding = path_binding(experience_memory, "memory")
+        memory_state = object.__getattribute__(experience_memory, "__dict__")
+        if type(memory_state) is not dict or "_correction_evidence_resolver" not in memory_state:
+            raise ProtocolViolation(
+                "ablation qualification memory correction authority is unavailable"
+            )
+        memory_correction_authority = memory_state["_correction_evidence_resolver"]
 
         def release(
             reference: object,
@@ -1555,6 +1562,9 @@ def _make_ablation_authority_policy_binding(
                 int,
                 tuple[tuple[str, str | None], tuple[str, str | None]],
             ] = backing_paths,
+            memory_correction_authorities: dict[int, object | None] = (
+                memory_correction_authorities
+            ),
             lock: RLock = lock,
         ) -> None:
             with lock:
@@ -1562,6 +1572,7 @@ def _make_ablation_authority_policy_binding(
                 if current is not None and current[0] is reference:
                     bindings.pop(authority_id, None)
                     backing_paths.pop(authority_id, None)
+                    memory_correction_authorities.pop(authority_id, None)
 
         reference = weakref_ref(authority, release)
         with lock:
@@ -1591,6 +1602,7 @@ def _make_ablation_authority_policy_binding(
                 registry_path_binding,
                 memory_path_binding,
             )
+            memory_correction_authorities[authority_id] = memory_correction_authority
 
     def resolve(
         authority: object,
@@ -1630,6 +1642,25 @@ def _make_ablation_authority_policy_binding(
             if path_binding(bound[2], "memory") != bound_paths[1]:
                 raise ProtocolViolation(
                     "ablation qualification memory database path changed after issuance"
+                )
+            if authority_id not in memory_correction_authorities:
+                raise ProtocolViolation(
+                    "ablation qualification memory correction binding is unavailable"
+                )
+            memory_state = object.__getattribute__(bound[2], "__dict__")
+            if (
+                type(memory_state) is not dict
+                or "_correction_evidence_resolver" not in memory_state
+            ):
+                raise ProtocolViolation(
+                    "ablation qualification memory correction authority is unavailable"
+                )
+            if (
+                memory_state["_correction_evidence_resolver"]
+                is not memory_correction_authorities[authority_id]
+            ):
+                raise ProtocolViolation(
+                    "ablation qualification memory correction authority changed after issuance"
                 )
             return (
                 bound[1],

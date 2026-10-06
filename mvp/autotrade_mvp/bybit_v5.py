@@ -227,6 +227,7 @@ def _install_bybit_fee_currency_authority() -> object:
         current = tuple(getattr(value, name) for name in (
             "provider_id",
             "provider_environment",
+            "account_id",
             "entity_id",
             "product_category",
             "instrument_version",

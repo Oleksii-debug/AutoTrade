@@ -234,6 +234,60 @@ class AccessibleStatusTests(unittest.TestCase):
         self.assertNotIn("forged status", text)
         self.assertNotIn("\t", text)
 
+    def test_unicode_format_controls_cannot_reorder_or_split_accessible_status(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "symbol": "SIM\u202eUSD",
+                "initial_cash": "1000\u2028forged",
+                "evidence_count": 1,
+                "fills": {},
+                "state_format": "canonical_journal",
+                "episode_id": "episode\u2066spoof",
+                "session_status": "RUNNING",
+                "active_reservations": [
+                    {
+                        "remaining": {"CASH:USD": "10\u2029forged"},
+                        "state": "ACTIVE",
+                    }
+                ],
+            }
+        )
+        self.assertIn("Instrument: Unavailable", text)
+        self.assertIn("Initial capital: Unavailable", text)
+        self.assertIn("Episode: Unavailable", text)
+        self.assertIn("Reserved CASH:USD: Unavailable; state: ACTIVE", text)
+        self.assertNotIn("\u202e", text)
+        self.assertNotIn("\u2028", text)
+        self.assertNotIn("\u2029", text)
+        self.assertNotIn("\u2066", text)
+        self.assertNotIn("forged", text)
+
+    def test_nonfinite_float_values_are_unavailable_not_operator_facts(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "symbol": "SIM",
+                "initial_cash": float("nan"),
+                "evidence_count": float("inf"),
+                "fills": {},
+            },
+            {
+                "final_equity": float("-inf"),
+                "net_pnl": float("nan"),
+                "total_fees": "0",
+                "turnover": "0",
+                "max_drawdown": "0",
+                "reconciled": False,
+            },
+        )
+        self.assertIn("Initial capital: Unavailable", text)
+        self.assertIn("Recorded evidence items: Unavailable", text)
+        self.assertIn("Final equity: Unavailable", text)
+        self.assertIn("Net profit or loss: Unavailable", text)
+        self.assertNotIn(" nan", text.lower())
+        self.assertNotIn(" inf", text.lower())
+
     def test_accessible_cli_returns_failure_for_unknown_state(self):
         output = io.StringIO()
         canonical = {

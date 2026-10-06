@@ -1,6 +1,6 @@
 # AutoTrade — canonical contracts
 
-Contract baseline `autotrade.contracts/1.0.0`. Normative design, not production source. JSON Schema 2020-12 plus OpenAPI 3.1 are the implementation artifacts to commit first. C# and Python/TypeScript bindings are generated from the same schemas; examples are not alternative schemas.
+Contract baseline `autotrade.contracts/6.0.0`. Normative design, not production source. JSON Schema 2020-12 plus OpenAPI 3.1 are the implementation artifacts to commit first. C# and Python/TypeScript bindings are generated from the same schemas; examples are not alternative schemas.
 
 ## 1. Common types and compatibility
 
@@ -8,7 +8,7 @@ Contract baseline `autotrade.contracts/1.0.0`. Normative design, not production 
 
 `Money = {amount: Decimal, currency: CurrencyId}`; `Quantity = {value: Decimal, unit: UnitId}`. Units distinguish base units, shares and contracts. Currency is not inferred from a symbol. `Environment = REPLAY | SIMULATION | PAPER | LIVE`; credentials and IDs are environment-separated. `EvidenceRef = {artifact_id, sha256, source_uri?, observed_at, rights_id?}`. Payloads cannot contain credentials or credential-shaped provider headers.
 
-Major versions change meaning/required structure. Minor versions add optional fields with fixed defaults. Financial commands reject unknown fields and unknown enum values; observations preserve unknown provider data in the raw evidence object and quarantine unrecognized economically material events. Schema upgrades have forward/backward fixtures and a journal migration plan. No silent float coercion.
+Major versions change meaning, required structure, or versioned semantic-validator accept/reject authority. Adding, removing, or changing a declared semantic validator or its shared conformance corpus requires a new major version. Minor versions add optional fields with fixed defaults. Financial commands reject unknown fields and unknown enum values; observations preserve unknown provider data in the raw evidence object and quarantine unrecognized economically material events. Schema upgrades have forward/backward fixtures and a journal migration plan. No silent float coercion.
 
 ## 2. Durable event envelope
 
@@ -30,11 +30,11 @@ Only VERIFIED and unexpired evidence can authorize the relevant action. Refresh 
 
 ## 4. Data contracts
 
-`MarketEvent`: envelope + `instrument_version`, `kind = TRADE | QUOTE | BOOK_SNAPSHOT | BOOK_DELTA | BAR | FUNDING | MARK | INDEX | STATUS`, `source_event_at`, `available_at`, `availability_basis`, `ingested_at`, `source_sequence?`, `revision`, typed payload, `quality_flags[]`, `raw_evidence_ref`. A bar contains start/end, OHLCV, finalized flag and first availability; finalized close cannot be known at bar start. Book deltas contain predecessor/range IDs and checksum when supplied; a gap invalidates executable book state.
+`MarketEvent`: envelope + required bounded `adapter_version`, `instrument_version`, `kind = TRADE | QUOTE | BOOK_SNAPSHOT | BOOK_DELTA | BAR | FUNDING | MARK | INDEX | STATUS`, `source_event_at`, `available_at`, `availability_basis`, `ingested_at`, `source_sequence?`, `revision`, typed payload, `quality_flags[]`, `raw_evidence_ref`. `adapter_version` is the exact product-owned parser/adapter build identity that produced the normalized observation; it is provenance, not provider qualification by possession. A bar contains start/end, OHLCV, finalized flag and first availability; finalized close cannot be known at bar start. Book deltas contain predecessor/range IDs and checksum when supplied; a gap invalidates executable book state.
 
 `InformationEvent`: `information_id`, `source_id`, `source_event_at?`, `published_at`, `available_at`, `ingested_at`, `revision`, `supersedes?`, `entities[]`, `claims[]`, `content_hash`, `rights_id`, `trust_features`, `language`, `evidence[]`. Store disagreements as claims from separate sources. A revised macro series does not replace its historical vintages.
 
-`DatasetManifest`: `dataset_id`, `version`, `content_hashes[]`, `instrument_universe_version`, `calendar_version`, `coverage`, `availability_policy`, `revision_policy`, `normalization_version`, `adjustment_policy`, `rights`, `missingness_report`, `source_evidence[]`, `created_at`. Frozen experiments reference a manifest digest, not a folder name that can later change.
+`DatasetManifest`: `dataset_id`, `version`, non-empty `content_hashes[]`, `instrument_universe_version`, `calendar_version`, `coverage`, `availability_policy`, `revision_policy`, `normalization_version`, `adjustment_policy`, `rights`, `missingness_report`, non-empty `source_evidence[]`, `created_at`. Contract 6.0.0 uses canonical semantic validator `dataset-manifest-content-authority-v1`: every declared `content_hashes[]` digest MUST have at least one `source_evidence[].sha256` exact match. Each matching `EvidenceRef` is an explicit exact content-object binding through its `artifact_id` plus digest (and `rights_id` when present); additional non-matching `source_evidence` entries remain provenance-only. The structural JSON Schema cannot express sibling-array value equality, so this cross-field invariant is part of the canonical contract through the versioned semantic validator and its shared Python/C#/TypeScript corpus. Role-specific consumers may narrow a valid manifest further (for example, require exactly one market-population binding) but may not infer an authoritative content object from a bare digest without a matching canonical `EvidenceRef`. Frozen experiments reference a manifest digest, not a folder name that can later change.
 
 ## 5. Decisions and portfolio targets
 

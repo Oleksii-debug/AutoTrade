@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-import os
 from pathlib import Path
+import re
 import subprocess
 from typing import Iterable, Sequence
 
@@ -51,6 +51,16 @@ PROTECTED_SENTINELS = frozenset(
         "tools/verify.py",
     }
 )
+
+PROTECTED_MUTATION_ROOTS = frozenset(
+    {
+        ".github/workflows/reconvergence-integrity.yml",
+        "control/tools/reconvergence_integrity.py",
+    }
+)
+
+TRUSTED_SCOPE_APPROVAL_MARKER = "AUTOTRADE_RECONVERGENCE_SCOPE_V1"
+_SHA40 = re.compile(r"^[0-9a-f]{40}$")
 
 
 @dataclass(frozen=True)
@@ -87,6 +97,50 @@ def _require_repo_relative_path(value: str, *, name: str) -> str:
     return value
 
 
+def parse_trusted_scope_approval(
+    body: object,
+    *,
+    expected_head_sha: str,
+) -> tuple[str, ...] | None:
+    """Parse one external OWNER-issued exact-head trust-root approval.
+
+    Unmarked comments and records for another well-formed head are unrelated.
+    A record targeting the current head is authority-bearing input and therefore
+    fails closed when malformed or when it repeats paths.
+    """
+
+    if type(body) is not str:
+        return None
+    lines = body.splitlines()
+    if not lines or lines[0] != TRUSTED_SCOPE_APPROVAL_MARKER:
+        return None
+    if type(expected_head_sha) is not str or not _SHA40.fullmatch(expected_head_sha):
+        raise ValueError("expected approval head must be a lowercase 40-hex SHA")
+    if len(lines) < 2 or not lines[1].startswith("head: "):
+        raise ValueError("trusted scope approval requires one exact head line")
+    approved_head = lines[1].removeprefix("head: ")
+    if not _SHA40.fullmatch(approved_head):
+        raise ValueError("trusted scope approval head must be a lowercase 40-hex SHA")
+    if approved_head != expected_head_sha:
+        return None
+    if len(lines) < 3:
+        raise ValueError("trusted scope approval must contain at least one exact path")
+
+    paths: list[str] = []
+    for line in lines[2:]:
+        if not line.startswith("path: "):
+            raise ValueError("trusted scope approval permits only path lines after head")
+        paths.append(
+            _require_repo_relative_path(
+                line.removeprefix("path: "),
+                name="approved scope path",
+            )
+        )
+    if len(set(paths)) != len(paths):
+        raise ValueError("trusted scope approval must not repeat paths")
+    return tuple(paths)
+
+
 def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
     changes: list[Change] = []
     for raw in lines:
@@ -101,7 +155,12 @@ def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
         if not status:
             raise ValueError(f"Malformed Git name-status record: {line!r}")
         if kind in {"R", "C"}:
-            if len(status) == 1 or not status[1:].isdigit():
+            score = status[1:]
+            if (
+                len(score) != 3
+                or not score.isdigit()
+                or int(score) > 100
+            ):
                 raise ValueError(f"Malformed rename/copy status: {line!r}")
         elif len(status) != 1:
             raise ValueError(f"Malformed Git name-status record: {line!r}")
@@ -168,27 +227,42 @@ def assess_reconvergence(
         kind = change.status[:1]
         if kind not in SUPPORTED_CHANGE_KINDS:
             raise ValueError("unsupported Git change status")
-        _require_repo_relative_path(change.path, name="changed path")
         if kind in {"R", "C"}:
+            score = change.status[1:]
+            if (
+                len(score) != 3
+                or not score.isdigit()
+                or int(score) > 100
+            ):
+                raise ValueError("rename/copy Git change status is malformed")
             if change.previous_path is None:
                 raise ValueError("rename/copy change requires previous path")
             _require_repo_relative_path(change.previous_path, name="previous path")
-        elif change.previous_path is not None:
-            raise ValueError("non-rename/copy change must not have previous path")
+        else:
+            if len(change.status) != 1:
+                raise ValueError("Git change status is malformed")
+            if change.previous_path is not None:
+                raise ValueError("non-rename/copy change must not have previous path")
+        _require_repo_relative_path(change.path, name="changed path")
 
     authorized_protected_paths = _normalized_exact_paths(
         authorized_protected_sentinel_paths
     )
-    if not authorized_protected_paths.issubset(PROTECTED_SENTINELS):
+    if not authorized_protected_paths.issubset(PROTECTED_MUTATION_ROOTS):
         raise ValueError(
-            "protected sentinel authorization must name only canonical protected sentinels"
+            "trust-root authorization must name only canonical executable trust roots"
         )
     if not authorized_protected_paths.issubset(protected_sentinels):
         raise ValueError(
-            "protected sentinel authorization must name active protected sentinels"
+            "trust-root authorization must name active protected sentinels"
         )
 
-    normalized_base = tuple(dict.fromkeys(base_paths))
+    normalized_base = tuple(
+        dict.fromkeys(
+            _require_repo_relative_path(path, name="base tree path")
+            for path in base_paths
+        )
+    )
     base_count = len(normalized_base)
     if base_count == 0:
         raise ValueError("base tree must contain at least one tracked path")
@@ -213,7 +287,11 @@ def assess_reconvergence(
             )
         if kind == "T" and change.path in protected_sentinels:
             protected_damage.add(f"{change.path} (type change)")
-        if kind == "M" and change.path in protected_sentinels:
+        if (
+            kind == "M"
+            and change.path in PROTECTED_MUTATION_ROOTS
+            and change.path in protected_sentinels
+        ):
             if change.path not in authorized_protected_paths:
                 protected_damage.add(f"{change.path} (modification)")
         if kind in {"A", "C"} and change.path in protected_sentinels:
@@ -376,14 +454,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
-        "--allow-protected-sentinel-path",
+        "--trusted-root-approval",
         action="append",
         default=None,
         help=(
-            "Permit regular content modification of this exact protected sentinel "
-            "path. Paths must be exact protected-file paths; directory scopes are "
-            "not accepted. The trusted workflow may also supply exact paths through "
-            "AUTOTRADE_TRUSTED_PROTECTED_SENTINEL_PATHS."
+            "Externally approved exact executable trust-root path. This channel is "
+            "separate from ordinary mutation scope and must be resolved by trusted "
+            "base code from an exact-head OWNER approval record."
         ),
     )
     parser.add_argument(
@@ -393,16 +470,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     allowed_scopes = args.allowed_scope
-    env_authorized_paths = tuple(
-        line.strip()
-        for line in os.environ.get(
-            "AUTOTRADE_TRUSTED_PROTECTED_SENTINEL_PATHS",
-            "",
-        ).splitlines()
-        if line.strip()
-    )
     authorized_protected_sentinel_paths = tuple(
-        dict.fromkeys((args.allow_protected_sentinel_path or ()) + env_authorized_paths)
+        dict.fromkeys(args.trusted_root_approval or ())
     )
 
     assessment = assess_git_revisions(

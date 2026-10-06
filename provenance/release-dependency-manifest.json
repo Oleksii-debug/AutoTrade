@@ -47,7 +47,7 @@
           "path": ".github/workflows/contracts.yml"
         },
         {
-          "blob_sha": "f78d47c0e14de7f1790eb45f16620133b1947ffd",
+          "blob_sha": "a52419bc2b73190b9795fddf71425be6cb9fd870",
           "path": ".github/workflows/control-plane.yml"
         },
         {
@@ -55,7 +55,7 @@
           "path": ".github/workflows/dotnet-foundation.yml"
         },
         {
-          "blob_sha": "991ef1c555597a0fd33203c81fa4cb82c97d0eea",
+          "blob_sha": "3b556a42fe7d9dfd31c0d9827f9d1f566528b100",
           "path": ".github/workflows/futures-qualification.yml"
         },
         {
@@ -67,7 +67,7 @@
           "path": ".github/workflows/research-primitives.yml"
         },
         {
-          "blob_sha": "dc7f2d362fb72c803b58952cfc7733a5d3f8b452",
+          "blob_sha": "c48f1a02241278f830dba483692aa3bf07a9680d",
           "path": ".github/workflows/science-qualification.yml"
         },
         {
@@ -145,7 +145,7 @@
           "path": ".github/workflows/contracts.yml"
         },
         {
-          "blob_sha": "f78d47c0e14de7f1790eb45f16620133b1947ffd",
+          "blob_sha": "a52419bc2b73190b9795fddf71425be6cb9fd870",
           "path": ".github/workflows/control-plane.yml"
         },
         {
@@ -153,7 +153,7 @@
           "path": ".github/workflows/dotnet-foundation.yml"
         },
         {
-          "blob_sha": "991ef1c555597a0fd33203c81fa4cb82c97d0eea",
+          "blob_sha": "3b556a42fe7d9dfd31c0d9827f9d1f566528b100",
           "path": ".github/workflows/futures-qualification.yml"
         },
         {
@@ -161,7 +161,7 @@
           "path": ".github/workflows/research-primitives.yml"
         },
         {
-          "blob_sha": "dc7f2d362fb72c803b58952cfc7733a5d3f8b452",
+          "blob_sha": "c48f1a02241278f830dba483692aa3bf07a9680d",
           "path": ".github/workflows/science-qualification.yml"
         },
         {
@@ -183,7 +183,7 @@
           "path": ".github/workflows/contracts.yml"
         },
         {
-          "blob_sha": "f78d47c0e14de7f1790eb45f16620133b1947ffd",
+          "blob_sha": "a52419bc2b73190b9795fddf71425be6cb9fd870",
           "path": ".github/workflows/control-plane.yml"
         },
         {
@@ -191,7 +191,7 @@
           "path": ".github/workflows/dotnet-foundation.yml"
         },
         {
-          "blob_sha": "991ef1c555597a0fd33203c81fa4cb82c97d0eea",
+          "blob_sha": "3b556a42fe7d9dfd31c0d9827f9d1f566528b100",
           "path": ".github/workflows/futures-qualification.yml"
         },
         {
@@ -203,7 +203,7 @@
           "path": ".github/workflows/research-primitives.yml"
         },
         {
-          "blob_sha": "dc7f2d362fb72c803b58952cfc7733a5d3f8b452",
+          "blob_sha": "c48f1a02241278f830dba483692aa3bf07a9680d",
           "path": ".github/workflows/science-qualification.yml"
         },
         {

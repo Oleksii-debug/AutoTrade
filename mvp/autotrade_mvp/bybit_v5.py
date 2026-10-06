@@ -25,6 +25,7 @@ from .provider_core import (
     ProviderResponseObservation,
     ProviderSubmissionObservation,
     Surface,
+    _require_provider_submission_observation_authority,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
@@ -671,10 +672,11 @@ def _submission_evidence(
     *,
     prepared_request: BybitPreparedSubmission,
 ) -> dict[str, str]:
-    if not isinstance(observation, ProviderSubmissionObservation):
+    if type(observation) is not ProviderSubmissionObservation:
         raise TypeError(
-            "observation must be durable ProviderSubmissionObservation"
+            "observation must be exact ProviderSubmissionObservation"
         )
+    _require_provider_submission_observation_authority(observation)
     observation.require_scope(
         provider_id="BYBIT",
         endpoint=prepared_request.endpoint,
@@ -732,10 +734,11 @@ def parse_submission_response(
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",
         }
-    if not isinstance(observation, ProviderSubmissionObservation):
+    if type(observation) is not ProviderSubmissionObservation:
         raise TypeError(
-            "observation must be durable ProviderSubmissionObservation"
+            "observation must be exact ProviderSubmissionObservation"
         )
+    _require_provider_submission_observation_authority(observation)
     if observation.response_binding.attempt_id != aid:
         raise ProviderCoreError("Bybit submission observation attempt_id mismatch")
     evidence = [

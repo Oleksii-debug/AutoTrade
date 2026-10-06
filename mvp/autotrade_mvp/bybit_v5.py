@@ -1428,13 +1428,35 @@ def parse_executions(
         raise ProviderCoreError(
             "Bybit execution evidence requires ORDER.READ permission scope"
         )
-    query_category = binding.query.get("category")
+    query = binding.query
+    query_category = query.get("category")
     if (
         type(query_category) is not str
         or query_category not in {"spot", "linear", "inverse", "option"}
     ):
         raise ProviderCoreError(
             "Bybit execution query requires exact documented category"
+        )
+
+    execution_filter = None
+    for filter_name in ("orderId", "orderLinkId", "symbol", "baseCoin"):
+        filter_value = query.get(filter_name)
+        if filter_value is None:
+            continue
+        if (
+            type(filter_value) is not str
+            or not filter_value
+            or filter_value != filter_value.strip()
+        ):
+            raise ProviderCoreError(
+                f"Bybit execution query {filter_name} must be canonical exact text"
+            )
+        if execution_filter is None:
+            execution_filter = (filter_name, filter_value)
+    if execution_filter is not None and execution_filter[0] == "baseCoin":
+        raise ProviderCoreError(
+            "Bybit baseCoin-filtered execution rows require qualified "
+            "symbol/base-coin authority"
         )
     response = observation.payload
     account_id = observation.account_id
@@ -1534,6 +1556,27 @@ def parse_executions(
                     "Bybit execution orderLinkId must be canonical exact text"
                 )
             client_id = _client_order_id(link)
+
+        if execution_filter is not None:
+            filter_name, filter_value = execution_filter
+            if filter_name == "orderId":
+                row_order_id = row.get("orderId")
+                if (
+                    type(row_order_id) is not str
+                    or row_order_id != filter_value
+                ):
+                    raise ProviderCoreError(
+                        "Bybit execution row does not match exact orderId query"
+                    )
+            elif filter_name == "orderLinkId":
+                if type(link) is not str or link != filter_value:
+                    raise ProviderCoreError(
+                        "Bybit execution row does not match exact orderLinkId query"
+                    )
+            elif filter_name == "symbol" and symbol != filter_value:
+                raise ProviderCoreError(
+                    "Bybit execution row does not match exact symbol query"
+                )
 
         extra_fees = row.get("extraFees")
         if extra_fees not in (None, "", [], {}, ()):
@@ -1666,23 +1709,35 @@ BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST = (
             {
                 "parser_identity": BYBIT_EXECUTION_PARSER_IDENTITY,
                 "parser_version": BYBIT_EXECUTION_PARSER_VERSION,
-                "source_type": "ProviderResponseObservation",
+                "source_type": "EXACT_ProviderResponseObservation",
                 "scope": {
                     "provider_id": "BYBIT",
                     "surface": "AUTHENTICATED_READ",
                     "endpoint": "/v5/execution/list",
                     "permission_scope": "ORDER.READ",
+                    "query_category": ["spot", "linear", "inverse", "option"],
+                    "response_category": "EXACT_MATCH_QUERY_CATEGORY",
                 },
-                "success_rule": "EXACT_JSON_INTEGER_RET_CODE_ZERO",
+                "query_filter": {
+                    "priority": ["orderId", "orderLinkId", "symbol", "baseCoin"],
+                    "orderId": "EXACT_ROW_MATCH",
+                    "orderLinkId": "EXACT_ROW_MATCH",
+                    "symbol": "EXACT_ROW_MATCH",
+                    "baseCoin": (
+                        "FAIL_CLOSED_WITHOUT_QUALIFIED_SYMBOL_BASE_COIN_AUTHORITY"
+                    ),
+                    "lower_priority": "IGNORED_AFTER_FIRST_PRESENT",
+                },
                 "row_identity": {
                     "execId": "EXACT_NONEMPTY_TEXT",
                     "orderLinkId": "EMPTY_OR_EXACT_CANONICAL_CLIENT_ID",
                     "symbol": "EXACT_NONEMPTY_TEXT",
                     "side": ["Buy", "Sell"],
                 },
-                "instrument_binding": (
-                    "EXACT_DICT_SNAPSHOT_SYMBOL_TO_CANONICAL_VERSION_TEXT"
+                "metadata_inputs": (
+                    "CALLBACK_FREE_EXACT_DICT_OR_MAPPINGPROXY_TEXT_SNAPSHOT"
                 ),
+                "instrument_binding": "SYMBOL_TO_CANONICAL_VERSION_TEXT",
                 "economic_fields": {
                     "execQty": "BOUNDED_EXACT_DECIMAL_TEXT",
                     "execPrice": "BOUNDED_EXACT_DECIMAL_TEXT",
@@ -1690,8 +1745,11 @@ BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST = (
                     "execTime": "BOUNDED_INTEGER_TEXT_SUPPORTED_UTC_RANGE",
                 },
                 "fee_currency": (
-                    "EXACT_UPPERCASE_PROVIDER_TEXT_OR_EXACT_DICT_SNAPSHOT_"
+                    "EXACT_UPPERCASE_PROVIDER_TEXT_OR_EXACT_TEXT_MAPPING_"
                     "FALLBACK_ONLY_WHEN_PROVIDER_FIELD_EMPTY"
+                ),
+                "fee_currency_fallback_authority": (
+                    "NOT_ESTABLISHED_BY_PARSER_CONTRACT"
                 ),
                 "extra_fees": "FAIL_CLOSED_WHEN_ECONOMICALLY_NONEMPTY",
                 "duplicate_execution_id": "IDENTICAL_OR_FAIL_CLOSED",

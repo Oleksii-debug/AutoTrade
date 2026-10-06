@@ -347,6 +347,10 @@ class DispatchBlocked(RuntimeError):
     """Raised inside a provider wrapper when the final send barrier rejects."""
 
 
+class _DispatchAuthorityChanged(PermissionError):
+    """The invocation-selected dispatcher authority was retargeted."""
+
+
 def _validated_authority_result(result: Any) -> tuple[bool, str]:
     """Fail closed unless authority returns the exact typed decision contract."""
     if type(result) is not tuple or len(result) != 2:
@@ -1391,6 +1395,10 @@ class GuardedDispatcher:
     ) -> DispatchOutcome:
         self._require_dispatch_authority_state()
         dispatch_call_authority = (
+            self.store,
+            self._journal_store_path,
+            self._journal_store_identity,
+            self._dispatch_authority_state,
             self.environment,
             self.account_id,
             self.scope_key,
@@ -1400,6 +1408,18 @@ class GuardedDispatcher:
         )
 
         def require_dispatch_call_authority() -> None:
+            (
+                authority_store,
+                authority_path,
+                authority_identity,
+                authority_state,
+                environment,
+                account_id,
+                scope_key,
+                owner_token,
+                owner_epoch,
+                prepared_lease_seconds,
+            ) = dispatch_call_authority
             current = (
                 self.environment,
                 self.account_id,
@@ -1408,16 +1428,47 @@ class GuardedDispatcher:
                 self.owner_epoch,
                 self.prepared_lease_seconds,
             )
+            expected = (
+                environment,
+                account_id,
+                scope_key,
+                owner_token,
+                owner_epoch,
+                prepared_lease_seconds,
+            )
             if (
-                type(self.environment) is not str
-                or type(self.account_id) is not str
-                or type(self.scope_key) is not str
-                or type(self.owner_token) is not str
-                or type(self.owner_epoch) is not int
-                or type(self.prepared_lease_seconds) is not int
-                or current != dispatch_call_authority
+                self.store is authority_store
+                and self._journal_store_path is authority_path
+                and self._journal_store_identity is authority_identity
+                and self._dispatch_authority_state is authority_state
+                and type(self.environment) is str
+                and type(self.account_id) is str
+                and type(self.scope_key) is str
+                and type(self.owner_token) is str
+                and type(self.owner_epoch) is int
+                and type(self.prepared_lease_seconds) is int
+                and current == expected
             ):
-                raise PermissionError("dispatcher authority changed during dispatch")
+                return
+
+            # Restore the exact invocation-selected authority before propagating
+            # the failure. Error handling must not continue through a store or
+            # scope that an external callback retargeted.
+            self.store = authority_store
+            self._journal_store_path = authority_path
+            self._journal_store_identity = authority_identity
+            self._dispatch_authority_state = authority_state
+            (
+                self.environment,
+                self.account_id,
+                self.scope_key,
+                self.owner_token,
+                self.owner_epoch,
+                self.prepared_lease_seconds,
+            ) = expected
+            raise _DispatchAuthorityChanged(
+                "dispatcher authority changed during dispatch"
+            )
 
         for value, name in (
             (attempt_id, "attempt_id"),
@@ -1520,6 +1571,7 @@ class GuardedDispatcher:
         try:
             authority_result = authority_check(intent_hash, now)
         except Exception as error:
+            require_dispatch_call_authority()
             reason = f"authority_check_failed_before_send:{type(error).__name__}"
             self._append(
                 attempt_id=attempt_id,
@@ -1534,6 +1586,7 @@ class GuardedDispatcher:
                 None,
                 "authority_check_failed_before_send",
             )
+        require_dispatch_call_authority()
         allowed, reason = _validated_authority_result(authority_result)
         if not allowed:
             self._append(
@@ -1563,6 +1616,7 @@ class GuardedDispatcher:
                     barrier_now = final_barrier_clock()
                     parsed_barrier_now = _instant(barrier_now)
                 except Exception as error:
+                    require_dispatch_call_authority()
                     barrier_now = now
                     reason = (
                         "final_barrier_clock_failed:"
@@ -1612,6 +1666,8 @@ class GuardedDispatcher:
                 try:
                     sender_check(self.owner_token, self.owner_epoch)
                     require_dispatch_call_authority()
+                except _DispatchAuthorityChanged:
+                    raise
                 except Exception as error:
                     barrier_reason = f"sender_fence_rejected:{type(error).__name__}"
                     self._append(
@@ -1629,7 +1685,10 @@ class GuardedDispatcher:
                     raise DispatchBlocked(barrier_reason) from error
             try:
                 authority_result = authority_check(intent_hash, barrier_now)
+            except _DispatchAuthorityChanged:
+                raise
             except Exception as error:
+                require_dispatch_call_authority()
                 barrier_reason = (
                     "authority_check_failed_at_final_barrier:"
                     + type(error).__name__
@@ -1739,6 +1798,11 @@ class GuardedDispatcher:
 
         try:
             response = transport_send(client_order_id, request_frozen, final_guard)
+        except _DispatchAuthorityChanged:
+            # The helper restored the invocation-selected authority. The final
+            # barrier did not pass, so preserve this as an explicit authority
+            # failure instead of reclassifying it as a provider transport error.
+            raise
         except DispatchBlocked as error:
             events = self._events(attempt_id)
             if events:

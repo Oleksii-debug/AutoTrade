@@ -30,6 +30,10 @@ def model(**overrides):
         slippage_bps="5",
         impact_bps_at_max_participation="10",
         scenario_cost_multiplier="1",
+        price_quantum="0.01",
+        price_projection_policy_id="ADVERSE_PRICE_GRID",
+        price_projection_policy_version=1,
+        price_grid_instrument_version="ABC@v1",
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -70,6 +74,15 @@ class ExecutionOracleTests(unittest.TestCase):
         result = simulate_execution(o, q, m)
         assert_conservative_execution(order=o, observation=q, model=m, result=result)
 
+    def test_oracle_reconstructs_market_price_grid_not_just_reference_bound(self):
+        o, q, m = order(), observation(), model()
+        result = simulate_execution(o, q, m)
+        forged = replace(result, fill_price=Decimal("101.11"))
+        with self.assertRaisesRegex(ExecutionOracleError, "independent price-grid projection"):
+            assert_conservative_execution(
+                order=o, observation=q, model=m, result=forged
+            )
+
     def test_oracle_rejects_quantity_above_participation_capacity(self):
         o = order(quantity="20")
         q = observation(available_volume="20")
@@ -78,6 +91,38 @@ class ExecutionOracleTests(unittest.TestCase):
         bad = replace(result, filled_quantity=Decimal("6"))
         with self.assertRaisesRegex(ExecutionOracleError, "participation capacity"):
             assert_conservative_execution(order=o, observation=q, model=m, result=bad)
+
+    def test_oracle_rejects_market_price_grid_bound_to_other_instrument(self):
+        o, q, m = order(), observation(), model()
+        result = simulate_execution(o, q, m)
+        changed = model(price_grid_instrument_version="OTHER@v1")
+        forged = replace(result, model_fingerprint=changed.fingerprint)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "price grid is not bound to the order instrument_version",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=changed,
+                result=forged,
+            )
+
+    def test_oracle_rejects_market_result_without_complete_price_projection_evidence(self):
+        o, q, m = order(), observation(), model()
+        result = simulate_execution(o, q, m)
+        changed = model(price_quantum=None)
+        forged = replace(result, model_fingerprint=changed.fingerprint)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "complete price projection policy evidence",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=changed,
+                result=forged,
+            )
 
     def test_oracle_rejects_market_buy_better_than_ask(self):
         o, q, m = order(), observation(), model()

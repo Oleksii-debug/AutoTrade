@@ -33,6 +33,7 @@ from .provider_route_dispatch import (
     compose_selected_provider_route_authority,
 )
 from .provider_route_financial_binding import (
+    build_selected_provider_route_financial_submission_scope,
     require_financial_binding_matches_selected_route,
 )
 from .provider_selection import SelectedProviderRoute
@@ -500,6 +501,8 @@ class FinancialSendAuthorityIssuer:
         "__route_authority_code",
         "__route_scope_function",
         "__route_scope_code",
+        "__financial_route_scope_function",
+        "__financial_route_scope_code",
         "__financial_route_binding_function",
         "__financial_route_binding_code",
     )
@@ -577,6 +580,9 @@ class FinancialSendAuthorityIssuer:
         prepared_request_function = _require_durable_prepared_financial_request
         route_authority_function = compose_selected_provider_route_authority
         route_scope_function = bind_selected_provider_route_submission_scope
+        financial_route_scope_function = (
+            build_selected_provider_route_financial_submission_scope
+        )
         financial_route_binding_function = require_financial_binding_matches_selected_route
         journal_load_events_code = getattr(journal_load_events_function, "__code__", None)
         risk_payload_code = getattr(risk_payload_function, "__code__", None)
@@ -643,6 +649,8 @@ class FinancialSendAuthorityIssuer:
         self.__route_authority_code = route_authority_function.__code__
         self.__route_scope_function = route_scope_function
         self.__route_scope_code = route_scope_function.__code__
+        self.__financial_route_scope_function = financial_route_scope_function
+        self.__financial_route_scope_code = financial_route_scope_function.__code__
         self.__financial_route_binding_function = financial_route_binding_function
         self.__financial_route_binding_code = financial_route_binding_function.__code__
 
@@ -730,6 +738,20 @@ class FinancialSendAuthorityIssuer:
         if self.__route_scope_function.__code__ is not self.__route_scope_code:
             raise FinancialSendAuthorityError(
                 "provider route submission scope authority code changed"
+            )
+        if (
+            build_selected_provider_route_financial_submission_scope
+            is not self.__financial_route_scope_function
+        ):
+            raise FinancialSendAuthorityError(
+                "financial provider-route scope authority changed"
+            )
+        if (
+            self.__financial_route_scope_function.__code__
+            is not self.__financial_route_scope_code
+        ):
+            raise FinancialSendAuthorityError(
+                "financial provider-route scope authority code changed"
             )
         if (
             require_financial_binding_matches_selected_route
@@ -906,19 +928,14 @@ class FinancialSendAuthorityIssuer:
             )
         financial_route_binding = self.__financial_route_binding_function
         financial_route_binding(binding, selected_route)
-        route_scope = self.__route_scope_function(
+        route_scope = self.__financial_route_scope_function(
             selected_route,
-            {
-                "provider_id": binding.provider_id,
-                "account_id": binding.account_id,
-                "environment": binding.runtime_environment,
-                "provider_environment": binding.provider_environment,
-                "capability_snapshot_id": binding.capability_snapshot_id,
-                "endpoint": binding.endpoint,
-                "prepared_request_sha256": binding.request_sha256,
-                "capability_snapshot_ids": [binding.capability_snapshot_id],
-                "instrument_versions": [str(binding.instrument_version)],
-            },
+            account_id=binding.account_id,
+            runtime_environment=binding.runtime_environment,
+            endpoint=binding.endpoint,
+            prepared_request_sha256=binding.request_sha256,
+            capability_snapshot_ids=(binding.capability_snapshot_id,),
+            instrument_versions=(str(binding.instrument_version),),
         )
         if payload_digest(route_scope) != binding.submission_scope_digest:
             raise FinancialSendAuthorityError(

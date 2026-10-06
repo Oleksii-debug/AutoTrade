@@ -1368,8 +1368,8 @@ def unresolved_provider_activity_ids_from_checkpoint(
 def unknown_submissions_from_dispatch(
     store: JournalStore,
     *,
-    attempt_ids: Iterable[str],
-    aggregate_ids: Mapping[str, str] | None = None,
+    attempt_ids: list[str] | tuple[str, ...],
+    aggregate_ids: dict[str, str] | None = None,
     environment: str | None = None,
     account_id: str | None = None,
 ) -> tuple[UnknownSubmission, ...]:

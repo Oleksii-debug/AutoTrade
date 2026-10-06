@@ -1805,13 +1805,21 @@ class JournalStore:
                         raise ValueError(
                             "projection checkpoint aggregate_version is not a canonical integer"
                         )
+                    existing_state_json = _require_canonical_durable_text(
+                        existing["state_json"],
+                        name="projection checkpoint state_json",
+                    )
+                    existing_state_hash = _require_canonical_durable_text(
+                        existing["state_hash"],
+                        name="projection checkpoint state_hash",
+                    )
                     try:
-                        existing_state = json.loads(existing["state_json"])
+                        existing_state = json.loads(existing_state_json)
                     except (json.JSONDecodeError, TypeError) as error:
                         raise ValueError(
                             "projection checkpoint state is not valid JSON"
                         ) from error
-                    if canonical_json(existing_state) != existing["state_json"]:
+                    if canonical_json(existing_state) != existing_state_json:
                         raise ValueError(
                             "projection checkpoint state is not canonical JSON"
                         )
@@ -1826,7 +1834,7 @@ class JournalStore:
                         if self.SCHEMA_VERSION >= 8
                         else payload_digest(existing_state)
                     )
-                    if existing_hash != existing["state_hash"]:
+                    if existing_hash != existing_state_hash:
                         raise ValueError(
                             "projection checkpoint hash does not match identity, version, and state"
                         )
@@ -1842,8 +1850,8 @@ class JournalStore:
                 if existing is not None:
                     exact = (
                         existing_version == aggregate_version
-                        and existing["state_json"] == state_json
-                        and existing["state_hash"] == state_hash
+                        and existing_state_json == state_json
+                        and existing_state_hash == state_hash
                     )
                     if exact:
                         connection.commit()
@@ -1924,13 +1932,22 @@ class JournalStore:
                 connection.rollback()
                 raise
 
+        state_json = _require_canonical_durable_text(
+            row["state_json"], name="projection checkpoint state_json"
+        )
+        state_hash = _require_canonical_durable_text(
+            row["state_hash"], name="projection checkpoint state_hash"
+        )
+        updated_at = _require_canonical_durable_text(
+            row["updated_at"], name="projection checkpoint updated_at"
+        )
         try:
-            state = json.loads(row["state_json"])
+            state = json.loads(state_json)
         except (json.JSONDecodeError, TypeError) as error:
             raise ValueError(
                 "projection checkpoint state is not valid JSON"
             ) from error
-        if canonical_json(state) != row["state_json"]:
+        if canonical_json(state) != state_json:
             raise ValueError(
                 "projection checkpoint state is not canonical JSON"
             )
@@ -1950,7 +1967,7 @@ class JournalStore:
             if self.SCHEMA_VERSION >= 8
             else payload_digest(state)
         )
-        if expected_hash != row["state_hash"]:
+        if expected_hash != state_hash:
             raise ValueError(
                 "projection checkpoint hash does not match identity, version, and state"
             )
@@ -1962,8 +1979,8 @@ class JournalStore:
             "aggregate_id": aggregate_id,
             "aggregate_version": aggregate_version,
             "state": state,
-            "state_hash": row["state_hash"],
-            "updated_at": row["updated_at"],
+            "state_hash": state_hash,
+            "updated_at": updated_at,
         }
 
     def save_global_projection_checkpoint(
@@ -2011,13 +2028,21 @@ class JournalStore:
                             "global projection checkpoint journal_sequence "
                             "is not a canonical integer"
                         )
+                    existing_state_json = _require_canonical_durable_text(
+                        existing["state_json"],
+                        name="global projection checkpoint state_json",
+                    )
+                    existing_state_hash = _require_canonical_durable_text(
+                        existing["state_hash"],
+                        name="global projection checkpoint state_hash",
+                    )
                     try:
-                        existing_state = json.loads(existing["state_json"])
+                        existing_state = json.loads(existing_state_json)
                     except (json.JSONDecodeError, TypeError) as error:
                         raise ValueError(
                             "global projection checkpoint state is not valid JSON"
                         ) from error
-                    if canonical_json(existing_state) != existing["state_json"]:
+                    if canonical_json(existing_state) != existing_state_json:
                         raise ValueError(
                             "global projection checkpoint state is not canonical JSON"
                         )
@@ -2028,15 +2053,15 @@ class JournalStore:
                             "state": existing_state,
                         }
                     )
-                    if existing_hash != existing["state_hash"]:
+                    if existing_hash != existing_state_hash:
                         raise ValueError(
                             "global projection checkpoint hash does not match "
                             "identity, cut, and state"
                         )
                     exact = (
                         existing_sequence == journal_sequence
-                        and existing["state_json"] == state_json
-                        and existing["state_hash"] == state_hash
+                        and existing_state_json == state_json
+                        and existing_state_hash == state_hash
                     )
                     if exact:
                         connection.commit()
@@ -2104,13 +2129,22 @@ class JournalStore:
                 connection.rollback()
                 raise
 
+        state_json = _require_canonical_durable_text(
+            row["state_json"], name="global projection checkpoint state_json"
+        )
+        state_hash = _require_canonical_durable_text(
+            row["state_hash"], name="global projection checkpoint state_hash"
+        )
+        updated_at = _require_canonical_durable_text(
+            row["updated_at"], name="global projection checkpoint updated_at"
+        )
         try:
-            state = json.loads(row["state_json"])
+            state = json.loads(state_json)
         except (json.JSONDecodeError, TypeError) as error:
             raise ValueError(
                 "global projection checkpoint state is not valid JSON"
             ) from error
-        if canonical_json(state) != row["state_json"]:
+        if canonical_json(state) != state_json:
             raise ValueError(
                 "global projection checkpoint state is not canonical JSON"
             )
@@ -2127,7 +2161,7 @@ class JournalStore:
                 "state": state,
             }
         )
-        if expected_hash != row["state_hash"]:
+        if expected_hash != state_hash:
             raise ValueError(
                 "global projection checkpoint hash does not match identity, cut, and state"
             )
@@ -2139,8 +2173,8 @@ class JournalStore:
             "projection_name": projection_name,
             "journal_sequence": journal_sequence,
             "state": state,
-            "state_hash": row["state_hash"],
-            "updated_at": row["updated_at"],
+            "state_hash": state_hash,
+            "updated_at": updated_at,
         }
 
     def pending_outbox_count(self) -> int:

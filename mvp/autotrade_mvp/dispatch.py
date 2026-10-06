@@ -915,11 +915,19 @@ class GuardedDispatcher:
             type(prepared_payload) is not dict
             or prepared_payload.get("prepared_at") != events[0].get("committed_at")
             or type(expected_prepared) is not dict
-            or any(
-                prepared_payload.get(key) != value
-                for key, value in expected_prepared.items()
-            )
         ):
+            return False
+        try:
+            durable_prepared_projection = {
+                key: prepared_payload[key]
+                for key in expected_prepared
+            }
+            if (
+                canonical_json(durable_prepared_projection)
+                != canonical_json(expected_prepared)
+            ):
+                return False
+        except (KeyError, TypeError, ValueError):
             return False
         prepared_scope = prepared_payload.get("submission_scope")
         prepared_scope_hash = prepared_payload.get("submission_scope_hash")

@@ -295,6 +295,7 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             ("submission_scope", {"endpoint": "/retargeted"}, False),
             ("owner_token", "retargeted-owner", False),
             ("owner_epoch", 77, False),
+            ("owner_epoch", True, False),
             ("prepared_at", "2026-10-06T13:59:59Z", False),
             ("environment", "PAPER", True),
         ):

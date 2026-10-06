@@ -1181,6 +1181,20 @@ function appendProjectionRow(body, label, value) {
       if (!filter || !copy || !sort || !previous || !next) continue;
       filter.addEventListener("input", () =>
         applyTableFilter(tool, {resetPage: true}));
+      filter.addEventListener("keydown", (event) => {
+        if (
+          event.key !== "Escape" ||
+          event.isComposing ||
+          event.altKey ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.shiftKey ||
+          filter.value === ""
+        ) return;
+        event.preventDefault();
+        filter.value = "";
+        applyTableFilter(tool, {resetPage: true});
+      });
       sort.addEventListener("change", () =>
         applyTableFilter(tool, {resetPage: true}));
       previous.addEventListener("click", () => {

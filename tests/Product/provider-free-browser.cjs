@@ -111,6 +111,14 @@ async function command(page, action, index) {
 async function exercisePortfolioTableTools(page) {
   stage = "portfolio keyboard tools";
   await tabTo(page, "portfolio-filter");
+  assert.equal(
+    await page.locator("#portfolio-filter").getAttribute("aria-keyshortcuts"),
+    "Escape",
+    "table filter exposes the Escape shortcut to assistive technology");
+  assert.equal(
+    await page.locator("#portfolio-region").getAttribute("aria-describedby"),
+    "portfolio-filter-status",
+    "table region exposes current paging/filter context to assistive technology");
   await page.keyboard.type("895.696");
   await page.waitForFunction(() => {
     const status = document.querySelector("#portfolio-filter-status")?.textContent || "";
@@ -138,12 +146,84 @@ async function exercisePortfolioTableTools(page) {
   assert.match(copiedPortfolio, /895\.696/);
   await page.keyboard.press("Shift+Tab");
   assert.equal(await page.evaluate(() => document.activeElement.id), "portfolio-filter");
-  await page.keyboard.press("Control+A");
-  await page.keyboard.press("Backspace");
-  await page.waitForFunction(() => {
-    const status = document.querySelector("#portfolio-filter-status")?.textContent || "";
-    return status.includes("Page 1 of ") && status.includes("Sort: host order.");
+
+  await page.evaluate(() => {
+    const filter = document.querySelector("#portfolio-filter");
+    const composingEscape = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+      isComposing: true
+    });
+    filter.dispatchEvent(composingEscape);
   });
+  assert.equal(
+    await page.locator("#portfolio-filter").inputValue(),
+    "895.696",
+    "Escape during IME composition must not clear the filter");
+
+  await page.evaluate(() => {
+    const filter = document.querySelector("#portfolio-filter");
+    for (const modifier of ["altKey", "ctrlKey", "metaKey", "shiftKey"]) {
+      const init = {key: "Escape", bubbles: true, cancelable: true};
+      init[modifier] = true;
+      filter.dispatchEvent(new KeyboardEvent("keydown", init));
+    }
+  });
+  assert.equal(
+    await page.locator("#portfolio-filter").inputValue(),
+    "895.696",
+    "modified Escape shortcuts must not clear the filter");
+
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => {
+    const filter = document.querySelector("#portfolio-filter");
+    const status = document.querySelector("#portfolio-filter-status")?.textContent || "";
+    return filter?.value === "" &&
+      status.includes("Page 1 of ") &&
+      status.includes("Sort: host order.");
+  });
+  assert.equal(
+    await page.evaluate(() => document.activeElement.id),
+    "portfolio-filter",
+    "Escape clears the current table filter without moving keyboard focus");
+  await page.waitForFunction(() =>
+    (document.querySelector("#polite-status")?.textContent || "").includes(
+      "Sort: host order."));
+}
+
+async function exerciseAllTableFilterEscapeBindings(page) {
+  stage = "all table filter Escape bindings";
+  const filterIds = [
+    "permissions-filter",
+    "strategy-filter",
+    "portfolio-filter",
+    "operations-filter",
+    "risk-filter",
+    "jobs-filter",
+    "event-history-filter"
+  ];
+  for (const filterId of filterIds) {
+    const statusId = filterId + "-status";
+    const filter = page.locator("#" + filterId);
+    await filter.focus();
+    await filter.fill("no-match-autotrade-escape-proof");
+    await page.waitForFunction(({filterId, statusId}) => {
+      const currentFilter = document.getElementById(filterId);
+      const status = document.getElementById(statusId);
+      return currentFilter?.value === "no-match-autotrade-escape-proof" &&
+        Boolean(status?.textContent);
+    }, {filterId, statusId});
+    await page.keyboard.press("Escape");
+    assert.equal(
+      await filter.inputValue(),
+      "",
+      filterId + " bare Escape clears the canonical table filter");
+    assert.equal(
+      await page.evaluate(() => document.activeElement.id),
+      filterId,
+      filterId + " retains keyboard focus after Escape");
+  }
 }
 
 async function exercisePortfolioPagingAndSort(page) {
@@ -463,6 +543,7 @@ s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_tim
   await command(page, "RECOVER_SIMULATION", 3);
   assert.match(await page.locator("#portfolio-body").innerText(), /895\.696/);
   await exercisePortfolioTableTools(page);
+  await exerciseAllTableFilterEscapeBindings(page);
   await exercisePortfolioPagingAndSort(page);
   await exerciseSnapshotSelectionPreservation(page);
   await exerciseScopeSpeechIsolation(page);

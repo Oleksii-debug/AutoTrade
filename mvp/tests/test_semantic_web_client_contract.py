@@ -57,6 +57,52 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn('text("server-time", parsed.serverTime)', js)
         self.assertNotIn("Not loaded.", html)
 
+    def test_table_filters_clear_with_escape_without_moving_focus(self):
+        js = APP.read_text(encoding="utf-8")
+        bind = js[
+            js.index("function bindTableTools()"):
+            js.index("function announceLiveText")
+        ]
+        self.assertIn('filter.addEventListener("keydown", (event) => {', bind)
+        self.assertIn('event.key !== "Escape"', bind)
+        self.assertIn("event.isComposing", bind)
+        self.assertIn("event.altKey", bind)
+        self.assertIn("event.ctrlKey", bind)
+        self.assertIn("event.metaKey", bind)
+        self.assertIn("event.shiftKey", bind)
+        self.assertIn('filter.value === ""', bind)
+        self.assertIn("event.preventDefault()", bind)
+        self.assertIn('filter.value = ""', bind)
+        self.assertIn("applyTableFilter(tool, {resetPage: true})", bind)
+        self.assertNotIn("filter.blur()", bind)
+        html = INDEX.read_text(encoding="utf-8")
+        for filter_id in (
+            "permissions-filter",
+            "strategy-filter",
+            "portfolio-filter",
+            "operations-filter",
+            "risk-filter",
+            "jobs-filter",
+            "event-history-filter",
+        ):
+            self.assertIn(
+                f'id="{filter_id}" type="search" aria-keyshortcuts="Escape"',
+                html,
+            )
+        for region_id, status_id in (
+            ("permissions-region", "permissions-filter-status"),
+            ("strategy-region", "strategy-filter-status"),
+            ("portfolio-region", "portfolio-filter-status"),
+            ("operations-region", "operations-filter-status"),
+            ("risk-region", "risk-filter-status"),
+            ("jobs-region", "jobs-filter-status"),
+            ("event-history-region", "event-history-filter-status"),
+        ):
+            self.assertRegex(
+                html,
+                rf'id="{region_id}"[^>]*aria-describedby="{status_id}"',
+            )
+
     def test_projection_rendering_is_text_only_deterministic_and_focusable(self):
         html = INDEX.read_text(encoding="utf-8")
         js = APP.read_text(encoding="utf-8")

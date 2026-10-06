@@ -697,6 +697,7 @@ def _install_submission_response_binding_authority(loader):
     canonical_int = int
     canonical_bool = bool
     canonical_bytes = bytes
+    canonical_attribute_error = AttributeError
     canonical_object = object
     object_getattribute = canonical_object.__getattribute__
     canonical_getattr = getattr
@@ -779,6 +780,7 @@ def _install_submission_response_binding_authority(loader):
             or int is not canonical_int
             or bool is not canonical_bool
             or bytes is not canonical_bytes
+            or AttributeError is not canonical_attribute_error
             or object is not canonical_object
             or getattr is not canonical_getattr
             or MappingProxyType is not mapping_proxy_type
@@ -831,10 +833,13 @@ def _install_submission_response_binding_authority(loader):
             authority_changed()
 
     def raw_snapshot(value):
-        return canonical_tuple(
-            object_getattribute(value, name)
-            for name in field_names
-        )
+        try:
+            return canonical_tuple(
+                object_getattribute(value, name)
+                for name in field_names
+            )
+        except canonical_attribute_error:
+            authority_changed()
 
     def prune():
         for object_id, (value_ref, _snapshot) in canonical_tuple(states.items()):

@@ -33,7 +33,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from weakref import ref as weakref_ref
 from urllib.request import (
+    AbstractHTTPHandler,
     HTTPRedirectHandler,
+    HTTPSHandler,
+    OpenerDirector,
     Request,
     ProxyHandler,
     build_opener,
@@ -1618,6 +1621,75 @@ class AuthenticatedReadWireResponse:
             raise ProviderTransportError("invalid or oversized authenticated-read response") from error
 
 
+_DIRECT_TRADING_WRITE_TRANSPORT_IDENTITY = (
+    "autotrade.provider_transport.UrllibJsonWireClient:direct-trading-write:v1"
+)
+_DIRECT_TRADING_WRITE_NETWORK_POLICY_IDENTITY = "sha256:" + sha256(
+    json.dumps(
+        {
+            "automatic_retries": False,
+            "https_only": True,
+            "proxy_mode": "DIRECT_ONLY",
+            "redirects": False,
+            "response_body": "BOUNDED_EXACT_BYTES",
+            "transport": "urllib",
+            "version": 1,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
+class DirectTradingWriteExecutionReceipt:
+    """Closure-authorized proof of one exact direct trading HTTP response.
+
+    This proves direct network execution only.  It is not provider lifecycle,
+    qualification, financial-admission or fill authority by itself.
+    """
+
+    transport_identity: str
+    network_policy_identity: str
+    request_sha256: str
+    http_status: int
+    response_sha256: str
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        raise ProviderTransportError(
+            "direct trading-write receipt is minted only by canonical wire execution"
+        )
+
+
+def direct_trading_write_transport_identity() -> str:
+    return _DIRECT_TRADING_WRITE_TRANSPORT_IDENTITY
+
+
+def direct_trading_write_network_policy_identity() -> str:
+    return _DIRECT_TRADING_WRITE_NETWORK_POLICY_IDENTITY
+
+
+def _direct_trading_write_request_digest(request: SignedHttpRequest) -> str:
+    method, url, headers, body, timeout_seconds = _require_signed_http_request(request)
+    material = {
+        "method": method,
+        "url_sha256": "sha256:" + sha256(url.encode("utf-8")).hexdigest(),
+        "headers_sha256": "sha256:"
+        + sha256(
+            json.dumps(
+                dict(sorted(dict(headers).items())),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        "body_sha256": "sha256:" + sha256(body).hexdigest(),
+        "timeout_seconds": timeout_seconds,
+    }
+    return "sha256:" + sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 class _NoRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -1804,6 +1876,408 @@ class UrllibJsonWireClient:
 
     send = _install_send_authority()
     del _install_send_authority
+
+
+def _install_direct_trading_write_execution_authority():
+    """Bind exact direct urllib write I/O to one non-self-mintable receipt."""
+
+    clients: dict[int, tuple[object, tuple[object, ...]]] = {}
+    receipts: dict[int, tuple[object, object, tuple[str, str, str, int, str]]] = {}
+
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_list = list
+    canonical_dict = dict
+    canonical_set = set
+    canonical_bool = bool
+    canonical_int = int
+    canonical_str = str
+    canonical_bytes = bytes
+    canonical_repr = repr
+    canonical_sorted = sorted
+    canonical_getattr = getattr
+    canonical_vars = vars
+    canonical_len = len
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    weakref = weakref_ref
+
+    client_type = UrllibJsonWireClient
+    request_type = SignedHttpRequest
+    response_type = TradingWireResponse
+    receipt_type = DirectTradingWriteExecutionReceipt
+    transport_error = ProviderTransportError
+    opener_type = OpenerDirector
+    proxy_type = ProxyHandler
+    redirect_base_type = HTTPRedirectHandler
+    redirect_type = _NoRedirectHandler
+
+    canonical_opener_open = OpenerDirector.open
+    canonical_opener_dispatch = OpenerDirector._open
+    canonical_opener_call_chain = OpenerDirector._call_chain
+    canonical_http_do_open = AbstractHTTPHandler.do_open
+    canonical_https_open = HTTPSHandler.https_open
+    canonical_proxy_open = ProxyHandler.proxy_open
+    canonical_redirect_request = _NoRedirectHandler.redirect_request
+    canonical_request_digest = _direct_trading_write_request_digest
+    request_digest_code = canonical_request_digest.__code__
+    canonical_sha256 = sha256
+
+    def freeze_authority_state(value: object) -> object:
+        value_type = canonical_type(value)
+        if value is None or value_type in {canonical_bool, canonical_int, canonical_str, canonical_bytes}:
+            return value
+        if value_type is canonical_tuple:
+            return ("tuple", canonical_tuple(freeze_authority_state(item) for item in value))
+        if value_type is canonical_list:
+            return ("list", canonical_tuple(freeze_authority_state(item) for item in value))
+        if value_type is canonical_dict:
+            frozen_items = canonical_tuple(
+                canonical_sorted(
+                    (
+                        (
+                            freeze_authority_state(key),
+                            freeze_authority_state(item),
+                        )
+                        for key, item in value.items()
+                    ),
+                    key=canonical_repr,
+                )
+            )
+            return ("dict", frozen_items)
+        if value_type is canonical_set:
+            return (
+                "set",
+                canonical_tuple(
+                    canonical_sorted(
+                        (freeze_authority_state(item) for item in value),
+                        key=canonical_repr,
+                    )
+                ),
+            )
+        return ("identity", value_type, canonical_id(value))
+
+    def implementation_changed() -> bool:
+        return (
+            UrllibJsonWireClient is not client_type
+            or SignedHttpRequest is not request_type
+            or TradingWireResponse is not response_type
+            or DirectTradingWriteExecutionReceipt is not receipt_type
+            or type is not canonical_type
+            or id is not canonical_id
+            or tuple is not canonical_tuple
+            or list is not canonical_list
+            or dict is not canonical_dict
+            or set is not canonical_set
+            or bool is not canonical_bool
+            or int is not canonical_int
+            or str is not canonical_str
+            or bytes is not canonical_bytes
+            or repr is not canonical_repr
+            or sorted is not canonical_sorted
+            or getattr is not canonical_getattr
+            or vars is not canonical_vars
+            or len is not canonical_len
+            or object is not canonical_object
+            or weakref_ref is not weakref
+            or sha256 is not canonical_sha256
+            or _direct_trading_write_request_digest is not canonical_request_digest
+            or canonical_request_digest.__code__ is not request_digest_code
+        )
+
+    def client_network_authority(client: UrllibJsonWireClient) -> tuple[object, ...]:
+        if implementation_changed():
+            raise transport_error(
+                "direct trading-write wire implementation authority changed"
+            )
+        opener = object_getattribute(client, "__dict__").get("_opener")
+        if canonical_type(opener) is not opener_type:
+            raise transport_error(
+                "direct trading-write wire client opener is not canonical"
+            )
+        opener_state = canonical_vars(opener)
+        if "open" in opener_state:
+            raise transport_error(
+                "direct trading-write wire client opener method is shadowed"
+            )
+        if (
+            OpenerDirector.open is not canonical_opener_open
+            or OpenerDirector._open is not canonical_opener_dispatch
+            or OpenerDirector._call_chain is not canonical_opener_call_chain
+            or AbstractHTTPHandler.do_open is not canonical_http_do_open
+            or HTTPSHandler.https_open is not canonical_https_open
+            or ProxyHandler.proxy_open is not canonical_proxy_open
+            or _NoRedirectHandler.redirect_request is not canonical_redirect_request
+        ):
+            raise transport_error(
+                "direct trading-write wire client network implementation changed"
+            )
+        handlers = canonical_tuple(canonical_getattr(opener, "handlers", ()))
+        proxies = canonical_tuple(
+            handler for handler in handlers if canonical_type(handler) is proxy_type
+        )
+        redirects = canonical_tuple(
+            handler for handler in handlers if isinstance(handler, redirect_base_type)
+        )
+        if (
+            canonical_len(proxies) != 1
+            or canonical_getattr(proxies[0], "proxies", None) != {}
+            or canonical_len(redirects) != 1
+            or canonical_type(redirects[0]) is not redirect_type
+        ):
+            raise transport_error(
+                "direct trading-write wire client direct-only policy changed"
+            )
+        handler_state = canonical_tuple(
+            (handler, freeze_authority_state(canonical_vars(handler)))
+            for handler in handlers
+        )
+        return (
+            opener,
+            freeze_authority_state(opener_state),
+            handler_state,
+        )
+
+    def prune() -> None:
+        for states in (clients, receipts):
+            for object_id, state in canonical_tuple(states.items()):
+                if state[0]() is None:
+                    states.pop(object_id, None)
+
+    def register_client(client: object) -> None:
+        if canonical_type(client) is not client_type:
+            return
+        prune()
+        try:
+            authority = client_network_authority(client)
+        except transport_error:
+            # Neutral/test clients remain usable, but cannot gain direct-wire proof.
+            return
+        clients[canonical_id(client)] = (weakref(client), authority)
+
+    def require_client(client: object) -> UrllibJsonWireClient:
+        if canonical_type(client) is not client_type:
+            raise transport_error(
+                "canonical direct trading-write wire client is required"
+            )
+        prune()
+        client_state = clients.get(canonical_id(client))
+        try:
+            current_authority = client_network_authority(client)
+        except transport_error as error:
+            raise transport_error(
+                "direct trading-write wire client network authority changed"
+            ) from error
+        if (
+            client_state is None
+            or client_state[0]() is not client
+            or client_state[1] != current_authority
+        ):
+            raise transport_error(
+                "direct trading-write wire client network authority changed"
+            )
+        return client
+
+    def eligible_client(client: object) -> bool:
+        try:
+            require_client(client)
+        except transport_error:
+            return False
+        return True
+
+    def mint(
+        client: object,
+        request: object,
+        response: object,
+    ) -> DirectTradingWriteExecutionReceipt | None:
+        if (
+            canonical_type(client) is not client_type
+            or canonical_type(request) is not request_type
+            or canonical_type(response) is not response_type
+        ):
+            return None
+        if not eligible_client(client):
+            return None
+        request_sha256 = canonical_request_digest(request)
+        response_body = object_getattribute(response, "body")
+        http_status = object_getattribute(response, "http_status")
+        if (
+            canonical_type(response_body) is not canonical_bytes
+            or canonical_type(http_status) is not canonical_int
+            or not 100 <= http_status <= 599
+        ):
+            raise transport_error(
+                "direct trading-write response is not canonical"
+            )
+        response_sha256 = "sha256:" + canonical_sha256(response_body).hexdigest()
+        receipt = canonical_object.__new__(receipt_type)
+        values = (
+            _DIRECT_TRADING_WRITE_TRANSPORT_IDENTITY,
+            _DIRECT_TRADING_WRITE_NETWORK_POLICY_IDENTITY,
+            request_sha256,
+            http_status,
+            response_sha256,
+        )
+        for field_name, field_value in zip(
+            (
+                "transport_identity",
+                "network_policy_identity",
+                "request_sha256",
+                "http_status",
+                "response_sha256",
+            ),
+            values,
+        ):
+            canonical_object.__setattr__(receipt, field_name, field_value)
+        receipts[canonical_id(receipt)] = (
+            weakref(receipt),
+            weakref(response),
+            values,
+        )
+        canonical_object.__setattr__(
+            response,
+            "_direct_trading_write_execution_receipt",
+            receipt,
+        )
+        return receipt
+
+    def snapshot(
+        receipt: object,
+    ) -> tuple[str, str, str, int, str, object | None]:
+        if implementation_changed() or canonical_type(receipt) is not receipt_type:
+            raise transport_error(
+                "canonical direct trading-write execution receipt is required"
+            )
+        prune()
+        state = receipts.get(canonical_id(receipt))
+        if state is None or state[0]() is not receipt:
+            raise transport_error(
+                "direct trading-write receipt construction authority is unavailable"
+            )
+        values = state[2]
+        current = canonical_tuple(
+            object_getattribute(receipt, name)
+            for name in (
+                "transport_identity",
+                "network_policy_identity",
+                "request_sha256",
+                "http_status",
+                "response_sha256",
+            )
+        )
+        if current != values:
+            raise transport_error(
+                "direct trading-write receipt changed after wire execution"
+            )
+        return (*values, state[1]())
+
+    return register_client, require_client, eligible_client, mint, snapshot
+
+
+(
+    _register_direct_trading_write_client,
+    require_direct_trading_write_client,
+    _direct_trading_write_client_is_eligible,
+    _mint_direct_trading_write_execution_receipt,
+    _direct_trading_write_execution_receipt_state,
+) = _install_direct_trading_write_execution_authority()
+del _install_direct_trading_write_execution_authority
+
+
+def _bind_direct_trading_write_client_init(init_impl, register_client):
+    def __init__(self, *args, **kwargs):
+        init_impl(self, *args, **kwargs)
+        register_client(self)
+
+    return __init__
+
+
+def _bind_direct_trading_write_send(send_impl, eligible_client, mint_receipt):
+    def send(self, request):
+        eligible_before_send = (
+            type(request) is SignedHttpRequest
+            and eligible_client(self)
+        )
+        response = send_impl(self, request)
+        if eligible_before_send:
+            mint_receipt(self, request, response)
+        return response
+
+    return send
+
+
+UrllibJsonWireClient.__init__ = _bind_direct_trading_write_client_init(
+    UrllibJsonWireClient.__init__,
+    _register_direct_trading_write_client,
+)
+UrllibJsonWireClient.send = _bind_direct_trading_write_send(
+    UrllibJsonWireClient.send,
+    _direct_trading_write_client_is_eligible,
+    _mint_direct_trading_write_execution_receipt,
+)
+del _bind_direct_trading_write_client_init
+del _bind_direct_trading_write_send
+del _register_direct_trading_write_client
+del _direct_trading_write_client_is_eligible
+del _mint_direct_trading_write_execution_receipt
+
+
+def _bind_direct_trading_write_receipt_access(snapshot_impl):
+    def direct_trading_write_execution_receipt(
+        response: TradingWireResponse,
+    ) -> DirectTradingWriteExecutionReceipt:
+        if type(response) is not TradingWireResponse:
+            raise ProviderTransportError(
+                "exact trading wire response is required"
+            )
+        receipt = getattr(
+            response,
+            "_direct_trading_write_execution_receipt",
+            None,
+        )
+        values = snapshot_impl(receipt)
+        if values[5] is not response:
+            raise ProviderTransportError(
+                "direct trading-write receipt is not bound to exact response"
+            )
+        if (
+            values[3] != response.http_status
+            or values[4] != "sha256:" + sha256(response.body).hexdigest()
+        ):
+            raise ProviderTransportError(
+                "direct trading-write receipt does not match exact response"
+            )
+        return receipt
+
+    def direct_trading_write_execution_receipt_snapshot(
+        receipt: DirectTradingWriteExecutionReceipt,
+    ) -> Mapping[str, object]:
+        values = snapshot_impl(receipt)
+        return MappingProxyType(
+            {
+                "transport_identity": values[0],
+                "network_policy_identity": values[1],
+                "request_sha256": values[2],
+                "http_status": values[3],
+                "response_sha256": values[4],
+            }
+        )
+
+    return (
+        direct_trading_write_execution_receipt,
+        direct_trading_write_execution_receipt_snapshot,
+    )
+
+
+(
+    direct_trading_write_execution_receipt,
+    direct_trading_write_execution_receipt_snapshot,
+) = _bind_direct_trading_write_receipt_access(
+    _direct_trading_write_execution_receipt_state
+)
+del _bind_direct_trading_write_receipt_access
+del _direct_trading_write_execution_receipt_state
 
 
 def _trading_response_evidence(

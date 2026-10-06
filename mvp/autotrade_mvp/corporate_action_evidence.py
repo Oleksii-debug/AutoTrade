@@ -473,7 +473,7 @@ def _authoritative_corporate_action_operations():
 del _authoritative_corporate_action_operations
 
 
-def resolve_authoritative_corporate_action(
+def _resolve_authoritative_corporate_action_impl(
     evidence_ref: str,
     *,
     evidence_resolver: EvidenceResolver,
@@ -485,6 +485,7 @@ def resolve_authoritative_corporate_action(
     permission_scope: str,
     normalizer: object | None = None,
     instrument_resolver: object | None = None,
+    _register_authority,
 ) -> AuthoritativeCorporateAction:
     """Resolve one accepted event exclusively from sealed provider evidence.
 
@@ -689,9 +690,47 @@ def resolve_authoritative_corporate_action(
         provenance_digest=provenance_digest,
         corrects_external_event_id=observation.corrects_external_event_id,
     )
-    _register_authoritative_corporate_action(accepted)
+    _register_authority(accepted)
     return accepted
 
+
+
+def _bind_authoritative_corporate_action_resolver(register_authority):
+    def resolve_authoritative_corporate_action(
+        evidence_ref: str,
+        *,
+        evidence_resolver: EvidenceResolver,
+        instrument_registry: InstrumentRegistry,
+        expected_provider_id: str,
+        expected_account_id: str,
+        expected_environment: str,
+        allowed_endpoints: frozenset[str],
+        permission_scope: str,
+        normalizer: object | None = None,
+        instrument_resolver: object | None = None,
+    ) -> AuthoritativeCorporateAction:
+        return _resolve_authoritative_corporate_action_impl(
+            evidence_ref,
+            evidence_resolver=evidence_resolver,
+            instrument_registry=instrument_registry,
+            expected_provider_id=expected_provider_id,
+            expected_account_id=expected_account_id,
+            expected_environment=expected_environment,
+            allowed_endpoints=allowed_endpoints,
+            permission_scope=permission_scope,
+            normalizer=normalizer,
+            instrument_resolver=instrument_resolver,
+            _register_authority=register_authority,
+        )
+
+    return resolve_authoritative_corporate_action
+
+
+resolve_authoritative_corporate_action = _bind_authoritative_corporate_action_resolver(
+    _register_authoritative_corporate_action
+)
+del _bind_authoritative_corporate_action_resolver
+del _register_authoritative_corporate_action
 
 
 class CorporateActionEvidenceConflict(CorporateActionEvidenceError):
@@ -1020,7 +1059,6 @@ class DurableCorporateActionEvidenceStore:
     ) -> PreparedCorporateActionEvidenceMutation:
         """Prepare source evidence for a shared JournalStore transaction."""
 
-        _require_authoritative_corporate_action(accepted)
         _, _, provider_id, account_id, environment, aggregate_id = (
             DurableCorporateActionEvidenceStore._composition(self)
         )
@@ -1249,4 +1287,28 @@ class DurableCorporateActionEvidenceStore:
             provenance_digest=accepted.provenance_digest,
             corrects_external_event_id=accepted.corrects_external_event_id,
         )
+
+def _bind_durable_corporate_action_verifier(
+    prepare_record_mutation,
+    require_authority,
+):
+    def verified_prepare_record_mutation(
+        self,
+        accepted: AuthoritativeCorporateAction,
+    ) -> PreparedCorporateActionEvidenceMutation:
+        require_authority(accepted)
+        return prepare_record_mutation(self, accepted)
+
+    return verified_prepare_record_mutation
+
+
+DurableCorporateActionEvidenceStore.prepare_record_mutation = (
+    _bind_durable_corporate_action_verifier(
+        DurableCorporateActionEvidenceStore.prepare_record_mutation,
+        _require_authoritative_corporate_action,
+    )
+)
+del _bind_durable_corporate_action_verifier
+del _require_authoritative_corporate_action
+
 

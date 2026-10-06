@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -15,6 +16,7 @@ from mvp.autotrade_mvp.reconciliation import (
 )
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.scientific_financial_cut import (
+    FinancialCutUnavailable,
     capture_current_scientific_financial_cut,
 )
 from research.autotrade_research.evaluation.scientific_financial_accounting_owner import (
@@ -33,7 +35,7 @@ from research.tests.test_science_registry import protocol
 PROVIDER = "TEST_PROVIDER"
 ACCOUNT = "test-account"
 ENVIRONMENT = "SIMULATION"
-PROVIDER_ENVIRONMENT = "SIMULATION"
+PROVIDER_ENVIRONMENT = "SANDBOX_A"
 
 
 def _bound_protocol(gate_profile, *, trial_budget: int = 1):
@@ -173,7 +175,168 @@ def _checkpoint_and_cut(
     return checkpoint, cut
 
 
+def _bybit_fill(provider_environment: str):
+    return ProviderFillEvidence.create(
+        side="BUY",
+        evidence_refs=("test:bybit-normalized-fill",),
+        provider_id="BYBIT",
+        account_id=ACCOUNT,
+        environment="PAPER",
+        provider_environment=provider_environment,
+        provider_execution_id="bybit-e1",
+        client_order_id="bybit-c1",
+        instrument="ABC",
+        quantity="1",
+        price="100",
+        fee_currency="USD",
+        trade_time="2026-09-24T18:00:00Z",
+    )
+
+
+def _bybit_reconciliation(provider_environment: str):
+    return reconcile_account(
+        provider_id="BYBIT",
+        account_id=ACCOUNT,
+        environment="PAPER",
+        provider_environment=provider_environment,
+        local_cash={"USD": "900"},
+        provider_cash={"USD": "900"},
+        local_positions={"ABC": "1"},
+        provider_positions={"ABC": "1"},
+        local_execution_ids=["bybit-e1"],
+        provider_fills=[_bybit_fill(provider_environment)],
+        snapshot_consistency=SnapshotConsistencyEvidence(
+            provider_id="BYBIT",
+            account_id=ACCOUNT,
+            environment="PAPER",
+            provider_environment=provider_environment,
+            mode="ATOMIC",
+            query_started_at="2026-09-24T17:00:00Z",
+            query_completed_at="2026-09-24T19:00:00Z",
+        ),
+        coverage_start="2026-09-24T17:00:00Z",
+        coverage_end="2026-09-24T19:00:00Z",
+        pagination_complete=True,
+        provider_activity_provider_id="BYBIT",
+        provider_activity_account_id=ACCOUNT,
+    )
+
+
+def _bybit_book(
+    store: JournalStore,
+    provider_environment: str,
+) -> DurableProviderEconomicBook:
+    book = DurableProviderEconomicBook(
+        store,
+        provider_id="BYBIT",
+        account_id=ACCOUNT,
+        environment="PAPER",
+        provider_environment=provider_environment,
+    )
+    book.append_batch(
+        (
+            book_external_cash_flow(
+                transaction_id="bybit-cash-seed",
+                cause_event_id="bybit-cash-seed-event",
+                currency="USD",
+                amount="1000",
+            ),
+            book_equity_fill(
+                transaction_id="bybit-fill-e1",
+                cause_event_id="bybit-provider-fill-e1",
+                instrument="ABC",
+                settlement_currency="USD",
+                side="BUY",
+                quantity="1",
+                price="100",
+            ),
+        ),
+        committed_at="2026-09-24T18:00:00Z",
+    )
+    return book
+
+
 class ScientificFinancialAccountingOwnerTests(unittest.TestCase):
+    def test_non_bybit_explicit_provider_environment_differs_from_runtime(self):
+        self.assertNotEqual(PROVIDER_ENVIRONMENT, ENVIRONMENT)
+        with TemporaryDirectory() as directory:
+            gate_profile, registry, registration = _science_owner(directory)
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            book = _book_matching_provider(store)
+            _, cut = _checkpoint_and_cut(
+                store,
+                gate_profile=gate_profile,
+                registration=registration,
+            )
+
+            owner = resolve_scientific_financial_accounting_owner(
+                store=store,
+                financial_cut=cut,
+                scientific_registry=registry,
+                profile=gate_profile,
+            )
+
+            self.assertEqual(owner.provider_environment, PROVIDER_ENVIRONMENT)
+            self.assertEqual(owner.economic_book_digest, book.audit_digest())
+
+    def test_bybit_requires_explicit_provider_environment_before_cut_resolution(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            with self.assertRaisesRegex(
+                ValueError,
+                "BYBIT requires explicit provider_environment",
+            ):
+                capture_current_scientific_financial_cut(
+                    store,
+                    scientific_protocol_id="wp36-bybit-domain",
+                    gate_profile_digest=gate_profile_subject_digest(profile()),
+                    provider_id="BYBIT",
+                    account_id=ACCOUNT,
+                    environment="PAPER",
+                    reconciliation_event_id="missing-checkpoint",
+                )
+
+    def test_bybit_demo_cut_cannot_cross_authorize_testnet_accounting_owner(self):
+        with TemporaryDirectory() as directory:
+            gate_profile, registry, registration = _science_owner(directory)
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            book = _bybit_book(store, "DEMO")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="wp36-bybit-demo-owner",
+                result=_bybit_reconciliation("DEMO"),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            cut = capture_current_scientific_financial_cut(
+                store,
+                scientific_protocol_id=registration.protocol_id,
+                gate_profile_digest=gate_profile_subject_digest(gate_profile),
+                provider_id="BYBIT",
+                account_id=ACCOUNT,
+                environment="PAPER",
+                provider_environment="DEMO",
+                reconciliation_event_id=checkpoint["event_id"],
+            )
+            owner = resolve_scientific_financial_accounting_owner(
+                store=store,
+                financial_cut=cut,
+                scientific_registry=registry,
+                profile=gate_profile,
+            )
+            self.assertEqual(owner.provider_environment, "DEMO")
+            self.assertEqual(owner.economic_book_digest, book.audit_digest())
+
+            cross_domain_cut = replace(cut, provider_environment="TESTNET")
+            with self.assertRaises(FinancialCutUnavailable):
+                resolve_scientific_financial_accounting_owner(
+                    store=store,
+                    financial_cut=cross_domain_cut,
+                    scientific_registry=registry,
+                    profile=gate_profile,
+                )
+
     def test_owner_binds_registry_cut_book_and_clean_reconciliation(self):
         with TemporaryDirectory() as directory:
             gate_profile, registry, registration = _science_owner(directory)

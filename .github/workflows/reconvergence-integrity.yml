@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   guard:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Check out trusted base revision
         uses: actions/checkout@v4

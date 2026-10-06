@@ -235,7 +235,7 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 "    steps:\n"
                 "      - run: python tools/dotnet_package_rights.py "
                 "--verify-restored "
-                "--packages-root \"\${{ env.NUGET_PACKAGES }}\" "
+                "--packages-root \"${{ env.NUGET_PACKAGES }}\" "
                 "--project src/App/App.csproj\n",
                 encoding="utf-8",
             )

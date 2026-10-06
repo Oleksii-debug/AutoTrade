@@ -642,8 +642,8 @@ def _validate_submission_scope(
     *,
     source_uri: str,
 ) -> str:
-    if not isinstance(prepared_request, KrakenSpotPreparedRequest):
-        raise TypeError("prepared_request must be KrakenSpotPreparedRequest")
+    if type(prepared_request) is not KrakenSpotPreparedRequest:
+        raise TypeError("prepared_request must be exact KrakenSpotPreparedRequest")
     if prepared_request.environment != "LIVE":
         raise KrakenSpotAdapterError(
             "Kraken Spot provider submission evidence is qualified only for LIVE"
@@ -673,6 +673,10 @@ def _submission_projection(
     if type(observation) is not _observation_type:
         raise TypeError(
             "observation must be durable ProviderSubmissionObservation"
+        )
+    if type(prepared_request) is not KrakenSpotPreparedRequest:
+        raise TypeError(
+            "prepared_request must be exact KrakenSpotPreparedRequest"
         )
     projected = _projection(observation)
     cid = validate_spot_client_order_id(

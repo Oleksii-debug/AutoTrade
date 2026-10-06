@@ -341,7 +341,7 @@ class InstrumentVersion:
         except (ValueError, TypeError, AttributeError) as error:
             raise InstrumentRegistryError("instrument_id must be a UUID") from error
         object.__setattr__(self, "instrument_id", canonical_instrument_id)
-        if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version < 1:
+        if type(self.version) is not int or self.version < 1:
             raise InstrumentRegistryError("version must be a positive integer")
 
         for field in (
@@ -357,6 +357,8 @@ class InstrumentVersion:
         ):
             object.__setattr__(self, field, _text(getattr(self, field), field))
 
+        object.__setattr__(self, "asset_class", _text(self.asset_class, "asset_class"))
+        object.__setattr__(self, "status", _text(self.status, "status"))
         if self.asset_class not in {
             "CASH_EQUITY",
             "FUND",
@@ -416,6 +418,15 @@ class InstrumentVersion:
         if self.effective_to is not None and self.effective_to <= start:
             raise InstrumentRegistryError("effective_to must be after effective_from")
 
+        if type(self.deliverable) not in (tuple, list):
+            raise InstrumentRegistryError(
+                "deliverable must be an exact built-in array"
+            )
+        if type(self.metadata_evidence) not in (tuple, list):
+            raise InstrumentRegistryError(
+                "metadata_evidence must be an exact built-in array"
+            )
+
         canonical_deliverable = []
         for leg in self.deliverable:
             if type(leg) is not DeliverableLeg:
@@ -431,6 +442,9 @@ class InstrumentVersion:
 
         derivative = self.asset_class in {"FUTURE", "PERPETUAL", "OPTION"}
         if derivative:
+            if self.payoff is None:
+                raise InstrumentRegistryError("derivative payoff is required")
+            object.__setattr__(self, "payoff", _text(self.payoff, "payoff"))
             if self.payoff not in {"LINEAR", "INVERSE", "OPTION"}:
                 raise InstrumentRegistryError("derivative payoff is required")
             if self.asset_class in {"FUTURE", "PERPETUAL"} and self.payoff not in {
@@ -483,8 +497,10 @@ class InstrumentVersion:
                 raise InstrumentRegistryError("perpetual must not invent an expiry")
             if self.funding_schedule is None:
                 raise InstrumentRegistryError("perpetual funding_schedule is required")
-            if not isinstance(self.funding_schedule, Mapping) or not self.funding_schedule:
-                raise InstrumentRegistryError("funding_schedule must be a non-empty object")
+            if type(self.funding_schedule) is not dict or not self.funding_schedule:
+                raise InstrumentRegistryError(
+                    "funding_schedule must be a non-empty exact built-in object"
+                )
             object.__setattr__(
                 self,
                 "funding_schedule",
@@ -501,6 +517,11 @@ class InstrumentVersion:
             if self.strike is None:
                 raise InstrumentRegistryError("option strike is required")
             object.__setattr__(self, "strike", _decimal(self.strike, "strike", positive=True))
+            if self.option_right is None:
+                raise InstrumentRegistryError("option_right must be CALL or PUT")
+            object.__setattr__(
+                self, "option_right", _text(self.option_right, "option_right")
+            )
             if self.option_right not in {"CALL", "PUT"}:
                 raise InstrumentRegistryError("option_right must be CALL or PUT")
             if self.exercise_style is None:

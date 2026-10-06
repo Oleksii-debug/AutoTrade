@@ -1346,7 +1346,7 @@ def _install_provider_submission_observation_authority(binding_projection):
             scoped_provider_environment = canonical_text(
                 raw_provider_environment,
                 "submission_scope.provider_environment",
-            )
+            ).upper()
             if scoped_provider_environment != raw_provider_environment:
                 raise error_type(
                     "durable submission provider environment is not canonical"

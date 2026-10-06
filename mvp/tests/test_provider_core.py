@@ -374,6 +374,7 @@ class ProviderCoreTests(unittest.TestCase):
         *,
         capability_snapshot_ids=("cap-1",),
         instrument_versions=("BTCUSD:v1",),
+        provider_environment="TESTNET",
         raw=b'{ "orderId" : "provider-1" }',
     ):
         store = JournalStore(f"{directory}/journal.sqlite3")
@@ -394,11 +395,12 @@ class ProviderCoreTests(unittest.TestCase):
         request_sha = "sha256:" + sha256(request_text.encode("utf-8")).hexdigest()
         scope = {
             "endpoint": "/v5/order/create",
-            "provider_environment": "TESTNET",
             "prepared_request_sha256": request_sha,
             "capability_snapshot_ids": list(capability_snapshot_ids),
             "instrument_versions": list(instrument_versions),
         }
+        if provider_environment is not None:
+            scope["provider_environment"] = provider_environment
 
         def transport(_client_id, _request, guard):
             guard()
@@ -443,7 +445,9 @@ class ProviderCoreTests(unittest.TestCase):
             self.assertEqual(observation.observed_at, binding.sent_at)
             self.assertEqual(observation.request_sha256, request_sha)
             self.assertEqual(
-                observation.submission_scope["provider_environment"],
+                provider_submission_observation_projection(observation)[
+                    "submission_scope"
+                ]["provider_environment"],
                 "TESTNET",
             )
             observation.require_scope(
@@ -457,6 +461,24 @@ class ProviderCoreTests(unittest.TestCase):
                 client_order_id=binding.client_order_id,
             )
 
+
+    def test_bybit_submission_observation_requires_durable_provider_environment(self):
+        for provider_environment in (None, "testnet", " TESTNET "):
+            with self.subTest(provider_environment=provider_environment):
+                with TemporaryDirectory() as directory:
+                    binding, request_sha = self._durable_submission_binding(
+                        directory,
+                        provider_environment=provider_environment,
+                    )
+                    with self.assertRaises(ProviderCoreError):
+                        observe_submission_json_response(
+                            response_binding=binding,
+                            provider_id="BYBIT",
+                            endpoint="/v5/order/create",
+                            prepared_request_sha256=request_sha,
+                            capability_snapshot_ids=("cap-1",),
+                            instrument_versions=("BTCUSD:v1",),
+                        )
 
     def test_submission_observation_rejects_post_mint_scope_retargeting(self):
         with TemporaryDirectory() as directory:

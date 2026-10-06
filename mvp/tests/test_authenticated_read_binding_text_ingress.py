@@ -24,6 +24,11 @@ class _HostileString(str):
         raise AssertionError("hostile string method must never execute")
 
 
+class _HostileSurface:
+    def __str__(self):
+        raise AssertionError("hostile surface stringification must never execute")
+
+
 def capability():
     observed = NOW - timedelta(minutes=2)
     expires = NOW + timedelta(minutes=10)
@@ -99,6 +104,48 @@ class AuthenticatedReadTextIngressTests(unittest.TestCase):
                 query={"category": "option"},
                 at=NOW,
                 permission_scope=_HostileString("ACCOUNT.READ"),
+            )
+
+    def test_endpoint_whitespace_is_rejected_instead_of_normalized(self):
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "authenticated-read endpoint must be a canonical string",
+        ):
+            prepare_authenticated_read_query(
+                capability=capability(),
+                surface=Surface.ACTIVITIES,
+                endpoint=" /v5/account/transaction-log",
+                query={"category": "option"},
+                at=NOW,
+                permission_scope="ACCOUNT.READ",
+            )
+
+    def test_permission_scope_whitespace_is_rejected_instead_of_normalized(self):
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "permission_scope must be a canonical string",
+        ):
+            prepare_authenticated_read_query(
+                capability=capability(),
+                surface=Surface.ACTIVITIES,
+                endpoint="/v5/account/transaction-log",
+                query={"category": "option"},
+                at=NOW,
+                permission_scope=" ACCOUNT.READ",
+            )
+
+    def test_non_surface_is_rejected_before_stringification(self):
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "surface must be a provider Surface",
+        ):
+            prepare_authenticated_read_query(
+                capability=capability(),
+                surface=_HostileSurface(),
+                endpoint="/v5/account/transaction-log",
+                query={"category": "option"},
+                at=NOW,
+                permission_scope="ACCOUNT.READ",
             )
 
 

@@ -21,7 +21,12 @@ import weakref
 from .capabilities import CapabilitySnapshot
 from .instruments import InstrumentRegistry, InstrumentRegistryError, InstrumentVersion
 from .persistence import canonical_json
-from .provider_qualification_authority import AcceptedProviderQualification
+from .provider_qualification_authority import (
+    AcceptedProviderQualification,
+    ProviderQualificationScope,
+)
+from .provider_qualification_identity import ProviderQualificationIdentity
+from .provider_domain import ProviderFinancialScope
 from .qualification_attestation import EvidenceArtifactRef
 
 
@@ -247,6 +252,20 @@ def _qualification_semantics(
             "provider qualification route semantics are non-canonical"
         )
     identity = object.__getattribute__(qualification, "identity")
+    scope = object.__getattribute__(qualification, "scope")
+    if type(identity) is not ProviderQualificationIdentity:
+        raise BybitFeeCurrencyAuthorityError(
+            "provider qualification identity is non-canonical"
+        )
+    if type(scope) is not ProviderQualificationScope:
+        raise BybitFeeCurrencyAuthorityError(
+            "provider qualification scope is non-canonical"
+        )
+    provider_scope = object.__getattribute__(scope, "provider_scope")
+    if type(provider_scope) is not ProviderFinancialScope:
+        raise BybitFeeCurrencyAuthorityError(
+            "provider qualification financial scope is non-canonical"
+        )
     qualification_id = object.__getattribute__(qualification, "qualification_id")
     semantics_digest = "sha256:" + sha256(raw.encode("utf-8")).hexdigest()
     if (
@@ -256,9 +275,8 @@ def _qualification_semantics(
         raise BybitFeeCurrencyAuthorityError(
             "provider qualification semantics do not match Q identity"
         )
-    scope = object.__getattribute__(qualification, "scope")
     if (
-        getattr(identity, "provider_scope", None) != getattr(scope, "provider_scope", None)
+        getattr(identity, "provider_scope", None) != provider_scope
         or getattr(identity, "product_family", None) != getattr(scope, "product_family", None)
         or getattr(identity, "adapter_source_git_sha", None)
         != getattr(scope, "adapter_source_git_sha", None)
@@ -358,6 +376,48 @@ def _qualification_semantics(
     ):
         raise BybitFeeCurrencyAuthorityError(
             "provider qualification acceptance metadata does not match Q identity"
+        )
+
+    required_cases = object.__getattribute__(qualification, "required_cases")
+    unsupported_features = object.__getattribute__(
+        qualification,
+        "unsupported_features",
+    )
+    documentation_revisions = object.__getattribute__(
+        qualification,
+        "documentation_revisions",
+    )
+    supersedes_qualification_id = object.__getattribute__(
+        qualification,
+        "supersedes_qualification_id",
+    )
+    if (
+        getattr(identity, "required_case_policy_digest", None)
+        != _canonical_digest(list(required_cases))
+        or getattr(identity, "result_set_digest", None)
+        != _canonical_digest(
+            {
+                "passed_cases": list(required_cases),
+                "failed_cases": [],
+                "unsupported_features": list(unsupported_features),
+            }
+        )
+        or getattr(identity, "documentation_revision_digest", None)
+        != _canonical_digest(list(documentation_revisions))
+        or getattr(identity, "lineage_digest", None)
+        != _canonical_digest(
+            {"supersedes_qualification_id": supersedes_qualification_id}
+        )
+    ):
+        raise BybitFeeCurrencyAuthorityError(
+            "provider qualification campaign content does not match Q identity"
+        )
+    if (
+        getattr(identity, "content_digest", None)
+        != object.__getattribute__(qualification, "qualification_id")
+    ):
+        raise BybitFeeCurrencyAuthorityError(
+            "provider qualification content identity does not match Q record"
         )
     return semantics
 

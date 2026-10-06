@@ -189,6 +189,14 @@ class _HostileCandidateList(list):
         raise AssertionError("hostile candidate iterator executed")
 
 
+class _HostileTuple(tuple):
+    calls = 0
+
+    def __iter__(self):
+        type(self).calls += 1
+        raise AssertionError("hostile nested tuple iterator executed")
+
+
 class ProviderSelectionTests(unittest.TestCase):
     def authorities(self, directory: str, *, unsupported=()):
         journal = JournalStore(Path(directory) / "journal.sqlite3")
@@ -528,6 +536,43 @@ class ProviderSelectionTests(unittest.TestCase):
                     original_product_family,
                 )
 
+            self.assertIs(route.qualification, selected_qualification)
+
+    def test_selected_route_rejects_executable_nested_q_tuple_before_iteration(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            result = select_provider(
+                request(),
+                [candidate()],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            route = result.selected
+            self.assertIsNotNone(route)
+            selected_qualification = route.qualification
+            original_unsupported = selected_qualification.unsupported_features
+            _HostileTuple.calls = 0
+
+            object.__setattr__(
+                selected_qualification,
+                "unsupported_features",
+                _HostileTuple(original_unsupported),
+            )
+            try:
+                with self.assertRaisesRegex(
+                    (ProviderSelectionError, PermissionError),
+                    "selected provider route authority changed",
+                ):
+                    _ = route.qualification
+            finally:
+                object.__setattr__(
+                    selected_qualification,
+                    "unsupported_features",
+                    original_unsupported,
+                )
+
+            self.assertEqual(_HostileTuple.calls, 0)
             self.assertIs(route.qualification, selected_qualification)
 
     def test_testnet_authority_does_not_admit_demo_route(self):

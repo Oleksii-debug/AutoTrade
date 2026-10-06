@@ -1055,6 +1055,13 @@ class DurableOrderProjectionTests(unittest.TestCase):
             store_ref = weakref.ref(store)
             artifacts_ref = weakref.ref(artifacts)
 
+            owner_refs = weakref.getweakrefs(book)
+            self.assertTrue(owner_refs, "OMS authority registry did not retain an owner weakref")
+            self.assertTrue(
+                all(reference.__callback__ is None for reference in owner_refs),
+                "OMS owner weakref exposed an invokable trust-binding cleanup callback",
+            )
+
             del book
             del store
             del artifacts

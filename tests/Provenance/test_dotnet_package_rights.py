@@ -194,6 +194,48 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 blockers,
             )
 
+    def test_post_restore_rights_verifier_rejects_step_bypass_controls(self):
+        for bypass in (
+            "        continue-on-error: true\n",
+            "        if: ${{ false }}\n",
+            "        shell: echo {0}\n",
+        ):
+            with self.subTest(bypass=bypass.strip()):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    _write_project(root)
+                    _write_policy(root)
+                    workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
+                    workflow.parent.mkdir(parents=True)
+                    workflow.write_text(
+                        "env:\n"
+                        "  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages\n"
+                        "jobs:\n"
+                        "  verify:\n"
+                        "    steps:\n"
+                        "      - name: rights\n"
+                        "        run: python tools/dotnet_package_rights.py "
+                        "--verify-restored "
+                        '--packages-root "${{ env.NUGET_PACKAGES }}" '
+                        "--project src/App/App.csproj\n"
+                        + bypass,
+                        encoding="utf-8",
+                    )
+                    blockers = package_rights_blockers(root)
+                    self.assertTrue(
+                        any(
+                            blocker.startswith(
+                                "DOTNET_PACKAGE_RIGHTS_VERIFY_COMMAND_INVALID:"
+                            )
+                            for blocker in blockers
+                        )
+                    )
+                    self.assertIn(
+                        "DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_MISSING:"
+                        "src/App/App.csproj",
+                        blockers,
+                    )
+
     def test_zero_package_project_does_not_require_nuget_cache(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

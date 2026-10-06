@@ -776,52 +776,94 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 (False, "financial_evidence_invalid"),
             )
 
-    def test_provider_domain_capital_fails_closed_until_economic_book_is_exact(self):
-        cases = (
-            ("BYBIT", "bybit-account", "TESTNET"),
-            ("KRAKEN", "kraken-account", "FUTURES_DEMO"),
-        )
-        for provider_id, account_id, provider_environment in cases:
-            with self.subTest(
-                provider_id=provider_id,
-                provider_environment=provider_environment,
-            ), TemporaryDirectory() as directory:
-                store = JournalStore(f"{directory}/journal.sqlite3")
-                artifact_root = Path(directory) / "settlement-evidence"
-                artifacts = ArtifactStore(artifact_root)
-                if provider_id != "BYBIT":
-                    # The current settlement owner already rejects unqualified
-                    # provider domains before capital composition can occur.
-                    with self.assertRaisesRegex(ValueError, "provider_environment must equal runtime environment"):
-                        DurableSettlementBook(store, provider_id=provider_id, account_id=account_id,
-                            environment="PAPER", provider_environment=provider_environment,
-                            evidence_artifact_root=artifact_root, evidence_artifact_store=artifacts)
-                    self.assertEqual(store.current_journal_sequence(), 0)
-                    continue
-                settlement = DurableSettlementBook(
+    def test_provider_domain_capital_requires_exact_economic_book_domain(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifact_root = Path(directory) / "settlement-evidence"
+            artifacts = ArtifactStore(artifact_root)
+            settlement = DurableSettlementBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                evidence_artifact_root=artifact_root,
+                evidence_artifact_store=artifacts,
+            )
+            economic = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            authority = AuthorityService(
+                store,
+                settlement_book=settlement,
+                economic_book=economic,
+            )
+            self.assertIsNotNone(authority)
+
+            demo_economic = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="DEMO",
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "settlement and economic capital scopes do not match",
+            ):
+                AuthorityService(
                     store,
-                    provider_id=provider_id,
-                    account_id=account_id,
-                    environment="PAPER",
-                    provider_environment=provider_environment,
-                    evidence_artifact_root=artifact_root,
-                    evidence_artifact_store=artifacts,
+                    settlement_book=settlement,
+                    economic_book=demo_economic,
                 )
-                economic = DurableProviderEconomicBook(
-                    store,
-                    provider_id=provider_id,
-                    account_id=account_id,
+
+            capital = {
+                "schema_version": "settlement-capital-cut.v1",
+                "journal_sequence": 0,
+                "provider_id": "BYBIT",
+                "account_id": "bybit-account",
+                "environment": "PAPER",
+                "provider_environment": "TESTNET",
+                "settlement_scope_id": "settlement:testnet",
+                "economic_book_id": economic.book_id,
+                "resources": {
+                    "CASH:USD": {
+                        "provider_available": "100",
+                        "local_available": "80",
+                        "effective_available": "80",
+                    }
+                },
+            }
+            canonical, effective = (
+                authority_module._canonical_settlement_capital_adjustment(
+                    capital,
+                    provider_available={"CASH:USD": Decimal("100")},
+                    required_resources=("CASH:USD",),
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
                     environment="PAPER",
+                    provider_environment="TESTNET",
                 )
-                with self.assertRaisesRegex(
-                    AuthorityConflict,
-                    "requires provider_environment",
-                ):
-                    AuthorityService(
-                        store,
-                        settlement_book=settlement,
-                        economic_book=economic,
-                    )
+            )
+            self.assertEqual(canonical["provider_environment"], "TESTNET")
+            self.assertEqual(effective["CASH:USD"], Decimal("80"))
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "provider domain is inconsistent",
+            ):
+                authority_module._canonical_settlement_capital_adjustment(
+                    capital,
+                    provider_available={"CASH:USD": Decimal("100")},
+                    required_resources=("CASH:USD",),
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                )
 
     def test_admission_uses_exact_reconciled_cash_and_survives_restart_retry(self):
         with TemporaryDirectory() as directory:

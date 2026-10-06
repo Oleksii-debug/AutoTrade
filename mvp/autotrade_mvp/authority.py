@@ -613,17 +613,10 @@ def _authority_service_capital_operations():
                 scope.provider_id != economic_book.provider_id
                 or scope.account_id != economic_book.account_id
                 or scope.environment != economic_book.environment
+                or scope.provider_environment != economic_book.provider_environment
             ):
                 raise AuthorityConflict(
                     "settlement and economic capital scopes do not match"
-                )
-            # DurableProviderEconomicBook does not yet retain provider_environment.
-            # Until it does, never collapse a provider-specific domain into the
-            # broader runtime environment for any provider.
-            if scope.provider_environment != scope.environment:
-                raise AuthorityConflict(
-                    "capital authority requires provider_environment "
-                    "in the durable economic book"
                 )
 
         object_id = id(service)
@@ -694,13 +687,9 @@ def _authority_service_capital_operations():
             scope.provider_id != economic_book.provider_id
             or scope.account_id != economic_book.account_id
             or scope.environment != economic_book.environment
+            or scope.provider_environment != economic_book.provider_environment
         ):
             raise AuthorityConflict("capital authority scope changed")
-        if scope.provider_environment != scope.environment:
-            raise AuthorityConflict(
-                "capital authority requires provider_environment "
-                "in the durable economic book"
-            )
         return settlement_book, economic_book
 
     def resolve(
@@ -872,6 +861,7 @@ def _canonical_settlement_capital_adjustment(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
     risk_journal_sequence: int | None = None,
     expected_journal_sequence: int | None = None,
 ) -> tuple[dict[str, object], dict[str, Decimal]]:
@@ -922,15 +912,37 @@ def _canonical_settlement_capital_adjustment(
         or value.get("environment") != canonical_environment
     ):
         raise AuthorityConflict("settlement capital scope is inconsistent")
+    if canonical_provider == "BYBIT" and provider_environment is None:
+        raise AuthorityConflict(
+            "BYBIT settlement capital requires exact provider_environment"
+        )
+    expected_provider_environment = (
+        canonical_environment
+        if provider_environment is None
+        else _text(
+            provider_environment,
+            name="expected_provider_environment",
+        ).upper()
+    )
+    if canonical_provider == "BYBIT":
+        if expected_provider_environment not in {"MAINNET", "TESTNET", "DEMO"}:
+            raise AuthorityConflict(
+                "BYBIT settlement capital provider_environment is unsupported"
+            )
+        expected_runtime = (
+            "LIVE" if expected_provider_environment == "MAINNET" else "PAPER"
+        )
+        if canonical_environment != expected_runtime:
+            raise AuthorityConflict(
+                "BYBIT settlement capital provider domain does not match runtime"
+            )
     provider_environment = _text(
         value.get("provider_environment"),
         name="provider_environment",
     ).upper()
-    # Until DurableProviderEconomicBook carries provider_environment, only an
-    # unambiguous runtime==provider domain can be consumed here.
-    if provider_environment != canonical_environment:
+    if provider_environment != expected_provider_environment:
         raise AuthorityConflict(
-            "settlement capital provider domain is not represented by economic authority"
+            "settlement capital provider domain is inconsistent"
         )
     settlement_scope_id = _text(
         value.get("settlement_scope_id"),
@@ -2936,6 +2948,13 @@ class AuthorityService:
                     ),
                     account_id=record.account_id,
                     environment=record.environment,
+                    provider_environment=_text(
+                        availability_evidence.get(
+                            "provider_environment",
+                            availability_evidence.get("environment"),
+                        ),
+                        name="provider_environment",
+                    ),
                     resources=tuple(sorted(risk_requirements)),
                     now=record.admitted_at,
                     max_age_seconds=availability_evidence.get(
@@ -3178,6 +3197,13 @@ class AuthorityService:
                     ),
                     account_id=record.account_id,
                     environment=record.environment,
+                    provider_environment=_text(
+                        regenerated_availability.get(
+                            "provider_environment",
+                            regenerated_availability.get("environment"),
+                        ),
+                        name="provider_environment",
+                    ),
                     risk_journal_sequence=risk_journal_sequence,
                     expected_journal_sequence=journal_sequence_cut,
                 )
@@ -4426,6 +4452,7 @@ class AuthorityService:
                         provider_id=provider_id,
                         account_id=account_id,
                         environment=environment,
+                        provider_environment=risk_authority_request.provider_environment,
                         resources=tuple(
                             resource
                             for resource, _amount in normalized_requirements
@@ -4632,6 +4659,13 @@ class AuthorityService:
                             provider_id=provider_id,
                             account_id=account_id,
                             environment=environment,
+                            provider_environment=_text(
+                                availability_evidence.get(
+                                    "provider_environment",
+                                    availability_evidence.get("environment"),
+                                ),
+                                name="provider_environment",
+                            ),
                         )
                     )
                     authoritative_available.update(effective_cash)
@@ -4656,6 +4690,13 @@ class AuthorityService:
                             provider_id=provider_id,
                             account_id=account_id,
                             environment=environment,
+                            provider_environment=_text(
+                                availability_evidence.get(
+                                    "provider_environment",
+                                    availability_evidence.get("environment"),
+                                ),
+                                name="provider_environment",
+                            ),
                         )
                     )
                     authoritative_available.update(effective_cash)
@@ -5352,6 +5393,13 @@ class AuthorityService:
                         ),
                         account_id=record.account_id,
                         environment=record.environment,
+                        provider_environment=_text(
+                            availability_evidence.get(
+                                "provider_environment",
+                                availability_evidence.get("environment"),
+                            ),
+                            name="provider_environment",
+                        ),
                         resources=tuple(sorted(risk_requirements)),
                         now=now,
                         max_age_seconds=availability_evidence.get(
@@ -5380,6 +5428,13 @@ class AuthorityService:
                             ),
                             account_id=record.account_id,
                             environment=record.environment,
+                            provider_environment=_text(
+                                current_provider_evidence.get(
+                                    "provider_environment",
+                                    current_provider_evidence.get("environment"),
+                                ),
+                                name="provider_environment",
+                            ),
                         )
                     )
                     current_capital = _resolve_authority_service_capital(
@@ -5401,6 +5456,13 @@ class AuthorityService:
                             ),
                             account_id=record.account_id,
                             environment=record.environment,
+                            provider_environment=_text(
+                                current_provider_evidence.get(
+                                    "provider_environment",
+                                    current_provider_evidence.get("environment"),
+                                ),
+                                name="provider_environment",
+                            ),
                         )
                     )
                     for identity_field in (

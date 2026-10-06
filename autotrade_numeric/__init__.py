@@ -1,4 +1,4 @@
-"""Shared installed v5 exact-number semantics for product and research."""
+"""Shared installed v6 exact-number semantics for product and research."""
 
 from .exact_decimal import (
     ExactDecimalError,

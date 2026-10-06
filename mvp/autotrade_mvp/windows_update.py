@@ -21,7 +21,6 @@ from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .qualification_attestation import (
     QualificationTrustError,
-    QualificationTrustPolicy,
     parse_signed_qualification_attestation,
 )
 from .release_candidate import (
@@ -39,13 +38,10 @@ class WindowsUpdateError(ValueError):
 
 @dataclass(frozen=True)
 class WindowsUpdateTrustContext:
-    """Pinned trust inputs required to consume a frozen release downstream."""
+    """Canonical evidence authority used to reverify frozen releases downstream."""
 
     evidence_store: ArtifactStore
     evidence_root: str | Path
-    qualification_policy: QualificationTrustPolicy
-    expected_policy_id: str
-    expected_policy_version: str
 
     def __post_init__(self) -> None:
         if type(self.evidence_store) is not ArtifactStore:
@@ -61,29 +57,7 @@ class WindowsUpdateTrustContext:
             evidence_root,
             publication_store=self.evidence_store,
         )
-        if not isinstance(self.qualification_policy, QualificationTrustPolicy):
-            raise TypeError(
-                "qualification_policy must be QualificationTrustPolicy"
-            )
-        policy_id = _text(
-            self.expected_policy_id,
-            name="expected_policy_id",
-        )
-        policy_version = _text(
-            self.expected_policy_version,
-            name="expected_policy_version",
-        )
-        if self.qualification_policy.policy_id != policy_id:
-            raise WindowsUpdateError(
-                "expected_policy_id does not match pinned qualification policy"
-            )
-        if self.qualification_policy.policy_version != policy_version:
-            raise WindowsUpdateError(
-                "expected_policy_version does not match pinned qualification policy"
-            )
         object.__setattr__(self, "evidence_root", evidence_root)
-        object.__setattr__(self, "expected_policy_id", policy_id)
-        object.__setattr__(self, "expected_policy_version", policy_version)
 
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -440,9 +414,6 @@ def _release_manifest(
         evidence_store=trust.evidence_store,
         evidence_root=trust.evidence_root,
         qualification_receipt=receipt,
-        qualification_policy=trust.qualification_policy,
-        expected_policy_id=trust.expected_policy_id,
-        expected_policy_version=trust.expected_policy_version,
     )
     if (
         refrozen.status != "FROZEN"
@@ -750,9 +721,6 @@ def _validated_plan_release(
             evidence_store=trust.evidence_store,
             evidence_root=trust.evidence_root,
             qualification_receipt=receipt,
-            qualification_policy=trust.qualification_policy,
-            expected_policy_id=trust.expected_policy_id,
-            expected_policy_version=trust.expected_policy_version,
         )
     except (
         KeyError,

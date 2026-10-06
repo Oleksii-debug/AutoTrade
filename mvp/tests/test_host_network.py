@@ -1058,5 +1058,394 @@ class HostNetworkTests(unittest.TestCase):
             self.assertNotIn("paper-account-1", json.dumps(payload))
 
 
+    def test_header_and_principal_text_reject_subclasses_before_callbacks(self):
+        callbacks = []
+
+        class HostileText(str):
+            def __str__(self):
+                callbacks.append("str")
+                raise AssertionError("hostile text __str__ callback must not run")
+
+            def __bool__(self):
+                callbacks.append("bool")
+                raise AssertionError("hostile text truthiness callback must not run")
+
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("hostile text strip callback must not run")
+
+            def startswith(self, *args, **kwargs):
+                callbacks.append("startswith")
+                raise AssertionError("hostile text startswith callback must not run")
+
+            def encode(self, *args, **kwargs):
+                callbacks.append("encode")
+                raise AssertionError("hostile text encode callback must not run")
+
+            def __eq__(self, other):
+                callbacks.append("eq")
+                raise AssertionError("hostile text equality callback must not run")
+
+            def __hash__(self):
+                callbacks.append("hash")
+                raise AssertionError("hostile text hash callback must not run")
+
+        valid_token = self.owner.token
+        valid_session = public_session_reference(valid_token)
+
+        with self.assertRaises(ValueError):
+            public_session_reference(HostileText(valid_token))
+        self.assertEqual(callbacks, [])
+
+        for field, value in (
+            ("actor", HostileText("owner")),
+            ("token", HostileText(valid_token)),
+            ("session", HostileText(valid_session)),
+        ):
+            with self.subTest(principal_field=field):
+                callbacks.clear()
+                values = {
+                    "actor": "owner",
+                    "token": valid_token,
+                    "session": valid_session,
+                }
+                values[field] = value
+                with self.assertRaises(ValueError):
+                    HostPrincipal(**values)
+                self.assertEqual(callbacks, [])
+
+        valid_authorization = "AutoTrade-Session " + valid_token
+        for headers in (
+            {
+                "x-autotrade-actor": HostileText("owner"),
+                "authorization": valid_authorization,
+            },
+            {
+                "x-autotrade-actor": "owner",
+                "authorization": HostileText(valid_authorization),
+            },
+        ):
+            callbacks.clear()
+            with self.assertRaises(PermissionError):
+                header_principal_resolver(headers, self.origin)
+            self.assertEqual(callbacks, [])
+
+        callbacks.clear()
+        response = self.app.dispatch(
+            method="GET",
+            target="/api/v1/health",
+            headers={"X-Probe": HostileText("value")},
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.body(response), {"error": "INVALID_REQUEST"})
+        self.assertEqual(callbacks, [])
+
+        class HostileHeaderMap(dict):
+            def items(self):
+                return [(HostileText("X-Probe"), "value")]
+
+        callbacks.clear()
+        response = self.app.dispatch(
+            method="GET",
+            target="/api/v1/health",
+            headers=HostileHeaderMap(),
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.body(response), {"error": "INVALID_REQUEST"})
+        self.assertEqual(callbacks, [])
+
+
+    def test_host_id_configuration_rejects_str_subclass_without_strip_callback(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("host_id strip callback must not run")
+
+        with self.assertRaisesRegex(ValueError, "host_id is required"):
+            AuthenticatedHostApplication(
+                JournalStore(str(Path(self.directory.name) / "hostile-host-id.sqlite3")),
+                security_boundary=self.boundary,
+                account_id="paper-account-1",
+                environment="PAPER",
+                host_id=HostileText("host-local-1"),
+                public_origin=self.origin,
+                principal_resolver=header_principal_resolver,
+                snapshot_provider=self._snapshot,
+                now=lambda: "2026-09-25T09:30:00Z",
+            )
+
+        self.assertEqual(callbacks, [])
+
+
+    def test_snapshot_scope_identity_rejects_str_subclasses_before_comparison(self):
+        callbacks = []
+
+        class HostileText(str):
+            def __eq__(self, other):
+                callbacks.append("eq")
+                raise AssertionError("snapshot identity equality callback must not run")
+
+            def __ne__(self, other):
+                callbacks.append("ne")
+                raise AssertionError("snapshot identity inequality callback must not run")
+
+        for field in ("account_id", "host_id"):
+            with self.subTest(field=field):
+                callbacks.clear()
+
+                def hostile_snapshot(durable, principal, *, _field=field):
+                    payload = dict(self._snapshot(durable, principal))
+                    payload[_field] = HostileText(str(payload[_field]))
+                    return payload
+
+                app = self._application(
+                    origin=self.origin,
+                    boundary=self.boundary,
+                    session=self.owner,
+                    path=str(
+                        Path(self.directory.name)
+                        / f"snapshot-hostile-{field}.sqlite3"
+                    ),
+                    snapshot_provider=hostile_snapshot,
+                )
+                response = app.dispatch(
+                    method="GET",
+                    target="/api/v1/state",
+                    headers=self.headers(),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(
+                    self.body(response),
+                    {"error": "INVALID_REQUEST"},
+                )
+                self.assertEqual(callbacks, [])
+
+
+    def test_snapshot_identity_metadata_rejects_str_subclasses_without_callbacks(self):
+        callbacks = []
+
+        class HostileText(str):
+            def __bool__(self):
+                callbacks.append("bool")
+                raise AssertionError("snapshot text truthiness callback must not run")
+
+            def __eq__(self, other):
+                callbacks.append("eq")
+                raise AssertionError("snapshot text equality callback must not run")
+
+            def __ne__(self, other):
+                callbacks.append("ne")
+                raise AssertionError("snapshot text inequality callback must not run")
+
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("snapshot text strip callback must not run")
+
+        cases = (
+            ("actor", "owner"),
+            ("session", public_session_reference(self.owner.token)),
+            ("role", "OWNER"),
+            ("capability", "READ"),
+            ("reason_code", "diagnostic"),
+            ("server_time", "2026-09-25T09:30:00Z"),
+        )
+        for target, raw_value in cases:
+            with self.subTest(target=target):
+                callbacks.clear()
+
+                def hostile_snapshot(durable, principal, *, _target=target, _value=raw_value):
+                    payload = dict(self._snapshot(durable, principal))
+                    hostile = HostileText(_value)
+                    if _target in {"actor", "session", "role"}:
+                        payload["permission_summary"] = dict(payload["permission_summary"])
+                        payload["permission_summary"][_target] = hostile
+                    elif _target == "capability":
+                        payload["permission_summary"] = dict(payload["permission_summary"])
+                        payload["permission_summary"]["capabilities"] = [hostile]
+                    elif _target == "reason_code":
+                        payload["reason_codes"] = [hostile]
+                    else:
+                        payload["server_time"] = hostile
+                    return payload
+
+                app = self._application(
+                    origin=self.origin,
+                    boundary=self.boundary,
+                    session=self.owner,
+                    path=str(
+                        Path(self.directory.name)
+                        / f"snapshot-hostile-metadata-{target}.sqlite3"
+                    ),
+                    snapshot_provider=hostile_snapshot,
+                )
+                response = app.dispatch(
+                    method="GET",
+                    target="/api/v1/state",
+                    headers=self.headers(),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(self.body(response), {"error": "INVALID_REQUEST"})
+                self.assertEqual(callbacks, [])
+
+
+    def test_snapshot_sequence_identity_cannot_be_type_coerced(self):
+        for field in ("state_version", "event_cursor"):
+            with self.subTest(field=field):
+                def malformed_snapshot(durable, principal, *, _field=field):
+                    payload = dict(self._snapshot(durable, principal))
+                    payload[_field] = int(str(payload[_field]))
+                    return payload
+
+                app = self._application(
+                    origin=self.origin,
+                    boundary=self.boundary,
+                    session=self.owner,
+                    path=str(
+                        Path(self.directory.name)
+                        / f"snapshot-{field}.sqlite3"
+                    ),
+                    snapshot_provider=malformed_snapshot,
+                )
+                response = app.dispatch(
+                    method="GET",
+                    target="/api/v1/state",
+                    headers=self.headers(),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(
+                    self.body(response),
+                    {"error": "INVALID_REQUEST"},
+                )
+
+    def test_command_expected_state_version_rejects_noncanonical_sequence(self):
+        for version in ("00", "01", "+0", "-0", " 0", "0 ", "\u0660"):
+            with self.subTest(version=version):
+                command = self.command(expected_state_version=version)
+                response = self.app.dispatch(
+                    method="POST",
+                    target="/api/v1/commands",
+                    headers=self.headers(json_body=True),
+                    body=json.dumps(command).encode("utf-8"),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(self.body(response), {"error": "INVALID_REQUEST"})
+                self.assertEqual(self.app.store.state_version, 0)
+
+    def test_event_cursor_rejects_noncanonical_query_aliases(self):
+        targets = (
+            "/api/v1/events?after=01",
+            "/api/v1/events?after=%31",
+            "/api/v1/events?after=%30",
+            "/api/v1/events?a%66ter=0",
+            "/api/v1/events?after=%2B1",
+            "/api/v1/events?after=-0",
+            "/api/v1/events?after=%200",
+            "/api/v1/events?after=0%20",
+            "/api/v1/events?after=",
+        )
+        for target in targets:
+            with self.subTest(target=target):
+                response = self.app.dispatch(
+                    method="GET",
+                    target=target,
+                    headers=self.headers(),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(
+                    self.body(response),
+                    {"error": "INVALID_EVENT_CURSOR"},
+                )
+
+        canonical = self.app.dispatch(
+            method="GET",
+            target="/api/v1/events?after=0",
+            headers=self.headers(),
+        )
+        self.assertEqual(canonical.status, 200)
+
+
+    def test_canonical_long_state_version_returns_conflict_not_parse_error(self):
+        command = self.command(expected_state_version="9" * 5000)
+        response = self.app.dispatch(
+            method="POST",
+            target="/api/v1/commands",
+            headers=self.headers(json_body=True),
+            body=json.dumps(command).encode("utf-8"),
+        )
+        self.assertEqual(response.status, 409)
+        payload = self.body(response)
+        self.assertEqual(payload["status"], "CONFLICT")
+        self.assertEqual(payload["reason_codes"], ["stale_state_version"])
+        self.assertEqual(self.app.store.state_version, 0)
+
+    def test_ui_command_contract_rejects_unknown_or_missing_top_level_fields(self):
+        extra = self.command(unexpected="forbidden")
+        response = self.post(extra)
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.app.store.state_version, 0)
+
+        missing = self.command()
+        missing.pop("payload")
+        response = self.post(missing)
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.app.store.state_version, 0)
+
+    def test_ui_command_contract_rejects_noncanonical_identity_and_sequence(self):
+        canonical_uuid = "11111111-1111-1111-1111-111111111111"
+        invalid_commands = (
+            self.command(command_id="not-a-uuid"),
+            self.command(command_id="{" + canonical_uuid + "}"),
+            self.command(command_id="urn:uuid:" + canonical_uuid),
+            self.command(command_id=canonical_uuid.replace("-", "")),
+            self.command(expected_state_version="00"),
+            self.command(expected_state_version="+0"),
+            self.command(expected_state_version=" 0"),
+            self.command(idempotency_key="x" * 129),
+            self.command(session="sid-" + "A" * 64),
+            self.command(environment="paper"),
+            self.command(action="UNKNOWN_FUTURE_ACTION"),
+            self.command(payload=[]),
+        )
+        for command in invalid_commands:
+            with self.subTest(command=command):
+                response = self.post(command)
+                self.assertEqual(response.status, 400)
+                self.assertEqual(self.app.store.state_version, 0)
+
+    def test_ui_command_account_id_scope_is_not_whitespace_aliased(self):
+        response = self.post(
+            self.command(account_id=" paper-account-1 ")
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.app.store.state_version, 0)
+        self.assertEqual(JournalStore(self.path).current_journal_sequence(), 0)
+
+    def test_ui_command_distinct_schema_valid_idempotency_keys_do_not_alias(self):
+        first = self.command(idempotency_key="host-network-key-distinct")
+        first_response = self.post(first)
+        self.assertEqual(first_response.status, 200)
+        self.assertEqual(self.body(first_response)["status"], "ACCEPTED")
+        self.assertEqual(self.app.store.state_version, 1)
+
+        second = self.command(
+            command_id="22222222-2222-4222-8222-222222222222",
+            expected_state_version="1",
+            idempotency_key=" host-network-key-distinct ",
+        )
+        second_response = self.post(second)
+        self.assertEqual(second_response.status, 200)
+        self.assertEqual(self.body(second_response)["status"], "ACCEPTED")
+        self.assertEqual(self.app.store.state_version, 2)
+
+    def test_ui_command_contract_accepts_exact_v5_shape(self):
+        command = self.command()
+        response = self.post(command)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.body(response)["status"], "ACCEPTED")
+        self.assertEqual(self.app.store.state_version, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

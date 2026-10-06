@@ -27,9 +27,9 @@ SUPPORTED_HOST_ACTIONS: Final[tuple[str, ...]] = tuple(HOST_ACTION_REQUIRED_ROLE
 def canonical_host_action(value: object) -> str:
     """Return an exact supported action or fail before authorization/mutation."""
 
-    if not isinstance(value, str) or not value:
+    if type(value) is not str or not value:
         raise ValueError("host action must be a non-empty string")
-    if value != value.strip() or value not in HOST_ACTION_REQUIRED_ROLES:
+    if value != str.strip(value) or value not in HOST_ACTION_REQUIRED_ROLES:
         raise ValueError("unsupported or non-canonical host action")
     return value
 

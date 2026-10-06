@@ -231,6 +231,8 @@ def _now(value: str | None) -> str:
 
 
 def _prices(values: list[str]) -> list[Decimal]:
+    if type(values) is not list:
+        raise TypeError("prices must be an exact built-in list")
     if not values:
         raise ValueError("at least one simulated price is required")
     parsed = []
@@ -451,7 +453,7 @@ def _require_zero_wire_blocked_submission(
     store: JournalStore,
     *,
     episode_id: str,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str]:
     attempt_id = _uuid("attempt", episode_id)
     aggregate_id = submission_attempt_aggregate_id(
         environment=ENVIRONMENT,
@@ -497,7 +499,15 @@ def _require_zero_wire_blocked_submission(
         or not reason.strip()
     ):
         raise ValueError("durable blocked submission scope is invalid")
-    return attempt_id, expected_client_order_id, reason.strip()
+    blocked_at = blocked.get("committed_at")
+    if (
+        type(blocked_at) is not str
+        or _now(blocked_at) != blocked_at
+        or blocked.get("occurred_at") != blocked_at
+        or blocked.get("observed_at") != blocked_at
+    ):
+        raise ValueError("durable blocked submission timestamp is invalid")
+    return attempt_id, expected_client_order_id, reason.strip(), blocked_at
 
 
 def _require_initial_reconciliation_checkpoint(store: JournalStore) -> dict:
@@ -673,8 +683,13 @@ def _zero_wire_blocked_projection(
     *,
     episode_id: str,
     required_reservation_state: str,
-) -> tuple[dict[str, object], DurableReservationBook, str, str]:
-    attempt_id, client_order_id, reason = _require_zero_wire_blocked_submission(
+) -> tuple[dict[str, object], DurableReservationBook, str, str, str]:
+    (
+        attempt_id,
+        client_order_id,
+        reason,
+        blocked_at,
+    ) = _require_zero_wire_blocked_submission(
         store,
         episode_id=episode_id,
     )
@@ -723,7 +738,7 @@ def _zero_wire_blocked_projection(
         "new_outbound_requests": 0,
     }
     result.update(_started_identity(store, episode_id=episode_id))
-    return result, reservations, attempt_id, client_order_id
+    return result, reservations, attempt_id, client_order_id, blocked_at
 
 
 def _finalize_zero_wire_blocked(
@@ -734,14 +749,21 @@ def _finalize_zero_wire_blocked(
     timestamp: str,
     resumed: bool,
 ) -> dict[str, object]:
+    # The caller timestamp is compatibility-only here. The durable
+    # SubmissionBlocked event owns the terminal chronology on every restart.
+    _now(timestamp)
     validation_start_cut = JournalStore.whole_store_state_cut(store)
-    result, reservations, attempt_id, client_order_id = (
-        _zero_wire_blocked_projection(
-            store,
-            root,
-            episode_id=episode_id,
-            required_reservation_state="WORKING",
-        )
+    (
+        result,
+        reservations,
+        attempt_id,
+        client_order_id,
+        terminal_timestamp,
+    ) = _zero_wire_blocked_projection(
+        store,
+        root,
+        episode_id=episode_id,
+        required_reservation_state="WORKING",
     )
     terminal_cut = JournalStore.whole_store_state_cut(store)
     if terminal_cut != validation_start_cut:
@@ -755,7 +777,7 @@ def _finalize_zero_wire_blocked(
         provider=PROVIDER,
         attempt_id=attempt_id,
         client_order_id=client_order_id,
-        committed_at=timestamp,
+        committed_at=terminal_timestamp,
     )
     if terminal_plan.already_committed or terminal_plan.envelope is None:
         raise ValueError(
@@ -775,7 +797,7 @@ def _finalize_zero_wire_blocked(
         "SimulationSessionCompleted",
         episode_id,
         result,
-        timestamp,
+        terminal_timestamp,
         aggregate_version=2,
     )
     command_id = _uuid("blocked-terminal-command", episode_id)
@@ -934,8 +956,10 @@ def run_canonical_simulation(
     now: str | None = None, fault_after_send: bool = False,
 ) -> dict[str, object]:
     """Run one BUY/HOLD episode; a restarted ambiguous send is never retried."""
-    if not isinstance(episode_id, str) or not episode_id.strip():
-        raise ValueError("episode_id is required")
+    if type(episode_id) is not str:
+        raise TypeError("episode_id must be exact canonical text")
+    if not episode_id or episode_id != episode_id.strip():
+        raise ValueError("episode_id must be canonical nonempty text")
     if type(fault_after_send) is not bool:
         raise TypeError("fault_after_send must be boolean")
     if now is not None:
@@ -1055,7 +1079,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                     or result["position"] != str(economic.position(INSTRUMENT))):
                 raise ValueError("completed simulation does not match durable economics")
             if result.get("status") == "BLOCKED":
-                expected, _, _, _ = _zero_wire_blocked_projection(
+                expected, _, _, _, _ = _zero_wire_blocked_projection(
                     store,
                     root,
                     episode_id=episode_id,
@@ -1174,6 +1198,14 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                         prepared_request_time=timestamp,
                         recovery_now=timestamp if now is None else _now(now),
                     )
+                    if recovery.status == "BLOCKED":
+                        return _finalize_zero_wire_blocked(
+                            store,
+                            root,
+                            episode_id=episode_id,
+                            timestamp=timestamp,
+                            resumed=True,
+                        )
                     if recovery.status == "IN_PROGRESS":
                         # Dispatcher lease activity is an internal recovery
                         # phase, not a new product-level simulation status.
@@ -2953,7 +2985,8 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
             policy_id = _uuid("loop-authority-policy", key)
             authority.register_policy(AuthorityPolicy.create(policy_id=policy_id, account_id=ACCOUNT,
                 environments={ENVIRONMENT}, instruments={(INSTRUMENT_ID, 1)}, actions={"ORDER.SUBMIT"},
-                max_notional="1000", expires_at=future, autonomous=True, protection_only=False, version=1))
+                max_notional="1000", expires_at=future, autonomous=True, protection_only=False, version=1),
+                simulation_time=timestamp)
             intent_id = _uuid("loop-intent", key)
             intent_hash = payload_digest({"protocol_digest": protocol_digest, "episode": episode,
                 "side": side, "quantity": canonical_decimal_text(exact_abs(quantity)), "price": canonical_decimal_text(price),

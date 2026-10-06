@@ -1,22 +1,32 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
+
+from autotrade_numeric import exact_decimal as neutral_decimal
+from research.autotrade_research.strategies import deterministic as strategy_module
 
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
 
 from research.autotrade_research.strategies.deterministic import (
+    BreakoutThresholdBaseline,
     CausalObservation,
     DeterministicProposal,
+    EconomicsBoundProposal,
+    MeanReversionThresholdBaseline,
     NoTradeBaseline,
+    RegisteredStrategyRunReceipt,
     ReturnThresholdBaseline,
     StrategyDescriptor,
     StrategyEconomicsBinding,
     bind_strategy_economics,
     run_baseline,
+    run_registered_baseline,
     to_decision_proposal,
+    verify_registered_strategy_run,
 )
 
 
@@ -45,6 +55,7 @@ def economics_binding(
     dimension_evidence=(),
     status="QUALIFIED",
     input_manifest_refs=("sha256:" + "c" * 64,),
+    registered_run_receipt=None,
 ):
     return StrategyEconomicsBinding(
         strategy_fingerprint=proposal.strategy_fingerprint,
@@ -67,6 +78,11 @@ def economics_binding(
         capacity_assessment_sha256="sha256:" + "2" * 64,
         max_feasible_quantity=max_feasible_quantity,
         lot_size=lot_size,
+        registered_run_receipt_sha256=(
+            None
+            if registered_run_receipt is None
+            else registered_run_receipt.fingerprint
+        ),
         required_evidence_dimensions=required_evidence_dimensions,
         dimension_evidence=dimension_evidence,
         status=status,
@@ -107,6 +123,21 @@ class DeterministicStrategyTests(unittest.TestCase):
         self.assertEqual(normalized.symbol, "AAA")
         self.assertEqual(normalized.available_at, BASE)
         self.assertEqual(normalized.price, Decimal("100.00"))
+
+    def test_ingest_rejects_duck_typed_observation_bypass(self):
+        class FakeObservation:
+            event_id = "fake"
+            symbol = "AAA"
+            available_at = BASE
+            price = Decimal("100")
+
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="1",
+        )
+        with self.assertRaisesRegex(TypeError, "CausalObservation"):
+            strategy.ingest(FakeObservation(), simulation_time=BASE)
 
     def test_future_observation_is_rejected(self):
         strategy = ReturnThresholdBaseline(lookback=2, threshold="0.01", proposal_quantity="1")
@@ -237,6 +268,91 @@ class DeterministicStrategyTests(unittest.TestCase):
                 json.dumps(payload, sort_keys=True, separators=(",", ":"))
             )
 
+    def test_snapshot_restore_rejects_duplicate_and_noncanonical_json_before_replay(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1"
+        )
+        strategy.ingest(obs(0, "100"), simulation_time=BASE)
+        canonical = strategy.snapshot()
+        self.assertIn('"lookback":2', canonical)
+        self.assertIn('"price":"100"', canonical)
+
+        invalid = (
+            canonical.replace('"lookback":2', '"lookback":2,"lookback":2', 1),
+            canonical.replace('"price":"100"', '"price":"100","price":"100"', 1),
+            canonical.replace('"lookback":2', '"lookback":NaN', 1),
+            canonical.replace('"lookback":2', '"lookback":Infinity', 1),
+            canonical.replace('"lookback":2', '"lookback":2.0', 1),
+            canonical.replace('"lookback":2', '"lookback":' + "9" * 257, 1),
+            canonical.replace('"schema_version":6', '"schema_version":true', 1),
+        )
+        for index, raw in enumerate(invalid):
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                ReturnThresholdBaseline.restore(raw)
+        restored = ReturnThresholdBaseline.restore(canonical)
+        self.assertEqual(restored.snapshot(), canonical)
+
+
+    def test_snapshot_restore_rejects_coercive_descriptor_container_shapes(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+            descriptor=self.descriptor(),
+        )
+        base_payload = json.loads(strategy.snapshot())
+        mutations = (
+            ("market_requirements", "AB"),
+            ("supported_regimes", "AB"),
+            ("parameter_bounds", {"name": "threshold", "minimum": "0", "maximum": "1"}),
+        )
+        for field, value in mutations:
+            payload = json.loads(strategy.snapshot())
+            payload["descriptor"][field] = value
+            # Recompute descriptor hashes is intentionally not enough: the
+            # descriptor JSON shape itself must remain canonical.
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError,
+                "descriptor",
+            ):
+                ReturnThresholdBaseline.restore(
+                    json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                )
+
+        payload = base_payload
+        payload["descriptor"]["unexpected"] = "field"
+        with self.assertRaisesRegex(ValueError, "descriptor"):
+            ReturnThresholdBaseline.restore(
+                json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            )
+
+    def test_snapshot_restore_rejects_noncanonical_parameter_bound_document(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+            descriptor=self.descriptor(),
+        )
+        payload = json.loads(strategy.snapshot())
+        payload["descriptor"]["parameter_bounds"][0]["extra"] = "x"
+        with self.assertRaisesRegex(ValueError, "parameter bound"):
+            ReturnThresholdBaseline.restore(
+                json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            )
+
+    def test_snapshot_restore_normalizes_deep_json_recursion_failure(self):
+        raw = "[" * 4000 + "0" + "]" * 4000
+        # Decoder recursion thresholds vary by Python build/platform. Force the
+        # exact fault at the installed JSON seam rather than assuming a depth.
+        with patch.object(
+            strategy_module.json, "loads",
+            side_effect=RecursionError("sensitive parser internals"),
+        ):
+            with self.assertRaisesRegex(ValueError, "strategy snapshot is invalid") as caught:
+                ReturnThresholdBaseline.restore(raw)
+        cursor = caught.exception
+        seen = set()
+        while cursor is not None and id(cursor) not in seen:
+            seen.add(id(cursor))
+            self.assertNotIsInstance(cursor, RecursionError)
+            cursor = cursor.__cause__ or cursor.__context__
+
     def test_schema_v1_snapshot_remains_readable(self):
         snapshot_v1 = json.dumps(
             {
@@ -330,6 +446,25 @@ class DeterministicStrategyTests(unittest.TestCase):
                     ("threshold", "0", "1"),
                     ("threshold", "0", "2"),
                 )
+            )
+
+    def test_return_threshold_rejects_descriptor_from_other_strategy_family(self):
+        descriptor = self.descriptor(
+            family="NO_TRADE_CONTROL",
+            parameter_bounds=(
+                ("threshold", "0", "0.10"),
+                ("proposal_quantity", "0.0001", "100"),
+            ),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "descriptor family must be DETERMINISTIC_RETURN_THRESHOLD",
+        ):
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
             )
 
     def test_strategy_configuration_must_fit_registered_descriptor(self):
@@ -464,22 +599,26 @@ class DeterministicStrategyTests(unittest.TestCase):
             proposal_quantity="2",
             descriptor=descriptor,
         )
-        proposal = run_baseline(
+        instrument = "instrument:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa@7"
+        proposal, receipt = run_registered_baseline(
             strategy,
             [obs(0, "100"), obs(1, "102")],
             decision_time=BASE + timedelta(minutes=1),
             symbol="AAA",
+            instrument_version=instrument,
         )
         body = to_decision_proposal(
             proposal,
             proposal_id="12345678-1234-5678-9234-567812345678",
-            instrument_version="instrument:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa@7",
+            instrument_version=instrument,
             economics_binding=economics_binding(
                 proposal,
-                instrument_version="instrument:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa@7",
+                instrument_version=instrument,
+                registered_run_receipt=receipt,
             ),
             exit_policy_ref="exit-policy:registered-v1",
             compute_cost_currency="USD",
+            registered_run_receipt=receipt,
             counterarguments=("economic edge remains unproven",),
         )
         self.assertEqual(
@@ -506,6 +645,10 @@ class DeterministicStrategyTests(unittest.TestCase):
         self.assertEqual(body["estimated_compute_cost"], {"amount": "0", "currency": "USD"})
         self.assertEqual(body["confidence_basis"]["economic_edge_claim"], "UNPROVEN")
         self.assertEqual(body["confidence_basis"]["model_calls"], 0)
+        self.assertEqual(
+            body["confidence_basis"]["registered_run_receipt_sha256"],
+            receipt.fingerprint,
+        )
         self.assertNotIn("NO_TRADE_reason", body)
 
         schemas = {
@@ -702,6 +845,7 @@ class DeterministicStrategyTests(unittest.TestCase):
         payload["schema_version"] = 3
         del payload["descriptor_fingerprint"]
         del payload["configuration_fingerprint"]
+        del payload["strategy_family"]
         restored = ReturnThresholdBaseline.restore(
             json.dumps(payload, sort_keys=True, separators=(",", ":"))
         )
@@ -859,6 +1003,7 @@ class DeterministicStrategyTests(unittest.TestCase):
         payload = json.loads(strategy.snapshot())
         payload["schema_version"] = 4
         del payload["configuration_fingerprint"]
+        del payload["strategy_family"]
         restored = ReturnThresholdBaseline.restore(
             json.dumps(payload, sort_keys=True, separators=(",", ":"))
         )
@@ -912,6 +1057,111 @@ class DeterministicStrategyTests(unittest.TestCase):
 
 
 
+    def test_direct_economics_bound_proposal_cannot_expand_or_change_direction(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        proposal, receipt = run_registered_baseline(
+            strategy,
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@1",
+        )
+        economics = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@1",
+            max_feasible_quantity="1",
+            registered_run_receipt=receipt,
+        )
+        with self.assertRaisesRegex(ValueError, "cannot increase"):
+            EconomicsBoundProposal(
+                gross_proposal=proposal,
+                economics=economics,
+                instrument_version="instrument:aaa@1",
+                action="BUY",
+                quantity=Decimal("3"),
+                reason="bypass",
+                registered_run_receipt=receipt,
+            )
+        with self.assertRaisesRegex(ValueError, "frozen capacity"):
+            EconomicsBoundProposal(
+                gross_proposal=proposal,
+                economics=economics,
+                instrument_version="instrument:aaa@1",
+                action="BUY",
+                quantity=Decimal("2"),
+                reason="capacity bypass",
+                registered_run_receipt=receipt,
+            )
+        lot_economics = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@1",
+            max_feasible_quantity="2",
+            lot_size="1",
+            registered_run_receipt=receipt,
+        )
+        with self.assertRaisesRegex(ValueError, "lot multiple"):
+            EconomicsBoundProposal(
+                gross_proposal=proposal,
+                economics=lot_economics,
+                instrument_version="instrument:aaa@1",
+                action="BUY",
+                quantity=Decimal("0.5"),
+                reason="lot bypass",
+                registered_run_receipt=receipt,
+            )
+        with self.assertRaisesRegex(ValueError, "cannot change gross direction"):
+            EconomicsBoundProposal(
+                gross_proposal=proposal,
+                economics=economics,
+                instrument_version="instrument:aaa@1",
+                action="SELL",
+                quantity=Decimal("1"),
+                reason="bypass",
+                registered_run_receipt=receipt,
+            )
+        with self.assertRaisesRegex(ValueError, "HOLD.*zero"):
+            EconomicsBoundProposal(
+                gross_proposal=proposal,
+                economics=economics,
+                instrument_version="instrument:aaa@1",
+                action="HOLD",
+                quantity=Decimal("1"),
+                reason="bypass",
+                registered_run_receipt=receipt,
+            )
+
+        later_proposal = run_baseline(
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=2),
+            symbol="AAA",
+        )
+        later_economics = economics_binding(
+            later_proposal,
+            instrument_version="instrument:aaa@1",
+        )
+        with self.assertRaisesRegex(ValueError, "information_cutoff"):
+            EconomicsBoundProposal(
+                gross_proposal=proposal,
+                economics=later_economics,
+                instrument_version="instrument:aaa@1",
+                action="HOLD",
+                quantity=Decimal("0"),
+                reason="mismatched causal cut",
+                registered_run_receipt=receipt,
+            )
+
     def test_positive_gross_signal_with_nonpositive_after_cost_bound_cannot_qualify(self):
         descriptor = self.descriptor()
         strategy = ReturnThresholdBaseline(
@@ -920,11 +1170,12 @@ class DeterministicStrategyTests(unittest.TestCase):
             proposal_quantity="2",
             descriptor=descriptor,
         )
-        proposal = run_baseline(
+        proposal, receipt = run_registered_baseline(
             strategy,
             [obs(0, "100"), obs(1, "102")],
             decision_time=BASE + timedelta(minutes=1),
             symbol="AAA",
+            instrument_version="instrument:aaa@1",
         )
         with self.assertRaisesRegex(ValueError, "positive after-cost lower bound"):
             economics_binding(
@@ -944,6 +1195,7 @@ class DeterministicStrategyTests(unittest.TestCase):
             proposal,
             inconclusive,
             instrument_version="instrument:aaa@1",
+            registered_run_receipt=receipt,
         )
         self.assertEqual(bound.action, "HOLD")
         self.assertEqual(bound.quantity, Decimal("0"))
@@ -958,22 +1210,25 @@ class DeterministicStrategyTests(unittest.TestCase):
             proposal_quantity="2",
             descriptor=descriptor,
         )
-        proposal = run_baseline(
+        proposal, receipt = run_registered_baseline(
             strategy,
             [obs(0, "100"), obs(1, "102")],
             decision_time=BASE + timedelta(minutes=1),
             symbol="AAA",
+            instrument_version="instrument:aaa@1",
         )
         economics = economics_binding(
             proposal,
             instrument_version="instrument:aaa@1",
             max_feasible_quantity="1.4",
             lot_size="0.5",
+            registered_run_receipt=receipt,
         )
         bound = bind_strategy_economics(
             proposal,
             economics,
             instrument_version="instrument:aaa@1",
+            registered_run_receipt=receipt,
         )
         self.assertEqual(bound.action, "BUY")
         self.assertEqual(bound.quantity, Decimal("1.0"))
@@ -984,6 +1239,7 @@ class DeterministicStrategyTests(unittest.TestCase):
                 proposal,
                 economics,
                 instrument_version="instrument:aaa@1",
+                registered_run_receipt=receipt,
             ).fingerprint,
         )
 
@@ -1017,11 +1273,12 @@ class DeterministicStrategyTests(unittest.TestCase):
             proposal_quantity="2",
             descriptor=descriptor,
         )
-        proposal = run_baseline(
+        proposal, receipt = run_registered_baseline(
             strategy,
             [obs(0, "102"), obs(1, "100")],
             decision_time=BASE + timedelta(minutes=1),
             symbol="AAA",
+            instrument_version="instrument:aaa@1",
         )
         self.assertEqual(proposal.action, "SELL")
         with self.assertRaisesRegex(ValueError, "missing required evidence"):
@@ -1046,6 +1303,7 @@ class DeterministicStrategyTests(unittest.TestCase):
             proposal,
             economics,
             instrument_version="instrument:aaa@1",
+            registered_run_receipt=receipt,
         )
         self.assertEqual(bound.action, "HOLD")
 
@@ -1057,16 +1315,18 @@ class DeterministicStrategyTests(unittest.TestCase):
             proposal_quantity="2",
             descriptor=descriptor,
         )
-        proposal = run_baseline(
+        proposal, receipt = run_registered_baseline(
             strategy,
             [obs(0, "100"), obs(1, "102")],
             decision_time=BASE + timedelta(minutes=1),
             symbol="AAA",
+            instrument_version="instrument:aaa@1",
         )
         economics = economics_binding(
             proposal,
             instrument_version="instrument:aaa@1",
             max_feasible_quantity="1",
+            registered_run_receipt=receipt,
         )
         body = to_decision_proposal(
             proposal,
@@ -1075,6 +1335,7 @@ class DeterministicStrategyTests(unittest.TestCase):
             economics_binding=economics,
             exit_policy_ref="exit-policy:v1",
             compute_cost_currency="USD",
+            registered_run_receipt=receipt,
         )
         self.assertEqual(
             body["expected_return_distribution_ref"],
@@ -1091,6 +1352,1243 @@ class DeterministicStrategyTests(unittest.TestCase):
             confidence["strategy_economics_binding_sha256"],
             economics.fingerprint,
         )
+        self.assertEqual(
+            confidence["registered_run_receipt_sha256"],
+            receipt.fingerprint,
+        )
+
+
+    def test_registered_exact_threshold_receipt_is_ambient_context_invariant(self):
+        # Equal registered observations must not mint different decisions/receipts
+        # when the caller changes the process-global Decimal context.
+        cases = (
+            (("100", "101.0000000000000001"), "BUY"),
+            (("100", "98.9999999999999999"), "SELL"),
+        )
+        from decimal import ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN, localcontext
+        for values, action in cases:
+            outcomes = []
+            for precision in (6, 10, 28, 80):
+                for rounding in (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN):
+                    with localcontext() as context:
+                        context.prec, context.rounding = precision, rounding
+                        proposal, receipt = run_registered_baseline(
+                            ReturnThresholdBaseline(
+                                lookback=2, threshold="0.01", proposal_quantity="1",
+                                descriptor=self.descriptor(),
+                            ),
+                            [obs(0, values[0]), obs(1, values[1])],
+                            decision_time=BASE + timedelta(minutes=1),
+                            symbol="AAA", instrument_version="instrument:aaa@7",
+                        )
+                        self.assertEqual(proposal.action, action)
+                        self.assertEqual(verify_registered_strategy_run(proposal, receipt), receipt.fingerprint)
+                        outcomes.append((proposal, receipt.fingerprint))
+            self.assertEqual(outcomes, [outcomes[0]] * len(outcomes))
+
+    def test_registered_runner_rejects_polymorphic_strategy_and_descriptor(self):
+        class HostileStrategy(ReturnThresholdBaseline):
+            def snapshot(self):
+                raise AssertionError("virtual registered-run snapshot")
+
+        with self.assertRaisesRegex(TypeError, "ReturnThresholdBaseline"):
+            run_registered_baseline(
+                HostileStrategy(lookback=2, threshold="0.01", proposal_quantity="1",
+                                descriptor=self.descriptor()),
+                [obs(0, "100"), obs(1, "102")],
+                decision_time=BASE + timedelta(minutes=1),
+                symbol="AAA", instrument_version="instrument:aaa@7",
+            )
+
+        class HostileDescriptor(StrategyDescriptor):
+            def __getattribute__(self, name):
+                if name == "fingerprint" and getattr(self, "_armed", False):
+                    raise AssertionError("virtual descriptor fingerprint")
+                return super().__getattribute__(name)
+
+        descriptor = HostileDescriptor(**self.descriptor().__dict__)
+        object.__setattr__(descriptor, "_armed", True)
+        with self.assertRaisesRegex(TypeError, "canonical StrategyDescriptor"):
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="1",
+                descriptor=descriptor,
+            )
+
+    def test_registered_run_rejects_observation_subclass_and_tuple_subclass(self):
+        class HostileObservation(CausalObservation):
+            def __getattribute__(self, name):
+                if name in ("event_id", "available_at") and getattr(self, "_armed", False):
+                    raise AssertionError("virtual observation identity")
+                return super().__getattribute__(name)
+
+        raw = obs(0, "100")
+        hostile = HostileObservation(**raw.__dict__)
+        object.__setattr__(hostile, "_armed", True)
+        normal = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+            descriptor=self.descriptor(),
+        )
+        with self.assertRaisesRegex(TypeError, "CausalObservation"):
+            run_registered_baseline(
+                normal, [hostile, obs(1, "102")],
+                decision_time=BASE + timedelta(minutes=1),
+                symbol="AAA", instrument_version="instrument:aaa@7",
+            )
+        proposal, receipt = run_registered_baseline(
+            normal, [raw, obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA", instrument_version="instrument:aaa@7",
+        )
+        with self.assertRaisesRegex(TypeError, "CausalObservation"):
+            RegisteredStrategyRunReceipt(
+                strategy_snapshot=receipt.strategy_snapshot,
+                instrument_version=receipt.instrument_version,
+                symbol=receipt.symbol, decision_time=receipt.decision_time,
+                observations=(hostile, obs(1, "102")), proposal=proposal,
+            )
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                raise AssertionError("virtual observation ordering")
+        with self.assertRaisesRegex(ValueError, "observations must be a tuple"):
+            RegisteredStrategyRunReceipt(
+                strategy_snapshot=receipt.strategy_snapshot,
+                instrument_version=receipt.instrument_version,
+                symbol=receipt.symbol, decision_time=receipt.decision_time,
+                observations=HostileTuple(receipt.observations), proposal=proposal,
+            )
+
+    def test_registered_verifier_and_economic_join_refuse_subclass_getters(self):
+        class HostileProposal(DeterministicProposal):
+            def __getattribute__(self, name):
+                if name in ("symbol", "information_cutoff") and getattr(self, "_armed", False):
+                    raise AssertionError("virtual proposal getter")
+                return super().__getattribute__(name)
+        class HostileReceipt(RegisteredStrategyRunReceipt):
+            def __getattribute__(self, name):
+                if name == "proposal" and getattr(self, "_armed", False):
+                    raise AssertionError("virtual receipt getter")
+                return super().__getattribute__(name)
+        class HostileBinding(StrategyEconomicsBinding):
+            def __getattribute__(self, name):
+                if name == "status" and getattr(self, "_armed", False):
+                    raise AssertionError("virtual economics getter")
+                return super().__getattribute__(name)
+
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="1",
+                descriptor=self.descriptor(),
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA", instrument_version="instrument:aaa@7",
+        )
+        forged_proposal = HostileProposal(**proposal.__dict__)
+        object.__setattr__(forged_proposal, "_armed", True)
+        with self.assertRaisesRegex(TypeError, "DeterministicProposal"):
+            verify_registered_strategy_run(forged_proposal, receipt)
+        with self.assertRaisesRegex(TypeError, "DeterministicProposal"):
+            RegisteredStrategyRunReceipt(
+                strategy_snapshot=receipt.strategy_snapshot,
+                instrument_version=receipt.instrument_version,
+                symbol=receipt.symbol, decision_time=receipt.decision_time,
+                observations=receipt.observations, proposal=forged_proposal,
+            )
+        forged_receipt = HostileReceipt(**receipt.__dict__)
+        object.__setattr__(forged_receipt, "_armed", True)
+        with self.assertRaisesRegex(TypeError, "RegisteredStrategyRunReceipt"):
+            verify_registered_strategy_run(proposal, forged_receipt)
+        economics = economics_binding(
+            proposal, instrument_version="instrument:aaa@7",
+            registered_run_receipt=receipt,
+        )
+        with self.assertRaisesRegex(TypeError, "DeterministicProposal"):
+            bind_strategy_economics(
+                forged_proposal, economics, instrument_version="instrument:aaa@7",
+                registered_run_receipt=receipt,
+            )
+        forged_economics = HostileBinding(**economics.__dict__)
+        object.__setattr__(forged_economics, "_armed", True)
+        with self.assertRaisesRegex(TypeError, "StrategyEconomicsBinding"):
+            bind_strategy_economics(
+                proposal, forged_economics, instrument_version="instrument:aaa@7",
+                registered_run_receipt=receipt,
+            )
+        with self.assertRaisesRegex(TypeError, "StrategyEconomicsBinding"):
+            to_decision_proposal(
+                proposal,
+                proposal_id="00000000-0000-0000-0000-000000000001",
+                instrument_version="instrument:aaa@7",
+                economics_binding=forged_economics,
+                exit_policy_ref="exit:1", compute_cost_currency="USD",
+                registered_run_receipt=receipt,
+            )
+
+    def test_registered_numeric_inputs_reject_hostile_decimal_and_str_subclasses(self):
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("virtual Decimal.is_finite")
+        class HostileText(str):
+            def __len__(self):
+                raise AssertionError("virtual str.__len__")
+        with self.assertRaises(TypeError):
+            CausalObservation.create(
+                event_id="hostile", symbol="AAA", available_at=BASE,
+                price=HostileDecimal("100"),
+            )
+        with self.assertRaises(TypeError):
+            ReturnThresholdBaseline(
+                lookback=2, threshold=HostileText("0.01"),
+                proposal_quantity="1", descriptor=self.descriptor(),
+            )
+        with self.assertRaises(ValueError):
+            ReturnThresholdBaseline(
+                lookback=2, threshold="1e99999",
+                proposal_quantity="1", descriptor=self.descriptor(),
+            )
+
+    def test_registered_value_graph_rejects_scalar_and_tuple_subclasses_before_callbacks(self):
+        touched = []
+
+        class CallerInt(int):
+            def __le__(self, other):
+                touched.append("int comparison")
+                raise AssertionError("caller integer comparison")
+
+            def __str__(self):
+                touched.append("int rendering")
+                raise AssertionError("caller integer rendering")
+
+        class CallerTuple(tuple):
+            def __iter__(self):
+                touched.append("tuple iteration")
+                raise AssertionError("caller tuple iteration")
+
+            def __len__(self):
+                touched.append("tuple length")
+                raise AssertionError("caller tuple length")
+
+        for field in ("version", "minimum_history", "horizon_seconds"):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.descriptor(**{field: CallerInt(2)})
+        with self.assertRaisesRegex(ValueError, "parameter_bounds"):
+            self.descriptor(parameter_bounds=CallerTuple((("threshold", "0", "1"),)))
+        with self.assertRaisesRegex(ValueError, "parameter bound"):
+            self.descriptor(parameter_bounds=(CallerTuple(("threshold", "0", "1")),))
+        with self.assertRaisesRegex(ValueError, "market_requirements"):
+            self.descriptor(market_requirements=CallerTuple(("CAUSAL_PRICE",)))
+        for attribute, value in (
+            ("model_calls", CallerInt(0)),
+            ("evidence_event_ids", CallerTuple(("x",))),
+            ("horizon_seconds", CallerInt(3600)),
+        ):
+            fields = dict(
+                symbol="AAA", action="HOLD", quantity="0", decision_time=BASE,
+                evidence_event_ids=(), model_calls=0,
+                economic_edge_claim="UNPROVEN", reason="no risk",
+                information_cutoff=BASE, horizon_seconds=3600,
+                expiry=BASE + timedelta(seconds=3600),
+            )
+            fields[attribute] = value
+            with self.subTest(attribute=attribute), self.assertRaises(ValueError):
+                DeterministicProposal(**fields)
+        with self.assertRaisesRegex(ValueError, "lookback"):
+            ReturnThresholdBaseline(
+                lookback=CallerInt(2), threshold="0.01",
+                proposal_quantity="1",
+            )
+        self.assertEqual(touched, [])
+
+    def test_strategy_ingest_rejects_observation_subclass_without_identity_reads(self):
+        class CallerObservation(CausalObservation):
+            def __getattribute__(self, name):
+                if name in {"event_id", "available_at"} and getattr(self, "_armed", False):
+                    raise AssertionError("caller observation getter")
+                return super().__getattribute__(name)
+
+        pristine = obs(0, "100")
+        caller = CallerObservation(**pristine.__dict__)
+        object.__setattr__(caller, "_armed", True)
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+        )
+        with self.assertRaisesRegex(TypeError, "CausalObservation"):
+            strategy.ingest(caller, simulation_time=BASE)
+        self.assertEqual(strategy._observations_by_id, {})
+        self.assertEqual(strategy._history, {})
+
+    def test_causal_time_rejects_nested_timezone_callbacks_before_observation(self):
+        called = []
+
+        class CallerTimezone(tzinfo):
+            def utcoffset(self, value):
+                called.append("utcoffset")
+                raise AssertionError("untrusted time callback invoked")
+
+            def dst(self, value):
+                called.append("dst")
+                raise AssertionError("untrusted time callback invoked")
+
+            def fromutc(self, value):
+                called.append("fromutc")
+                raise AssertionError("untrusted time callback invoked")
+
+        hostile = datetime(2026, 1, 1, 12, tzinfo=CallerTimezone())
+        with self.assertRaisesRegex(ValueError, "built-in timezone"):
+            CausalObservation.create(
+                event_id="untrusted-clock",
+                symbol="AAA",
+                available_at=hostile,
+                price="100",
+            )
+        with self.assertRaisesRegex(ValueError, "built-in timezone"):
+            DeterministicProposal(
+                symbol="AAA",
+                action="HOLD",
+                quantity="0",
+                decision_time=hostile,
+                evidence_event_ids=(),
+                model_calls=0,
+                economic_edge_claim="UNPROVEN",
+                reason="no exposure",
+            )
+        self.assertEqual(called, [])
+
+        # Exact built-in non-UTC fixed offsets remain supported.
+        accepted = CausalObservation.create(
+            event_id="fixed-clock",
+            symbol="AAA",
+            available_at=datetime(
+                2026, 1, 1, 12, tzinfo=timezone(timedelta(hours=2)),
+            ),
+            price="100",
+        )
+        self.assertEqual(
+            accepted.available_at,
+            datetime(2026, 1, 1, 10, tzinfo=timezone.utc),
+        )
+
+    def test_bounded_numeric_ingress_denies_hostile_tokens_before_decimal_construction(self):
+        # The neutral parser must reject adverse input *before* Decimal(value).
+        # A later as_fraction() bound check alone is insufficient.
+        hostile = (
+            "1e" + "9" * 120,
+            "9" * 257,
+            "0." + "0" * 256 + "1",
+            "1e256",
+            "1e-257",
+            10 ** 300,
+        )
+        for value in hostile:
+            with self.subTest(value=str(value)[:24]):
+                with patch.object(
+                    neutral_decimal,
+                    "Decimal",
+                    side_effect=AssertionError("unbounded Decimal constructed"),
+                ) as constructor:
+                    with self.assertRaises(ValueError):
+                        strategy_module._decimal(value, name="risk_input")
+                    constructor.assert_not_called()
+
+    def test_bounded_numeric_ingress_accepts_exact_limit_boundaries(self):
+        # Geometry limits come from the installed neutral numeric authority.
+        from autotrade_numeric import (
+            MAX_INTEGER_DIGITS, MAX_SCALE, MAX_SIGNIFICANT_DIGITS,
+        )
+        for text in (
+            "9" * MAX_SIGNIFICANT_DIGITS,
+            "1e" + str(MAX_INTEGER_DIGITS - 1),
+            "1e-" + str(MAX_SCALE),
+            "0." + "0" * (MAX_SCALE - 1) + "1",
+        ):
+            with self.subTest(value=text[:30]):
+                self.assertEqual(
+                    strategy_module._decimal(text, name="quantity"),
+                    Decimal(text),
+                )
+        self.assertEqual(
+            CausalObservation.create(
+                event_id="at-boundary",
+                symbol="AAA",
+                available_at=BASE,
+                price="1e-" + str(MAX_SCALE),
+            ).price,
+            Decimal("1e-" + str(MAX_SCALE)),
+        )
+
+    def test_bounded_numeric_ingress_rejects_subclass_without_virtual_calls(self):
+        class HostileText(str):
+            def __len__(self):
+                raise AssertionError("caller len invoked")
+        class HostileInt(int):
+            def bit_length(self):
+                raise AssertionError("caller bit_length invoked")
+        for hostile in (HostileText("1.2"), HostileInt(12)):
+            with self.subTest(type=type(hostile).__name__):
+                with self.assertRaises(TypeError):
+                    strategy_module._decimal(hostile, name="quantity")
+
+    def test_economics_lot_floor_is_context_independent_and_never_expands_risk(self):
+        from decimal import ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN, localcontext
+        observed = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN):
+                with localcontext() as context:
+                    context.prec, context.rounding = precision, rounding
+                    proposal, receipt = run_registered_baseline(
+                        ReturnThresholdBaseline(
+                            lookback=2, threshold="0.01",
+                            proposal_quantity="1.000000000000000001",
+                            descriptor=self.descriptor(),
+                        ),
+                        [obs(0, "100"), obs(1, "102")],
+                        decision_time=BASE + timedelta(minutes=1), symbol="AAA",
+                        instrument_version="instrument:aaa@7",
+                    )
+                    economics = economics_binding(
+                        proposal,
+                        instrument_version="instrument:aaa@7",
+                        registered_run_receipt=receipt,
+                        max_feasible_quantity="1.000000000000000001",
+                        lot_size="0.000000000000000003",
+                    )
+                    bound = bind_strategy_economics(
+                        proposal, economics, instrument_version="instrument:aaa@7",
+                        registered_run_receipt=receipt,
+                    )
+                    self.assertEqual(bound.action, "BUY")
+                    self.assertEqual(bound.quantity, Decimal("0.999999999999999999"))
+                    self.assertLessEqual(bound.quantity, economics.max_feasible_quantity)
+                    projected = to_decision_proposal(
+                        proposal,
+                        proposal_id="00000000-0000-0000-0000-000000000001",
+                        instrument_version="instrument:aaa@7",
+                        economics_binding=economics,
+                        exit_policy_ref="exit:1", compute_cost_currency="USD",
+                        registered_run_receipt=receipt,
+                    )
+                    self.assertEqual(
+                        projected["confidence_basis"]["effective_quantity"],
+                        "0.999999999999999999",
+                    )
+                    too_small = economics_binding(
+                        proposal,
+                        instrument_version="instrument:aaa@7",
+                        registered_run_receipt=receipt,
+                        max_feasible_quantity="0.000000000000000002",
+                        lot_size="0.000000000000000003",
+                    )
+                    hold = bind_strategy_economics(
+                        proposal, too_small, instrument_version="instrument:aaa@7",
+                        registered_run_receipt=receipt,
+                    )
+                    self.assertEqual(hold.action, "HOLD")
+                    self.assertEqual(hold.quantity, Decimal("0"))
+                    observed.append((bound.fingerprint, receipt.fingerprint, hold.fingerprint))
+        self.assertEqual(observed, [observed[0]] * len(observed))
+
+    def test_registered_run_receipt_replays_and_roundtrips(self):
+        descriptor = self.descriptor()
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        self.assertEqual(
+            verify_registered_strategy_run(proposal, receipt),
+            receipt.fingerprint,
+        )
+        restored = RegisteredStrategyRunReceipt.from_json(receipt.to_json())
+        self.assertEqual(restored, receipt)
+        self.assertEqual(restored.fingerprint, receipt.fingerprint)
+        self.assertEqual(proposal.economic_edge_claim, "UNPROVEN")
+
+    def test_registered_receipt_json_rejects_duplicate_evidence_and_unbounded_numbers(self):
+        _proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="2",
+                descriptor=self.descriptor(),
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA", instrument_version="instrument:aaa@7",
+        )
+        raw = receipt.to_json()
+        self.assertIn('"model_calls":0', raw)
+        self.assertIn('"symbol":"AAA"', raw)
+        invalid = (
+            raw.replace('"symbol":"AAA"', '"symbol":"AAA","symbol":"AAA"', 1),
+            raw.replace('"model_calls":0', '"model_calls":0,"model_calls":0', 1),
+            raw.replace('"model_calls":0', '"model_calls":NaN', 1),
+            raw.replace('"model_calls":0', '"model_calls":0.0', 1),
+            raw.replace('"model_calls":0', '"model_calls":' + "9" * 257, 1),
+        )
+        for index, serialized in enumerate(invalid):
+            with self.subTest(index=index), self.assertRaisesRegex(
+                ValueError, "invalid JSON"
+            ):
+                RegisteredStrategyRunReceipt.from_json(serialized)
+        self.assertEqual(
+            RegisteredStrategyRunReceipt.from_json(raw).fingerprint,
+            receipt.fingerprint,
+        )
+
+    def test_registered_receipt_normalizes_deep_json_recursion_failure(self):
+        raw = "[" * 4000 + "0" + "]" * 4000
+        with patch.object(
+            strategy_module.json, "loads",
+            side_effect=RecursionError("sensitive parser internals"),
+        ):
+            with self.assertRaisesRegex(ValueError, "registered run receipt is invalid JSON") as caught:
+                RegisteredStrategyRunReceipt.from_json(raw)
+        cursor = caught.exception
+        seen = set()
+        while cursor is not None and id(cursor) not in seen:
+            seen.add(id(cursor))
+            self.assertNotIsInstance(cursor, RecursionError)
+            cursor = cursor.__cause__ or cursor.__context__
+
+    def test_forged_registered_looking_proposal_without_receipt_cannot_bind(self):
+        descriptor = self.descriptor()
+        proposal, _receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        forged = DeterministicProposal(**proposal.__dict__)
+        with self.assertRaisesRegex(ValueError, "verified run receipt"):
+            bind_strategy_economics(
+                forged,
+                economics_binding(forged, instrument_version="instrument:aaa@7"),
+                instrument_version="instrument:aaa@7",
+            )
+
+    def test_forged_receipt_output_fails_deterministic_replay(self):
+        descriptor = self.descriptor()
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        forged_proposal = DeterministicProposal(
+            **{**proposal.__dict__, "action": "SELL"}
+        )
+        forged_receipt = RegisteredStrategyRunReceipt(
+            strategy_snapshot=receipt.strategy_snapshot,
+            instrument_version=receipt.instrument_version,
+            symbol=receipt.symbol,
+            decision_time=receipt.decision_time,
+            observations=receipt.observations,
+            proposal=forged_proposal,
+        )
+        with self.assertRaisesRegex(ValueError, "does not replay"):
+            verify_registered_strategy_run(forged_proposal, forged_receipt)
+
+    def test_receipt_observation_tamper_fails_even_after_rehash(self):
+        descriptor = self.descriptor()
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        changed = CausalObservation.create(
+            event_id=receipt.observations[1].event_id,
+            symbol="AAA",
+            available_at=receipt.observations[1].available_at,
+            price="99",
+        )
+        forged = RegisteredStrategyRunReceipt(
+            strategy_snapshot=receipt.strategy_snapshot,
+            instrument_version=receipt.instrument_version,
+            symbol=receipt.symbol,
+            decision_time=receipt.decision_time,
+            observations=(receipt.observations[0], changed),
+            proposal=proposal,
+        )
+        with self.assertRaisesRegex(ValueError, "does not replay"):
+            verify_registered_strategy_run(proposal, forged)
+
+    def test_registered_runner_rejects_hidden_preloaded_state(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        strategy.ingest(obs(0, "100"), simulation_time=BASE)
+        with self.assertRaisesRegex(ValueError, "pristine"):
+            run_registered_baseline(
+                strategy,
+                [obs(1, "102")],
+                decision_time=BASE + timedelta(minutes=1),
+                symbol="AAA",
+                instrument_version="instrument:aaa@7",
+            )
+
+    def test_cross_instrument_economics_cannot_bind_registered_run(self):
+        descriptor = self.descriptor()
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        economics = economics_binding(
+            proposal,
+            instrument_version="instrument:bbb@9",
+        )
+        with self.assertRaisesRegex(ValueError, "instrument_version"):
+            bind_strategy_economics(
+                proposal,
+                economics,
+                instrument_version="instrument:bbb@9",
+                registered_run_receipt=receipt,
+            )
+
+
+    def test_qualified_economics_cannot_cross_bind_distinct_registered_run_inputs(self):
+        descriptor = self.descriptor()
+        instrument = "instrument:aaa@7"
+        decision_time = BASE + timedelta(minutes=1)
+
+        proposal_a, receipt_a = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=decision_time,
+            symbol="AAA",
+            instrument_version=instrument,
+        )
+        proposal_b, receipt_b = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "103")],
+            decision_time=decision_time,
+            symbol="AAA",
+            instrument_version=instrument,
+        )
+        self.assertEqual(proposal_a.action, "BUY")
+        self.assertEqual(proposal_b.action, "BUY")
+        self.assertEqual(
+            proposal_a.strategy_configuration_fingerprint,
+            proposal_b.strategy_configuration_fingerprint,
+        )
+        self.assertEqual(proposal_a.decision_time, proposal_b.decision_time)
+        self.assertNotEqual(receipt_a.fingerprint, receipt_b.fingerprint)
+
+        economics_a = economics_binding(
+            proposal_a,
+            instrument_version=instrument,
+            registered_run_receipt=receipt_a,
+        )
+        accepted = bind_strategy_economics(
+            proposal_a,
+            economics_a,
+            instrument_version=instrument,
+            registered_run_receipt=receipt_a,
+        )
+        self.assertEqual(accepted.action, "BUY")
+        self.assertEqual(
+            economics_a.registered_run_receipt_sha256,
+            receipt_a.fingerprint,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact registered strategy run",
+        ):
+            bind_strategy_economics(
+                proposal_b,
+                economics_a,
+                instrument_version=instrument,
+                registered_run_receipt=receipt_b,
+            )
+
+    def test_configuration_tamper_cannot_reuse_old_registered_output(self):
+        descriptor = self.descriptor()
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        payload = json.loads(receipt.strategy_snapshot)
+        payload["threshold"] = "0.02"
+        tampered_snapshot = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        with self.assertRaisesRegex(ValueError, "configuration fingerprint"):
+            RegisteredStrategyRunReceipt(
+                strategy_snapshot=tampered_snapshot,
+                instrument_version=receipt.instrument_version,
+                symbol=receipt.symbol,
+                decision_time=receipt.decision_time,
+                observations=receipt.observations,
+                proposal=proposal,
+            )
+
+
+    def test_ingest_detaches_observation_from_later_caller_mutation(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+        )
+        first = obs(0, "100")
+        strategy.ingest(first, simulation_time=BASE)
+        object.__setattr__(first, "price", Decimal("999"))
+        strategy.ingest(
+            obs(1, "102"),
+            simulation_time=BASE + timedelta(minutes=1),
+        )
+        proposal = strategy.propose(
+            symbol="AAA",
+            decision_time=BASE + timedelta(minutes=1),
+        )
+        self.assertEqual(proposal.action, "BUY")
+        self.assertEqual(strategy._history["AAA"][0].price, Decimal("100"))
+
+    def test_registered_receipt_detaches_nested_values_from_caller_mutation(self):
+        descriptor = self.descriptor()
+        first = obs(0, "100")
+        second = obs(1, "102")
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="1",
+                descriptor=descriptor,
+            ),
+            [first, second],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        original_fingerprint = receipt.fingerprint
+        object.__setattr__(first, "price", Decimal("999"))
+        object.__setattr__(proposal, "reason", "caller mutation")
+        self.assertEqual(receipt.fingerprint, original_fingerprint)
+        self.assertEqual(receipt.observations[0].price, Decimal("100"))
+        self.assertNotEqual(receipt.proposal.reason, "caller mutation")
+
+    def test_bind_rejects_post_construction_economics_mutation(self):
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="2",
+                descriptor=self.descriptor(),
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        economics = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@7",
+            registered_run_receipt=receipt,
+        )
+        object.__setattr__(economics, "after_cost_lower_bound", Decimal("-1"))
+        with self.assertRaisesRegex(
+            ValueError,
+            "QUALIFIED economics binding requires positive",
+        ):
+            bind_strategy_economics(
+                proposal,
+                economics,
+                instrument_version="instrument:aaa@7",
+                registered_run_receipt=receipt,
+            )
+
+    def test_bind_rejects_post_construction_proposal_mutation(self):
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="2",
+                descriptor=self.descriptor(),
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        economics = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@7",
+            registered_run_receipt=receipt,
+        )
+        object.__setattr__(proposal, "action", "HOLD")
+        with self.assertRaisesRegex(ValueError, "HOLD proposal quantity must be zero"):
+            bind_strategy_economics(
+                proposal,
+                economics,
+                instrument_version="instrument:aaa@7",
+                registered_run_receipt=receipt,
+            )
+
+    def test_projection_uses_readmitted_canonical_economics_value(self):
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="2",
+                descriptor=self.descriptor(),
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        economics = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@7",
+            max_feasible_quantity="1.0",
+            registered_run_receipt=receipt,
+        )
+        object.__setattr__(
+            economics,
+            "instrument_version",
+            " instrument:aaa@7 ",
+        )
+        body = to_decision_proposal(
+            proposal,
+            proposal_id="12345678-1234-5678-9234-567812345678",
+            instrument_version="instrument:aaa@7",
+            economics_binding=economics,
+            exit_policy_ref="exit-policy:v1",
+            compute_cost_currency="USD",
+            registered_run_receipt=receipt,
+        )
+        canonical = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@7",
+            max_feasible_quantity="1.0",
+            registered_run_receipt=receipt,
+        )
+        self.assertEqual(
+            body["confidence_basis"]["strategy_economics_binding_sha256"],
+            canonical.fingerprint,
+        )
+
+
+    def family_descriptor(self, *, family, strategy_id, minimum_history=2):
+        return self.descriptor(
+            strategy_id=strategy_id,
+            family=family,
+            minimum_history=minimum_history,
+        )
+
+    def test_strategy_implementation_requires_matching_descriptor_family(self):
+        with self.assertRaisesRegex(ValueError, "descriptor family"):
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="1",
+                descriptor=self.family_descriptor(
+                    family="DETERMINISTIC_MEAN_REVERSION_THRESHOLD",
+                    strategy_id="mean-control",
+                ),
+            )
+        with self.assertRaisesRegex(ValueError, "descriptor family"):
+            MeanReversionThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="1",
+                descriptor=self.descriptor(),
+            )
+
+    def test_trend_and_mean_reversion_are_distinct_exact_controls(self):
+        rising = [obs(0, "100"), obs(1, "102")]
+        trend = run_baseline(
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="1",
+                descriptor=self.descriptor(),
+            ),
+            rising,
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        mean = run_baseline(
+            MeanReversionThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="1",
+                descriptor=self.family_descriptor(
+                    family="DETERMINISTIC_MEAN_REVERSION_THRESHOLD",
+                    strategy_id="mean-control",
+                ),
+            ),
+            rising,
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        self.assertEqual(trend.action, "BUY")
+        self.assertEqual(mean.action, "SELL")
+        self.assertEqual(trend.economic_edge_claim, "UNPROVEN")
+        self.assertEqual(mean.economic_edge_claim, "UNPROVEN")
+        self.assertEqual(trend.model_calls, 0)
+        self.assertEqual(mean.model_calls, 0)
+
+    def test_breakout_uses_only_prior_causal_window_with_exact_arithmetic(self):
+        descriptor = self.family_descriptor(
+            family="DETERMINISTIC_BREAKOUT_THRESHOLD",
+            strategy_id="breakout-control",
+            minimum_history=3,
+        )
+        proposal = run_baseline(
+            BreakoutThresholdBaseline(
+                lookback=3, threshold="0.01", proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "101"), obs(2, "103")],
+            decision_time=BASE + timedelta(minutes=2),
+            symbol="AAA",
+        )
+        self.assertEqual(proposal.action, "BUY")
+        self.assertEqual(proposal.quantity, Decimal("2"))
+        self.assertEqual(
+            proposal.evidence_event_ids,
+            ("event-0", "event-1", "event-2"),
+        )
+        self.assertEqual(proposal.economic_edge_claim, "UNPROVEN")
+
+    def test_family_snapshot_restart_preserves_exact_strategy_semantics(self):
+        descriptor = self.family_descriptor(
+            family="DETERMINISTIC_MEAN_REVERSION_THRESHOLD",
+            strategy_id="mean-control",
+        )
+        strategy = MeanReversionThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+            descriptor=descriptor,
+        )
+        strategy.ingest(obs(0, "100"), simulation_time=BASE)
+        strategy.ingest(
+            obs(1, "102"),
+            simulation_time=BASE + timedelta(minutes=1),
+        )
+        restored = MeanReversionThresholdBaseline.restore(strategy.snapshot())
+        self.assertEqual(
+            restored.propose(
+                symbol="AAA",
+                decision_time=BASE + timedelta(minutes=1),
+            ),
+            strategy.propose(
+                symbol="AAA",
+                decision_time=BASE + timedelta(minutes=1),
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "family does not match"):
+            ReturnThresholdBaseline.restore(strategy.snapshot())
+
+    def test_legacy_snapshot_cannot_be_reinterpreted_as_new_family(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+        )
+        payload = json.loads(strategy.snapshot())
+        payload["schema_version"] = 5
+        del payload["strategy_family"]
+        legacy = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        ReturnThresholdBaseline.restore(legacy)
+        with self.assertRaisesRegex(ValueError, "legacy strategy snapshot"):
+            MeanReversionThresholdBaseline.restore(legacy)
+        with self.assertRaisesRegex(ValueError, "legacy strategy snapshot"):
+            BreakoutThresholdBaseline.restore(legacy)
+
+    def test_v6_registered_family_snapshot_restores_descriptor_seen_state_and_identity(self):
+        descriptor = self.family_descriptor(
+            family="DETERMINISTIC_BREAKOUT_THRESHOLD",
+            strategy_id="breakout-control",
+            minimum_history=3,
+        )
+        strategy = BreakoutThresholdBaseline(
+            lookback=3, threshold="0.01", proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        for item in (obs(0, "100"), obs(1, "101"), obs(2, "103")):
+            strategy.ingest(item, simulation_time=item.available_at)
+        snapshot = strategy.snapshot()
+        restored = BreakoutThresholdBaseline.restore(snapshot)
+        self.assertEqual(restored.snapshot(), snapshot)
+        self.assertEqual(restored.descriptor.fingerprint, descriptor.fingerprint)
+        self.assertEqual(
+            restored.configuration_fingerprint,
+            strategy.configuration_fingerprint,
+        )
+        self.assertEqual(
+            set(restored._observations_by_id),
+            {"event-0", "event-1", "event-2"},
+        )
+        self.assertEqual(
+            restored.propose(
+                symbol="AAA",
+                decision_time=BASE + timedelta(minutes=2),
+            ),
+            strategy.propose(
+                symbol="AAA",
+                decision_time=BASE + timedelta(minutes=2),
+            ),
+        )
+
+    def test_registered_receipts_replay_each_supported_strategy_family(self):
+        cases = (
+            (
+                ReturnThresholdBaseline,
+                self.descriptor(),
+                "BUY",
+            ),
+            (
+                MeanReversionThresholdBaseline,
+                self.family_descriptor(
+                    family="DETERMINISTIC_MEAN_REVERSION_THRESHOLD",
+                    strategy_id="mean-control",
+                ),
+                "SELL",
+            ),
+            (
+                BreakoutThresholdBaseline,
+                self.family_descriptor(
+                    family="DETERMINISTIC_BREAKOUT_THRESHOLD",
+                    strategy_id="breakout-control",
+                    minimum_history=3,
+                ),
+                "BUY",
+            ),
+        )
+        for strategy_type, descriptor, expected_action in cases:
+            with self.subTest(strategy=strategy_type.__name__):
+                lookback = descriptor.minimum_history
+                observations = (
+                    [obs(0, "100"), obs(1, "102")]
+                    if lookback == 2
+                    else [obs(0, "100"), obs(1, "101"), obs(2, "103")]
+                )
+                decision_time = BASE + timedelta(minutes=lookback - 1)
+                proposal, receipt = run_registered_baseline(
+                    strategy_type(
+                        lookback=lookback,
+                        threshold="0.01",
+                        proposal_quantity="1",
+                        descriptor=descriptor,
+                    ),
+                    observations,
+                    decision_time=decision_time,
+                    symbol="AAA",
+                    instrument_version="instrument:aaa@7",
+                )
+                self.assertEqual(proposal.action, expected_action)
+                self.assertEqual(
+                    verify_registered_strategy_run(proposal, receipt),
+                    receipt.fingerprint,
+                )
+                restored_receipt = RegisteredStrategyRunReceipt.from_json(
+                    receipt.to_json()
+                )
+                self.assertEqual(
+                    verify_registered_strategy_run(
+                        restored_receipt.proposal,
+                        restored_receipt,
+                    ),
+                    receipt.fingerprint,
+                )
+                self.assertEqual(proposal.economic_edge_claim, "UNPROVEN")
+
+    def test_registered_runner_rejects_generator_before_observation_iteration(self):
+        touched = []
+        def hostile_generator():
+            touched.append("iterated")
+            yield obs(0, "100")
+
+        with self.assertRaisesRegex(TypeError, "exact built-in list or tuple"):
+            run_registered_baseline(
+                ReturnThresholdBaseline(
+                    lookback=2, threshold="0.01", proposal_quantity="1",
+                    descriptor=self.descriptor(),
+                ),
+                hostile_generator(),
+                decision_time=BASE,
+                symbol="AAA",
+                instrument_version="instrument:aaa@7",
+            )
+        self.assertEqual(touched, [])
+
+
+
+
+    def test_propose_validates_only_retained_cut_while_snapshot_validates_full_seen_state(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+        )
+        rows = [obs(i, str(100 + i)) for i in range(5)]
+        for item in rows:
+            strategy.ingest(item, simulation_time=item.available_at)
+        self.assertEqual(
+            [item.event_id for item in strategy._history["AAA"]],
+            ["event-3", "event-4"],
+        )
+        object.__setattr__(
+            strategy._observations_by_id["event-0"],
+            "price",
+            Decimal("0"),
+        )
+        proposal = strategy.propose(
+            symbol="AAA",
+            decision_time=BASE + timedelta(minutes=4),
+        )
+        self.assertEqual(proposal.evidence_event_ids, ("event-3", "event-4"))
+        with self.assertRaisesRegex(ValueError, "price must be positive"):
+            strategy.snapshot()
+
+    def test_propose_does_not_scan_unrelated_symbol_history(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+        )
+        a0, a1 = obs(0, "100"), obs(1, "102")
+        for item in (a0, a1):
+            strategy.ingest(item, simulation_time=item.available_at)
+        other = CausalObservation.create(
+            event_id="other-0",
+            symbol="BBB",
+            available_at=BASE,
+            price="50",
+        )
+        strategy.ingest(other, simulation_time=BASE)
+        object.__setattr__(
+            strategy._history["BBB"][0],
+            "price",
+            Decimal("0"),
+        )
+        proposal = strategy.propose(
+            symbol="AAA",
+            decision_time=BASE + timedelta(minutes=1),
+        )
+        self.assertEqual(proposal.action, "BUY")
+        with self.assertRaisesRegex(ValueError, "price must be positive"):
+            strategy.snapshot()
+
+    def test_strategy_constructor_detaches_descriptor_from_caller_mutation(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+            descriptor=descriptor,
+        )
+        object.__setattr__(descriptor, "family", "FORGED_FAMILY")
+        proposal = strategy.propose(symbol="AAA", decision_time=BASE)
+        self.assertEqual(
+            proposal.strategy_fingerprint,
+            strategy.descriptor.fingerprint,
+        )
+        self.assertEqual(
+            strategy.descriptor.family,
+            "DETERMINISTIC_RETURN_THRESHOLD",
+        )
+
+    def test_strategy_use_boundary_rejects_post_construction_threshold_mutation(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+            descriptor=self.descriptor(),
+        )
+        object.__setattr__(strategy, "threshold", Decimal("-0.5"))
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            strategy.propose(symbol="AAA", decision_time=BASE)
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            strategy.snapshot()
+
+    def test_strategy_use_boundary_rejects_post_construction_descriptor_relabeling(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+            descriptor=self.descriptor(),
+        )
+        object.__setattr__(
+            strategy.descriptor,
+            "family",
+            "DETERMINISTIC_MEAN_REVERSION_THRESHOLD",
+        )
+        with self.assertRaisesRegex(ValueError, "descriptor family"):
+            strategy.propose(symbol="AAA", decision_time=BASE)
+
+    def test_propose_rejects_corrupted_internal_history_before_signal(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+        )
+        first, second = obs(0, "100"), obs(1, "102")
+        strategy.ingest(first, simulation_time=first.available_at)
+        strategy.ingest(second, simulation_time=second.available_at)
+        object.__setattr__(
+            strategy._history["AAA"][0],
+            "price",
+            Decimal("0"),
+        )
+        with self.assertRaisesRegex(ValueError, "price must be positive"):
+            strategy.propose(
+                symbol="AAA",
+                decision_time=BASE + timedelta(minutes=1),
+            )
+
+    def test_propose_requires_history_to_match_seen_event_state(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+        )
+        first = obs(0, "100")
+        strategy.ingest(first, simulation_time=first.available_at)
+        strategy._observations_by_id[first.event_id] = CausalObservation.create(
+            event_id=first.event_id,
+            symbol="AAA",
+            available_at=first.available_at,
+            price="999",
+        )
+        with self.assertRaisesRegex(ValueError, "identical seen-event state"):
+            strategy.propose(symbol="AAA", decision_time=BASE)
+
+    def test_no_trade_use_boundary_rejects_descriptor_relabeling(self):
+        descriptor = self.descriptor(
+            strategy_id="no-trade-control",
+            family="NO_TRADE_CONTROL",
+            minimum_history=1,
+            parameter_bounds=(("dummy", "0", "0"),),
+        )
+        baseline = NoTradeBaseline(descriptor=descriptor)
+        object.__setattr__(baseline.descriptor, "family", "FORGED_FAMILY")
+        with self.assertRaisesRegex(ValueError, "NO_TRADE_CONTROL"):
+            baseline.propose(symbol="AAA", decision_time=BASE)
 
 
 if __name__ == "__main__":

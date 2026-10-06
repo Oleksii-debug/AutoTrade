@@ -34,6 +34,26 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaises(InvalidJsonDomainError):
             strict_json_loads('{"a":' + ('1' * 641) + '}')
 
+    def test_strict_json_rejects_float_underflow_and_unbounded_lexemes(self):
+        with self.assertRaisesRegex(InvalidJsonDomainError, "underflows"):
+            strict_json_loads('{"a":1e-10000}')
+
+        huge_significand = "1" * 641
+        with self.assertRaisesRegex(
+            InvalidJsonDomainError,
+            "floating-point significand exceeds",
+        ):
+            strict_json_loads('{"a":' + huge_significand + '.0}')
+
+        with self.assertRaisesRegex(
+            InvalidJsonDomainError,
+            "floating-point exponent exceeds",
+        ):
+            strict_json_loads('{"a":1e+1234567}')
+
+        self.assertEqual(strict_json_loads('{"a":0e-10000}'), {"a": 0.0})
+        self.assertGreater(strict_json_loads('{"a":5e-324}')["a"], 0.0)
+
     def test_strict_json_rejects_oversized_document_and_decoded_domain(self):
         with self.assertRaisesRegex(InvalidJsonDomainError, "document exceeds"):
             strict_json_loads('{"value":"' + ("x" * 1_000_000) + '"}')
@@ -54,9 +74,24 @@ class MigrationTests(unittest.TestCase):
         encoded = json.dumps({"text": string_value})
         self.assertEqual(strict_json_loads(encoded), {"text": string_value})
 
+    def test_strict_json_rejects_polymorphic_text_before_dispatch(self):
+        class TrapText(str):
+            def __len__(self):
+                raise AssertionError("caller __len__ must not execute")
+
+        with self.assertRaisesRegex(TypeError, "exact str"):
+            strict_json_loads(TrapText('{"a":1}'))
+
     def test_blank_jsonl_is_json_whitespace_only(self):
         self.assertTrue(jsonl_bytes_are_blank(b" \t\r\n"))
         self.assertFalse(jsonl_bytes_are_blank("\u00a0".encode()))
+
+        class TrapBytes(bytes):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("caller strip must not execute")
+
+        with self.assertRaisesRegex(TypeError, "exact bytes"):
+            jsonl_bytes_are_blank(TrapBytes(b" "))
 
     def test_atomic_json_is_stable(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 import re
@@ -496,6 +496,25 @@ def _instant(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _prepared_lease_state(
+    *,
+    prepared_at: str,
+    now: str,
+    lease_seconds: int,
+) -> str:
+    """Return BEFORE, ACTIVE or EXPIRED using exact microsecond chronology."""
+
+    elapsed = _instant(now) - _instant(prepared_at)
+    if elapsed < timedelta(0):
+        return "BEFORE"
+    elapsed_microseconds = (
+        (elapsed.days * 86400 + elapsed.seconds) * 1_000_000
+        + elapsed.microseconds
+    )
+    lease_microseconds = lease_seconds * 1_000_000
+    return "ACTIVE" if elapsed_microseconds < lease_microseconds else "EXPIRED"
+
+
 def _event_id(scope_key: str, attempt_id: str, event_type: str, version: int) -> str:
     return str(
         uuid5(
@@ -591,8 +610,8 @@ class GuardedDispatcher:
         if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool) or owner_epoch < 1:
             raise ValueError("owner_epoch must be a positive integer")
         self.owner_epoch = owner_epoch
-        if not isinstance(prepared_lease_seconds, int) or isinstance(prepared_lease_seconds, bool) or prepared_lease_seconds < 1:
-            raise ValueError("prepared_lease_seconds must be a positive integer")
+        if type(prepared_lease_seconds) is not int or prepared_lease_seconds < 1:
+            raise ValueError("prepared_lease_seconds must be a positive exact integer")
         self.prepared_lease_seconds = prepared_lease_seconds
 
     def _journal_store_authority(self) -> JournalStore:
@@ -704,36 +723,96 @@ class GuardedDispatcher:
         if last["event_type"] in {"SubmissionSent", "SubmissionBlocked", "SubmissionUnknown"}:
             return self._outcome_from_terminal(last, client_order_id)
         if last["event_type"] == "SubmissionSending":
-            self._append(
-                attempt_id=attempt_id,
-                event_type="SubmissionUnknown",
-                version=last["aggregate_version"] + 1,
-                payload={
-                    "client_order_id": client_order_id,
-                    "reason": "recovered_after_send_barrier_without_terminal_result",
-                },
-                now=now,
+            # Recovery time is caller/process input, but the durable Sending row
+            # is already a causal lower bound. Never let a restarted or skewed
+            # clock place terminal UNKNOWN chronologically before the send
+            # barrier it is resolving.
+            sending_at = _instant(last["committed_at"])
+            recovery_at = _instant(now)
+            terminal_at = max(sending_at, recovery_at).isoformat().replace(
+                "+00:00", "Z"
             )
+            try:
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionUnknown",
+                    version=last["aggregate_version"] + 1,
+                    payload={
+                        "client_order_id": client_order_id,
+                        "reason": "recovered_after_send_barrier_without_terminal_result",
+                    },
+                    now=terminal_at,
+                )
+            except ValueError:
+                # Multiple recovery owners may observe the same Sending cut.
+                # The first terminal append wins; every loser must converge on
+                # that durable result instead of surfacing an aggregate-version
+                # race as an operational retry signal.
+                current = self._events(attempt_id)
+                if not current:
+                    raise RuntimeError("submission attempt disappeared")
+                current_last = current[-1]
+                if current_last["event_type"] in {
+                    "SubmissionSent",
+                    "SubmissionBlocked",
+                    "SubmissionUnknown",
+                }:
+                    return self._outcome_from_terminal(
+                        current_last,
+                        client_order_id,
+                    )
+                raise
             return self._outcome_from_terminal(self._events(attempt_id)[-1], client_order_id)
         if last["event_type"] != "SubmissionPrepared":
             raise RuntimeError(f"unsupported submission attempt state: {last['event_type']}")
 
-        prepared_at = _instant(last["payload"]["prepared_at"])
-        age = (_instant(now) - prepared_at).total_seconds()
-        if age < 0:
-            return DispatchOutcome("IN_PROGRESS", client_order_id, None, "clock_before_prepared_timestamp")
-        if age < self.prepared_lease_seconds:
-            return DispatchOutcome("IN_PROGRESS", client_order_id, None, "prepared_owner_lease_active")
-        self._append(
-            attempt_id=attempt_id,
-            event_type="SubmissionUnknown",
-            version=last["aggregate_version"] + 1,
-            payload={
-                "client_order_id": client_order_id,
-                "reason": "prepared_owner_lease_expired_without_send_evidence",
-            },
+        lease_state = _prepared_lease_state(
+            prepared_at=last["payload"]["prepared_at"],
             now=now,
+            lease_seconds=self.prepared_lease_seconds,
         )
+        if lease_state == "BEFORE":
+            return DispatchOutcome("IN_PROGRESS", client_order_id, None, "clock_before_prepared_timestamp")
+        if lease_state == "ACTIVE":
+            return DispatchOutcome("IN_PROGRESS", client_order_id, None, "prepared_owner_lease_active")
+        # SubmissionPrepared is durably before the irreversible boundary. If its
+        # lease expires while no SubmissionSending exists, the journal proves
+        # zero wire. Fence the stale owner as BLOCKED; UNKNOWN remains reserved
+        # for states that may actually have crossed the provider boundary.
+        try:
+            self._append(
+                attempt_id=attempt_id,
+                event_type="SubmissionBlocked",
+                version=last["aggregate_version"] + 1,
+                payload={
+                    "client_order_id": client_order_id,
+                    "reason": "prepared_owner_lease_expired_before_send",
+                },
+                now=now,
+            )
+        except ValueError:
+            # The final send barrier may win the aggregate-version race after
+            # recovery observed Prepared but before it can commit Blocked.
+            # Re-read durable truth rather than leaking a CAS conflict or
+            # fabricating zero-wire safety.  Once Sending exists the outcome is
+            # ambiguous and must converge through the existing UNKNOWN path.
+            current = self._events(attempt_id)
+            if not current:
+                raise RuntimeError("submission attempt disappeared")
+            current_last = current[-1]
+            if current_last["event_type"] in {
+                "SubmissionSent",
+                "SubmissionBlocked",
+                "SubmissionUnknown",
+            }:
+                return self._outcome_from_terminal(current_last, client_order_id)
+            if current_last["event_type"] == "SubmissionSending":
+                return self._recover_existing(
+                    attempt_id=attempt_id,
+                    client_order_id=client_order_id,
+                    now=now,
+                )
+            raise
         return self._outcome_from_terminal(self._events(attempt_id)[-1], client_order_id)
 
     def dispatch(
@@ -971,23 +1050,97 @@ class GuardedDispatcher:
                     now=barrier_now,
                 )
                 raise DispatchBlocked(barrier_reason)
-            self._append(
-                attempt_id=attempt_id,
-                event_type="SubmissionSending",
-                version=2,
-                payload={
-                    "client_order_id": client_order_id,
-                    "owner_token": self.owner_token,
-                    "owner_epoch": self.owner_epoch,
-                    "reason": "final_send_barrier_passed",
-                },
+            durable_before_send = self._events(attempt_id)
+            if not durable_before_send or durable_before_send[-1]["event_type"] != "SubmissionPrepared":
+                raise DispatchBlocked(
+                    "submission_changed_during_final_send_validation"
+                )
+            prepared_payload = durable_before_send[0].get("payload")
+            if type(prepared_payload) is not dict or type(prepared_payload.get("prepared_at")) is not str:
+                raise DispatchBlocked("submission_prepared_chronology_invalid")
+            lease_state = _prepared_lease_state(
+                prepared_at=prepared_payload["prepared_at"],
                 now=barrier_now,
+                lease_seconds=self.prepared_lease_seconds,
             )
+            if lease_state != "ACTIVE":
+                barrier_reason = (
+                    "prepared_owner_lease_expired_before_send"
+                    if lease_state == "EXPIRED"
+                    else "final_barrier_clock_moved_before_prepared"
+                )
+                try:
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionBlocked",
+                        version=2,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": barrier_reason,
+                            "owner_token": self.owner_token,
+                            "owner_epoch": self.owner_epoch,
+                        },
+                        now=barrier_now if lease_state == "EXPIRED" else now,
+                    )
+                except ValueError:
+                    # Another owner may have won the same version-2 race. The
+                    # outer DispatchBlocked handler re-reads that durable truth.
+                    pass
+                raise DispatchBlocked(barrier_reason)
+            try:
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionSending",
+                    version=2,
+                    payload={
+                        "client_order_id": client_order_id,
+                        "owner_token": self.owner_token,
+                        "owner_epoch": self.owner_epoch,
+                        "reason": "final_send_barrier_passed",
+                    },
+                    now=barrier_now,
+                )
+            except ValueError as error:
+                # A concurrent recovery may have terminalized the Prepared
+                # attempt as zero-wire BLOCKED after its lease expired. Never
+                # let a stale final_guard cross that durable fence.
+                latest = self._events(attempt_id)
+                if latest and latest[-1]["event_type"] == "SubmissionPrepared":
+                    reason = "submission_changed_during_final_send_validation"
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionBlocked",
+                        version=2,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": reason,
+                        },
+                        now=barrier_now,
+                    )
+                raise DispatchBlocked(
+                    "submission_changed_during_final_send_validation"
+                ) from error
             barrier_passed = True
 
         try:
             response = transport_send(client_order_id, request_frozen, final_guard)
         except DispatchBlocked as error:
+            events = self._events(attempt_id)
+            if events:
+                last = events[-1]
+                if last["event_type"] == "SubmissionSending":
+                    return DispatchOutcome(
+                        "UNKNOWN",
+                        client_order_id,
+                        None,
+                        "concurrent_send_barrier_already_committed",
+                    )
+                if last["event_type"] in {
+                    "SubmissionSent",
+                    "SubmissionBlocked",
+                    "SubmissionUnknown",
+                }:
+                    return self._outcome_from_terminal(last, client_order_id)
             return DispatchOutcome("BLOCKED", client_order_id, None, str(error))
         except Exception as error:
             events = self._events(attempt_id)

@@ -1,4 +1,4 @@
-"""Compatibility exports for the single shared installed v5 exact-numeric authority."""
+"""Compatibility exports for the single shared installed v6 exact-numeric authority."""
 
 from autotrade_numeric.exact_decimal import (
     ExactDecimalError,

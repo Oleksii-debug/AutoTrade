@@ -47,9 +47,12 @@ def bind_provider_evidence(artifact_store: ArtifactStore, evidence):
     )
 
 
-class EvidencedBorrowRecallProjection(DurableBorrowRecallProjection):
+class EvidencedBorrowRecallProjection:
+    """Test-only evidence binder around the sealed production projection."""
+
     def __init__(self, store: JournalStore, **scope):
-        super().__init__(
+        self.store = store
+        self._projection = DurableBorrowRecallProjection(
             store,
             evidence_artifact_store=artifact_store_for(store),
             **scope,
@@ -57,14 +60,52 @@ class EvidencedBorrowRecallProjection(DurableBorrowRecallProjection):
 
     def _bound(self, evidence):
         if (
-            isinstance(getattr(evidence, "evidence_ref", None), str)
+            type(getattr(evidence, "evidence_ref", None)) is str
             and evidence.evidence_ref.startswith("artifact:")
         ):
             return evidence
         return bind_provider_evidence(artifact_store_for(self.store), evidence)
 
+    @property
+    def version(self):
+        return self._projection.version
+
+    @property
+    def active_quantity(self):
+        return self._projection.active_quantity
+
+    @property
+    def active_recall_ids(self):
+        return self._projection.active_recall_ids
+
+    @property
+    def active_blocking_resources(self):
+        return self._projection.active_blocking_resources
+
+    @property
+    def resource_key(self):
+        return self._projection.resource_key
+
+    def remaining(self, recall_id):
+        return self._projection.remaining(recall_id)
+
+    def remaining_at(self, recall_id, now):
+        return self._projection.remaining_at(recall_id, now)
+
+    def active_quantity_at(self, now):
+        return self._projection.active_quantity_at(now)
+
+    def active_recall_ids_at(self, now):
+        return self._projection.active_recall_ids_at(now)
+
+    def active_blocking_resources_at(self, now):
+        return self._projection.active_blocking_resources_at(now)
+
     def record_recall(self, evidence):
-        return super().record_recall(self._bound(evidence))
+        return self._projection.record_recall(self._bound(evidence))
 
     def resolve_recall(self, evidence):
-        return super().resolve_recall(self._bound(evidence))
+        return self._projection.resolve_recall(self._bound(evidence))
+
+    def project_equity_state(self, state):
+        return self._projection.project_equity_state(state)

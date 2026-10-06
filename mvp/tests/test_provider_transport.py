@@ -33,6 +33,7 @@ from mvp.autotrade_mvp.dispatch import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_core import (
+    AuthenticatedReadQueryBinding,
     Surface,
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
@@ -54,7 +55,11 @@ from mvp.autotrade_mvp.provider_transport import (
     SignedHttpRequest,
     UrllibJsonWireClient,
     _exact_trading_response,
+    _bybit_exact_trading_response,
     _binance_exact_trading_response,
+    _kraken_spot_exact_trading_response,
+    _alpaca_exact_trading_response,
+    _whitebit_exact_trading_response,
     KRAKEN_FUTURES_ENDPOINT_POLICIES,
     KRAKEN_SPOT_ENDPOINT_POLICIES,
     KrakenFuturesSigner,
@@ -107,6 +112,7 @@ class FakeSecretResolver:
         provider,
         environment,
         purpose,
+        provider_environment=None,
     ):
         if self.lease_active:
             raise AssertionError("credential lease must not be re-entered")
@@ -119,6 +125,7 @@ class FakeSecretResolver:
             provider=provider,
             environment=environment,
             purpose=purpose,
+            provider_environment=provider_environment,
         )
         self.lease_active = True
         self.lease_enters += 1
@@ -139,20 +146,22 @@ class FakeSecretResolver:
         provider,
         environment,
         purpose,
+        provider_environment=None,
     ):
         self.events.append("resolve")
-        self.calls.append(
-            {
-                "token": token,
-                "origin": origin,
-                "handle": handle,
-                "execution_identity": execution_identity,
-                "account_id": account_id,
-                "provider": provider,
-                "environment": environment,
-                "purpose": purpose,
-            }
-        )
+        call = {
+            "token": token,
+            "origin": origin,
+            "handle": handle,
+            "execution_identity": execution_identity,
+            "account_id": account_id,
+            "provider": provider,
+            "environment": environment,
+            "purpose": purpose,
+        }
+        if provider_environment is not None:
+            call["provider_environment"] = provider_environment
+        self.calls.append(call)
         if self.on_resolve is not None:
             self.on_resolve()
         if self.credential_plaintext is not None:
@@ -460,6 +469,26 @@ def authenticated_read_binding(
     )
 
 
+def unissued_authenticated_read_binding_clone(binding):
+    forged = object.__new__(AuthenticatedReadQueryBinding)
+    for field in (
+        "provider_id",
+        "account_id",
+        "entity_id",
+        "environment",
+        "capability_snapshot_id",
+        "instrument_version",
+        "surface",
+        "endpoint",
+        "query",
+        "prepared_at",
+        "permission_scope",
+        "query_digest",
+    ):
+        object.__setattr__(forged, field, getattr(binding, field))
+    return forged
+
+
 KRAKEN_READ_NOW = datetime(2026, 9, 26, 1, 0, tzinfo=timezone.utc)
 KRAKEN_READ_SNAPSHOT_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 _KRAKEN_READ_ARTIFACT_IDS = {
@@ -695,6 +724,29 @@ class AlpacaProviderTransportTests(unittest.TestCase):
         self.assertEqual(resolver.calls, [])
         self.assertEqual(wire.requests, [])
 
+    def test_alpaca_post_send_missing_status_and_5xx_require_reconciliation(self):
+        cases = (
+            (
+                b'{"id":"raw-order","status":"accepted"}',
+                None,
+                "alpaca_http_status_unavailable_execution_unknown",
+            ),
+            (
+                TradingWireResponse(
+                    http_status=503,
+                    body=b"<html>upstream unavailable</html>",
+                ),
+                503,
+                "alpaca_http_5xx_execution_unknown",
+            ),
+        )
+        for response, status, reason in cases:
+            with self.subTest(status=status):
+                exact = _alpaca_exact_trading_response(response)
+                self.assertEqual(exact.http_status, status)
+                self.assertTrue(exact.requires_reconciliation)
+                self.assertEqual(exact.ambiguity_reason, reason)
+
     def test_alpaca_wrong_scoped_trade_handle_is_rejected(self):
         events = []
         with self.assertRaisesRegex(
@@ -852,6 +904,29 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 ),
                 [],
             )
+
+    def test_whitebit_raw_response_without_http_status_requires_reconciliation(self):
+        raw = b'{"orderId":"provider-raw"}'
+        exact = _whitebit_exact_trading_response(raw)
+        self.assertIsNone(exact.http_status)
+        self.assertTrue(exact.requires_reconciliation)
+        self.assertEqual(
+            exact.ambiguity_reason,
+            "whitebit_http_status_unavailable_execution_unknown",
+        )
+
+    def test_whitebit_non_json_408_429_and_5xx_require_reconciliation(self):
+        for status in (408, 429, 500, 503):
+            with self.subTest(status=status):
+                exact = _whitebit_exact_trading_response(
+                    TradingWireResponse(
+                        http_status=status,
+                        body=b"<html>upstream unavailable</html>",
+                    )
+                )
+                self.assertEqual(exact.http_status, status)
+                self.assertTrue(exact.requires_reconciliation)
+                self.assertEqual(exact.response_bytes, b"<html>upstream unavailable</html>")
 
     def test_whitebit_transport_has_one_guarded_send_after_durable_nonce(self):
         events = []
@@ -2027,6 +2102,29 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
             self.assertEqual(events, [])
 
 
+    def test_kraken_spot_post_send_missing_status_and_5xx_require_reconciliation(self):
+        cases = (
+            (
+                b'{"error":[],"result":{"txid":["O-raw"]}}',
+                None,
+                "kraken_spot_http_status_unavailable_execution_unknown",
+            ),
+            (
+                TradingWireResponse(
+                    http_status=503,
+                    body=b"<html>upstream unavailable</html>",
+                ),
+                503,
+                "kraken_spot_http_5xx_execution_unknown",
+            ),
+        )
+        for response, status, reason in cases:
+            with self.subTest(status=status):
+                exact = _kraken_spot_exact_trading_response(response)
+                self.assertEqual(exact.http_status, status)
+                self.assertTrue(exact.requires_reconciliation)
+                self.assertEqual(exact.ambiguity_reason, reason)
+
     def test_transport_orders_quota_secret_nonce_guard_and_one_wire_send(self):
         events = []
         with TemporaryDirectory() as directory:
@@ -2847,9 +2945,20 @@ class ProviderTransportTests(unittest.TestCase):
                 wire_client=RecordingWire(events),
             )
 
+    def test_binance_raw_response_without_http_status_requires_reconciliation(self):
+        exact = _binance_exact_trading_response(
+            b'{"code":0,"orderId":"provider-raw"}'
+        )
+        self.assertTrue(exact.requires_reconciliation)
+        self.assertEqual(
+            exact.ambiguity_reason,
+            "binance_spot_http_status_unavailable_execution_unknown",
+        )
+        self.assertIsNone(exact.http_status)
+
     def test_binance_5xx_and_backend_timeout_are_unknown_not_definitive(self):
         cases = (
-            (503, b'{"code":-1000,"msg":"backend failure"}',
+            (503, b"<html>upstream unavailable</html>",
              "binance_spot_http_5xx_execution_unknown"),
             (200, b'{"code":-1007,"msg":"Timeout waiting for response"}',
              "binance_spot_backend_timeout_execution_unknown"),
@@ -2876,7 +2985,7 @@ class ProviderTransportTests(unittest.TestCase):
 
     def test_binance_ambiguous_http_after_send_is_durable_unknown_without_retry(self):
         cases = (
-            (503, b'{"code":-1000,"msg":"server"}',
+            (503, b"<html>upstream unavailable</html>",
              "binance_spot_http_5xx_execution_unknown"),
             (200, b'{"code":-1007,"msg":"timeout"}',
              "binance_spot_backend_timeout_execution_unknown"),
@@ -3276,6 +3385,21 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
             wire_client=wire or RecordingWire(events),
         )
         return transport, resolver
+
+    def test_binance_read_signer_rejects_unissued_exact_binding_clone(self):
+        forged = unissued_authenticated_read_binding_clone(
+            authenticated_read_binding()
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "construction authority is unavailable",
+        ):
+            BinanceSpotAuthenticatedReadSigner.sign(
+                policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+                query_binding=forged,
+                credential_plaintext='{"api_key":"key","api_secret":"secret"}',
+                timestamp_ms=1700000000000,
+            )
 
     def test_authenticated_read_signer_has_fixed_exact_vector(self):
         request = BinanceSpotAuthenticatedReadSigner.sign(
@@ -3805,6 +3929,23 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
             wire_client=wire or RecordingWire(events),
         )
         return transport, resolver, allocator
+
+    def test_kraken_read_signer_rejects_unissued_exact_binding_clone(self):
+        forged = unissued_authenticated_read_binding_clone(
+            kraken_authenticated_read_binding(
+                query={"trades": "true"}
+            )
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "construction authority is unavailable",
+        ):
+            KrakenSpotAuthenticatedReadSigner.sign(
+                policy=KRAKEN_SPOT_ENDPOINT_POLICIES["LIVE"],
+                query_binding=forged,
+                credential_plaintext=self.credential_plaintext(),
+                nonce=1_616_492_376_594,
+            )
 
     def test_private_read_signer_has_fixed_exact_hmac_vector(self):
         request = KrakenSpotAuthenticatedReadSigner.sign(
@@ -4597,6 +4738,38 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
         self.assertEqual(opener.calls, 1)
         self.assertEqual(stream.sizes, [5])
 
+    def test_empty_http_error_body_is_preserved_for_guarded_write_only(self):
+        class EmptyErrorOpener:
+            def open(self, request, *_args, **_kwargs):
+                raise HTTPError(
+                    request.full_url,
+                    503,
+                    "service unavailable",
+                    {},
+                    BytesIO(b""),
+                )
+
+        client = UrllibJsonWireClient(max_response_bytes=8)
+        client._opener = EmptyErrorOpener()
+        write_response = client.send(self.request())
+        self.assertIs(type(write_response), TradingWireResponse)
+        self.assertEqual(write_response.http_status, 503)
+        self.assertEqual(write_response.body, b"")
+
+        client = UrllibJsonWireClient(max_response_bytes=8)
+        client._opener = EmptyErrorOpener()
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "invalid or oversized authenticated-read response",
+        ):
+            client.send(
+                AuthenticatedReadHttpRequest(
+                    url="https://api.example.test/read",
+                    headers={"X-API-KEY": "synthetic"},
+                    timeout_seconds=2,
+                )
+            )
+
     def test_http_error_uses_same_captured_budget_when_live_field_mutates_during_read(self):
         class MutatingBytesIO(BytesIO):
             def __init__(self, client, data, mutate_to):
@@ -4757,6 +4930,7 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
         for status, body in (
             (200, b'{"retCode":0,"retMsg":"OK","result":{"orderId":"provider-1","orderLinkId":"bybit-order-1"}}'),
             (429, b'{"retCode":10006,"retMsg":"rate limit","result":{}}'),
+            (503, b'{"retCode":10016,"retMsg":"server error","result":{}}'),
         ):
             with self.subTest(status=status):
                 events = []
@@ -4766,8 +4940,8 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
                 class FakeOpener:
                     def open(self, request, *, timeout):
                         calls.append((request, timeout))
-                        if status == 429:
-                            raise HTTPError(request.full_url, status, "rate limit", {}, stream)
+                        if status != 200:
+                            raise HTTPError(request.full_url, status, "provider error", {}, stream)
                         return stream
 
                 client = UrllibJsonWireClient(max_response_bytes=256)
@@ -4784,13 +4958,371 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
                 self.assertEqual(type(exact.response_bytes), bytes)
                 self.assertEqual(exact.response_bytes, body)
                 self.assertEqual(exact.http_status, status)
-                self.assertEqual(exact.payload["retCode"], 0 if status == 200 else 10006)
+                expected_ret_code = {200: 0, 429: 10006, 503: 10016}[status]
+                self.assertEqual(exact.payload["retCode"], expected_ret_code)
+                self.assertEqual(exact.requires_reconciliation, status != 200)
+                if status == 429:
+                    self.assertEqual(
+                        exact.ambiguity_reason,
+                        "bybit_http_non_2xx_execution_unknown",
+                    )
+                elif status == 503:
+                    self.assertEqual(
+                        exact.ambiguity_reason,
+                        "bybit_http_5xx_execution_unknown",
+                    )
                 self.assertEqual(stream.read_sizes, [257])
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(len(resolver.calls), 1)
                 self.assertEqual(events, [
                     "capability", "resolve", "capability", "guard",
                 ])
+
+    def test_bybit_classifier_preserves_exact_evidence_and_marks_unknown(self):
+        raw = b'{"retCode":10016,"retMsg":"server error","result":{}}'
+        for status in (400, 429, 500, 502, 503, 599):
+            with self.subTest(status=status):
+                exact = _bybit_exact_trading_response(
+                    TradingWireResponse(http_status=status, body=raw)
+                )
+                self.assertEqual(exact.response_bytes, raw)
+                self.assertEqual(exact.http_status, status)
+                self.assertTrue(exact.requires_reconciliation)
+                self.assertEqual(
+                    exact.ambiguity_reason,
+                    (
+                        "bybit_http_5xx_execution_unknown"
+                        if status >= 500
+                        else "bybit_http_non_2xx_execution_unknown"
+                    ),
+                )
+
+        for code in (429, 10000, 10014, 10016):
+            with self.subTest(ret_code=code):
+                body = (
+                    '{"retCode":'
+                    + str(code)
+                    + ',"retMsg":"ambiguous","result":{}}'
+                ).encode("ascii")
+                exact = _bybit_exact_trading_response(
+                    TradingWireResponse(http_status=200, body=body)
+                )
+                self.assertEqual(exact.response_bytes, body)
+                self.assertEqual(exact.http_status, 200)
+                self.assertTrue(exact.requires_reconciliation)
+                self.assertEqual(
+                    exact.ambiguity_reason,
+                    "bybit_ambiguous_ret_code_execution_unknown",
+                )
+
+        accepted = _bybit_exact_trading_response(
+            TradingWireResponse(
+                http_status=200,
+                body=b'{"retCode":0,"retMsg":"OK","result":{}}',
+            )
+        )
+        self.assertFalse(accepted.requires_reconciliation)
+        self.assertIsNone(accepted.ambiguity_reason)
+
+
+    def test_bybit_raw_response_without_http_status_requires_reconciliation(self):
+        raw = b'{"retCode":0,"retMsg":"OK","result":{"orderId":"provider-raw"}}'
+        exact = _bybit_exact_trading_response(raw)
+        self.assertEqual(exact.response_bytes, raw)
+        self.assertIsNone(exact.http_status)
+        self.assertTrue(exact.requires_reconciliation)
+        self.assertEqual(
+            exact.ambiguity_reason,
+            "bybit_http_status_unavailable_execution_unknown",
+        )
+
+    def test_bybit_empty_http_503_persists_exact_unknown_and_never_resends(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="bybit-empty-account",
+                owner_token="owner-bybit-empty",
+            )
+            exact = _bybit_exact_trading_response(
+                TradingWireResponse(http_status=503, body=b"")
+            )
+            self.assertEqual(exact.response_bytes, b"")
+            self.assertEqual(exact.http_status, 503)
+            self.assertTrue(exact.requires_reconciliation)
+            sends = []
+
+            def send(_client_order_id, _request, final_guard):
+                final_guard()
+                sends.append(True)
+                return exact
+
+            common = dict(
+                attempt_id="attempt-bybit-empty-503",
+                intent_id="intent-bybit-empty-503",
+                intent_hash="intent-hash-bybit-empty-503",
+                provider="BYBIT",
+                request={"symbol": "BTCUSDT", "side": "BUY", "quantity": "1"},
+                now="2026-10-06T00:20:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                submission_scope={},
+            )
+            first = dispatcher.dispatch(**common, transport_send=send)
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(first.reason, "bybit_http_5xx_execution_unknown")
+            self.assertEqual(sends, [True])
+
+            terminal = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("attempt-bybit-empty-503"),
+            )[-1]["payload"]
+            self.assertEqual(terminal["response_encoding"], "hex")
+            self.assertEqual(terminal["response_text"], "")
+            self.assertEqual(
+                terminal["response_sha256"],
+                "sha256:" + __import__("hashlib").sha256(b"").hexdigest(),
+            )
+            self.assertEqual(terminal["http_status"], 503)
+            self.assertEqual(terminal["retry_disposition"], "RECONCILE_FIRST")
+
+            binding = load_submission_response_binding(
+                store,
+                environment="SIMULATION",
+                account_id="bybit-empty-account",
+                attempt_id="attempt-bybit-empty-503",
+            )
+            self.assertEqual(binding.response_bytes, b"")
+            self.assertEqual(binding.response_encoding, "hex")
+            self.assertEqual(binding.http_status, 503)
+            with self.assertRaisesRegex(ValueError, "no JSON payload"):
+                binding.payload
+
+            repeated = dispatcher.dispatch(
+                **{**common, "now": "2026-10-06T00:20:01Z"},
+                transport_send=lambda *_args: self.fail("blind provider retry"),
+            )
+            self.assertEqual(repeated.status, "UNKNOWN")
+            self.assertEqual(sends, [True])
+
+    def test_bybit_http_503_persists_unknown_and_never_resends(self):
+        from mvp.tests.test_bybit_transport import (
+            BybitV5SharedTransportTests,
+            prepared,
+        )
+        from mvp.autotrade_mvp.bybit_v5 import guarded_order_projection
+
+        with TemporaryDirectory() as directory:
+            events = []
+            raw = b"\xff\x00upstream unavailable"
+            wire = RecordingWire(
+                events,
+                response=raw,
+                http_status=503,
+            )
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="bybit-account",
+                owner_token="owner-bybit-503",
+            )
+            intent_id = "intent-bybit-http-503"
+            client_id = stable_client_order_id(
+                "BYBIT",
+                intent_id,
+                environment="PAPER",
+                account_id="bybit-account",
+            )
+            capability, prepared_request = prepared(client_id)
+            transport, _resolver = BybitV5SharedTransportTests().make_transport(
+                capability=capability,
+                events=events,
+                wire=wire,
+            )
+            projected = guarded_order_projection(prepared_request)
+            scope = {
+                "capability_snapshot_id": capability.snapshot_id,
+                "provider": "BYBIT",
+                "account_id": "bybit-account",
+                "environment": "PAPER",
+                "provider_environment": "TESTNET",
+            }
+
+            result = dispatcher.dispatch(
+                attempt_id="attempt-bybit-http-503",
+                intent_id=intent_id,
+                intent_hash="intent-hash-bybit-http-503",
+                provider="BYBIT",
+                request=projected,
+                now="2026-09-25T10:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=transport,
+                sender_check=lambda _owner, _epoch: None,
+                final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
+                submission_scope=scope,
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "bybit_http_5xx_execution_unknown")
+            self.assertEqual(events.count("wire"), 1)
+
+            repeated = dispatcher.dispatch(
+                attempt_id="attempt-bybit-http-503",
+                intent_id=intent_id,
+                intent_hash="intent-hash-bybit-http-503",
+                provider="BYBIT",
+                request=projected,
+                now="2026-09-25T10:00:02Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=transport,
+                sender_check=lambda _owner, _epoch: None,
+                submission_scope=scope,
+            )
+            self.assertEqual(repeated.status, "UNKNOWN")
+            self.assertEqual(events.count("wire"), 1)
+
+            durable = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("attempt-bybit-http-503"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in durable],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            terminal = durable[-1]["payload"]
+            self.assertEqual(terminal["http_status"], 503)
+            self.assertEqual(
+                terminal["reason"],
+                "bybit_http_5xx_execution_unknown",
+            )
+            self.assertEqual(terminal["response_encoding"], "hex")
+            self.assertEqual(bytes.fromhex(terminal["response_text"]), raw)
+            binding = load_submission_response_binding(
+                store,
+                environment="PAPER",
+                account_id="bybit-account",
+                attempt_id="attempt-bybit-http-503",
+            )
+            self.assertEqual(binding.response_bytes, raw)
+            self.assertEqual(binding.response_encoding, "hex")
+            self.assertEqual(binding.http_status, 503)
+            with self.assertRaisesRegex(ValueError, "no JSON payload"):
+                binding.payload
+
+
+    def test_bybit_additional_ambiguous_results_persist_unknown_and_never_resend(self):
+        from mvp.tests.test_bybit_transport import (
+            BybitV5SharedTransportTests,
+            prepared,
+        )
+        from mvp.autotrade_mvp.bybit_v5 import guarded_order_projection
+
+        cases = (
+            (
+                "http-429",
+                429,
+                b'{"retCode":10006,"retMsg":"rate limit","result":{}}',
+                "bybit_http_non_2xx_execution_unknown",
+            ),
+            (
+                "retcode-10000",
+                200,
+                b'{"retCode":10000,"retMsg":"server timeout","result":{}}',
+                "bybit_ambiguous_ret_code_execution_unknown",
+            ),
+        )
+        for label, http_status, response, terminal_reason in cases:
+            with self.subTest(case=label), TemporaryDirectory() as directory:
+                events = []
+                wire = RecordingWire(
+                    events,
+                    response=response,
+                    http_status=http_status,
+                )
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="PAPER",
+                    account_id="bybit-account",
+                    owner_token=f"owner-bybit-{label}",
+                )
+                intent_id = f"intent-bybit-{label}"
+                attempt_id = f"attempt-bybit-{label}"
+                client_id = stable_client_order_id(
+                    "BYBIT",
+                    intent_id,
+                    environment="PAPER",
+                    account_id="bybit-account",
+                )
+                capability, prepared_request = prepared(client_id)
+                transport, _resolver = BybitV5SharedTransportTests().make_transport(
+                    capability=capability,
+                    events=events,
+                    wire=wire,
+                )
+                projected = guarded_order_projection(prepared_request)
+                scope = {
+                    "capability_snapshot_id": capability.snapshot_id,
+                    "provider": "BYBIT",
+                    "account_id": "bybit-account",
+                    "environment": "PAPER",
+                    "provider_environment": "TESTNET",
+                }
+
+                result = dispatcher.dispatch(
+                    attempt_id=attempt_id,
+                    intent_id=intent_id,
+                    intent_hash=f"intent-hash-bybit-{label}",
+                    provider="BYBIT",
+                    request=projected,
+                    now="2026-09-25T10:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    sender_check=lambda _owner, _epoch: None,
+                    final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
+                    submission_scope=scope,
+                )
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertEqual(result.reason, terminal_reason)
+                self.assertEqual(events.count("wire"), 1)
+
+                repeated = dispatcher.dispatch(
+                    attempt_id=attempt_id,
+                    intent_id=intent_id,
+                    intent_hash=f"intent-hash-bybit-{label}",
+                    provider="BYBIT",
+                    request=projected,
+                    now="2026-09-25T10:00:02Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    sender_check=lambda _owner, _epoch: None,
+                    submission_scope=scope,
+                )
+                self.assertEqual(repeated.status, "UNKNOWN")
+                self.assertEqual(repeated.reason, terminal_reason)
+                self.assertEqual(events.count("wire"), 1)
+
+                durable = store.load_events(
+                    "submission_attempt",
+                    dispatcher._aggregate_id(attempt_id),
+                )
+                self.assertEqual(
+                    [event["event_type"] for event in durable],
+                    [
+                        "SubmissionPrepared",
+                        "SubmissionSending",
+                        "SubmissionUnknown",
+                    ],
+                )
+                terminal = durable[-1]["payload"]
+                self.assertEqual(terminal["http_status"], http_status)
+                self.assertEqual(terminal["reason"], terminal_reason)
+                self.assertEqual(terminal["retry_disposition"], "RECONCILE_FIRST")
+
 
     def test_typed_wire_status_rejects_int_subclasses_before_comparison_callbacks(self):
         # Exact response CLASS is not enough: a malicious subclass nested

@@ -747,6 +747,114 @@ class IbkrWebAdapterTests(unittest.TestCase):
         finally:
             CapabilitySnapshot.admits = original
 
+    def test_order_preparation_does_not_delegate_intent_revalidation_to_mutable_class_method(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        object.__setattr__(intent, "order_type", "FORGED")
+        original = IbkrWebOrderIntent.__dict__["create"]
+        IbkrWebOrderIntent.create = classmethod(
+            lambda _cls, **_kwargs: intent
+        )
+        try:
+            with self.assertRaisesRegex(
+                IbkrWebAdapterError,
+                "unsupported normalized order type",
+            ):
+                prepare_normalized_order(
+                    intent,
+                    client_order_id="at-intent-create-rebind",
+                    capability=capability(),
+                    session=ready_session(),
+                    at=NOW,
+                    maximum_session_age_seconds=30,
+                )
+        finally:
+            IbkrWebOrderIntent.create = original
+
+    def test_order_preparation_does_not_delegate_client_id_validation_to_mutable_module_lookup(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        original = ibkr_web_module.validate_coid
+        ibkr_web_module.validate_coid = lambda _value: "at-forged-client-id"
+        try:
+            with self.assertRaisesRegex(IbkrWebAdapterError, "cOID is required"):
+                prepare_normalized_order(
+                    intent,
+                    client_order_id="",
+                    capability=capability(),
+                    session=ready_session(),
+                    at=NOW,
+                    maximum_session_age_seconds=30,
+                )
+        finally:
+            ibkr_web_module.validate_coid = original
+
+    def test_order_preparation_keeps_bound_provider_order_type_mapping(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        original = ibkr_web_module._ORDER_TYPES
+        ibkr_web_module._ORDER_TYPES = {"MARKET": "FORGED"}
+        try:
+            prepared = prepare_normalized_order(
+                intent,
+                client_order_id="at-order-map-rebind",
+                capability=capability(),
+                session=ready_session(),
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+            self.assertEqual(prepared.fields["orderType"], "MKT")
+        finally:
+            ibkr_web_module._ORDER_TYPES = original
+
+    def test_order_preparation_keeps_bound_decimal_text_formatter(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="LIMIT",
+            time_in_force="DAY",
+            quantity="1.25",
+            limit_price="220.10",
+        )
+        original = ibkr_web_module._decimal_text
+        ibkr_web_module._decimal_text = lambda _value: "0"
+        try:
+            prepared = prepare_normalized_order(
+                intent,
+                client_order_id="at-decimal-text-rebind",
+                capability=capability(),
+                session=ready_session(),
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+            self.assertEqual(prepared.exact_quantity_text, "1.25")
+            self.assertEqual(prepared.exact_limit_price_text, "220.10")
+        finally:
+            ibkr_web_module._decimal_text = original
+
     def test_order_preparation_uses_class_owned_capability_and_session_checks(self):
         intent = IbkrWebOrderIntent.create(
             instrument_version="AAPL-CONID-265598:v1",

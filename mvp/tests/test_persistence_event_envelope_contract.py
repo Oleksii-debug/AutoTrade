@@ -80,6 +80,44 @@ class CanonicalEventEnvelopeAdmissionTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     JournalStore(f"{directory}/journal.sqlite3").append_event(envelope)
 
+    def test_claimed_event_envelope_rejects_noncanonical_uuid_lexical_forms(self):
+        canonical_uuid = "11111111-1111-4111-8111-111111111111"
+        noncanonical = (
+            "{" + canonical_uuid + "}",
+            "urn:uuid:" + canonical_uuid,
+            canonical_uuid.replace("-", ""),
+        )
+        for field in ("event_id", "correlation_id", "causation_id"):
+            for bad_value in noncanonical:
+                with self.subTest(field=field, value=bad_value), TemporaryDirectory() as directory:
+                    envelope = canonical_event()
+                    envelope[field] = bad_value
+                    with self.assertRaisesRegex(ValueError, "UUID string"):
+                        JournalStore(f"{directory}/journal.sqlite3").append_event(envelope)
+
+    def test_claimed_event_envelope_accepts_uppercase_hyphenated_uuid(self):
+        with TemporaryDirectory() as directory:
+            envelope = canonical_event()
+            envelope["event_id"] = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
+            envelope["correlation_id"] = "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB"
+            envelope["causation_id"] = "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC"
+            self.assertTrue(
+                JournalStore(f"{directory}/journal.sqlite3").append_event(envelope).inserted
+            )
+
+    def test_evidence_ref_rejects_noncanonical_uuid_lexical_form(self):
+        with TemporaryDirectory() as directory:
+            envelope = canonical_event()
+            envelope["evidence_refs"] = [
+                {
+                    "artifact_id": "{33333333-3333-4333-8333-333333333333}",
+                    "sha256": "sha256:" + "0" * 64,
+                    "observed_at": "2026-10-06T13:30:00Z",
+                }
+            ]
+            with self.assertRaisesRegex(ValueError, "EvidenceRef artifact_id"):
+                JournalStore(f"{directory}/journal.sqlite3").append_event(envelope)
+
     def test_claimed_event_envelope_rejects_malformed_evidence_ref(self):
         with TemporaryDirectory() as directory:
             envelope = canonical_event()

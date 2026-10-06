@@ -753,26 +753,34 @@ class ProviderSubmissionObservation:
         environment: str | None = None,
         client_order_id: str | None = None,
     ) -> None:
-        if _text(provider_id, "provider_id").upper() != self.provider_id:
+        # Re-enter the external observation registry at the consumer barrier.
+        # This remains fail-closed even if ordinary instance attribute lookup
+        # was rebound after mint, before any provider payload is consumed.
+        projection = provider_submission_observation_projection(self)
+        if _text(provider_id, "provider_id").upper() != projection["provider_id"]:
             raise ProviderCoreError("provider-write provenance provider mismatch")
-        if _text(endpoint, "endpoint") != self.endpoint:
+        if _text(endpoint, "endpoint") != projection["endpoint"]:
             raise ProviderCoreError("provider-write provenance endpoint mismatch")
-        if prepared_request_sha256 != self.request_sha256:
+        if prepared_request_sha256 != projection["request_sha256"]:
             raise ProviderCoreError("provider-write provenance request digest mismatch")
-        if tuple(capability_snapshot_ids) != self.capability_snapshot_ids:
+        if tuple(capability_snapshot_ids) != projection["capability_snapshot_ids"]:
             raise ProviderCoreError("provider-write provenance capability mismatch")
-        if tuple(instrument_versions) != self.instrument_versions:
+        if tuple(instrument_versions) != projection["instrument_versions"]:
             raise ProviderCoreError("provider-write provenance instrument mismatch")
-        if account_id is not None and _text(account_id, "account_id") != self.account_id:
+        if (
+            account_id is not None
+            and _text(account_id, "account_id") != projection["account_id"]
+        ):
             raise ProviderCoreError("provider-write provenance account mismatch")
         if (
             environment is not None
-            and _text(environment, "environment").upper() != self.environment
+            and _text(environment, "environment").upper() != projection["environment"]
         ):
             raise ProviderCoreError("provider-write provenance environment mismatch")
         if (
             client_order_id is not None
-            and _text(client_order_id, "client_order_id") != self.client_order_id
+            and _text(client_order_id, "client_order_id")
+            != projection["client_order_id"]
         ):
             raise ProviderCoreError("provider-write provenance client-order mismatch")
 

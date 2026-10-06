@@ -2101,8 +2101,35 @@ class SemanticWebClientContractTests(unittest.TestCase):
             submit[definitive:ambiguous],
         )
 
-if __name__ == "__main__":
-    unittest.main()
+
+    def test_browser_script_has_one_canonical_render_and_transport_authority(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertNotIn("async async function", js)
+        self.assertEqual(js.count("async function jsonFetch("), 1)
+        self.assertEqual(js.count("function text(id, value"), 1)
+        self.assertEqual(js.count("function stableProjectionValue("), 1)
+        self.assertEqual(js.count("function projectionText("), 1)
+        self.assertEqual(js.count("function resetOperationsForScope"), 1)
+
+        projection = js[
+            js.index("function appendProjectionRow"):
+            js.index("function renderProjection")
+        ]
+        self.assertIn('row.dataset.selectionKey = "projection:" + label', projection)
+        self.assertIn("return row;", projection)
+
+        operation = js[
+            js.index("function renderOperation"):
+            js.index("async function refreshOperation")
+        ]
+        self.assertIn("const bookmark = captureTableSelection(body);", operation)
+        self.assertIn(
+            'row.dataset.selectionKey = "operation:" + operation.operationId',
+            operation,
+        )
+        self.assertIn('row.dataset.selectionExact = "true"', operation)
+        self.assertIn("revealBookmarkedTablePage(body, bookmark);", operation)
+        self.assertIn("restoreTableSelection(body, bookmark);", operation)
 
 if __name__ == "__main__":
     unittest.main()

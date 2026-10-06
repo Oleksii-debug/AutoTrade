@@ -104,7 +104,7 @@ def reconcile_simulated(
 
 
 class DispatchOrderProjectionIntegrationTests(unittest.TestCase):
-    def test_sha_bound_exact_json_submission_projects_ack_without_inventing_fill(self):
+    def test_sha_bound_exact_json_submission_remains_unknown_without_provider_normalizer(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             provider = SimulatedProvider(
@@ -263,26 +263,25 @@ class DispatchOrderProjectionIntegrationTests(unittest.TestCase):
                 orders.order(client_order_id).snapshot().filled_quantity,
                 Decimal("0"),
             )
-            # The same original SHA-bound journal source is still valid.
-            # Replaying its already-projected send-start fact must be
-            # idempotent and yield exactly one WORKING ACK, never a fill.
+            # The same original SHA-bound journal source is still valid, but
+            # exact transport bytes are provider-neutral evidence only. Without
+            # an authenticated provider-specific normalizer, replay must retain
+            # UNKNOWN and must not project the response's provider order id.
             projected = orders.sync_submission_attempt(attempt_id=attempt_id)
             self.assertEqual(len(projected), 2)
             self.assertEqual(projected[0].snapshot.state, "SEND_STARTED")
-            self.assertEqual(projected[1].snapshot.state, "WORKING")
-            self.assertEqual(
-                projected[1].snapshot.provider_order_id,
-                outcome.response["provider_order_id"],
-            )
+            self.assertEqual(projected[1].snapshot.state, "UNKNOWN")
+            self.assertIsNone(projected[1].snapshot.provider_order_id)
             self.assertEqual(
                 projected[1].snapshot.filled_quantity, Decimal("0")
             )
             restarted = projection(store).order(client_order_id).snapshot()
-            self.assertEqual(restarted.state, "WORKING")
+            self.assertEqual(restarted.state, "UNKNOWN")
+            self.assertIsNone(restarted.provider_order_id)
             self.assertEqual(restarted.filled_quantity, Decimal("0"))
             self.assertEqual(provider.outbound_request_count, 1)
 
-    def test_dispatch_ack_fill_projection_and_reconciliation_share_identity(self):
+    def test_dispatch_raw_response_and_fill_projection_share_identity_without_ack_inference(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             provider = SimulatedProvider(
@@ -343,20 +342,22 @@ class DispatchOrderProjectionIntegrationTests(unittest.TestCase):
                 attempt_id=attempt_id,
             )
             self.assertEqual(len(projected_submission), 2)
-            send_started, acknowledged = projected_submission
+            send_started, unknown = projected_submission
             self.assertEqual(send_started.snapshot.state, "SEND_STARTED")
             self.assertEqual(
                 send_started.snapshot.submission_attempt_id,
                 attempt_id,
             )
-            # The provider may already have an execution in its activity feed,
-            # but acknowledgement alone is never permitted to invent that fill.
-            self.assertEqual(acknowledged.snapshot.state, "WORKING")
+            # The returned transport payload says ACKNOWLEDGED, but the generic
+            # projection must not interpret provider-specific lifecycle bytes.
+            # Independent execution evidence may still move UNKNOWN to FILLED.
+            self.assertEqual(unknown.snapshot.state, "UNKNOWN")
             self.assertEqual(
-                acknowledged.snapshot.submission_attempt_id,
+                unknown.snapshot.submission_attempt_id,
                 attempt_id,
             )
-            self.assertEqual(acknowledged.snapshot.filled_quantity, Decimal("0"))
+            self.assertIsNone(unknown.snapshot.provider_order_id)
+            self.assertEqual(unknown.snapshot.filled_quantity, Decimal("0"))
 
             fill = provider.activity_fills()[0]
             filled = orders.record_fill(
@@ -386,10 +387,7 @@ class DispatchOrderProjectionIntegrationTests(unittest.TestCase):
             restarted = projection(store)
             restored = restarted.order(client_order_id).snapshot()
             self.assertEqual(restored.state, "FILLED")
-            self.assertEqual(
-                restored.provider_order_id,
-                dispatched.response["provider_order_id"],
-            )
+            self.assertIsNone(restored.provider_order_id)
             self.assertEqual(restored.filled_quantity, Decimal("2"))
             self.assertEqual(restored.submission_attempt_id, attempt_id)
 

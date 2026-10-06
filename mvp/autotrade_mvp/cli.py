@@ -176,7 +176,15 @@ def _execute(args) -> int:
         if canonical is None and status.get("status") == "running":
             try:
                 economic_report = get_economic_report(args.state_dir)
-            except (OSError, ValueError):
+            except (
+                OSError,
+                sqlite3.Error,
+                RuntimeError,
+                KeyError,
+                TypeError,
+                ValueError,
+                ArithmeticError,
+            ):
                 economic_report = None
         print(format_accessible_status(status, economic_report))
         return 2 if accessible_status_state(status) in {"corrupt", "busy"} else 0

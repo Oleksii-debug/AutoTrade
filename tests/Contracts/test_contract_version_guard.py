@@ -38,6 +38,11 @@ def write_semantic_validator(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     version = manifest["contract_version"]
 
+    schema_path = root / "contracts" / "jsonschema" / "a.schema.json"
+    schema_payload = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema_payload["$defs"]["A"]["x-autotrade-semantic-validator"] = validator_id
+    schema_path.write_text(json.dumps(schema_payload), encoding="utf-8")
+
     corpus = root / "contracts" / "fixtures" / "semantic.corpus.json"
     corpus.parent.mkdir(parents=True, exist_ok=True)
     corpus.write_text(
@@ -193,6 +198,24 @@ class ContractVersionGuardTests(unittest.TestCase):
 
             write_tree(Path(right), version="6.0.0", defs=current_defs)
             self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_semantic_validator_requires_all_language_bindings(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left), version="6.0.0")
+            write_semantic_validator(Path(left))
+            write_tree(Path(right), version="7.0.0")
+            write_semantic_validator(Path(right))
+
+            manifest_path = Path(right) / "contracts" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            del manifest["semantic_validators"][0]["bindings"]["typescript"]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "must declare python/csharp/typescript bindings",
+            ):
+                evaluate(Path(left), Path(right))
 
     def test_semantic_validator_missing_binding_fails_closed(self):
         with TemporaryDirectory() as left, TemporaryDirectory() as right:

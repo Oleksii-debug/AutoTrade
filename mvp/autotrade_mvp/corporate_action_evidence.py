@@ -31,7 +31,12 @@ from .persistence import (
     payload_digest,
     require_exact_journal_store_authority,
 )
-from .provider_core import ProviderResponseObservation, Surface
+from .provider_core import (
+    ProviderResponseObservation,
+    Surface,
+    provider_response_observation_projection,
+    provider_response_observation_require_scope,
+)
 
 
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -265,11 +270,11 @@ def _provider_instant(value: object, name: str) -> datetime:
 
 
 def _canonical_observation_from_sealed_response(
-    source: ProviderResponseObservation,
+    projection: Mapping[str, object],
 ) -> CorporateActionObservation:
-    """Parse financially authoritative fields only from the sealed response."""
+    """Parse financially authoritative fields only from one verified snapshot."""
 
-    payload = source.payload
+    payload = projection["payload"]
     if not isinstance(payload, Mapping):
         raise CorporateActionEvidenceError(
             "corporate-action provider payload must be an object"
@@ -326,12 +331,14 @@ def _canonical_observation_from_sealed_response(
         for key, value in payload.items()
         if key not in _CORPORATE_ACTION_RESERVED_FIELDS
     }
-    source_observed = _provider_instant(source.observed_at, "observed_at")
+    source_observed = _provider_instant(
+        projection["observed_at"], "observed_at"
+    )
     return CorporateActionObservation(
-        provider_id=source.provider_id,
-        account_id=source.account_id,
-        environment=source.environment,
-        provider_instrument_version=source.query_binding.instrument_version,
+        provider_id=projection["provider_id"],
+        account_id=projection["account_id"],
+        environment=projection["environment"],
+        provider_instrument_version=projection["instrument_version"],
         instrument_id=payload["instrument_id"],
         instrument_version=instrument_version,
         external_event_id=payload["external_event_id"],
@@ -339,7 +346,7 @@ def _canonical_observation_from_sealed_response(
         kind=payload["kind"],
         effective_at=_provider_instant(payload["effective_at"], "effective_at"),
         observed_at=source_observed,
-        raw_evidence_digest=source.response_sha256,
+        raw_evidence_digest=projection["response_sha256"],
         payload=event_payload,
         complete=complete,
         source_sequence=source_sequence,
@@ -635,19 +642,35 @@ def _resolve_authoritative_corporate_action_impl(
         raise CorporateActionEvidenceError(
             "corporate-action evidence must be an exact sealed ProviderResponseObservation"
         )
-    if source.evidence_ref != reference:
+    if "require_scope" in vars(source):
+        raise CorporateActionEvidenceError(
+            "corporate-action provider observation callback must not be shadowed"
+        )
+
+    try:
+        projection = provider_response_observation_projection(source)
+    except Exception as error:
+        raise CorporateActionEvidenceError(
+            "corporate-action provider observation authority mismatch"
+        ) from error
+
+    if projection["evidence_ref"] != reference:
         raise CorporateActionEvidenceError(
             "resolved corporate-action evidence identity mismatch"
         )
-
-    binding = source.query_binding
-    endpoint = binding.endpoint
+    binding = projection["query_binding"]
+    if "require_scope" in vars(binding):
+        raise CorporateActionEvidenceError(
+            "corporate-action provider binding callback must not be shadowed"
+        )
+    endpoint = projection["endpoint"]
     if endpoint not in endpoints:
         raise CorporateActionEvidenceError(
             "corporate-action evidence endpoint is not allowed"
         )
     try:
-        source.require_scope(
+        projection = provider_response_observation_require_scope(
+            source,
             provider_id=expected_provider,
             surface=Surface.ACTIVITIES,
             endpoint=endpoint,
@@ -658,12 +681,19 @@ def _resolve_authoritative_corporate_action_impl(
         raise CorporateActionEvidenceError(
             "corporate-action provider evidence scope mismatch"
         ) from error
-    if binding.permission_scope != required_permission:
+    if (
+        projection["evidence_ref"] != reference
+        or projection["endpoint"] != endpoint
+    ):
+        raise CorporateActionEvidenceError(
+            "corporate-action provider observation changed during scope verification"
+        )
+    if projection["permission_scope"] != required_permission:
         raise CorporateActionEvidenceError(
             "corporate-action evidence permission scope mismatch"
         )
 
-    observation = _canonical_observation_from_sealed_response(source)
+    observation = _canonical_observation_from_sealed_response(projection)
     if observation.complete is not True:
         raise CorporateActionEvidenceError(
             "incomplete corporate-action evidence cannot authorize mutation"
@@ -690,7 +720,7 @@ def _resolve_authoritative_corporate_action_impl(
     if (
         instrument.provider_id.upper() != observation.provider_id
         or f"{instrument.provider_symbol}@{instrument.version}"
-        != binding.instrument_version
+        != projection["instrument_version"]
     ):
         raise CorporateActionEvidenceError(
             "corporate action does not match canonical instrument/provider binding"
@@ -698,7 +728,7 @@ def _resolve_authoritative_corporate_action_impl(
 
     provenance = {
         "schema_version": "1.0.0",
-        "evidence_ref": source.evidence_ref,
+        "evidence_ref": projection["evidence_ref"],
         "provider_id": observation.provider_id,
         "account_id": observation.account_id,
         "environment": observation.environment,
@@ -709,12 +739,12 @@ def _resolve_authoritative_corporate_action_impl(
         "instrument_version": observation.instrument_version,
         "kind": observation.kind,
         "effective_at": _utc_text(observation.effective_at),
-        "observed_at": source.observed_at,
-        "raw_evidence_digest": source.response_sha256,
-        "query_digest": binding.query_digest,
-        "capability_snapshot_id": binding.capability_snapshot_id,
+        "observed_at": projection["observed_at"],
+        "raw_evidence_digest": projection["response_sha256"],
+        "query_digest": projection["query_digest"],
+        "capability_snapshot_id": projection["capability_snapshot_id"],
         "endpoint": endpoint,
-        "permission_scope": binding.permission_scope,
+        "permission_scope": projection["permission_scope"],
         "parser_id": _CORPORATE_ACTION_PARSER_ID,
         "parser_version": _CORPORATE_ACTION_PARSER_VERSION,
         "parser_contract_digest": _CORPORATE_ACTION_PARSER_CONTRACT_DIGEST,
@@ -762,17 +792,17 @@ def _resolve_authoritative_corporate_action_impl(
     )
     accepted = AuthoritativeCorporateAction(
         event=event,
-        evidence_ref=source.evidence_ref,
+        evidence_ref=projection["evidence_ref"],
         provider_id=observation.provider_id,
         account_id=observation.account_id,
         environment=observation.environment,
         external_event_id=observation.external_event_id,
         provider_revision=observation.provider_revision,
-        raw_evidence_digest=source.response_sha256,
-        query_digest=binding.query_digest,
-        capability_snapshot_id=binding.capability_snapshot_id,
-        provider_instrument_version=binding.instrument_version,
-        observed_at=source.observed_at,
+        raw_evidence_digest=projection["response_sha256"],
+        query_digest=projection["query_digest"],
+        capability_snapshot_id=projection["capability_snapshot_id"],
+        provider_instrument_version=projection["instrument_version"],
+        observed_at=projection["observed_at"],
         provenance_digest=provenance_digest,
         corrects_external_event_id=observation.corrects_external_event_id,
     )

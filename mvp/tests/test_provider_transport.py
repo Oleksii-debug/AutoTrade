@@ -44,6 +44,7 @@ from mvp.autotrade_mvp.provider_transport import (
     BINANCE_SPOT_ENDPOINT_POLICIES,
     AuthenticatedReadHttpRequest,
     AuthenticatedReadWireResponse,
+    DirectAuthenticatedReadExecutionReceipt,
     AlpacaTradingHttpTransport,
     BinanceSpotAuthenticatedReadSigner,
     BinanceSpotAuthenticatedReadTransport,
@@ -56,6 +57,10 @@ from mvp.autotrade_mvp.provider_transport import (
     TradingWireResponse,
     SignedHttpRequest,
     UrllibJsonWireClient,
+    direct_authenticated_read_execution_receipt,
+    direct_authenticated_read_execution_receipt_snapshot,
+    direct_authenticated_read_network_policy_identity,
+    direct_authenticated_read_transport_identity,
     direct_trading_write_execution_receipt,
     direct_trading_write_exact_response_receipt,
     require_direct_trading_write_client,
@@ -4582,6 +4587,94 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
             body=b"{}",
             timeout_seconds=2,
         )
+
+    @staticmethod
+    def authenticated_read_request():
+        return AuthenticatedReadHttpRequest(
+            url="https://api.example.test/read?category=linear",
+            headers={"X-API-KEY": "synthetic"},
+            timeout_seconds=2,
+        )
+
+    def test_direct_authenticated_read_receipt_constructor_is_sealed(self):
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "minted only by canonical wire execution",
+        ):
+            DirectAuthenticatedReadExecutionReceipt()
+
+    def test_direct_authenticated_read_transport_identity_is_explicit(self):
+        self.assertEqual(
+            direct_authenticated_read_transport_identity(),
+            "autotrade.provider_transport.UrllibJsonWireClient:"
+            "direct-authenticated-read:v1",
+        )
+        policy = direct_authenticated_read_network_policy_identity()
+        self.assertTrue(policy.startswith("sha256:"))
+        self.assertEqual(len(policy), 71)
+
+    def test_forged_authenticated_read_receipt_has_no_execution_authority(self):
+        response = AuthenticatedReadWireResponse(
+            http_status=200,
+            body=b'{"ok":true}',
+        )
+        forged = object.__new__(DirectAuthenticatedReadExecutionReceipt)
+        object.__setattr__(
+            response,
+            "_direct_authenticated_read_execution_receipt",
+            forged,
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "construction authority is unavailable",
+        ):
+            direct_authenticated_read_execution_receipt(response)
+
+    def test_caller_assembled_authenticated_read_response_has_no_direct_receipt(self):
+        response = AuthenticatedReadWireResponse(
+            http_status=200,
+            body=b'{"ok":true}',
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "canonical direct authenticated-read execution receipt",
+        ):
+            direct_authenticated_read_execution_receipt(response)
+
+    def test_injected_opener_read_response_cannot_mint_direct_receipt(self):
+        class Stream(BytesIO):
+            status = 200
+
+            def __init__(self):
+                super().__init__(b'{"ok":true}')
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class InjectedOpener:
+            def open(self, *_args, **_kwargs):
+                return Stream()
+
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        client._opener = InjectedOpener()
+        response = client.send(self.authenticated_read_request())
+        self.assertIs(type(response), AuthenticatedReadWireResponse)
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "canonical direct authenticated-read execution receipt",
+        ):
+            direct_authenticated_read_execution_receipt(response)
+
+    def test_forged_read_receipt_snapshot_is_rejected(self):
+        forged = object.__new__(DirectAuthenticatedReadExecutionReceipt)
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "construction authority is unavailable",
+        ):
+            direct_authenticated_read_execution_receipt_snapshot(forged)
 
     def test_direct_trading_write_receipt_constructor_is_sealed(self):
         with self.assertRaisesRegex(

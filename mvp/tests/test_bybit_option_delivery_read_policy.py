@@ -117,6 +117,12 @@ class BybitOptionDeliveryReadPolicyTests(unittest.TestCase):
         }
         signed = sign(query)
         self.assertEqual(dict(parse_qsl(urlsplit(signed.url).query)), query)
+        self.assertIn(
+            "cursor=132791%3A0%2C132791%3A0",
+            urlsplit(signed.url).query,
+        )
+        self.assertNotIn("%253A", signed.url)
+        self.assertNotIn("%252C", signed.url)
 
     def test_category_is_required_and_option_only(self):
         cases = (
@@ -206,11 +212,22 @@ class BybitOptionDeliveryReadPolicyTests(unittest.TestCase):
                     sign({"category": "option", "expDate": exp_date})
 
     def test_cursor_is_nonempty_canonical_opaque_text(self):
-        for cursor in ("", " cursor", "cursor ", "two words", "\t"):
+        for cursor in (
+            "",
+            " cursor",
+            "cursor ",
+            "two words",
+            "\t",
+            "a&b",
+            "a=b",
+            "%ZZ",
+            "%3a",
+            "%",
+        ):
             with self.subTest(cursor=repr(cursor)):
                 with self.assertRaisesRegex(
                     ProviderTransportScopeError,
-                    "cursor must be canonical opaque text",
+                    "cursor must be canonical opaque percent-encoded text",
                 ):
                     sign({"category": "option", "cursor": cursor})
 

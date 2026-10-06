@@ -18,6 +18,7 @@ import re
 from types import MappingProxyType
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
+from weakref import ref as weakref_ref
 
 from .capabilities import CapabilityError, CapabilitySnapshot
 from .provider_core import (
@@ -69,6 +70,187 @@ _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT: Mapping[str, str] = {
     "DEMO": "PAPER",
 }
 _BYBIT_PREPARED_SUBMISSION_TOKEN = object()
+_BYBIT_FEE_CURRENCY_AUTHORITY_TOKEN = object()
+_FEE_CURRENCY_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_GIT_SHA256 = re.compile(r"^[0-9a-f]{40}$")
+_INSTRUMENT_VERSION_REF = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}@[1-9][0-9]*$"
+)
+
+
+@dataclass(frozen=True)
+class BybitFeeCurrencyAuthority:
+    """Typed provider/instrument fee-currency authority; issuance is source-owned."""
+
+    provider_id: str
+    provider_environment: str
+    account_id: str
+    entity_id: str
+    product_category: str
+    instrument_version: str
+    fee_currency: str
+    evidence_identity: str
+    valid_from: str
+    valid_to: str | None
+    qualification_id: str
+    adapter_build_sha: str
+    _factory_token: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._factory_token is not _BYBIT_FEE_CURRENCY_AUTHORITY_TOKEN:
+            raise ProviderCoreError(
+                "Bybit fee-currency authority must come from canonical issuance"
+            )
+        provider = _text(self.provider_id, name="fee authority provider_id").upper()
+        if provider != "BYBIT":
+            raise ProviderCoreError("Bybit fee authority provider_id must be BYBIT")
+        environment = _text(
+            self.provider_environment,
+            name="fee authority provider_environment",
+        ).upper()
+        if environment not in _REST_BASE_BY_ENVIRONMENT:
+            raise ProviderCoreError(
+                "Bybit fee authority provider_environment must be MAINNET, TESTNET or DEMO"
+            )
+        object.__setattr__(self, "provider_id", provider)
+        object.__setattr__(self, "provider_environment", environment)
+        object.__setattr__(self, "account_id", _text(self.account_id, name="fee authority account_id"))
+        object.__setattr__(self, "entity_id", _text(self.entity_id, name="fee authority entity_id"))
+        category = _text(
+            self.product_category,
+            name="fee authority product_category",
+        ).lower()
+        if category not in set(_CATEGORY_BY_FAMILY.values()):
+            raise ProviderCoreError("Bybit fee authority product_category is unsupported")
+        object.__setattr__(self, "product_category", category)
+        instrument = _text(
+            self.instrument_version,
+            name="fee authority instrument_version",
+        )
+        if _INSTRUMENT_VERSION_REF.fullmatch(instrument) is None:
+            raise ProviderCoreError(
+                "fee authority instrument_version must be canonical instrument_id@version"
+            )
+        object.__setattr__(self, "instrument_version", instrument)
+        object.__setattr__(
+            self,
+            "fee_currency",
+            _text(self.fee_currency, name="fee authority fee_currency").upper(),
+        )
+        evidence = _text(
+            self.evidence_identity,
+            name="fee authority evidence_identity",
+        )
+        if _FEE_CURRENCY_SHA256.fullmatch(evidence) is None:
+            raise ProviderCoreError(
+                "fee authority evidence_identity must be sha256:<64-hex>"
+            )
+        object.__setattr__(self, "evidence_identity", evidence)
+        object.__setattr__(
+            self,
+            "valid_from",
+            _utc_text(self.valid_from, name="fee authority valid_from"),
+        )
+        if self.valid_to is not None:
+            valid_to = _utc_text(self.valid_to, name="fee authority valid_to")
+            if valid_to <= self.valid_from:
+                raise ProviderCoreError("fee authority valid_to must be after valid_from")
+            object.__setattr__(self, "valid_to", valid_to)
+        qualification_id = _text(
+            self.qualification_id,
+            name="fee authority qualification_id",
+        )
+        if _FEE_CURRENCY_SHA256.fullmatch(qualification_id) is None:
+            raise ProviderCoreError(
+                "fee authority qualification_id must be sha256:<64-hex>"
+            )
+        object.__setattr__(self, "qualification_id", qualification_id)
+        build = _text(
+            self.adapter_build_sha,
+            name="fee authority adapter_build_sha",
+        )
+        if _GIT_SHA256.fullmatch(build) is None:
+            raise ProviderCoreError(
+                "fee authority adapter_build_sha must be a 40-character Git SHA"
+            )
+        object.__setattr__(self, "adapter_build_sha", build)
+
+
+def _install_bybit_fee_currency_authority() -> object:
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+    def prune() -> None:
+        for object_id, (value_ref, _snapshot) in tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def register(value: object) -> None:
+        if type(value) is not BybitFeeCurrencyAuthority:
+            raise ProviderCoreError(
+                "fee-currency authority registration requires exact authority"
+            )
+        prune()
+        object_id = id(value)
+        current = states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise ProviderCoreError("fee-currency authority identity collision")
+        states[object_id] = (
+            weakref_ref(value),
+            tuple(getattr(value, name) for name in (
+                "provider_id",
+                "provider_environment",
+                "account_id",
+                "entity_id",
+                "product_category",
+                "instrument_version",
+                "fee_currency",
+                "evidence_identity",
+                "valid_from",
+                "valid_to",
+                "qualification_id",
+                "adapter_build_sha",
+            )),
+        )
+
+    def require(value: object) -> BybitFeeCurrencyAuthority:
+        if type(value) is not BybitFeeCurrencyAuthority:
+            raise ProviderCoreError(
+                "qualified_fee_currency must be BybitFeeCurrencyAuthority"
+            )
+        prune()
+        state = states.get(id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderCoreError(
+                "Bybit fee-currency authority was not issued by canonical source authority"
+            )
+        expected = state[1]
+        current = tuple(getattr(value, name) for name in (
+            "provider_id",
+            "provider_environment",
+            "account_id",
+            "entity_id",
+            "product_category",
+            "instrument_version",
+            "fee_currency",
+            "evidence_identity",
+            "valid_from",
+            "valid_to",
+            "qualification_id",
+            "adapter_build_sha",
+        ))
+        if current != expected:
+            raise ProviderCoreError(
+                "Bybit fee-currency authority changed after canonical issuance"
+            )
+        return value
+
+    return register, require
+
+
+_register_bybit_fee_currency_authority, _require_bybit_fee_currency_authority = (
+    _install_bybit_fee_currency_authority()
+)
+del _install_bybit_fee_currency_authority
 
 
 _DERIVATIVE_ORDER_SCOPE_BY_FAMILY: Mapping[str, str] = {
@@ -794,11 +976,53 @@ def parse_submission_response(
     }
 
 
+def _validate_bybit_fee_currency_authority_binding(
+    authority: BybitFeeCurrencyAuthority,
+    *,
+    observation: ProviderResponseObservation,
+    product_category: object,
+    instrument_version: str,
+    trade_time: str,
+) -> str:
+    _require_bybit_fee_currency_authority(authority)
+    if authority.account_id != observation.account_id:
+        raise ProviderCoreError(
+            "Bybit fee-currency authority account does not match execution evidence"
+        )
+    expected_runtime_environment = (
+        "LIVE" if authority.provider_environment == "MAINNET" else "PAPER"
+    )
+    if expected_runtime_environment != observation.environment:
+        raise ProviderCoreError(
+            "Bybit fee-currency authority environment does not match execution evidence"
+        )
+    query_category = observation.query_binding.query.get("category")
+    if (
+        type(product_category) is not str
+        or query_category != authority.product_category
+        or product_category != authority.product_category
+    ):
+        raise ProviderCoreError(
+            "Bybit fee-currency authority product category does not match execution query"
+        )
+    if authority.instrument_version != instrument_version:
+        raise ProviderCoreError(
+            "Bybit fee-currency authority instrument does not match execution evidence"
+        )
+    if trade_time < authority.valid_from or (
+        authority.valid_to is not None and trade_time >= authority.valid_to
+    ):
+        raise ProviderCoreError(
+            "Bybit fee-currency authority is outside its validity interval"
+        )
+    return authority.fee_currency
+
+
 def parse_executions(
     observation: ProviderResponseObservation,
     *,
     instrument_versions: Mapping[str, str],
-    qualified_fee_currencies: Mapping[str, str] | None = None,
+    qualified_fee_currency: BybitFeeCurrencyAuthority | None = None,
 ) -> tuple[ProviderFillEvidence, ...]:
     """Map one authenticated, exact-byte Bybit execution read into fills."""
 
@@ -821,10 +1045,8 @@ def parse_executions(
         raise ProviderCoreError("result.list must be an array")
     if not isinstance(instrument_versions, Mapping):
         raise ProviderCoreError("instrument_versions must be a mapping")
-    if qualified_fee_currencies is not None and not isinstance(
-        qualified_fee_currencies, Mapping
-    ):
-        raise ProviderCoreError("qualified_fee_currencies must be a mapping")
+    if qualified_fee_currency is not None:
+        _require_bybit_fee_currency_authority(qualified_fee_currency)
 
     by_execution: dict[str, ProviderFillEvidence] = {}
     for index, value in enumerate(rows):
@@ -851,24 +1073,34 @@ def parse_executions(
                 "in canonical fill economics"
             )
 
+        trade_time = _millis_to_utc(row.get("execTime"), name="execTime")
         provider_fee_currency = row.get("feeCurrency")
         if isinstance(provider_fee_currency, str) and provider_fee_currency.strip():
             fee_currency = provider_fee_currency.strip()
-        else:
-            if qualified_fee_currencies is None:
-                raise ProviderCoreError(
-                    "Bybit execution fee currency is unresolved; qualified "
-                    "fee-currency evidence is required"
+            if qualified_fee_currency is not None:
+                qualified_currency = _validate_bybit_fee_currency_authority_binding(
+                    qualified_fee_currency,
+                    observation=observation,
+                    product_category=observation.query_binding.query.get("category"),
+                    instrument_version=instrument,
+                    trade_time=trade_time,
                 )
-            try:
-                fee_currency = qualified_fee_currencies[instrument]
-            except KeyError as error:
+                if fee_currency != qualified_currency:
+                    raise ProviderCoreError(
+                        "Bybit provider feeCurrency disagrees with qualified fee-currency authority"
+                    )
+        else:
+            if qualified_fee_currency is None:
                 raise ProviderCoreError(
-                    "Bybit execution fee currency is unresolved for instrument"
-                ) from error
-            fee_currency = _text(
-                fee_currency,
-                name="qualified fee currency",
+                    "Bybit execution fee currency is unresolved; canonical "
+                    "typed fee-currency authority is required"
+                )
+            fee_currency = _validate_bybit_fee_currency_authority_binding(
+                qualified_fee_currency,
+                observation=observation,
+                product_category=observation.query_binding.query.get("category"),
+                instrument_version=instrument,
+                trade_time=trade_time,
             )
 
         side = _text(row.get("side"), name="side").upper()
@@ -886,7 +1118,7 @@ def parse_executions(
             price=row.get("execPrice"),
             fee_amount=row.get("execFee"),
             fee_currency=fee_currency,
-            trade_time=_millis_to_utc(row.get("execTime"), name="execTime"),
+            trade_time=trade_time,
             evidence_refs=(observation.evidence_ref,),
         )
         previous = by_execution.get(execution_id)

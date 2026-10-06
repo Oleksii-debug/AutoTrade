@@ -213,5 +213,104 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
             self.assertNotIn("response_text", events[-1]["payload"])
 
 
+    def test_transport_cannot_replace_json_loads_in_place_after_send(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            json_module = dispatch_module.json
+            original_loads = json_module.loads
+
+            def forged_loads(_text, **_kwargs):
+                return {"forged": True}
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                json_module.loads = forged_loads
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "snapshot-json-loads-retarget",
+                    transport,
+                )
+            finally:
+                json_module.loads = original_loads
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            events = self._events(
+                path,
+                dispatcher,
+                "snapshot-json-loads-retarget",
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:ValueError",
+            )
+            self.assertNotIn("response_text", events[-1]["payload"])
+
+    def test_transport_cannot_replace_depth_guard_code_after_send(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            depth_guard = dispatch_module.require_provider_json_depth
+            original_code = depth_guard.__code__
+
+            def forged_depth_guard(_raw):
+                return None
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                depth_guard.__code__ = forged_depth_guard.__code__
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "snapshot-depth-guard-retarget",
+                    transport,
+                )
+            finally:
+                depth_guard.__code__ = original_code
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            events = self._events(
+                path,
+                dispatcher,
+                "snapshot-depth-guard-retarget",
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:ValueError",
+            )
+            self.assertNotIn("response_text", events[-1]["payload"])
+
+
 if __name__ == "__main__":
     unittest.main()

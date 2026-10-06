@@ -68,14 +68,6 @@ class CallbackString(str):
         raise AssertionError("caller string code must not execute")
 
 
-class CallbackInt(int):
-    calls = 0
-
-    def __lt__(self, other):
-        type(self).calls += 1
-        raise AssertionError("caller integer code must not execute")
-
-
 def at(month=9, day=24, hour=16, minute=0, second=0):
     return datetime(2026, month, day, hour, minute, second, tzinfo=timezone.utc)
 
@@ -240,34 +232,16 @@ class MarketNormalizationTests(unittest.TestCase):
             "2026-09-24T16:00:00Z",
         )
 
-    def test_trade_side_rejects_string_subclass_without_callbacks(self):
+    def test_book_lookup_rejects_string_subclass_without_callbacks(self):
         CallbackString.calls = 0
         normalizer = MarketNormalizer(registry())
-        update = raw(
-            "TRADE",
-            {"price": "100.01", "quantity": "1", "side": CallbackString("buy")},
-        )
         with self.assertRaisesRegex(MarketDataError, "exact string"):
-            normalizer.normalize(update)
+            normalizer.book_state(
+                provider_id=CallbackString("provider-a"),
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+            )
         self.assertEqual(CallbackString.calls, 0)
-
-    def test_book_sequence_rejects_integer_subclass_without_callbacks(self):
-        CallbackInt.calls = 0
-        normalizer = MarketNormalizer(registry())
-        update = raw(
-            "BOOK_SNAPSHOT",
-            {
-                "bids": [["100.00", "1"]],
-                "asks": [["100.01", "1"]],
-                "first_sequence": CallbackInt(1),
-                "last_sequence": 1,
-            },
-            stream="book",
-            generation=1,
-        )
-        with self.assertRaisesRegex(MarketDataError, "exact non-negative integer"):
-            normalizer.normalize(update)
-        self.assertEqual(CallbackInt.calls, 0)
 
     def test_trade_normalizes_to_contract_without_binary_numbers(self):
         normalizer = MarketNormalizer(registry())

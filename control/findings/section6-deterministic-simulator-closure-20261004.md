@@ -125,3 +125,29 @@ Section 6 may be marked DONE only when that final head has:
 The result remains provider-free simulation authority only. It does not grant
 PAPER/LIVE/provider qualification, economic-edge/profitability, signed-release,
 native-Windows or human-NVDA qualification.
+
+
+## 2026-10-06 final Prepared/send race and exact-lease hardening
+
+A final adversarial review of the zero-wire recovery seam found two residuals and
+closed both on this canonical Section-6 lineage:
+
+- if recovery had already read durable `SubmissionPrepared` but the original
+  final send barrier committed `SubmissionSending` before recovery could commit
+  version-2 `SubmissionBlocked`, the recovery CAS conflict could escape as a
+  `ValueError`; recovery now reloads durable truth and converges to terminal
+  state or the existing `SubmissionSending -> SubmissionUnknown` path instead
+  of fabricating zero-wire safety or leaking the version race;
+- Prepared lease age no longer passes through
+  `timedelta.total_seconds()`/binary float.  It is compared as exact
+  `timedelta` chronology, and `prepared_lease_seconds` must be an exact
+  built-in positive integer.
+
+Focused regressions now cover both race orders (BLOCKED wins and Sending wins),
+two recoveries converging through durable truth, hostile integer lease input,
+and the exact microsecond expiry boundary immediately before and at lease
+expiration.
+
+These changes preserve the fail-closed rule: before `SubmissionSending`, an
+expired Prepared can be proven zero-wire and BLOCKED; once `SubmissionSending`
+wins, recovery is UNKNOWN and cannot be blindly resent.

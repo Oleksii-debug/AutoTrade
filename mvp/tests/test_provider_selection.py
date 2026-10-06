@@ -342,6 +342,41 @@ class ProviderSelectionTests(unittest.TestCase):
                     decision_journal_sequence_cut=route.decision_journal_sequence_cut,
                 )
 
+    def test_selected_route_rejects_post_selection_candidate_mutation(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            result = select_provider(
+                request(),
+                [candidate()],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            route = result.selected
+            self.assertIsNotNone(route)
+            selected_candidate = route.candidate
+            original_account_id = selected_candidate.account_id
+
+            object.__setattr__(
+                selected_candidate,
+                "account_id",
+                "retargeted-account",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    (ProviderSelectionError, PermissionError),
+                    "selected provider route authority changed",
+                ):
+                    _ = route.candidate
+            finally:
+                object.__setattr__(
+                    selected_candidate,
+                    "account_id",
+                    original_account_id,
+                )
+
+            self.assertIs(route.candidate, selected_candidate)
+
     def test_testnet_authority_does_not_admit_demo_route(self):
         with TemporaryDirectory() as directory:
             capabilities, qualifications, _record = self.authorities(directory)

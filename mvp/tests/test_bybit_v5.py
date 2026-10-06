@@ -541,8 +541,11 @@ class BybitV5AdapterTests(unittest.TestCase):
         )
         payload = json.loads(json.dumps(response))
         result = payload.get("result")
-        if isinstance(result, dict) and result.get("orderLinkId") == "__CLIENT__":
-            result["orderLinkId"] = client_id
+        if isinstance(result, dict):
+            if result.get("orderLinkId") == "__CLIENT__":
+                result["orderLinkId"] = client_id
+            elif result.get("orderLinkId") == "__CLIENT_PADDED__":
+                result["orderLinkId"] = f" {client_id} "
         raw = json.dumps(
             payload,
             sort_keys=True,
@@ -631,6 +634,50 @@ class BybitV5AdapterTests(unittest.TestCase):
             result["evidence"][0]["sha256"],
             observation.response_sha256,
         )
+
+    def test_success_response_rejects_noncanonical_provider_order_id(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "orderId": " provider-123 ",
+                    "orderLinkId": "__CLIENT__",
+                },
+            },
+            intent_id="bybit-noncanonical-provider-order-id",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "orderId response must be canonical exact text",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+
+    def test_success_response_rejects_noncanonical_echoed_client_order_id(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "orderId": "provider-123",
+                    "orderLinkId": "__CLIENT_PADDED__",
+                },
+            },
+            intent_id="bybit-noncanonical-client-order-id",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "orderLinkId response must be canonical exact text",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
 
     def test_response_evidence_is_bound_to_provider_environment(self):
         base = {

@@ -40,6 +40,74 @@ from .provider_response_limits import (
     require_provider_response_bytes,
 )
 
+_CANONICAL_PROVIDER_ORIGIN_REQUIRE_RESPONSE_BYTES = require_provider_response_bytes
+_CANONICAL_PROVIDER_ORIGIN_REQUIRE_RESPONSE_BYTES_CODE = (
+    require_provider_response_bytes.__code__
+)
+_CANONICAL_PROVIDER_ORIGIN_HARD_MAX_RESPONSE_BYTES = HARD_MAX_PROVIDER_RESPONSE_BYTES
+_CANONICAL_PROVIDER_ORIGIN_MAX_RESPONSE_BASE64_CHARS = (
+    4 * ((_CANONICAL_PROVIDER_ORIGIN_HARD_MAX_RESPONSE_BYTES + 2) // 3)
+)
+
+
+def _require_provider_origin_response_resource_authority() -> None:
+    if (
+        require_provider_response_bytes
+        is not _CANONICAL_PROVIDER_ORIGIN_REQUIRE_RESPONSE_BYTES
+        or require_provider_response_bytes.__code__
+        is not _CANONICAL_PROVIDER_ORIGIN_REQUIRE_RESPONSE_BYTES_CODE
+        or HARD_MAX_PROVIDER_RESPONSE_BYTES
+        != _CANONICAL_PROVIDER_ORIGIN_HARD_MAX_RESPONSE_BYTES
+    ):
+        raise ProviderOriginError(
+            "provider-origin response resource authority changed"
+        )
+
+
+def _bounded_provider_origin_response_bytes(
+    value: object,
+    *,
+    name: str,
+) -> bytes:
+    _require_provider_origin_response_resource_authority()
+    if type(value) is not bytes or not value:
+        raise ProviderOriginError(f"{name} must be exact non-empty bytes")
+    try:
+        return _CANONICAL_PROVIDER_ORIGIN_REQUIRE_RESPONSE_BYTES(
+            value,
+            max_bytes=_CANONICAL_PROVIDER_ORIGIN_HARD_MAX_RESPONSE_BYTES,
+        )
+    except (TypeError, ValueError) as error:
+        raise ProviderOriginError(
+            f"{name} exceed provider response authority budget"
+        ) from error
+
+
+def _decode_bounded_provider_origin_base64(
+    value: object,
+    *,
+    name: str,
+) -> bytes:
+    _require_provider_origin_response_resource_authority()
+    if type(value) is not str or not value:
+        raise ProviderOriginError(f"{name} are missing")
+    if len(value) > _CANONICAL_PROVIDER_ORIGIN_MAX_RESPONSE_BASE64_CHARS:
+        raise ProviderOriginError(
+            f"{name} exceed provider response authority budget"
+        )
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except (ValueError, TypeError) as error:
+        raise ProviderOriginError(
+            f"{name} are not canonical base64"
+        ) from error
+    if base64.b64encode(raw).decode("ascii") != value:
+        raise ProviderOriginError(
+            f"{name} are not canonical base64"
+        )
+    return _bounded_provider_origin_response_bytes(raw, name=name)
+
+
 
 class ProviderOriginError(RuntimeError):
     """Raised when durable provider-origin authority is incomplete or invalid."""
@@ -425,17 +493,10 @@ class AuthenticatedReadResponseBinding:
             _exact_text(getattr(self, name), name=name)
         if type(self.http_status) is not int or not 100 <= self.http_status <= 599:
             raise ProviderOriginError("http_status must be exact integer 100..599")
-        if type(self.response_bytes) is not bytes or not self.response_bytes:
-            raise ProviderOriginError("response_bytes must be exact non-empty bytes")
-        try:
-            require_provider_response_bytes(
-                self.response_bytes,
-                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
-            )
-        except (TypeError, ValueError) as error:
-            raise ProviderOriginError(
-                "response_bytes exceed provider response authority budget"
-            ) from error
+        _bounded_provider_origin_response_bytes(
+            self.response_bytes,
+            name="response_bytes",
+        )
         digest = "sha256:" + sha256(self.response_bytes).hexdigest()
         if self.response_sha256 != digest or _SHA256_RE.fullmatch(digest) is None:
             raise ProviderOriginError("response_sha256 conflicts with exact response bytes")
@@ -642,17 +703,10 @@ class ProviderOriginJournal:
         attempt = _exact_text(attempt_id, name="attempt_id")
         if type(http_status) is not int or not 100 <= http_status <= 599:
             raise ProviderOriginError("http_status must be exact integer 100..599")
-        if type(response_bytes) is not bytes or not response_bytes:
-            raise ProviderOriginError("response_bytes must be exact non-empty bytes")
-        try:
-            raw = require_provider_response_bytes(
-                response_bytes,
-                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
-            )
-        except (TypeError, ValueError) as error:
-            raise ProviderOriginError(
-                "response_bytes exceed provider response authority budget"
-            ) from error
+        raw = _bounded_provider_origin_response_bytes(
+            response_bytes,
+            name="response_bytes",
+        )
         observed_text = _utc_text(observed_at, name="observed_at")
         store, identity = self._require_store()
         events = _load_origin_events(store, identity, attempt)
@@ -761,24 +815,10 @@ class ProviderOriginJournal:
         if type(status) is not int or not 100 <= status <= 599:
             raise ProviderOriginError("durable provider HTTP status is invalid")
         encoded = observed_payload.get("response_base64")
-        if type(encoded) is not str or not encoded:
-            raise ProviderOriginError("durable provider response bytes are missing")
-        try:
-            raw = base64.b64decode(encoded, validate=True)
-        except Exception as error:
-            raise ProviderOriginError(
-                "durable provider response bytes are not canonical base64"
-            ) from error
-        if type(raw) is not bytes or not raw:
-            raise ProviderOriginError("durable provider response bytes are empty")
-        try:
-            require_provider_response_bytes(
-                raw, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES
-            )
-        except (TypeError, ValueError) as error:
-            raise ProviderOriginError(
-                "durable provider response exceeds authority budget"
-            ) from error
+        raw = _decode_bounded_provider_origin_base64(
+            encoded,
+            name="durable provider response bytes",
+        )
         response_digest = "sha256:" + sha256(raw).hexdigest()
         if observed_payload.get("response_sha256") != response_digest:
             raise ProviderOriginError(
@@ -1659,19 +1699,10 @@ class HostAuthenticatedReadJournalBridge:
             verify_host_prepared_attestation,
         )
 
-        if type(response_bytes) is not bytes or not response_bytes:
-            raise ProviderOriginError(
-                "Host Observed response_bytes must be exact non-empty bytes"
-            )
-        try:
-            require_provider_response_bytes(
-                response_bytes,
-                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
-            )
-        except (TypeError, ValueError) as error:
-            raise ProviderOriginError(
-                "Host Observed response_bytes exceed provider response authority budget"
-            ) from error
+        _bounded_provider_origin_response_bytes(
+            response_bytes,
+            name="Host Observed response_bytes",
+        )
         expected = _query_snapshot(query_binding)
         pins = _require_host_expected_scope(expected_scope)
         try:

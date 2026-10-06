@@ -195,7 +195,7 @@ def _provider_fill_accounting_evidence_payload(
     same identity material that originally named the economic transaction.
     """
 
-    return {
+    payload = {
         "schema_version": "1.0.0",
         "provider_id": provider,
         "environment": book.environment,
@@ -215,6 +215,9 @@ def _provider_fill_accounting_evidence_payload(
         "trade_time": provider_fill.trade_time,
         "provider_revision": projected_fill.provider_revision,
     }
+    if provider_fill.provider_environment != book.environment:
+        payload["provider_environment"] = provider_fill.provider_environment
+    return payload
 
 
 def _validated_fill_evidence(
@@ -241,6 +244,14 @@ def _validated_fill_evidence(
     if durable_provider is not None and durable_provider != provider:
         raise AccountingConflict(
             "provider fill provider scope does not match durable economic book"
+        )
+    durable_provider_environment = getattr(book, "provider_environment", None)
+    if (
+        durable_provider_environment is not None
+        and provider_fill.provider_environment != durable_provider_environment
+    ):
+        raise AccountingConflict(
+            "provider fill provider_environment does not match durable economic book"
         )
     instrument = _text(expected_instrument, name="expected_instrument")
     settlement = _text(settlement_currency, name="settlement_currency").upper()
@@ -351,6 +362,7 @@ def _current_unexpected_execution_checkpoint(
         provider_id=provider_fill.provider_id,
         account_id=provider_fill.account_id,
         environment=provider_fill.environment,
+        provider_environment=provider_fill.provider_environment,
     )
     payload = checkpoint.get("payload")
     if not isinstance(payload, dict):
@@ -611,8 +623,14 @@ def build_provider_fill_transaction(
     )
     evidence_digest = payload_digest(evidence)
     transaction_id = "provider-fill:" + evidence_digest.removeprefix("sha256:")
+    provider_domain = (
+        ""
+        if provider_fill.provider_environment == book.environment
+        else f"provider-environment:{provider_fill.provider_environment}:"
+    )
     cause_event_id = (
         f"provider:{provider}:environment:{book.environment}:"
+        f"{provider_domain}"
         f"account:{book.account_id}:execution:{provider_fill.provider_execution_id}"
     )
     return book_equity_fill(
@@ -764,6 +782,8 @@ def build_provider_fill_financial_plan(
             for key, value in usage_items
         },
     }
+    if provider_fill.provider_environment != provider_fill.environment:
+        material["provider_environment"] = provider_fill.provider_environment
     return ProviderFillFinancialPlan(
         reservation_id=reservation_snapshot.reservation_id,
         intent_id=reservation_snapshot.intent_id,

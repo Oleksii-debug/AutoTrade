@@ -1714,6 +1714,32 @@ class QualificationAttestationTests(unittest.TestCase):
         self.assertEqual(accepted.attestation_json, expected_attestation_json)
         self.assertEqual(accepted.signature_b64, expected_signature)
 
+    def test_verified_snapshot_freezes_signature_before_evidence_callback(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        receipt = SignedQualificationAttestation(original, sign(original))
+        expected_signature = receipt.signature_b64
+        forged_signature = base64.b64encode(b"forged-after-verification").decode("ascii")
+        original_resolve = qualification_attestation_module._resolve_evidence
+
+        def mutate_receipt_after_evidence_read(read_snapshot, ref):
+            original_resolve(read_snapshot, ref)
+            object.__setattr__(receipt, "signature_b64", forged_signature)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with patch.object(
+                qualification_attestation_module,
+                "_resolve_evidence",
+                side_effect=mutate_receipt_after_evidence_read,
+            ):
+                accepted = verify(receipt, store, policy(trust_root))
+
+        self.assertEqual(receipt.signature_b64, forged_signature)
+        self.assertEqual(accepted.signature_b64, expected_signature)
+
+
 
 
 if __name__ == "__main__":

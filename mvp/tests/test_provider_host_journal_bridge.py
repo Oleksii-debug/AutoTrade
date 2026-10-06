@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from copy import deepcopy
 from datetime import datetime, timezone
 from hashlib import sha256
 import sys
@@ -11,6 +12,9 @@ from unittest.mock import patch
 import mvp.autotrade_mvp.provider_host_attestation as attestation
 import mvp.autotrade_mvp.provider_origin as provider_origin
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.provider_origin_journal_identity import (
+    canonical_provider_origin_journal_identity,
+)
 from mvp.autotrade_mvp.provider_origin import (
     HostAuthenticatedReadExpectedScope,
     HostAuthenticatedReadJournalBridge,
@@ -215,6 +219,15 @@ class HostAuthenticatedReadJournalBridgeTests(unittest.TestCase):
             committed_at=_OBSERVED_COMMIT,
         )
 
+    def test_writer_and_verifier_share_one_canonical_journal_identity(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            bridge = HostAuthenticatedReadJournalBridge(store)
+            self.assertEqual(
+                bridge.journal_identity,
+                canonical_provider_origin_journal_identity(store),
+            )
+
     def test_restart_replays_same_host_attempt_and_canonical_journal_cut(self):
         query = authenticated_read_binding()
         fixture = _fixture(query)
@@ -381,6 +394,116 @@ class HostAuthenticatedReadJournalBridgeTests(unittest.TestCase):
                 ),
                 [],
             )
+
+    def test_verified_prepared_input_is_detached_before_journal_write(self):
+        query = authenticated_read_binding()
+        fixture = _fixture(query)
+        mutable_prepared = deepcopy(fixture[0])
+        canonical_prepared = deepcopy(fixture[0])
+        with TemporaryDirectory() as directory, patch.object(
+            attestation,
+            "_verify_p256_sha256_p1363",
+            return_value=None,
+        ):
+            verified = attestation.verify_host_prepared_attestation(
+                canonical_prepared,
+                expected_session_identity=fixture[2],
+                expected_public_key_sha256=fixture[3],
+                expected_query=canonical_prepared["query"],
+            )
+
+            def mutate_after_verification(value, **_kwargs):
+                value["attempt"]["subject"]["transport_identity"] = (
+                    "provider-transport:attacker"
+                )
+                return verified
+
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            bridge = HostAuthenticatedReadJournalBridge(store)
+            with patch.object(
+                attestation,
+                "verify_host_prepared_attestation",
+                side_effect=mutate_after_verification,
+            ):
+                bridge.commit_prepared(
+                    mutable_prepared,
+                    query_binding=query,
+                    expected_session_identity=fixture[2],
+                    expected_public_key_sha256=fixture[3],
+                    expected_scope=fixture[4],
+                    committed_at=_PREPARED_COMMIT,
+                )
+
+            events = JournalStore.load_events(
+                store,
+                "authenticated_provider_read",
+                canonical_prepared["attempt"]["read_attempt_id"],
+            )
+            stored = events[0]["payload"]["host_prepared_attestation"]
+            self.assertEqual(
+                stored["attempt"]["subject"]["transport_identity"],
+                fixture[4].transport_identity,
+            )
+            self.assertEqual(stored, canonical_prepared)
+            self.assertNotEqual(stored, mutable_prepared)
+
+    def test_verified_provider_receipt_is_detached_before_observed_write(self):
+        query = authenticated_read_binding()
+        fixture = _fixture(query)
+        mutable_receipt = deepcopy(fixture[1])
+        canonical_receipt = deepcopy(fixture[1])
+        with TemporaryDirectory() as directory, patch.object(
+            attestation,
+            "_verify_p256_sha256_p1363",
+            return_value=None,
+        ):
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            bridge = HostAuthenticatedReadJournalBridge(store)
+            prepared_receipt = self._commit_prepared(bridge, query, fixture)
+            verified_prepared = attestation.verify_host_prepared_attestation(
+                fixture[0],
+                expected_session_identity=fixture[2],
+                expected_public_key_sha256=fixture[3],
+                expected_query=fixture[0]["query"],
+            )
+            parsed_receipt = attestation._parse_receipt(
+                canonical_receipt,
+                prepared=verified_prepared,
+                response_bytes=fixture[5],
+            )
+
+            def mutate_after_parse(value, **_kwargs):
+                value["http_status"] = 599
+                value["response_sha256"] = "sha256:" + "f" * 64
+                return parsed_receipt
+
+            with patch.object(
+                attestation,
+                "_parse_receipt",
+                side_effect=mutate_after_parse,
+            ):
+                bridge.commit_observed(
+                    fixture[0],
+                    mutable_receipt,
+                    provider_origin._host_prepared_receipt_payload(
+                        prepared_receipt
+                    ),
+                    fixture[5],
+                    query_binding=query,
+                    expected_session_identity=fixture[2],
+                    expected_public_key_sha256=fixture[3],
+                    expected_scope=fixture[4],
+                    committed_at=_OBSERVED_COMMIT,
+                )
+
+            events = JournalStore.load_events(
+                store,
+                "authenticated_provider_read",
+                fixture[0]["attempt"]["read_attempt_id"],
+            )
+            stored = events[1]["payload"]["host_provider_receipt"]
+            self.assertEqual(stored, canonical_receipt)
+            self.assertNotEqual(stored, mutable_receipt)
 
     def test_response_tamper_cannot_append_observed_event(self):
         query = authenticated_read_binding()

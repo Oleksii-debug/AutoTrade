@@ -689,6 +689,8 @@ def _install_journal_store_authority():
     seen_executables = set()
     global_binding_states = []
     seen_global_bindings = set()
+    nested_global_binding_states = []
+    seen_nested_global_bindings = set()
     global_missing = object()
     for _base, members in class_surfaces:
         for _member_name, member in members:
@@ -731,17 +733,46 @@ def _install_journal_store_authority():
                         if binding_key in seen_global_bindings:
                             continue
                         seen_global_bindings.add(binding_key)
+                        expected_global = canonical_dict.get(
+                            candidate_globals,
+                            global_name,
+                            global_missing,
+                        )
                         global_binding_states.append(
                             (
                                 candidate_globals,
                                 global_name,
-                                canonical_dict.get(
-                                    candidate_globals,
-                                    global_name,
-                                    global_missing,
-                                ),
+                                expected_global,
                             )
                         )
+                        if expected_global is global_missing:
+                            continue
+                        nested_namespace = canonical_getattr(
+                            expected_global,
+                            "__dict__",
+                            None,
+                        )
+                        if canonical_type(nested_namespace) is not canonical_dict:
+                            continue
+                        for nested_name in candidate_names:
+                            nested_key = (
+                                canonical_id(nested_namespace),
+                                nested_name,
+                            )
+                            if nested_key in seen_nested_global_bindings:
+                                continue
+                            seen_nested_global_bindings.add(nested_key)
+                            nested_global_binding_states.append(
+                                (
+                                    nested_namespace,
+                                    nested_name,
+                                    canonical_dict.get(
+                                        nested_namespace,
+                                        nested_name,
+                                        global_missing,
+                                    ),
+                                )
+                            )
                 candidate_kwdefaults = canonical_getattr(
                     candidate,
                     "__kwdefaults__",
@@ -781,6 +812,28 @@ def _install_journal_store_authority():
                 )
     executable_states = canonical_tuple(executable_states)
     global_binding_states = canonical_tuple(global_binding_states)
+    nested_global_binding_states = canonical_tuple(
+        nested_global_binding_states
+    )
+
+    def nested_global_binding_state_is_unchanged() -> bool:
+        for namespace, name, expected in nested_global_binding_states:
+            if (
+                canonical_dict.get(namespace, name, global_missing)
+                is not expected
+            ):
+                return False
+        return True
+
+    def restore_nested_global_binding_state() -> None:
+        for namespace, name, expected in nested_global_binding_states:
+            current = canonical_dict.get(namespace, name, global_missing)
+            if current is expected:
+                continue
+            if expected is global_missing:
+                canonical_dict.pop(namespace, name, None)
+            else:
+                canonical_dict.__setitem__(namespace, name, expected)
 
     def global_binding_state_is_unchanged() -> bool:
         for namespace, name, expected in global_binding_states:
@@ -890,7 +943,13 @@ def _install_journal_store_authority():
                     raise RuntimeError("submission journal class authority changed")
         if not global_binding_state_is_unchanged():
             restore_global_binding_state()
+            restore_nested_global_binding_state()
             raise RuntimeError("submission journal module authority changed")
+        if not nested_global_binding_state_is_unchanged():
+            restore_nested_global_binding_state()
+            raise RuntimeError(
+                "submission journal module dependency authority changed"
+            )
         if not executable_state_is_unchanged():
             restore_executable_state()
             raise RuntimeError("submission journal executable authority changed")

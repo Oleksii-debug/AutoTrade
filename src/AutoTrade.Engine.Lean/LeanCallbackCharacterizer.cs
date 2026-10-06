@@ -274,11 +274,14 @@ public sealed class LeanCallbackCharacterizer
             }
         }
 
-        if (state.ArrivalHighWaterUtc.HasValue &&
-            state.Callbacks.Any(entry => entry.UtcTime > state.ArrivalHighWaterUtc.Value))
+        if (state.ArrivalHighWaterUtc.HasValue)
         {
-            throw new InvalidDataException(
-                "LEAN callback restart arrival high-water predates a stored callback.");
+            var expectedArrivalHighWaterUtc = state.Callbacks.Max(entry => entry.UtcTime);
+            if (state.ArrivalHighWaterUtc.Value != expectedArrivalHighWaterUtc)
+            {
+                throw new InvalidDataException(
+                    "LEAN callback restart arrival high-water must equal the latest stored callback time.");
+            }
         }
 
         result._arrivalHighWaterUtc = state.ArrivalHighWaterUtc;

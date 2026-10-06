@@ -1499,26 +1499,11 @@ def verify_qualification_attestation(
         root=root,
     )
 
-    # Only now may external evidence-reader construction execute callbacks.
-    # The complete signed graph, expected scope, policy/root authorization and
-    # RSA signature are already detached and verified, so reader construction
-    # cannot retarget the trust decision that selected this attestation.
-    try:
-        evidence_reader = trusted_authenticated_reader(
-            evidence_root,
-            publication_store=evidence_store,
-        )
-    except (ArtifactIntegrityError, OSError, TypeError, ValueError) as error:
-        raise QualificationTrustError(
-            "evidence artifact authority cannot be bound"
-        ) from error
-
-    for ref in attestation.evidence_refs:
-        _resolve_evidence(evidence_reader, ref)
-
-    # Materialize a detached exact snapshot. Consumers must not retain the
-    # caller-owned attestation graph as a source of signed semantics.
-    return AcceptedQualificationAttestation(
+    # Materialize the complete accepted snapshot before any external evidence
+    # callback can rebind constructors or post-init hooks used to represent the
+    # verified signed graph. Evidence still has to resolve successfully before
+    # this snapshot is returned.
+    accepted = AcceptedQualificationAttestation(
         attestation_id=str(attestation.attestation_id),
         attestation_digest=verified_attestation_digest,
         policy_id=verified_policy_id,
@@ -1565,6 +1550,48 @@ def verify_qualification_attestation(
         attestation_json=verified_attestation_json,
         signature_b64=signature_b64,
     )
+
+    # Pin the exact internal evidence resolver across the external reader
+    # construction/read callback boundary. A callback may mutate module globals
+    # or a function object's code; neither may silently replace evidence checks.
+    evidence_resolver = _resolve_evidence
+    evidence_resolver_code = getattr(evidence_resolver, "__code__", None)
+
+    # Only now may external evidence-reader construction execute callbacks.
+    # The complete signed graph, expected scope, policy/root authorization and
+    # RSA signature are already detached and verified, so reader construction
+    # cannot retarget the trust decision that selected this attestation.
+    try:
+        evidence_reader = trusted_authenticated_reader(
+            evidence_root,
+            publication_store=evidence_store,
+        )
+    except (ArtifactIntegrityError, OSError, TypeError, ValueError) as error:
+        raise QualificationTrustError(
+            "evidence artifact authority cannot be bound"
+        ) from error
+
+    if _resolve_evidence is not evidence_resolver or (
+        evidence_resolver_code is not None
+        and getattr(evidence_resolver, "__code__", None)
+        is not evidence_resolver_code
+    ):
+        raise QualificationTrustError(
+            "evidence resolver changed during verification"
+        )
+
+    for ref in attestation.evidence_refs:
+        evidence_resolver(evidence_reader, ref)
+        if _resolve_evidence is not evidence_resolver or (
+            evidence_resolver_code is not None
+            and getattr(evidence_resolver, "__code__", None)
+            is not evidence_resolver_code
+        ):
+            raise QualificationTrustError(
+                "evidence resolver changed during verification"
+            )
+
+    return accepted
 
 
 def verify_canonical_qualification_attestation(

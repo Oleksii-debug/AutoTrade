@@ -915,18 +915,31 @@ def parse_submission_response(
     if not isinstance(send_status, Mapping):
         return unknown("MISSING_SEND_STATUS")
     status = _mapping(send_status, name="sendStatus")
-    echoed = status.get("cliOrdId")
-    if echoed is None:
-        echoed = status.get("cli_ord_id")
-    if echoed not in (None, ""):
-        if type(echoed) is not str or echoed != echoed.strip():
-            raise ProviderCoreError(
-                "Kraken Futures client identity must be canonical exact text"
-            )
-        if _client_order_id(echoed) != cid:
-            raise ProviderCoreError(
-                "Kraken Futures client identity does not match guarded request"
-            )
+    echoed_primary = status.get("cliOrdId")
+    echoed_alias = status.get("cli_ord_id")
+    for echoed_value in (echoed_primary, echoed_alias):
+        if echoed_value not in (None, ""):
+            if type(echoed_value) is not str or echoed_value != echoed_value.strip():
+                raise ProviderCoreError(
+                    "Kraken Futures client identity must be canonical exact text"
+                )
+    if (
+        echoed_primary not in (None, "")
+        and echoed_alias not in (None, "")
+        and echoed_primary != echoed_alias
+    ):
+        raise ProviderCoreError(
+            "Kraken Futures client identity aliases are inconsistent"
+        )
+    echoed = (
+        echoed_primary
+        if echoed_primary not in (None, "")
+        else echoed_alias
+    )
+    if echoed not in (None, "") and _client_order_id(echoed) != cid:
+        raise ProviderCoreError(
+            "Kraken Futures client identity does not match guarded request"
+        )
 
     raw_operation_status = status.get("status")
     if not isinstance(raw_operation_status, str) or not raw_operation_status.strip():

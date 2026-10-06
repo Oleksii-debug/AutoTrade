@@ -150,19 +150,68 @@ class ProviderCoreTests(unittest.TestCase):
     def test_invalid_response_cannot_bypass_sealed_dispatch_decoder(self):
         with TemporaryDirectory() as directory:
             # A historical weak decoder can no longer be injected to mint a
-            # durable response binding. The loader issuer pins the exact shared
-            # decoder/resource authorities before any provider observation.
+            # definitive durable response. The post-SEND transport response
+            # authority detects the decoder retarget before the response can be
+            # consumed as SENT and leaves the attempt reconciliation-required.
             legacy_raw = b'{"orderId":"provider-1","price":1e256}'
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            request = {"symbol": "BTCUSD", "qty": "1"}
+            request_text = json.dumps(
+                request,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            request_sha = "sha256:" + sha256(request_text.encode("utf-8")).hexdigest()
+            scope = {
+                "endpoint": "/v5/order/create",
+                "prepared_request_sha256": request_sha,
+                "capability_snapshot_ids": ["cap-1"],
+                "instrument_versions": ["BTCUSD:v1"],
+            }
+
+            def transport(_client_id, _request, guard):
+                guard()
+                return ExactJsonTransportResponse(legacy_raw)
+
             with patch.object(
                 legacy_dispatch,
                 "_decode_exact_json_bytes",
                 side_effect=lambda raw: json.loads(raw.decode("utf-8")),
             ):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "submission response binding authority is unavailable",
-                ):
-                    self._durable_submission_binding(directory, raw=legacy_raw)
+                outcome = dispatcher.dispatch(
+                    attempt_id="sealed-decoder-a1",
+                    intent_id="intent-1",
+                    intent_hash="intent-hash",
+                    provider="BYBIT",
+                    request=request,
+                    now="2026-09-24T18:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    submission_scope=scope,
+                )
+
+            self.assertEqual(outcome.status, "UNKNOWN")
+            self.assertEqual(outcome.reason, "transport_result_ambiguous")
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("sealed-decoder-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "transport_exception_after_send_barrier:ValueError",
+            )
 
     def test_oversized_raw_bytes_fail_before_utf8_decode_or_json_materialization(self):
         # A leading invalid UTF-8 byte distinguishes resource-first rejection

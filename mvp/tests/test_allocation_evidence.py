@@ -1588,7 +1588,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
         expiring = self.evidence(
             evidence_id=original.evidence_id,
             kind="VALUATION",
-            payload=original.payload,
+            payload=original.canonical_payload_snapshot(),
             valid_until="2026-09-25T18:35:00Z",
         )
         expiring_resolved = dict(resolved)

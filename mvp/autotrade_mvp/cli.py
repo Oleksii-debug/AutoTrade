@@ -10,7 +10,12 @@ import sys
 
 from .accessibility import format_accessible_status
 from .economics import build_economic_report
-from .pipeline import run_multi_episode, run_vertical_slice, verify_replay
+from .pipeline import (
+    CHECKPOINT_SCHEMA_VERSION,
+    run_multi_episode,
+    run_vertical_slice,
+    verify_replay,
+)
 from .simulation_session import run_canonical_simulation, run_autonomous_simulation
 from .simulation_status import inspect_canonical_simulation, SimulationStateChanging
 from research.autotrade_research.io.strict_json import strict_json_loads
@@ -54,16 +59,31 @@ def _legacy_status(state_dir: str) -> dict:
         checkpoint = strict_json_loads(checkpoint_path.read_text(encoding="utf-8"))
         if not isinstance(checkpoint, dict):
             return {"status": "corrupt"}
+        schema_version = checkpoint.get("schema_version")
+        if type(schema_version) is not int:
+            return {"status": "corrupt"}
         evidence_count = len(evidence_path.read_text(encoding="utf-8").splitlines()) if evidence_path.exists() else 0
         replay_verified = verify_replay(root)
-        return {
-            "status": "running" if replay_verified else "needs_recovery",
+        common = {
             "symbol": checkpoint.get("symbol"),
             "initial_cash": checkpoint.get("initial_cash"),
             "postings": checkpoint.get("postings", []),
             "fills": checkpoint.get("fills", {}),
             "evidence_count": evidence_count,
             "replay_verified": replay_verified,
+        }
+        if schema_version == 1:
+            return {
+                "status": "needs_recovery",
+                "resume_compatibility": "migration_required",
+                **common,
+            }
+        if schema_version != CHECKPOINT_SCHEMA_VERSION:
+            return {"status": "corrupt"}
+        return {
+            "status": "running" if replay_verified else "needs_recovery",
+            "resume_compatibility": "current",
+            **common,
         }
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError, ArithmeticError):
         return {"status": "corrupt"}

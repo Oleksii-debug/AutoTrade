@@ -167,6 +167,59 @@ class ScientificFinancialCutTests(unittest.TestCase):
                 reconciliation_checkpoint_digest=_SHA,
             )
 
+    def test_scope_aliases_resolve_to_one_canonical_cut_identity(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.db")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="science-cut-alias",
+                result=_reconciliation(),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            exact = _capture(
+                store,
+                reconciliation_event_id=checkpoint["event_id"],
+            )
+            alias = _capture(
+                store,
+                provider_id="test_provider",
+                environment="paper",
+                reconciliation_event_id=checkpoint["event_id"],
+            )
+            self.assertEqual(exact.provider_id, "TEST_PROVIDER")
+            self.assertEqual(alias.provider_id, "TEST_PROVIDER")
+            self.assertEqual(exact.environment, "PAPER")
+            self.assertEqual(alias.environment, "PAPER")
+            self.assertEqual(exact.cut_digest, alias.cut_digest)
+
+    def test_absent_checkpoint_race_is_conflict_not_unavailable(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.db")
+
+            def racing_lookup(*args, **kwargs):
+                record_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id="science-cut-race",
+                    result=_reconciliation(),
+                    observed_at="2026-09-24T19:00:00Z",
+                    host_id="test-host",
+                    owner_epoch="epoch-1",
+                )
+                return None
+
+            with patch.object(
+                cut_module,
+                "load_latest_reconciliation_checkpoint_for_scope",
+                side_effect=racing_lookup,
+            ):
+                with self.assertRaisesRegex(
+                    FinancialCutConflict,
+                    "changed while reconciliation absence was checked",
+                ):
+                    _capture(store)
+
     def test_cut_distinguishes_reconciliation_sequence_from_later_journal_truth(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.db")

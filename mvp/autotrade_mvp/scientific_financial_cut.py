@@ -131,12 +131,20 @@ class ScientificFinancialCut:
             raise TypeError("financial cut must be exact ScientificFinancialCut")
         for field in (
             "scientific_protocol_id",
-            "provider_id",
             "account_id",
-            "environment",
             "reconciliation_event_id",
         ):
             object.__setattr__(self, field, _text(getattr(self, field), name=field))
+        object.__setattr__(
+            self,
+            "provider_id",
+            _text(self.provider_id, name="provider_id").upper(),
+        )
+        object.__setattr__(
+            self,
+            "environment",
+            _text(self.environment, name="environment").upper(),
+        )
         for field_name in (
             "gate_profile_digest",
             "journal_population_digest",
@@ -198,9 +206,9 @@ def capture_current_scientific_financial_cut(
 
     protocol_id = _text(scientific_protocol_id, name="scientific_protocol_id")
     profile_digest = _sha256(gate_profile_digest, name="gate_profile_digest")
-    provider = _text(provider_id, name="provider_id")
+    provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")
-    env = _text(environment, name="environment")
+    env = _text(environment, name="environment").upper()
     checkpoint_id = _text(
         reconciliation_event_id,
         name="reconciliation_event_id",
@@ -227,6 +235,14 @@ def capture_current_scientific_financial_cut(
             environment=env,
         )
         if latest is None:
+            after = _exact_dict(
+                store.whole_store_state_cut(),
+                name="journal_state_after",
+            )
+            if before != after or _journal_sequence(after) != frozen_sequence:
+                raise FinancialCutConflict(
+                    "financial journal changed while reconciliation absence was checked"
+                )
             raise FinancialCutUnavailable(
                 "current reconciliation checkpoint is unavailable"
             )

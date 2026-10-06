@@ -931,7 +931,9 @@ def _require_checkpoint_evidence_financial_state(
         if not risk_replay_ledger.apply_fill(fill):
             raise ValueError("Checkpoint replay duplicates one fill")
     if risk_replay_ledger.postings != ledger.postings:
-        raise ValueError("Checkpoint replay postings are not canonical")
+        raise ValueError(
+            "Checkpoint posting chronology conflicts with durable replay prefix"
+        )
     if (
         risk_replay_ledger.cash != ledger.cash
         or risk_replay_ledger.position != ledger.position

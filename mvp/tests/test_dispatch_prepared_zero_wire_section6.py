@@ -2,6 +2,7 @@
 
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -107,6 +108,77 @@ class PreparedZeroWireSection6Tests(unittest.TestCase):
             )
             self.assertNotIn(
                 "SubmissionUnknown",
+                [event["event_type"] for event in events],
+            )
+
+    def test_send_barrier_winning_recovery_cas_converges_unknown(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original = self._dispatcher(store, owner="original-owner")
+            recovery = self._dispatcher(store, owner="recovery-owner")
+            recovery_results = []
+
+            def transport(_client_order_id, _request, final_guard):
+                recovery_append = recovery._append
+
+                def racing_append(*, attempt_id, event_type, version, payload, now):
+                    if event_type == "SubmissionBlocked":
+                        # Force the opposite race ordering from the BLOCKED-wins
+                        # regression: Sending commits after recovery read Prepared
+                        # but before recovery can commit its version-2 Blocked.
+                        final_guard()
+                    return recovery_append(
+                        attempt_id=attempt_id,
+                        event_type=event_type,
+                        version=version,
+                        payload=payload,
+                        now=now,
+                    )
+
+                with patch.object(recovery, "_append", side_effect=racing_append):
+                    recovered = recovery.dispatch(
+                        attempt_id="section6-send-wins",
+                        intent_id="section6-send-wins-intent",
+                        intent_hash="section6-send-wins-hash",
+                        provider="simulated",
+                        request={"quantity": "1"},
+                        now="2026-10-06T10:00:02Z",
+                        authority_check=self.authority,
+                        transport_send=lambda *_args: self.fail(
+                            "recovery reached provider transport"
+                        ),
+                    )
+                recovery_results.append(recovered)
+                raise _ProcessDeath("crash-after-send-barrier-before-wire")
+
+            with self.assertRaisesRegex(
+                _ProcessDeath,
+                "crash-after-send-barrier-before-wire",
+            ):
+                original.dispatch(
+                    attempt_id="section6-send-wins",
+                    intent_id="section6-send-wins-intent",
+                    intent_hash="section6-send-wins-hash",
+                    provider="simulated",
+                    request={"quantity": "1"},
+                    now="2026-10-06T10:00:00Z",
+                    authority_check=self.authority,
+                    transport_send=transport,
+                )
+
+            self.assertEqual(len(recovery_results), 1)
+            self.assertEqual(recovery_results[0].status, "UNKNOWN")
+            self.assertEqual(
+                recovery_results[0].reason,
+                "recovered_after_send_barrier_without_terminal_result",
+            )
+            events = original._events("section6-send-wins")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            self.assertNotIn(
+                "SubmissionBlocked",
                 [event["event_type"] for event in events],
             )
 

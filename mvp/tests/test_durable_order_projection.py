@@ -8,6 +8,11 @@ import weakref
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+from mvp.autotrade_mvp.dispatch import (
+    ExactJsonTransportResponse,
+    GuardedDispatcher,
+    stable_client_order_id,
+)
 from mvp.autotrade_mvp.durable_order_projection import (
     DurableOrderBookProjection,
 )
@@ -1115,6 +1120,130 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 evidence_refs=[ref],
             )
             self.assertTrue(confirmed.snapshot.cancel_confirmed)
+
+
+    def test_exact_wp18_sent_sync_stays_unknown_until_provider_semantics_are_evidenced(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            intent_id = "intent-exact-wp18-sync"
+            attempt_id = "exact-wp18-sync-a1"
+            client_order_id = stable_client_order_id(
+                "PROVIDER-A",
+                intent_id,
+                environment="PAPER",
+                account_id="acct-1",
+            )
+            book.create_order(
+                event_key="create-exact-wp18-sync",
+                client_order_id=client_order_id,
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="acct-1",
+                owner_token="sender-a",
+            )
+            raw_provider_response = (
+                b'{"retCode":0,"result":{"orderId":"provider-raw-1"}}'
+            )
+            outbound = 0
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return ExactJsonTransportResponse(
+                    raw_provider_response,
+                    http_status=200,
+                )
+
+            sent = dispatcher.dispatch(
+                attempt_id=attempt_id,
+                intent_id=intent_id,
+                intent_hash="sha256:" + "8" * 64,
+                provider="PROVIDER-A",
+                request={"side": "BUY", "quantity": "1"},
+                now=T1,
+                authority_check=lambda *_args: (True, "allowed"),
+                transport_send=transport,
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(sent.status, "SENT")
+            self.assertEqual(sent.client_order_id, client_order_id)
+            self.assertEqual(outbound, 1)
+
+            synced = book.sync_submission_attempt(attempt_id=attempt_id)
+            self.assertEqual(len(synced), 2)
+            self.assertTrue(all(item.inserted for item in synced))
+            projected = book.order(client_order_id)
+            self.assertEqual(projected.state, "UNKNOWN")
+            self.assertEqual(projected.filled_quantity, Decimal("0"))
+            self.assertIsNone(projected.provider_order_id)
+            self.assertEqual(projected.submission_attempt_id, attempt_id)
+
+            # The exact HTTP/provider response is transport truth only. A caller
+            # cannot promote it to provider acknowledgement in PAPER without a
+            # separately authenticated provider-lifecycle evidence artifact.
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "requires immutable evidence",
+            ):
+                book.acknowledge(
+                    event_key="forged-transport-success-as-ack",
+                    client_order_id=client_order_id,
+                    provider_order_id="provider-raw-1",
+                    status="ACCEPTED",
+                    attempt_id=attempt_id,
+                    committed_at=T2,
+                )
+
+            ack_request = {
+                "client_order_id": client_order_id,
+                "provider_order_id": "provider-raw-1",
+                "status": "ACCEPTED",
+                "attempt_id": attempt_id,
+            }
+            ack_ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=ack_request,
+                observed_at=T2,
+            )
+            normalized = book.acknowledge(
+                event_key="normalized-provider-ack",
+                client_order_id=client_order_id,
+                provider_order_id="provider-raw-1",
+                status="ACCEPTED",
+                attempt_id=attempt_id,
+                committed_at=T2,
+                evidence_refs=[ack_ref],
+            )
+            self.assertEqual(normalized.snapshot.state, "WORKING")
+            self.assertEqual(normalized.snapshot.filled_quantity, Decimal("0"))
+            self.assertEqual(
+                normalized.snapshot.provider_order_id,
+                "provider-raw-1",
+            )
+
+            # Replaying the WP-18 journal must be idempotent and must neither
+            # resend nor roll a later provider-normalized ACK back to UNKNOWN.
+            replayed = book.sync_submission_attempt(attempt_id=attempt_id)
+            self.assertEqual(len(replayed), 2)
+            self.assertTrue(all(not item.inserted for item in replayed))
+            self.assertEqual(book.order(client_order_id).state, "WORKING")
+            self.assertEqual(outbound, 1)
 
 
 if __name__ == "__main__":

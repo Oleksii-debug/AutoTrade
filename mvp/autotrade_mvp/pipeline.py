@@ -29,7 +29,7 @@ from .persistence import JournalStore, payload_digest
 
 
 MONEY_QUANTUM = Decimal("0.00000001")
-CHECKPOINT_SCHEMA_VERSION = 5
+CHECKPOINT_SCHEMA_VERSION = 6
 
 
 def _exact_decimal(value: Decimal | str | int, *, name: str) -> Decimal:
@@ -216,6 +216,7 @@ def handle_journal_event(
     )
     payload = {
         "evidence_id": evidence["evidence_id"],
+        "episode_sequence": evidence["episode_sequence"],
         "input_hash": evidence["input_hash"],
         "decision": evidence["decision"],
         "decision_reason": evidence["decision_reason"],
@@ -629,6 +630,7 @@ _REPLAY_EVIDENCE_FIELDS = frozenset(
     {
         "schema_version",
         "evidence_id",
+        "episode_sequence",
         "input_hash",
         "decision",
         "decision_reason",
@@ -679,7 +681,7 @@ def _require_replay_evidence_record(
     *,
     evidence_id: str,
     financial_configuration_hash: str,
-) -> datetime:
+) -> tuple[int, datetime]:
     """Authenticate one checkpoint evidence row before any replay repair write."""
 
     if (
@@ -687,6 +689,8 @@ def _require_replay_evidence_record(
         or set(record) != _REPLAY_EVIDENCE_FIELDS
         or record.get("schema_version") != 2
         or record.get("evidence_id") != evidence_id
+        or type(record.get("episode_sequence")) is not int
+        or record["episode_sequence"] < 1
         or type(record.get("input_hash")) is not str
         or len(record["input_hash"]) != 64
         or any(char not in "0123456789abcdef" for char in record["input_hash"])
@@ -741,7 +745,7 @@ def _require_replay_evidence_record(
         raise ValueError(
             "Checkpoint replay evidence equity does not match valuation"
         )
-    return timestamp
+    return record["episode_sequence"], timestamp
 
 
 def _require_checkpoint_evidence_financial_state(
@@ -771,12 +775,12 @@ def _require_checkpoint_evidence_financial_state(
 
     observed_order_ids: set[str] = set()
     evidence_by_order_id: dict[str, dict] = {}
-    ordered: list[tuple[datetime, str, dict]] = []
+    ordered: list[tuple[int, datetime, str, dict]] = []
     for evidence_id in ids:
         if type(evidence_id) is not str or not evidence_id:
             raise ValueError("Corrupt checkpoint replay evidence identity")
         record = records.get(evidence_id)
-        timestamp = _require_replay_evidence_record(
+        episode_sequence, timestamp = _require_replay_evidence_record(
             record,
             evidence_id=evidence_id,
             financial_configuration_hash=financial_configuration_hash,
@@ -805,18 +809,36 @@ def _require_checkpoint_evidence_financial_state(
                 )
             evidence_by_order_id[order_id] = record
             observed_order_ids.add(order_id)
-        ordered.append((timestamp, evidence_id, record))
+        ordered.append((episode_sequence, timestamp, evidence_id, record))
+
+    ordered_by_sequence = sorted(ordered, key=lambda item: item[0])
+    if [item[0] for item in ordered_by_sequence] != list(
+        range(1, len(ordered_by_sequence) + 1)
+    ):
+        raise ValueError("Checkpoint replay episode sequence is not contiguous")
 
     if observed_order_ids != set(restored_fills):
         raise ValueError("Checkpoint replay evidence does not cover restored fills")
 
+    expected_fill_sequence = [
+        restored_fills[record["order_id"]].fill_id
+        for _sequence, _timestamp, _evidence_id, record in ordered_by_sequence
+        if record["order_id"] is not None
+    ]
     fills_by_id = {fill.fill_id: fill for fill in restored_fills.values()}
     if len(fills_by_id) != len(restored_fills):
         raise ValueError("Checkpoint replay reuses one durable fill identity")
     risk_replay_ledger = EconomicLedger(ledger.initial_cash)
-    for posting in ledger.postings:
+    for posting_index, posting in enumerate(ledger.postings):
         if type(posting) is not dict or type(posting.get("fill_id")) is not str:
             raise ValueError("Corrupt checkpoint posting identity")
+        if (
+            posting_index >= len(expected_fill_sequence)
+            or posting["fill_id"] != expected_fill_sequence[posting_index]
+        ):
+            raise ValueError(
+                "Checkpoint posting chronology conflicts with replay episode sequence"
+            )
         fill = fills_by_id.get(posting["fill_id"])
         if fill is None:
             raise ValueError("Checkpoint posting lacks restored fill authority")
@@ -853,6 +875,10 @@ def _require_checkpoint_evidence_financial_state(
             )
         if not risk_replay_ledger.apply_fill(fill):
             raise ValueError("Checkpoint replay duplicates one fill")
+    if len(ledger.postings) != len(expected_fill_sequence):
+        raise ValueError(
+            "Checkpoint posting chronology conflicts with replay episode sequence"
+        )
     if risk_replay_ledger.postings != ledger.postings:
         raise ValueError("Checkpoint replay postings are not canonical")
     if (
@@ -861,11 +887,7 @@ def _require_checkpoint_evidence_financial_state(
     ):
         raise ValueError("Checkpoint replay financial path does not match final state")
 
-    latest_instant = max(item[0] for item in ordered)
-    latest = [item for item in ordered if item[0] == latest_instant]
-    if len(latest) != 1:
-        raise ValueError("Checkpoint replay chronology is ambiguous")
-    latest_record = latest[0][2]
+    latest_record = ordered_by_sequence[-1][3]
     if (
         latest_record["cash"] != str(ledger.cash)
         or latest_record["position"] != str(ledger.position)
@@ -895,23 +917,25 @@ def _repair_interrupted_replay(
     if not ids:
         return
 
-    ordered: list[tuple[datetime, str, dict]] = []
+    ordered: list[tuple[int, datetime, str, dict]] = []
     for evidence_id in ids:
         record = records.get(evidence_id)
         if type(evidence_id) is not str or not evidence_id:
             raise ValueError("Corrupt checkpoint replay evidence identity")
-        timestamp = _require_replay_evidence_record(
+        episode_sequence, timestamp = _require_replay_evidence_record(
             record,
             evidence_id=evidence_id,
             financial_configuration_hash=financial_configuration_hash,
         )
-        ordered.append((timestamp, evidence_id, record))
+        ordered.append((episode_sequence, timestamp, evidence_id, record))
 
-    latest_instant = max(item[0] for item in ordered)
-    latest = [item for item in ordered if item[0] == latest_instant]
-    if len(latest) != 1:
-        raise ValueError("Checkpoint replay chronology is ambiguous")
-    _instant, latest_id, latest_record = latest[0]
+    ordered_by_sequence = sorted(ordered, key=lambda item: item[0])
+    if [item[0] for item in ordered_by_sequence] != list(
+        range(1, len(ordered_by_sequence) + 1)
+    ):
+        raise ValueError("Checkpoint replay episode sequence is not contiguous")
+    canonical_evidence_order = [item[2] for item in ordered_by_sequence]
+    _sequence, _instant, latest_id, latest_record = ordered_by_sequence[-1]
     expected_ids = set(ids)
 
     evidence_path = root / "learning-evidence.jsonl"
@@ -950,6 +974,10 @@ def _repair_interrupted_replay(
     missing_evidence = expected_ids - existing_evidence_ids
     if missing_evidence - {latest_id}:
         raise ValueError("Historical learning evidence is incomplete before latest episode")
+    if existing_evidence_order != canonical_evidence_order[:len(existing_evidence_order)]:
+        raise ValueError(
+            "Learning evidence chronology conflicts with checkpoint episode sequence"
+        )
 
     journal_path = root / "journal.sqlite3"
     journal_ids: set[str] = set()
@@ -1001,8 +1029,11 @@ def _repair_interrupted_replay(
             record = records.get(evidence_id)
             if type(record) is not dict:
                 raise ValueError("Corrupt simulation journal evidence identity")
+            if record.get("episode_sequence") != expected_aggregate_version:
+                raise ValueError("Corrupt simulation journal episode sequence")
             expected_payload = {
                 "evidence_id": evidence_id,
+                "episode_sequence": record["episode_sequence"],
                 "input_hash": record.get("input_hash"),
                 "decision": record.get("decision"),
                 "decision_reason": record.get("decision_reason"),
@@ -1043,6 +1074,10 @@ def _repair_interrupted_replay(
             )
     if journal_ids - expected_ids:
         raise ValueError("Simulation journal contains unknown replay evidence")
+    if journal_order != canonical_evidence_order[:len(journal_order)]:
+        raise ValueError(
+            "Simulation journal chronology conflicts with checkpoint episode sequence"
+        )
     missing_journal = expected_ids - journal_ids
     if missing_journal - {latest_id}:
         raise ValueError("Historical simulation journal is incomplete before latest episode")
@@ -1088,7 +1123,7 @@ def _repair_interrupted_replay(
     require_durable_fill_prefix(existing_evidence_order, missing_evidence)
     require_durable_fill_prefix(journal_order, missing_journal)
 
-    for _timestamp, _evidence_id, record in ordered:
+    for _sequence, _timestamp, _evidence_id, record in ordered_by_sequence:
         _append_evidence(evidence_path, record)
     if latest_id in missing_journal:
         handle_journal_event(
@@ -1339,6 +1374,7 @@ def verify_replay(state_dir: str | Path) -> bool:
             {
                 "schema_version",
                 "evidence_id",
+                "episode_sequence",
                 "input_hash",
                 "decision",
                 "decision_reason",
@@ -1362,6 +1398,8 @@ def verify_replay(state_dir: str | Path) -> bool:
             type(row) is not dict
             or set(row) != evidence_fields
             or row["schema_version"] != 2
+            or type(row["episode_sequence"]) is not int
+            or row["episode_sequence"] < 1
             or type(row["evidence_id"]) is not str
             or not row["evidence_id"]
             or type(row["input_hash"]) is not str
@@ -1378,6 +1416,10 @@ def verify_replay(state_dir: str | Path) -> bool:
             or type(row["reconciled"]) is not bool
             or row["financial_configuration_hash"] != configuration_hash
             for row in rows
+        ):
+            return False
+        if [row["episode_sequence"] for row in rows] != list(
+            range(1, len(rows) + 1)
         ):
             return False
         observed = {row["evidence_id"]: row for row in rows}
@@ -1504,8 +1546,11 @@ def verify_replay(state_dir: str | Path) -> bool:
             record = observed.get(evidence_id)
             if type(record) is not dict:
                 return False
+            if record["episode_sequence"] != expected_aggregate_version:
+                return False
             expected_payload = {
                 "evidence_id": evidence_id,
+                "episode_sequence": record["episode_sequence"],
                 "input_hash": record["input_hash"],
                 "decision": record["decision"],
                 "decision_reason": record["decision_reason"],
@@ -1740,9 +1785,27 @@ def run_vertical_slice(
         "intent": intent.client_order_id if intent else None,
         "financial_configuration_hash": financial_configuration_hash,
     })[:20]
+    recorded_evidence = _find_evidence(evidence_path, evidence_id)
+    checkpoint_evidence = evidence_records.get(evidence_id)
+    sequence_source = (
+        checkpoint_evidence
+        if checkpoint_evidence is not None
+        else recorded_evidence
+    )
+    if sequence_source is None:
+        episode_sequence = len(evidence_records) + 1
+    elif (
+        type(sequence_source) is dict
+        and type(sequence_source.get("episode_sequence")) is int
+        and sequence_source["episode_sequence"] >= 1
+    ):
+        episode_sequence = sequence_source["episode_sequence"]
+    else:
+        raise ValueError("Checkpoint evidence lacks exact episode sequence")
     fresh_evidence = {
         "schema_version": 2,
         "evidence_id": evidence_id,
+        "episode_sequence": episode_sequence,
         "input_hash": input_hash,
         "decision": decision.side,
         "decision_reason": decision.reason,
@@ -1757,9 +1820,8 @@ def run_vertical_slice(
         "financial_configuration_hash": financial_configuration_hash,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
     }
-    recorded_evidence = _find_evidence(evidence_path, evidence_id)
-    if evidence_id in evidence_records:
-        evidence = evidence_records[evidence_id]
+    if checkpoint_evidence is not None:
+        evidence = checkpoint_evidence
     elif recorded_evidence is not None:
         # Adopt an evidence row left durable by an older interrupted build.
         evidence = recorded_evidence

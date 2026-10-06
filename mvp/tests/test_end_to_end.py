@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from datetime import datetime as real_datetime, timezone
 from decimal import Inexact, Rounded, ROUND_CEILING, localcontext
 from hashlib import sha256
 from pathlib import Path
@@ -40,6 +41,8 @@ class VerticalSliceTests(unittest.TestCase):
                 json.loads(evidence_before)["risk_outcome"],
                 "admitted",
             )
+            self.assertEqual(json.loads(evidence_before)["episode_sequence"], 1)
+            self.assertEqual(events[0]["payload"]["episode_sequence"], 1)
 
             restarted = run_vertical_slice([100, 101, 102, 103], directory)
             self.assertTrue(restarted.resumed)
@@ -210,6 +213,99 @@ class VerticalSliceTests(unittest.TestCase):
             )
             self.assertTrue(verify_replay(directory))
 
+    def test_resume_repairs_sequence_tail_when_wall_clock_moves_backward(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        class ControlledDateTime:
+            current = real_datetime(2030, 1, 1, tzinfo=timezone.utc)
+
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return cls.current.replace(tzinfo=None)
+                return cls.current.astimezone(tz)
+
+            @classmethod
+            def fromisoformat(cls, value):
+                return real_datetime.fromisoformat(value)
+
+        with TemporaryDirectory() as directory:
+            with patch.object(pipeline_module, "datetime", ControlledDateTime):
+                ControlledDateTime.current = real_datetime(
+                    2030, 1, 1, tzinfo=timezone.utc
+                )
+                run_vertical_slice([100, 101, 102, 103], directory)
+                ControlledDateTime.current = real_datetime(
+                    2020, 1, 1, tzinfo=timezone.utc
+                )
+                run_vertical_slice([100, 100, 100], directory)
+
+            root = Path(directory)
+            evidence_path = root / "learning-evidence.jsonl"
+            rows = evidence_path.read_text(encoding="utf-8").splitlines()
+            parsed = [json.loads(row) for row in rows]
+            self.assertEqual([row["episode_sequence"] for row in parsed], [1, 2])
+            self.assertLess(parsed[1]["recorded_at"], parsed[0]["recorded_at"])
+
+            evidence_path.write_text(rows[0] + "\n", encoding="utf-8")
+            resumed = run_vertical_slice([103, 102, 101, 100], directory)
+
+            self.assertEqual(resumed.status, "filled")
+            self.assertEqual(resumed.decision, "SELL")
+            repaired = [
+                json.loads(row)
+                for row in evidence_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                [row["episode_sequence"] for row in repaired],
+                [1, 2, 3],
+            )
+            self.assertTrue(verify_replay(directory))
+
+    def test_replay_rejects_evidence_order_outside_episode_sequence(self):
+        with TemporaryDirectory() as directory:
+            run_multi_episode(
+                [
+                    [100, 101, 102, 103],
+                    [100, 100, 100],
+                    [103, 102, 101, 100],
+                ],
+                directory,
+            )
+            root = Path(directory)
+            evidence_path = root / "learning-evidence.jsonl"
+            rows = evidence_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(rows), 3)
+            evidence_path.write_text(
+                "\n".join([rows[1], rows[0], rows[2]]) + "\n",
+                encoding="utf-8",
+            )
+
+            checkpoint_before = (root / "checkpoint.json").read_bytes()
+            evidence_before = evidence_path.read_bytes()
+            journal_before = (root / "journal.sqlite3").read_bytes()
+            intents_before = {
+                path.name: path.read_bytes()
+                for path in (root / "order-intents").glob("*.json")
+            }
+
+            self.assertFalse(verify_replay(directory))
+            with self.assertRaisesRegex(
+                ValueError,
+                "Learning evidence chronology conflicts with checkpoint episode sequence",
+            ):
+                run_vertical_slice([100, 100, 100], directory)
+
+            self.assertEqual((root / "checkpoint.json").read_bytes(), checkpoint_before)
+            self.assertEqual(evidence_path.read_bytes(), evidence_before)
+            self.assertEqual((root / "journal.sqlite3").read_bytes(), journal_before)
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in (root / "order-intents").glob("*.json")
+                },
+                intents_before,
+            )
 
     def test_resume_rejects_reordered_postings_before_tail_repair_write(self):
         with TemporaryDirectory() as directory:
@@ -647,7 +743,7 @@ class VerticalSliceTests(unittest.TestCase):
             root = Path(directory)
             checkpoint_path = root / "checkpoint.json"
             checkpoint_text = checkpoint_path.read_text(encoding="utf-8")
-            marker = '"schema_version": 5,'
+            marker = '"schema_version": 6,'
             self.assertEqual(checkpoint_text.count(marker), 1)
             checkpoint_path.write_text(
                 checkpoint_text.replace(

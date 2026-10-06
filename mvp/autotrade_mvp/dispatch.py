@@ -416,8 +416,6 @@ def load_submission_response_binding(
     sent_at = sent.get("observed_at")
     if not isinstance(prepared_at, str) or not isinstance(sent_at, str):
         raise ValueError("durable submission timestamps are unavailable")
-    if sending.get("aggregate_id") != aggregate_id or sent.get("aggregate_id") != aggregate_id:
-        raise ValueError("durable submission aggregate identity mismatch")
     durable_text: dict[str, str] = {}
     for field_name in (
         "attempt_id",
@@ -449,6 +447,24 @@ def load_submission_response_binding(
             "durable SubmissionPrepared account_id mismatches selected submission identity"
         )
 
+    for event_name, event in (
+        ("SubmissionPrepared", prepared),
+        ("SubmissionSending", sending),
+        ("terminal", sent),
+    ):
+        if event.get("aggregate_id") != aggregate_id:
+            raise ValueError(
+                f"durable {event_name} aggregate_id mismatches selected submission identity"
+            )
+        event_environment = event.get("environment")
+        if (
+            type(event_environment) is not str
+            or event_environment != expected_environment
+        ):
+            raise ValueError(
+                f"durable {event_name} environment mismatches selected submission identity"
+            )
+
     for event_name, event in (("SubmissionSending", sending), ("terminal", sent)):
         event_payload = event.get("payload")
         if type(event_payload) is not dict:
@@ -460,14 +476,6 @@ def load_submission_response_binding(
         ):
             raise ValueError(
                 f"durable {event_name} client_order_id mismatches SubmissionPrepared"
-            )
-        event_environment = event.get("environment")
-        if (
-            type(event_environment) is not str
-            or event_environment != expected_environment
-        ):
-            raise ValueError(
-                f"durable {event_name} environment mismatches selected submission identity"
             )
 
     return SubmissionResponseBinding(

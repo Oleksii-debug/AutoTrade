@@ -2557,6 +2557,11 @@ class GuardedDispatcher:
         decoder_json_namespace_get = decoder_json_namespace.get
         decoder_json_namespace_set = decoder_json_namespace.__setitem__
         decoder_json_loads = decoder_json_namespace_get("loads")
+        decoder_json_loads_code = snapshot_getattr(
+            decoder_json_loads,
+            "__code__",
+            None,
+        )
         decoder_json_decode_error = decoder_json_namespace_get(
             "JSONDecodeError"
         )
@@ -2602,6 +2607,7 @@ class GuardedDispatcher:
         )
         exact_response_code_bindings = (
             (exact_response_snapshot, snapshot_code),
+            (decoder_json_loads, decoder_json_loads_code),
             *snapshot_tuple(
                 (dependency, code)
                 for dependency, code in zip(

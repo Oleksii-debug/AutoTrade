@@ -31,6 +31,7 @@ from types import MappingProxyType
 from typing import Any, Callable, ContextManager, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
+from weakref import ref as weakref_ref
 from urllib.request import (
     HTTPRedirectHandler,
     Request,
@@ -1085,12 +1086,29 @@ class SignedHttpRequest:
     timeout_seconds: int
 
     def __post_init__(self) -> None:
-        method = _text(self.method, name="method").upper()
+        raw_method = self.method
+        if (
+            type(raw_method) is not str
+            or not raw_method
+            or raw_method != raw_method.strip()
+        ):
+            raise ProviderTransportScopeError(
+                "signed request method must be canonical text"
+            )
+        method = raw_method.upper()
         if method != "POST":
             raise ProviderTransportScopeError(
                 "trade transport currently permits only POST"
             )
-        parsed = urlsplit(_text(self.url, name="url"))
+
+        raw_url = self.url
+        if (
+            type(raw_url) is not str
+            or not raw_url
+            or raw_url != raw_url.strip()
+        ):
+            raise ProviderTransportScopeError("signed request URL is invalid")
+        parsed = urlsplit(raw_url)
         if (
             parsed.scheme != "https"
             or not parsed.hostname
@@ -1109,28 +1127,145 @@ class SignedHttpRequest:
             raise ProviderTransportScopeError(
                 "signed POST requires exactly one payload channel: URL query or body"
             )
-        if not isinstance(self.headers, Mapping):
-            raise ProviderTransportScopeError("headers must be a mapping")
+
+        if type(self.headers) not in {dict, MappingProxyType}:
+            raise ProviderTransportScopeError(
+                "signed request headers must be an exact inert mapping"
+            )
         normalized_headers: dict[str, str] = {}
         for raw_key, raw_value in self.headers.items():
-            key = _text(raw_key, name="header name")
-            value = _text(raw_value, name=f"header {key}")
-            if "\r" in key or "\n" in key or "\r" in value or "\n" in value:
+            if (
+                type(raw_key) is not str
+                or not raw_key
+                or raw_key != raw_key.strip()
+            ):
+                raise ProviderTransportScopeError(
+                    "signed request header names must be canonical text"
+                )
+            if (
+                type(raw_value) is not str
+                or not raw_value
+                or raw_value != raw_value.strip()
+            ):
+                raise ProviderTransportScopeError(
+                    "signed request header values must be canonical text"
+                )
+            if (
+                "\r" in raw_key
+                or "\n" in raw_key
+                or "\r" in raw_value
+                or "\n" in raw_value
+            ):
                 raise ProviderTransportScopeError(
                     "header values must not contain line breaks"
                 )
-            normalized_headers[key] = value
+            normalized_headers[raw_key] = raw_value
+
         if (
-            isinstance(self.timeout_seconds, bool)
-            or not isinstance(self.timeout_seconds, int)
+            type(self.timeout_seconds) is not int
             or self.timeout_seconds < 1
             or self.timeout_seconds > 120
         ):
             raise ProviderTransportScopeError("invalid request timeout")
+        object.__setattr__(self, "url", raw_url)
         object.__setattr__(self, "method", method)
         object.__setattr__(
             self, "headers", MappingProxyType(dict(normalized_headers))
         )
+        _register_signed_http_request(self)
+
+
+def _install_signed_http_request_integrity():
+    """Seal one exact write envelope against post-construction mutation."""
+
+    request_type = SignedHttpRequest
+    object_getattribute = object.__getattribute__
+    canonical_type = type
+    canonical_id = id
+    mapping_proxy_type = canonical_type(MappingProxyType({}))
+    weakref = weakref_ref
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+    def prune() -> None:
+        for object_id, (value_ref, _snapshot) in tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def register(value: SignedHttpRequest) -> None:
+        if canonical_type(value) is not request_type:
+            return
+        method = object_getattribute(value, "method")
+        url = object_getattribute(value, "url")
+        headers = object_getattribute(value, "headers")
+        body = object_getattribute(value, "body")
+        timeout_seconds = object_getattribute(value, "timeout_seconds")
+        if (
+            canonical_type(method) is not str
+            or canonical_type(url) is not str
+            or canonical_type(headers) is not mapping_proxy_type
+            or canonical_type(body) is not bytes
+            or canonical_type(timeout_seconds) is not int
+        ):
+            raise ProviderTransportScopeError(
+                "signed request must contain exact canonical fields"
+            )
+        if any(
+            canonical_type(key) is not str or canonical_type(item) is not str
+            for key, item in headers.items()
+        ):
+            raise ProviderTransportScopeError(
+                "signed request headers must contain exact text"
+            )
+        prune()
+        object_id = canonical_id(value)
+        current = states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise ProviderTransportScopeError(
+                "signed request identity collision"
+            )
+        states[object_id] = (
+            weakref(value),
+            (method, url, headers, body, timeout_seconds),
+        )
+
+    def require(value: SignedHttpRequest) -> None:
+        if canonical_type(value) is not request_type:
+            raise TypeError("request must be exact SignedHttpRequest")
+        prune()
+        state = states.get(canonical_id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderTransportScopeError(
+                "signed request lacks construction authority"
+            )
+        method, url, headers, body, timeout_seconds = state[1]
+        current_method = object_getattribute(value, "method")
+        current_url = object_getattribute(value, "url")
+        current_headers = object_getattribute(value, "headers")
+        current_body = object_getattribute(value, "body")
+        current_timeout = object_getattribute(value, "timeout_seconds")
+        if (
+            canonical_type(current_method) is not str
+            or canonical_type(current_url) is not str
+            or canonical_type(current_body) is not bytes
+            or canonical_type(current_timeout) is not int
+            or current_method != method
+            or current_url != url
+            or current_headers is not headers
+            or current_body != body
+            or current_timeout != timeout_seconds
+        ):
+            raise ProviderTransportScopeError(
+                "signed request changed after construction"
+            )
+
+    return register, require
+
+
+(
+    _register_signed_http_request,
+    _require_signed_http_request,
+) = _install_signed_http_request_integrity()
+del _install_signed_http_request_integrity
 
 
 @dataclass(frozen=True)
@@ -1151,12 +1286,31 @@ class AuthenticatedReadHttpRequest:
     body: bytes = b""
 
     def __post_init__(self) -> None:
-        method = _text(self.method, name="method").upper()
+        raw_method = self.method
+        if (
+            type(raw_method) is not str
+            or not raw_method
+            or raw_method != raw_method.strip()
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read method must be canonical text"
+            )
+        method = raw_method.upper()
         if method not in {"GET", "POST"}:
             raise ProviderTransportScopeError(
                 "authenticated-read method must be GET or POST"
             )
-        parsed = urlsplit(_text(self.url, name="url"))
+
+        raw_url = self.url
+        if (
+            type(raw_url) is not str
+            or not raw_url
+            or raw_url != raw_url.strip()
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read URL must be canonical HTTPS"
+            )
+        parsed = urlsplit(raw_url)
         if (
             parsed.scheme != "https"
             or not parsed.hostname
@@ -1180,30 +1334,158 @@ class AuthenticatedReadHttpRequest:
             raise ProviderTransportScopeError(
                 "authenticated POST requires no URL query"
             )
-        if not isinstance(self.headers, Mapping):
-            raise ProviderTransportScopeError("headers must be a mapping")
+
+        if type(self.headers) not in {dict, MappingProxyType}:
+            raise ProviderTransportScopeError(
+                "authenticated-read headers must be an exact inert mapping"
+            )
         normalized_headers: dict[str, str] = {}
         for raw_key, raw_value in self.headers.items():
-            key = _text(raw_key, name="header name")
-            value = _text(raw_value, name=f"header {key}")
-            if "\r" in key or "\n" in key or "\r" in value or "\n" in value:
+            if (
+                type(raw_key) is not str
+                or not raw_key
+                or raw_key != raw_key.strip()
+            ):
+                raise ProviderTransportScopeError(
+                    "authenticated-read header names must be canonical text"
+                )
+            if (
+                type(raw_value) is not str
+                or not raw_value
+                or raw_value != raw_value.strip()
+            ):
+                raise ProviderTransportScopeError(
+                    "authenticated-read header values must be canonical text"
+                )
+            if (
+                "\r" in raw_key
+                or "\n" in raw_key
+                or "\r" in raw_value
+                or "\n" in raw_value
+            ):
                 raise ProviderTransportScopeError(
                     "header values must not contain line breaks"
                 )
-            normalized_headers[key] = value
+            normalized_headers[raw_key] = raw_value
+
         if (
-            isinstance(self.timeout_seconds, bool)
-            or not isinstance(self.timeout_seconds, int)
+            type(self.timeout_seconds) is not int
             or self.timeout_seconds < 1
             or self.timeout_seconds > 120
         ):
             raise ProviderTransportScopeError("invalid request timeout")
+        object.__setattr__(self, "url", raw_url)
         object.__setattr__(self, "method", method)
         object.__setattr__(
             self,
             "headers",
             MappingProxyType(dict(normalized_headers)),
         )
+        _register_authenticated_read_http_request(self)
+
+
+def _install_authenticated_read_http_request_integrity():
+    """Seal one exact read envelope against post-construction mutation.
+
+    Frozen dataclasses can still be changed through object.__setattr__.  The
+    wire boundary therefore keeps a closure-private construction snapshot and
+    requires the exact request object to still match that snapshot before any
+    outbound field is consumed.  Header identity is retained deliberately: the
+    constructor replaces caller mappings with a fresh mappingproxy, so identity
+    proves the later mapping is still that detached canonical copy without
+    invoking an attacker-supplied mapping implementation.
+    """
+
+    request_type = AuthenticatedReadHttpRequest
+    object_getattribute = object.__getattribute__
+    canonical_type = type
+    canonical_id = id
+    mapping_proxy_type = canonical_type(MappingProxyType({}))
+    weakref = weakref_ref
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+    def prune() -> None:
+        for object_id, (value_ref, _snapshot) in tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def register(value: AuthenticatedReadHttpRequest) -> None:
+        if canonical_type(value) is not request_type:
+            return
+        method = object_getattribute(value, "method")
+        url = object_getattribute(value, "url")
+        headers = object_getattribute(value, "headers")
+        body = object_getattribute(value, "body")
+        timeout_seconds = object_getattribute(value, "timeout_seconds")
+        if (
+            canonical_type(method) is not str
+            or canonical_type(url) is not str
+            or canonical_type(headers) is not mapping_proxy_type
+            or canonical_type(body) is not bytes
+            or canonical_type(timeout_seconds) is not int
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read request must contain exact canonical fields"
+            )
+        if any(
+            canonical_type(key) is not str or canonical_type(item) is not str
+            for key, item in headers.items()
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read headers must contain exact text"
+            )
+        prune()
+        object_id = canonical_id(value)
+        current = states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise ProviderTransportScopeError(
+                "authenticated-read request identity collision"
+            )
+        states[object_id] = (
+            weakref(value),
+            (method, url, headers, body, timeout_seconds),
+        )
+
+    def require(value: AuthenticatedReadHttpRequest) -> None:
+        if canonical_type(value) is not request_type:
+            raise TypeError(
+                "request must be exact AuthenticatedReadHttpRequest"
+            )
+        prune()
+        state = states.get(canonical_id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderTransportScopeError(
+                "authenticated-read request lacks construction authority"
+            )
+        method, url, headers, body, timeout_seconds = state[1]
+        current_method = object_getattribute(value, "method")
+        current_url = object_getattribute(value, "url")
+        current_headers = object_getattribute(value, "headers")
+        current_body = object_getattribute(value, "body")
+        current_timeout = object_getattribute(value, "timeout_seconds")
+        if (
+            canonical_type(current_method) is not str
+            or canonical_type(current_url) is not str
+            or canonical_type(current_body) is not bytes
+            or canonical_type(current_timeout) is not int
+            or current_method != method
+            or current_url != url
+            or current_headers is not headers
+            or current_body != body
+            or current_timeout != timeout_seconds
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read request changed after construction"
+            )
+
+    return register, require
+
+
+(
+    _register_authenticated_read_http_request,
+    _require_authenticated_read_http_request,
+) = _install_authenticated_read_http_request_integrity()
+del _install_authenticated_read_http_request_integrity
 
 
 @dataclass(frozen=True)
@@ -1290,17 +1572,18 @@ class UrllibJsonWireClient:
         self,
         request: SignedHttpRequest | AuthenticatedReadHttpRequest,
     ) -> bytes | TradingWireResponse | AuthenticatedReadWireResponse:
-        if not isinstance(
-            request,
-            (SignedHttpRequest, AuthenticatedReadHttpRequest),
-        ):
+        is_authenticated_read = type(request) is AuthenticatedReadHttpRequest
+        is_signed_write = type(request) is SignedHttpRequest
+        if not is_authenticated_read and not is_signed_write:
             raise TypeError(
-                "request must be SignedHttpRequest or AuthenticatedReadHttpRequest"
+                "request must be exact SignedHttpRequest or exact AuthenticatedReadHttpRequest"
             )
-        if isinstance(request, SignedHttpRequest):
+        if is_authenticated_read:
+            _require_authenticated_read_http_request(request)
             data = request.body or None
             method = request.method
         else:
+            _require_signed_http_request(request)
             data = request.body or None
             method = request.method
         outbound = Request(
@@ -1308,10 +1591,6 @@ class UrllibJsonWireClient:
             data=data,
             headers=dict(request.headers),
             method=method,
-        )
-        is_authenticated_read = isinstance(
-            request,
-            AuthenticatedReadHttpRequest,
         )
         # Capture one exact validated budget before any response-body read.
         # Mutating the client during I/O cannot widen this send's read envelope.

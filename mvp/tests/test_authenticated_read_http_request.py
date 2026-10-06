@@ -80,6 +80,60 @@ class AuthenticatedReadHttpRequestTests(unittest.TestCase):
         self.assertEqual(request.method, "POST")
         self.assertEqual(request.body, b"nonce=1")
 
+    def test_wire_client_rejects_request_subclass_before_field_access(self):
+        class ExecutableReadRequest(AuthenticatedReadHttpRequest):
+            callbacks = 0
+
+            def __getattribute__(self, name):
+                if name in {"url", "headers", "timeout_seconds", "method", "body"}:
+                    type(self).callbacks += 1
+                    raise AssertionError("request subclass field access executed")
+                return super().__getattribute__(name)
+
+        forged = object.__new__(ExecutableReadRequest)
+        client = UrllibJsonWireClient(max_response_bytes=1024)
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "SignedHttpRequest or exact AuthenticatedReadHttpRequest",
+        ):
+            client.send(forged)
+
+        self.assertEqual(ExecutableReadRequest.callbacks, 0)
+
+    def test_wire_client_rejects_post_construction_read_request_mutation_zero_wire(self):
+        class Opener:
+            def __init__(self):
+                self.calls = 0
+
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                raise AssertionError("wire must not be reached")
+
+        request = AuthenticatedReadHttpRequest(
+            url="https://localhost/iserver/accounts",
+            headers={"Accept": "application/json"},
+            timeout_seconds=5,
+            method="GET",
+            body=b"",
+        )
+        object.__setattr__(
+            request,
+            "url",
+            "https://attacker.invalid/iserver/accounts",
+        )
+        client = UrllibJsonWireClient(max_response_bytes=1024)
+        opener = Opener()
+        client._opener = opener
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "changed after construction",
+        ):
+            client.send(request)
+
+        self.assertEqual(opener.calls, 0)
+
     def test_wire_client_preserves_queryless_get_method(self):
         class Response:
             status = 200
@@ -174,6 +228,101 @@ class AuthenticatedReadHttpRequestTests(unittest.TestCase):
         self.assertEqual(outbound.get_method(), "POST")
         self.assertIsNone(outbound.data)
         self.assertEqual(timeout, 5)
+
+
+    def test_url_validation_and_wire_url_use_the_same_exact_text(self):
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "authenticated-read URL must be canonical HTTPS",
+        ):
+            AuthenticatedReadHttpRequest(
+                url=" https://localhost/iserver/accounts ",
+                headers={"Accept": "application/json"},
+                timeout_seconds=5,
+                method="GET",
+            )
+
+        request = AuthenticatedReadHttpRequest(
+            url="https://localhost/iserver/accounts",
+            headers={"Accept": "application/json"},
+            timeout_seconds=5,
+            method="get",
+        )
+        self.assertEqual(request.url, "https://localhost/iserver/accounts")
+        self.assertEqual(request.method, "GET")
+
+    def test_executable_text_subclasses_are_rejected_before_virtual_text_methods(self):
+        class HostileText(str):
+            def strip(self):
+                raise AssertionError("hostile strip executed")
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "authenticated-read URL must be canonical HTTPS",
+        ):
+            AuthenticatedReadHttpRequest(
+                url=HostileText("https://localhost/iserver/accounts"),
+                headers={"Accept": "application/json"},
+                timeout_seconds=5,
+                method="GET",
+            )
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "authenticated-read method must be canonical text",
+        ):
+            AuthenticatedReadHttpRequest(
+                url="https://localhost/iserver/accounts",
+                headers={"Accept": "application/json"},
+                timeout_seconds=5,
+                method=HostileText("GET"),
+            )
+
+    def test_headers_require_exact_inert_mapping_and_canonical_text(self):
+        class HostileHeaders(dict):
+            def items(self):
+                raise AssertionError("hostile items executed")
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "authenticated-read headers must be an exact inert mapping",
+        ):
+            AuthenticatedReadHttpRequest(
+                url="https://localhost/iserver/accounts",
+                headers=HostileHeaders({"Accept": "application/json"}),
+                timeout_seconds=5,
+                method="GET",
+            )
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "authenticated-read header values must be canonical text",
+        ):
+            AuthenticatedReadHttpRequest(
+                url="https://localhost/iserver/accounts",
+                headers={"Accept": " application/json "},
+                timeout_seconds=5,
+                method="GET",
+            )
+
+    def test_timeout_requires_exact_integer_before_comparison(self):
+        class HostileInt(int):
+            def __lt__(self, other):
+                raise AssertionError("hostile less-than executed")
+
+            def __gt__(self, other):
+                raise AssertionError("hostile greater-than executed")
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "invalid request timeout",
+        ):
+            AuthenticatedReadHttpRequest(
+                url="https://localhost/iserver/accounts",
+                headers={"Accept": "application/json"},
+                timeout_seconds=HostileInt(5),
+                method="GET",
+            )
 
 
 if __name__ == "__main__":

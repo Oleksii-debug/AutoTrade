@@ -312,6 +312,28 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
                 store.append_event(candidate)
             self.assertEqual(store.current_journal_sequence(), 0)
 
+    def test_projection_rejects_executable_aggregate_version_before_write(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(
+                ValueError,
+                "aggregate_version must be a non-negative integer",
+            ):
+                store.save_projection_checkpoint(
+                    projection_name="hostile-version-projection",
+                    aggregate_type="account",
+                    aggregate_id="paper-json-ingress",
+                    aggregate_version=_HostileInt(0),
+                    state={"cash": "100"},
+                )
+            self.assertEqual(store.whole_store_state_counts()["projection_checkpoints"], 0)
+
+    def test_pending_outbox_rejects_executable_limit_before_query(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(ValueError, "limit must be between 1 and 1000"):
+                store.pending_outbox(limit=_HostileInt(1))
+
     def test_command_text_subclasses_cannot_dispatch_strip_or_upper(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, Inexact, Rounded, localcontext
 import json
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -751,6 +752,29 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                         "kraken-futures-mutated-provider-domain-map",
                         provider_environment="LIVE",
                     )
+
+    def test_submission_consumer_rejects_post_mint_financial_body_retarget(self):
+        prepared = prepared_futures_request(
+            "kraken-futures-post-mint-body-retarget",
+            provider_environment="LIVE",
+        )
+        forged_body = dict(object.__getattribute__(prepared, "body"))
+        forged_body["size"] = "999"
+        object.__setattr__(
+            prepared,
+            "body",
+            MappingProxyType(forged_body),
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "prepared request authority changed",
+        ):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=prepared,
+                observation=None,
+                transport_ambiguous=True,
+            )
 
     def test_submission_consumer_rejects_post_mint_prepared_digest_retarget(self):
         prepared = prepared_futures_request(

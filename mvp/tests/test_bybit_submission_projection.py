@@ -21,6 +21,7 @@ from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
     stable_client_order_id,
+    submission_attempt_aggregate_id,
 )
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
@@ -346,13 +347,10 @@ class AuthenticatedBybitSubmissionProjectionTests(unittest.TestCase):
             submission_events = JournalStore.load_events(
                 store,
                 "submission_attempt",
-                next(
-                    event["aggregate_id"]
-                    for event in JournalStore.load_events_by_aggregate_type(
-                        store,
-                        "submission_attempt",
-                    )
-                    if event["payload"].get("attempt_id") == attempt
+                submission_attempt_aggregate_id(
+                    environment="PAPER",
+                    account_id="bybit-account",
+                    attempt_id=attempt,
                 ),
             )
             self.assertEqual(

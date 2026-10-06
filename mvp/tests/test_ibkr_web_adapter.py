@@ -4,6 +4,8 @@ from decimal import Decimal
 from types import MappingProxyType
 import json
 import unittest
+
+import mvp.autotrade_mvp.ibkr_web as ibkr_web_module
 from uuid import uuid4
 
 from mvp.autotrade_mvp.capabilities import (
@@ -440,6 +442,11 @@ class IbkrWebAdapterTests(unittest.TestCase):
         )
         self.assertEqual(prepared.fields["conidex"], "557335679@ZEROHASH")
         self.assertNotIn("conid", prepared.fields)
+
+    def test_provider_order_type_authority_map_is_immutable(self):
+        with self.assertRaises(TypeError):
+            ibkr_web_module._ORDER_TYPES["MARKET"] = "FORGED"
+        self.assertEqual(ibkr_web_module._ORDER_TYPES["MARKET"], "MKT")
 
     def test_binary_float_quantity_is_rejected(self):
         with self.assertRaises(IbkrWebAdapterError):

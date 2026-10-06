@@ -724,13 +724,17 @@ class GuardedDispatcher:
             return DispatchOutcome("IN_PROGRESS", client_order_id, None, "clock_before_prepared_timestamp")
         if age < self.prepared_lease_seconds:
             return DispatchOutcome("IN_PROGRESS", client_order_id, None, "prepared_owner_lease_active")
+        # SubmissionPrepared is durably before the irreversible boundary. If its
+        # lease expires while no SubmissionSending exists, the journal proves
+        # zero wire. Fence the stale owner as BLOCKED; UNKNOWN remains reserved
+        # for states that may actually have crossed the provider boundary.
         self._append(
             attempt_id=attempt_id,
-            event_type="SubmissionUnknown",
+            event_type="SubmissionBlocked",
             version=last["aggregate_version"] + 1,
             payload={
                 "client_order_id": client_order_id,
-                "reason": "prepared_owner_lease_expired_without_send_evidence",
+                "reason": "prepared_owner_lease_expired_before_send",
             },
             now=now,
         )
@@ -971,23 +975,60 @@ class GuardedDispatcher:
                     now=barrier_now,
                 )
                 raise DispatchBlocked(barrier_reason)
-            self._append(
-                attempt_id=attempt_id,
-                event_type="SubmissionSending",
-                version=2,
-                payload={
-                    "client_order_id": client_order_id,
-                    "owner_token": self.owner_token,
-                    "owner_epoch": self.owner_epoch,
-                    "reason": "final_send_barrier_passed",
-                },
-                now=barrier_now,
-            )
+            try:
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionSending",
+                    version=2,
+                    payload={
+                        "client_order_id": client_order_id,
+                        "owner_token": self.owner_token,
+                        "owner_epoch": self.owner_epoch,
+                        "reason": "final_send_barrier_passed",
+                    },
+                    now=barrier_now,
+                )
+            except ValueError as error:
+                # A concurrent recovery may have terminalized the Prepared
+                # attempt as zero-wire BLOCKED after its lease expired. Never
+                # let a stale final_guard cross that durable fence.
+                latest = self._events(attempt_id)
+                if latest and latest[-1]["event_type"] == "SubmissionPrepared":
+                    reason = "submission_changed_during_final_send_validation"
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionBlocked",
+                        version=2,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": reason,
+                        },
+                        now=barrier_now,
+                    )
+                raise DispatchBlocked(
+                    "submission_changed_during_final_send_validation"
+                ) from error
             barrier_passed = True
 
         try:
             response = transport_send(client_order_id, request_frozen, final_guard)
         except DispatchBlocked as error:
+            events = self._events(attempt_id)
+            if events:
+                last = events[-1]
+                if last["event_type"] == "SubmissionSending":
+                    return DispatchOutcome(
+                        "UNKNOWN",
+                        client_order_id,
+                        None,
+                        "concurrent_send_barrier_already_committed",
+                    )
+                if last["event_type"] in {
+                    "SubmissionSent",
+                    "SubmissionBlocked",
+                    "SubmissionUnknown",
+                }:
+                    return self._outcome_from_terminal(last, client_order_id)
             return DispatchOutcome("BLOCKED", client_order_id, None, str(error))
         except Exception as error:
             events = self._events(attempt_id)

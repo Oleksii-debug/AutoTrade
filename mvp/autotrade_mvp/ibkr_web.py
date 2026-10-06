@@ -588,9 +588,10 @@ def prepare_normalized_order(
         regulatory_manual_indicator_required=(
             intent.regulatory_manual_indicator_required
         ),
-        manual_indicator=sealed_intent.manual_indicator,
-        ext_operator=sealed_intent.ext_operator,
+        manual_indicator=intent.manual_indicator,
+        ext_operator=intent.ext_operator,
     )
+    coid = validate_coid(client_order_id)
     point = _instant(at, name="at")
     if (
         type(maximum_session_age_seconds) is not int

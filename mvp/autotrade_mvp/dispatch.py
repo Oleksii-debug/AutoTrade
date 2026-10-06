@@ -907,6 +907,12 @@ def _envelope(
     owner_epoch: int,
 ) -> dict[str, Any]:
     timestamp = _instant(now).isoformat().replace("+00:00", "Z")
+    # Detach the complete event payload before hashing.  This is especially
+    # important after the irreversible send barrier: a provider response may
+    # contain dict/list/string subclasses whose JSON hooks would otherwise run
+    # inside payload_digest() before persistence gets a chance to apply its own
+    # exact-builtin fence.
+    canonical_payload = _detach_submission_json(payload)
     return {
         "event_id": _event_id(scope_key, attempt_id, event_type, version),
         "event_type": event_type,
@@ -927,8 +933,8 @@ def _envelope(
             )
         ),
         "causation_id": None,
-        "payload": payload,
-        "payload_hash": payload_digest(payload),
+        "payload": canonical_payload,
+        "payload_hash": payload_digest(canonical_payload),
         "evidence_refs": [],
     }
 

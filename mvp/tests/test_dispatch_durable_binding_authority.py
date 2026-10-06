@@ -4,12 +4,16 @@ import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 
+import mvp.autotrade_mvp.dispatch as dispatch_module
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
+    SubmissionResponseBinding,
     load_submission_response_binding,
+    require_canonical_submission_response_binding,
     stable_client_order_id,
     submission_attempt_aggregate_id,
+    submission_response_binding_projection,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 
@@ -120,6 +124,110 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             submission_scope={"endpoint": "/orders"},
         )
         self.assertEqual(result.status, "SENT")
+
+    def test_importable_binding_token_cannot_mint_response_authority(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            binding = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-type-a1",
+            )
+            projected = submission_response_binding_projection(binding)
+            require_canonical_submission_response_binding(binding)
+
+            forged = SubmissionResponseBinding(
+                attempt_id=projected["attempt_id"],
+                aggregate_id=projected["aggregate_id"],
+                provider=projected["provider"],
+                request_hash=projected["request_hash"],
+                client_order_id=projected["client_order_id"],
+                environment=projected["environment"],
+                account_id=projected["account_id"],
+                prepared_at=projected["prepared_at"],
+                sent_at=projected["sent_at"],
+                submission_scope=projected["submission_scope"],
+                submission_scope_hash=projected["submission_scope_hash"],
+                response_bytes=projected["response_bytes"],
+                response_sha256=projected["response_sha256"],
+                http_status=projected["http_status"],
+                _factory_token=dispatch_module._SUBMISSION_RESPONSE_BINDING_TOKEN,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "submission response binding authority is unavailable",
+            ):
+                submission_response_binding_projection(forged)
+
+            clone = object.__new__(SubmissionResponseBinding)
+            for name in (
+                "attempt_id",
+                "aggregate_id",
+                "provider",
+                "request_hash",
+                "client_order_id",
+                "environment",
+                "account_id",
+                "prepared_at",
+                "sent_at",
+                "submission_scope",
+                "submission_scope_hash",
+                "response_bytes",
+                "response_sha256",
+                "http_status",
+                "_factory_token",
+            ):
+                object.__setattr__(
+                    clone,
+                    name,
+                    object.__getattribute__(binding, name),
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "submission response binding authority is unavailable",
+            ):
+                require_canonical_submission_response_binding(clone)
+
+    def test_binding_projection_rejects_post_load_retargeting_and_restart_remints(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            first = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-type-a1",
+            )
+            first_projection = submission_response_binding_projection(first)
+
+            restarted = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-type-a1",
+            )
+            restarted_projection = submission_response_binding_projection(restarted)
+            self.assertEqual(
+                restarted_projection["response_sha256"],
+                first_projection["response_sha256"],
+            )
+            self.assertIsNot(restarted, first)
+
+            object.__setattr__(first, "provider", "forged-provider")
+            with self.assertRaisesRegex(
+                ValueError,
+                "submission response binding authority is unavailable",
+            ):
+                submission_response_binding_projection(first)
+
+            object.__setattr__(restarted, "shadow_authority", "forged")
+            with self.assertRaisesRegex(
+                ValueError,
+                "submission response binding authority is unavailable",
+            ):
+                require_canonical_submission_response_binding(restarted)
 
     def test_restart_rejects_non_contiguous_aggregate_versions(self):
         with TemporaryDirectory() as directory:

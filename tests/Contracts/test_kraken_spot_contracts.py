@@ -13,6 +13,7 @@ from mvp.autotrade_mvp.capabilities import (
     EvidenceVerification,
     derive_capability_snapshot,
 )
+from mvp.tests.capability_test_support import fresh_test_admission
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
@@ -90,12 +91,12 @@ class KrakenSpotContractTests(unittest.TestCase):
             )
             for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
         )
-        capability = derive_capability_snapshot(
+        capability = fresh_test_admission(derive_capability_snapshot(
             snapshot_id=str(uuid4()),
             claims=claims,
             observed_at=NOW_DT,
             evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-        )
+        ))
         intent = KrakenSpotOrderIntent.create(
             instrument_version="XBTUSD:v1",
             pair="XBTUSD",

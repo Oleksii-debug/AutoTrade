@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 import weakref
 
+import mvp.autotrade_mvp.authority as authority_module
 from mvp.autotrade_mvp.authority import (
     AuthoritativeRiskSnapshot,
     AuthorityConflict,
@@ -443,6 +444,16 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                     instruments_module,
                     "_detached_instrument_version",
                     new=decoy_detach,
+                ),
+                patch.object(
+                    authority_module,
+                    "_instrument_registry_versions_for",
+                    new=decoy_versions,
+                ),
+                patch.object(
+                    authority_module,
+                    "InstrumentRegistry",
+                    new=object,
                 ),
             ):
                 admitted = _admit_short(

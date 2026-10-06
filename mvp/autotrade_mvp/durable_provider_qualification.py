@@ -91,11 +91,10 @@ def _qid(value: object, *, name: str) -> str:
 
 
 def _point(value: datetime, *, name: str) -> datetime:
-    if (
-        type(value) is not datetime
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
+    # Exact datetime alone is insufficient: its nested tzinfo can still be a
+    # caller-defined Python object. Reject executable timezone authority
+    # before utcoffset()/astimezone() can dispatch through caller code.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
         raise ProviderQualificationError(
             f"{name} must be an exact timezone-aware datetime"
         )

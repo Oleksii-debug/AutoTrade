@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -49,6 +49,18 @@ class _HostileDatetime(datetime):
 
     def astimezone(self, *args, **kwargs):
         raise AssertionError("hostile datetime callback must never execute")
+
+
+class _HostileTimezone(tzinfo):
+    calls = 0
+
+    def utcoffset(self, _dt):
+        type(self).calls += 1
+        raise AssertionError("hostile timezone callback must never execute")
+
+    def dst(self, _dt):
+        type(self).calls += 1
+        raise AssertionError("hostile timezone callback must never execute")
 
 
 class _HostileCapabilitySnapshot(CapabilitySnapshot):
@@ -200,6 +212,38 @@ class AuthenticatedReadTextIngressTests(unittest.TestCase):
                 at=hostile,
                 permission_scope="ACCOUNT.READ",
             )
+
+    def test_response_observed_at_rejects_executable_timezone_before_callback(self):
+        binding = prepare_authenticated_read_query(
+            capability=capability(),
+            surface=Surface.ACTIVITIES,
+            endpoint="/v5/account/transaction-log",
+            query={"category": "option"},
+            at=NOW,
+            permission_scope="ACCOUNT.READ",
+        )
+        _HostileTimezone.calls = 0
+        hostile_observed_at = datetime(
+            2026,
+            10,
+            6,
+            0,
+            0,
+            tzinfo=_HostileTimezone(),
+        )
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "observed_at must be an exact stdlib timezone datetime",
+        ):
+            observe_authenticated_json_response(
+                query_binding=binding,
+                http_status=200,
+                response_bytes=b'{"result":{"list":[]}}',
+                observed_at=hostile_observed_at,
+            )
+
+        self.assertEqual(_HostileTimezone.calls, 0)
 
     def test_authenticated_response_projection_ignores_require_scope_rebinding(self):
         binding = prepare_authenticated_read_query(

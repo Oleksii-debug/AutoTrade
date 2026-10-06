@@ -774,12 +774,19 @@ class AlpacaAdapterTests(unittest.TestCase):
         )
 
     def test_submission_consumer_ignores_exact_prepared_getattribute_callback(self):
+        intent_id = "alpaca-prepared-callback-fence"
+        client_id = stable_client_order_id(
+            "ALPACA",
+            intent_id,
+            environment="PAPER",
+            account_id="paper-account",
+        )
         attempt, prepared, observation = self._durable_submission_observation(
             {
                 "id": str(uuid4()),
-                "client_order_id": "__CLIENT__",
+                "client_order_id": client_id,
             },
-            intent_id="alpaca-prepared-callback-fence",
+            intent_id=intent_id,
         )
         callbacks = []
 

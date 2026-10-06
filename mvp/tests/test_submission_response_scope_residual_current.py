@@ -208,6 +208,40 @@ class ResponseScopeResidualCurrentTests(unittest.TestCase):
             )
         self.assertEqual(HostileDict.callbacks, 0)
 
+    def test_loader_rejects_hostile_selector_subclasses_before_normalization(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        class HostileText(str):
+            callbacks = 0
+
+            def strip(self):
+                type(self).callbacks += 1
+                raise AssertionError("hostile strip executed")
+
+            def upper(self):
+                type(self).callbacks += 1
+                raise AssertionError("hostile upper executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(directory + "/journal.sqlite3")
+            for field, value in (
+                ("environment", "SIMULATION"),
+                ("account_id", "acct"),
+                ("attempt_id", "attempt-scope-current"),
+            ):
+                HostileText.callbacks = 0
+                kwargs = {
+                    "store": store,
+                    "environment": "SIMULATION",
+                    "account_id": "acct",
+                    "attempt_id": "attempt-scope-current",
+                }
+                kwargs[field] = HostileText(value)
+                with self.subTest(field=field):
+                    with self.assertRaises(ValueError):
+                        load_submission_response_binding(**kwargs)
+                    self.assertEqual(HostileText.callbacks, 0)
+
     def test_provider_must_be_exact_text_not_string_coerced(self):
         with TemporaryDirectory() as directory:
             store = self._store(

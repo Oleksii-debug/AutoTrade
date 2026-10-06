@@ -17,6 +17,11 @@ from weakref import ref as weakref_ref
 from .capabilities import CapabilityError, CapabilitySnapshot
 from .durable_capabilities import DurableCapabilityRegistry
 from .durable_provider_qualification import DurableProviderQualificationRegistry
+from .persistence import (
+    JournalStore,
+    journal_store_authority_scope,
+    require_exact_journal_store_authority,
+)
 from .provider_core import provider_definition
 from .provider_domain import ProviderDomainError, ProviderFinancialScope
 from .provider_qualification_authority import (
@@ -106,14 +111,45 @@ def _instant(value: datetime, name: str) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _journal_cut(store: object) -> int:
-    value = store.whole_store_state_cut()
-    if type(value) is not dict:
-        raise ProviderSelectionError("whole-store decision cut is non-canonical")
-    sequence = value.get("journal_sequence")
-    if type(sequence) is not int or sequence < 0:
-        raise ProviderSelectionError("whole-store decision cut lacks canonical sequence")
-    return sequence
+def _install_journal_cut_reader():
+    """Freeze provider selection to canonical JournalStore cut authority."""
+
+    store_type = JournalStore
+    canonical_require = require_exact_journal_store_authority
+    canonical_scope = journal_store_authority_scope
+    canonical_operation = store_type.whole_store_state_cut
+    canonical_getattr = getattr
+
+    def journal_cut(store: object) -> int:
+        if (
+            JournalStore is not store_type
+            or require_exact_journal_store_authority is not canonical_require
+            or journal_store_authority_scope is not canonical_scope
+            or canonical_getattr(store_type, "whole_store_state_cut", None)
+            is not canonical_operation
+        ):
+            raise ProviderSelectionError("journal cut authority changed")
+
+        identity = canonical_require(
+            store,
+            subject="provider selection JournalStore",
+        )
+        with canonical_scope(store, identity):
+            value = canonical_operation(store)
+        if type(value) is not dict:
+            raise ProviderSelectionError("whole-store decision cut is non-canonical")
+        sequence = value.get("journal_sequence")
+        if type(sequence) is not int or sequence < 0:
+            raise ProviderSelectionError(
+                "whole-store decision cut lacks canonical sequence"
+            )
+        return sequence
+
+    return journal_cut
+
+
+_journal_cut = _install_journal_cut_reader()
+del _install_journal_cut_reader
 
 
 @dataclass(frozen=True, slots=True)

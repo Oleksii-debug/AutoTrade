@@ -297,6 +297,57 @@ class ProviderSelectionTests(unittest.TestCase):
 
             self.assertEqual(_HostileCandidateList.calls, 0)
 
+    def test_selection_rejects_journal_cut_instance_shadow_before_callback(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            store = capabilities.store
+            calls = []
+
+            def hostile_cut(*_args, **_kwargs):
+                calls.append("whole_store_state_cut")
+                raise AssertionError("instance-shadowed journal cut executed")
+
+            store.whole_store_state_cut = hostile_cut
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical JournalStore instance state is shadowed",
+            ):
+                select_provider(
+                    request(),
+                    [candidate()],
+                    at=NOW,
+                    capability_registry=capabilities,
+                    qualification_registry=qualifications,
+                )
+            self.assertEqual(calls, [])
+
+    def test_selection_rejects_journal_cut_class_rebind_before_callback(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            calls = []
+
+            def hostile_cut(*_args, **_kwargs):
+                calls.append("whole_store_state_cut")
+                raise AssertionError("class-rebound journal cut executed")
+
+            original = JournalStore.whole_store_state_cut
+            JournalStore.whole_store_state_cut = hostile_cut
+            try:
+                with self.assertRaisesRegex(
+                    ProviderSelectionError,
+                    "journal cut authority changed",
+                ):
+                    select_provider(
+                        request(),
+                        [candidate()],
+                        at=NOW,
+                        capability_registry=capabilities,
+                        qualification_registry=qualifications,
+                    )
+            finally:
+                JournalStore.whole_store_state_cut = original
+            self.assertEqual(calls, [])
+
     def test_selection_accepts_exact_tuple_candidate_population(self):
         with TemporaryDirectory() as directory:
             capabilities, qualifications, _record = self.authorities(directory)

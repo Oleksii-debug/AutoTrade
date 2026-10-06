@@ -341,12 +341,16 @@ def prepare_authenticated_read_query(
 
     if not isinstance(capability, CapabilitySnapshot):
         raise TypeError("capability must be CapabilitySnapshot")
+    if not isinstance(surface, Surface):
+        raise ProviderCoreError("surface must be a provider Surface")
     point = _utc(at, "at")
-    if type(permission_scope) is not str:
+    if (
+        type(permission_scope) is not str
+        or not permission_scope
+        or permission_scope != permission_scope.strip()
+    ):
         raise ProviderCoreError("permission_scope must be a canonical string")
-    scope = permission_scope.strip()
-    if not scope:
-        raise ProviderCoreError("permission_scope is required")
+    scope = permission_scope
     if (
         capability.status != "VERIFIED"
         or not (capability.observed_at <= point < capability.expires_at)
@@ -358,11 +362,13 @@ def prepare_authenticated_read_query(
     provider = capability.provider_id.upper()
     if provider not in PROVIDERS:
         raise ProviderCoreError("unknown provider")
-    if type(endpoint) is not str:
+    if (
+        type(endpoint) is not str
+        or not endpoint
+        or endpoint != endpoint.strip()
+    ):
         raise ProviderCoreError("authenticated-read endpoint must be a canonical string")
-    normalized_endpoint = endpoint.strip()
-    if not normalized_endpoint:
-        raise ProviderCoreError("authenticated-read endpoint is required")
+    normalized_endpoint = endpoint
     if not normalized_endpoint.startswith("/") or "://" in normalized_endpoint:
         raise ProviderCoreError(
             "authenticated-read endpoint must be a canonical provider-relative path"

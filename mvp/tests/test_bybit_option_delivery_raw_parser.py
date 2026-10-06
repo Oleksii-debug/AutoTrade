@@ -154,6 +154,22 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
             parsed.next_page_cursor,
             "132791%3A0%2C132791%3A0",
         )
+        self.assertEqual(parsed.provider_id, source.provider_id)
+        self.assertEqual(parsed.account_id, source.account_id)
+        self.assertEqual(parsed.entity_id, source.query_binding.entity_id)
+        self.assertEqual(parsed.environment, source.environment)
+        self.assertEqual(
+            parsed.capability_snapshot_id,
+            source.query_binding.capability_snapshot_id,
+        )
+        self.assertEqual(
+            parsed.instrument_version,
+            source.query_binding.instrument_version,
+        )
+        self.assertIs(parsed.surface, Surface.ACTIVITIES)
+        self.assertEqual(parsed.endpoint, ENDPOINT)
+        self.assertEqual(parsed.permission_scope, "ACCOUNT.READ")
+        self.assertEqual(parsed.query_digest, source.query_binding.query_digest)
         self.assertEqual(parsed.evidence_ref, source.evidence_ref)
         self.assertEqual(parsed.response_sha256, source.response_sha256)
         self.assertEqual(parsed.observed_at, source.observed_at)

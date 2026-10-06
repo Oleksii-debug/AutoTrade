@@ -254,7 +254,26 @@ def _order_projection_binding_operations():
             store = state["store"]
             identity = require_exact_journal_store_authority(store, subject="durable OMS JournalStore")
             scope = tuple(state[name] for name in _ORDER_SCOPE_FIELDS)
-            bindings[id(value)] = (weakref.ref(value), store, identity, scope, state["evidence_artifact_store"])
+            binding_key = id(value)
+
+            def release_binding(reference, *, binding_key=binding_key):
+                # The registry must not outlive the OMS authority it protects.
+                # Do not capture value here: that would keep the referent alive.
+                # The identity check also prevents a delayed weakref callback
+                # from deleting a newer object that reused the same id().
+                with lock:
+                    entry = bindings.get(binding_key)
+                    if entry is not None and entry[0] is reference:
+                        bindings.pop(binding_key, None)
+
+            reference = weakref.ref(value, release_binding)
+            bindings[binding_key] = (
+                reference,
+                store,
+                identity,
+                scope,
+                state["evidence_artifact_store"],
+            )
 
     def require(value):
         if type(value) is not DurableOrderBookProjection:

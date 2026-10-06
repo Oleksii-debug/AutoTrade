@@ -1115,6 +1115,224 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(prepared.fields["extOperator"], "autotrade")
 
 
+    def test_ibkr_authority_scalars_reject_polymorphic_subclasses_before_callbacks(self):
+        class ExecutableText(str):
+            strip_called = False
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_called = True
+                raise AssertionError("text subclass callback executed")
+
+        class ExecutableDecimal(Decimal):
+            finite_called = False
+
+            def is_finite(self):
+                type(self).finite_called = True
+                raise AssertionError("decimal subclass callback executed")
+
+        class ExecutableDatetime(datetime):
+            offset_called = False
+
+            def utcoffset(self):
+                type(self).offset_called = True
+                raise AssertionError("datetime subclass callback executed")
+
+        class ExecutableInt(int):
+            compare_called = False
+
+            def __le__(self, other):
+                type(self).compare_called = True
+                raise AssertionError("integer subclass comparison executed")
+
+            def __lt__(self, other):
+                type(self).compare_called = True
+                raise AssertionError("integer subclass comparison executed")
+
+        with self.assertRaisesRegex(IbkrWebAdapterError, "exact text"):
+            IbkrWebOrderIntent.create(
+                instrument_version="AAPL-CONID-265598:v1",
+                account_id="U1234567",
+                contract=IbkrContractIdentity(conid=265598),
+                side=ExecutableText("BUY"),
+                order_type="MARKET",
+                time_in_force="DAY",
+                quantity="1",
+            )
+        self.assertFalse(ExecutableText.strip_called)
+
+        with self.assertRaisesRegex(IbkrWebAdapterError, "exact decimal input"):
+            IbkrWebOrderIntent.create(
+                instrument_version="AAPL-CONID-265598:v1",
+                account_id="U1234567",
+                contract=IbkrContractIdentity(conid=265598),
+                side="BUY",
+                order_type="MARKET",
+                time_in_force="DAY",
+                quantity=ExecutableDecimal("1"),
+            )
+        self.assertFalse(ExecutableDecimal.finite_called)
+
+        with self.assertRaisesRegex(IbkrWebAdapterError, "positive exact integer"):
+            IbkrContractIdentity(conid=ExecutableInt(265598))
+        self.assertFalse(ExecutableInt.compare_called)
+
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        hostile_time = ExecutableDatetime(
+            2026, 9, 24, 20, tzinfo=timezone.utc
+        )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "exact datetime"):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-hostile-time",
+                capability=capability(),
+                session=ready_session(),
+                at=hostile_time,
+                maximum_session_age_seconds=30,
+            )
+        self.assertFalse(ExecutableDatetime.offset_called)
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError, "non-negative integer"
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-hostile-age",
+                capability=capability(),
+                session=ready_session(),
+                at=NOW,
+                maximum_session_age_seconds=ExecutableInt(30),
+            )
+        self.assertFalse(ExecutableInt.compare_called)
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError, "positive exact integer"
+        ):
+            IbkrExecutionEvidence.create(
+                execution_id="exec-int-subclass",
+                permanent_order_id=ExecutableInt(778899),
+                account_id="U1234567",
+                quantity="1",
+                price="100",
+            )
+        self.assertFalse(ExecutableInt.compare_called)
+
+    def test_execution_evidence_direct_constructor_enforces_canonical_invariants(self):
+        class ExecutableText(str):
+            strip_called = False
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_called = True
+                raise AssertionError("execution text callback executed")
+
+        class ExecutableDecimal(Decimal):
+            finite_called = False
+
+            def is_finite(self):
+                type(self).finite_called = True
+                raise AssertionError("execution decimal callback executed")
+
+        with self.assertRaisesRegex(IbkrWebAdapterError, "exact text"):
+            IbkrExecutionEvidence(
+                execution_id=ExecutableText("exec-direct"),
+                permanent_order_id="778899",
+                account_id="U1234567",
+                quantity=Decimal("1"),
+                price=Decimal("100"),
+            )
+        self.assertFalse(ExecutableText.strip_called)
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError, "canonical positive integer text"
+        ):
+            IbkrExecutionEvidence(
+                execution_id="exec-direct",
+                permanent_order_id="0778899",
+                account_id="U1234567",
+                quantity=Decimal("1"),
+                price=Decimal("100"),
+            )
+
+        with self.assertRaisesRegex(IbkrWebAdapterError, "exact decimal input"):
+            IbkrExecutionEvidence(
+                execution_id="exec-direct",
+                permanent_order_id="778899",
+                account_id="U1234567",
+                quantity=ExecutableDecimal("1"),
+                price=Decimal("100"),
+            )
+        self.assertFalse(ExecutableDecimal.finite_called)
+
+        direct = IbkrExecutionEvidence(
+            execution_id="exec-direct",
+            permanent_order_id="778899",
+            account_id="U1234567",
+            quantity=Decimal("1"),
+            price=Decimal("100"),
+        )
+        self.assertEqual(direct.execution_id, "exec-direct")
+        self.assertEqual(direct.permanent_order_id, "778899")
+        self.assertEqual(direct.quantity, Decimal("1"))
+
+    def test_reconciliation_revalidates_mutated_execution_snapshot(self):
+        class ExecutableDecimal(Decimal):
+            finite_called = False
+
+            def is_finite(self):
+                type(self).finite_called = True
+                raise AssertionError("mutated execution callback executed")
+
+        execution = IbkrExecutionEvidence.create(
+            execution_id="exec-mutated",
+            permanent_order_id=778899,
+            account_id="U1234567",
+            quantity="1",
+            price="100",
+        )
+        object.__setattr__(execution, "quantity", ExecutableDecimal("1"))
+        with self.assertRaisesRegex(IbkrWebAdapterError, "exact decimal input"):
+            execution_to_reconciliation_fill(
+                execution,
+                client_order_id="at-exec-mutated",
+                expected_account_id="U1234567",
+                instrument="AAPL-CONID-265598:v1",
+                fee_amount="0",
+                fee_currency="USD",
+                trade_time="2026-09-24T20:00:01Z",
+            )
+        self.assertFalse(ExecutableDecimal.finite_called)
+
+    def test_reconciliation_rejects_execution_subclass_before_field_callbacks(self):
+        class ExecutableExecution(IbkrExecutionEvidence):
+            attribute_called = False
+
+            def __getattribute__(self, name):
+                if name not in {"attribute_called", "__class__"}:
+                    type(self).attribute_called = True
+                    raise AssertionError("execution evidence callback executed")
+                return super().__getattribute__(name)
+
+        forged = object.__new__(ExecutableExecution)
+        with self.assertRaisesRegex(TypeError, "exact IbkrExecutionEvidence"):
+            execution_to_reconciliation_fill(
+                forged,
+                client_order_id="at-exec-subclass",
+                expected_account_id="U1234567",
+                instrument="AAPL-CONID-265598:v1",
+                fee_amount="0",
+                fee_currency="USD",
+                trade_time="2026-09-24T20:00:01Z",
+            )
+        self.assertFalse(ExecutableExecution.attribute_called)
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -683,10 +683,10 @@ def _require_physical_delivery_borrow_safety(
             )
 
 
-def _callback_financial_authority_fingerprint() -> tuple[object, ...]:
+def _callback_financial_authority_fingerprint() -> tuple[tuple[object, object], ...]:
     """Capture downstream financial code that an arbitrary resolver must not retarget."""
 
-    return (
+    authorities = (
         InstrumentRegistry.exact,
         InstrumentRegistry.at,
         InstrumentVersion.to_contract_dict,
@@ -713,6 +713,10 @@ def _callback_financial_authority_fingerprint() -> tuple[object, ...]:
         physical_exercise_obligation,
         book_cash_option_settlement,
         book_physical_option_settlement,
+    )
+    return tuple(
+        (authority, getattr(authority, "__code__", None))
+        for authority in authorities
     )
 
 
@@ -844,6 +848,11 @@ class DurableOptionLifecycleAuthority:
         observation_parser = _canonical_observation_from_sealed_response
         observation_parser_code = getattr(observation_parser, "__code__", None)
         financial_authority_fingerprint = _callback_financial_authority_fingerprint
+        financial_authority_fingerprint_code = getattr(
+            financial_authority_fingerprint,
+            "__code__",
+            None,
+        )
         expected_financial_authority = financial_authority_fingerprint()
 
         # Snapshot every caller-reachable lifecycle owner/config value locally.
@@ -910,6 +919,11 @@ class DurableOptionLifecycleAuthority:
         if (
             _callback_financial_authority_fingerprint
             is not financial_authority_fingerprint
+            or (
+                financial_authority_fingerprint_code is not None
+                and getattr(financial_authority_fingerprint, "__code__", None)
+                is not financial_authority_fingerprint_code
+            )
             or financial_authority_fingerprint() != expected_financial_authority
         ):
             raise OptionLifecycleError(

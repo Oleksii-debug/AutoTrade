@@ -410,6 +410,55 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 self.assertEqual(result.status, "UNKNOWN")
                 self.assertEqual(result.reason, "exact_response_invalid")
 
+    def test_response_binding_rejects_sender_ownership_discontinuity(self):
+        cases = (
+            ("SubmissionSending", "owner_token", "other-owner", False),
+            ("SubmissionSending", "owner_epoch", 2, False),
+            ("SubmissionSending", "owner_epoch", "2", True),
+            ("SubmissionSent", "owner_epoch", "2", True),
+        )
+        for event_type, field, value, envelope_field in cases:
+            with self.subTest(
+                event_type=event_type,
+                field=field,
+            ), TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                self._make_exact_response_attempt(path)
+                self._tamper_event_field(
+                    path,
+                    event_type,
+                    field,
+                    value,
+                    envelope_field=envelope_field,
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "sender ownership is not continuous",
+                ):
+                    load_submission_response_binding(
+                        JournalStore(path),
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id="binding-type-a1",
+                    )
+
+    def test_restart_rejects_sent_terminal_owner_epoch_retarget(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            self._tamper_event_field(
+                path,
+                "SubmissionSent",
+                "owner_epoch",
+                "2",
+                envelope_field=True,
+            )
+
+            result = self._redispatch_exact_response_attempt(path)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "durable_submission_history_invalid")
+
     def test_restart_rejects_prepared_sending_owner_discontinuity(self):
         for event_type, field, value, envelope_field in (
             ("SubmissionPrepared", "owner_token", "", False),

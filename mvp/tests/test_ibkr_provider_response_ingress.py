@@ -48,6 +48,14 @@ class _ExecutableList(list):
         raise AssertionError("provider sequence callback executed")
 
 
+class _ExecutableBody(dict):
+    iter_called = False
+
+    def __iter__(self):
+        type(self).iter_called = True
+        raise AssertionError("reply body mapping callback executed")
+
+
 class _ExecutableObservation(ProviderResponseObservation):
     scope_called = False
 
@@ -64,6 +72,7 @@ class IbkrProviderResponseIngressTests(unittest.TestCase):
         _EqualityTrap.eq_called = False
         _ExecutableList.iter_called = False
         _ExecutableObservation.scope_called = False
+        _ExecutableBody.iter_called = False
 
     def test_submission_parser_rejects_executable_mapping_before_callbacks(self):
         with self.assertRaisesRegex(TypeError, "exact object"):
@@ -204,6 +213,20 @@ class IbkrProviderResponseIngressTests(unittest.TestCase):
                 fee_currency_by_execution_id={"exec-1": "USD"},
             )
         self.assertFalse(_ExecutableObservation.scope_called)
+
+    def test_reply_request_rejects_mapping_subclass_before_copy_callbacks(self):
+        from mvp.autotrade_mvp.ibkr_web import IbkrReplyRequest
+
+        with self.assertRaisesRegex(IbkrWebAdapterError, "confirmed=true"):
+            IbkrReplyRequest(
+                endpoint="/iserver/reply/safe-reply-id",
+                body=_ExecutableBody({"confirmed": True}),
+                attempt_id="attempt-1",
+                account_id="U1234567",
+                client_order_id="coid-1",
+                response_sha256="sha256:" + "a" * 64,
+            )
+        self.assertFalse(_ExecutableBody.iter_called)
 
     def test_documented_ack_reply_and_reject_shapes_still_parse(self):
         ack = parse_order_submission_response(

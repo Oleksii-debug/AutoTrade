@@ -172,8 +172,8 @@ class IbkrWebOrderIntent:
     ext_operator: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.contract, IbkrContractIdentity):
-            raise TypeError("contract must be IbkrContractIdentity")
+        if type(self.contract) is not IbkrContractIdentity:
+            raise TypeError("contract must be exact IbkrContractIdentity")
         side = _text(self.side, name="side").upper()
         order = _text(self.order_type, name="order_type").upper()
         tif = _text(self.time_in_force, name="time_in_force").upper()
@@ -240,8 +240,8 @@ class IbkrWebOrderIntent:
         manual_indicator: bool | None = None,
         ext_operator: str | None = None,
     ) -> "IbkrWebOrderIntent":
-        if not isinstance(contract, IbkrContractIdentity):
-            raise TypeError("contract must be IbkrContractIdentity")
+        if type(contract) is not IbkrContractIdentity:
+            raise TypeError("contract must be exact IbkrContractIdentity")
         side_value = _text(side, name="side").upper()
         order = _text(order_type, name="order_type").upper()
         tif = _text(time_in_force, name="time_in_force").upper()
@@ -324,12 +324,12 @@ def prepare_normalized_order(
     until exact-version adapter tests establish a lossless provider boundary.
     """
 
-    if not isinstance(intent, IbkrWebOrderIntent):
-        raise TypeError("intent must be IbkrWebOrderIntent")
-    if not isinstance(capability, CapabilitySnapshot):
-        raise TypeError("capability must be CapabilitySnapshot")
-    if not isinstance(session, IbkrBrokerageSessionStatus):
-        raise TypeError("session must be IbkrBrokerageSessionStatus")
+    if type(intent) is not IbkrWebOrderIntent:
+        raise TypeError("intent must be exact IbkrWebOrderIntent")
+    if type(capability) is not CapabilitySnapshot:
+        raise TypeError("capability must be exact CapabilitySnapshot")
+    if type(session) is not IbkrBrokerageSessionStatus:
+        raise TypeError("session must be exact IbkrBrokerageSessionStatus")
     point = _instant(at, name="at")
     if (
         isinstance(maximum_session_age_seconds, bool)
@@ -870,7 +870,7 @@ class IbkrReplyRequest:
         if not endpoint.startswith(prefix):
             raise IbkrWebAdapterError("reply endpoint must use /iserver/reply/<reply-id>")
         _reply_id(endpoint[len(prefix):])
-        if not isinstance(self.body, Mapping) or dict(self.body) != {"confirmed": True}:
+        if type(self.body) is not dict or self.body != {"confirmed": True}:
             raise IbkrWebAdapterError("reply request body must be exactly confirmed=true")
         object.__setattr__(self, "endpoint", endpoint)
         object.__setattr__(self, "body", MappingProxyType(dict(self.body)))

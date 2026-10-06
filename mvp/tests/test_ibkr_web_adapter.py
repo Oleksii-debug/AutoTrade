@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
+    CapabilitySnapshot,
     EvidenceVerification,
     derive_capability_snapshot,
 )
@@ -173,6 +174,83 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(normalized.order_type, "LIMIT")
         self.assertEqual(normalized.quantity, Decimal("1.25"))
         self.assertEqual(normalized.limit_price, Decimal("220.10"))
+
+    def test_normalized_order_rejects_polymorphic_admission_authorities(self):
+        class ExecutableIntent(IbkrWebOrderIntent):
+            pass
+
+        class ExecutableCapability(CapabilitySnapshot):
+            admits_called = False
+
+            def admits(self, **kwargs):
+                type(self).admits_called = True
+                raise AssertionError("capability callback executed")
+
+        class ExecutableSession(IbkrBrokerageSessionStatus):
+            readiness_called = False
+
+            def require_trade_ready(self):
+                type(self).readiness_called = True
+                raise AssertionError("session callback executed")
+
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        cap = capability()
+        session = ready_session()
+
+        with self.assertRaisesRegex(TypeError, "exact IbkrWebOrderIntent"):
+            prepare_normalized_order(
+                object.__new__(ExecutableIntent),
+                client_order_id="at-polymorphic-intent",
+                capability=cap,
+                session=session,
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+
+        with self.assertRaisesRegex(TypeError, "exact CapabilitySnapshot"):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-polymorphic-capability",
+                capability=object.__new__(ExecutableCapability),
+                session=session,
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+        self.assertFalse(ExecutableCapability.admits_called)
+
+        with self.assertRaisesRegex(TypeError, "exact IbkrBrokerageSessionStatus"):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-polymorphic-session",
+                capability=cap,
+                session=object.__new__(ExecutableSession),
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+        self.assertFalse(ExecutableSession.readiness_called)
+
+    def test_order_intent_rejects_contract_subclass_before_polymorphic_state(self):
+        class ExecutableContract(IbkrContractIdentity):
+            pass
+
+        with self.assertRaisesRegex(TypeError, "exact IbkrContractIdentity"):
+            IbkrWebOrderIntent.create(
+                instrument_version="AAPL-CONID-265598:v1",
+                account_id="U1234567",
+                contract=object.__new__(ExecutableContract),
+                side="BUY",
+                order_type="MARKET",
+                time_in_force="DAY",
+                quantity="1",
+            )
 
     def test_normalized_limit_order_preserves_exact_decimal_outside_provider_double(self):
         intent = IbkrWebOrderIntent.create(

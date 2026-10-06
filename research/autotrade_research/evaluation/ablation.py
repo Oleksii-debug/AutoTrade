@@ -242,13 +242,10 @@ class AblationOutcome:
         )
         if type(self.variant) is not str or self.variant not in {"FULL", "ABLATED"}:
             raise ValueError("variant must be exact built-in text FULL or ABLATED")
-        if (
-            not isinstance(self.elapsed_ms, int)
-            or isinstance(self.elapsed_ms, bool)
-            or not isinstance(self.deadline_ms, int)
-            or isinstance(self.deadline_ms, bool)
-        ):
-            raise TypeError("elapsed_ms and deadline_ms must be integers")
+        if type(self.elapsed_ms) is not int or type(self.deadline_ms) is not int:
+            raise TypeError(
+                "elapsed_ms and deadline_ms must be exact built-in integers"
+            )
         if self.elapsed_ms < 0 or self.deadline_ms <= 0:
             raise ValueError("elapsed_ms must be non-negative and deadline_ms positive")
         if not isinstance(self.components, tuple):
@@ -450,12 +447,10 @@ class ExactAblationDecision:
     status: str
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.pair_count, int)
-            or isinstance(self.pair_count, bool)
-            or self.pair_count < 2
-        ):
-            raise ValueError("exact decision pair_count must be an integer >= 2")
+        if type(self.pair_count) is not int or self.pair_count < 2:
+            raise ValueError(
+                "exact decision pair_count must be an exact built-in integer >= 2"
+            )
         for field_name in (
             "mean",
             "sample_variance",
@@ -756,8 +751,8 @@ def evaluate_incremental_value(
 ) -> AblationEvaluation:
     """Measure conservative net marginal value with an exact rational verdict."""
 
-    if not isinstance(minimum_pairs, int) or isinstance(minimum_pairs, bool) or minimum_pairs < 2:
-        raise ValueError("minimum_pairs must be an integer >= 2")
+    if type(minimum_pairs) is not int or minimum_pairs < 2:
+        raise ValueError("minimum_pairs must be an exact built-in integer >= 2")
     required = _decimal(required_lower_bound, "required_lower_bound")
     multiplier = _decimal(uncertainty_multiplier, "uncertainty_multiplier")
     if multiplier < 0:
@@ -896,24 +891,20 @@ class AblationEvidenceBundle:
             "dataset_digest",
             _digest(self.dataset_digest, "dataset_digest"),
         )
-        if (
-            not isinstance(self.minimum_pairs, int)
-            or isinstance(self.minimum_pairs, bool)
-            or self.minimum_pairs < 2
-        ):
-            raise ValueError("minimum_pairs must be an integer >= 2")
+        if type(self.minimum_pairs) is not int or self.minimum_pairs < 2:
+            raise ValueError(
+                "minimum_pairs must be an exact built-in integer >= 2"
+            )
         required = _decimal(self.required_lower_bound, "required_lower_bound")
         multiplier = _decimal(self.uncertainty_multiplier, "uncertainty_multiplier")
         if multiplier < 0:
             raise ValueError("uncertainty_multiplier must be non-negative")
         object.__setattr__(self, "required_lower_bound", required)
         object.__setattr__(self, "uncertainty_multiplier", multiplier)
-        if (
-            not isinstance(self.pair_count, int)
-            or isinstance(self.pair_count, bool)
-            or self.pair_count < 0
-        ):
-            raise ValueError("pair_count must be a non-negative integer")
+        if type(self.pair_count) is not int or self.pair_count < 0:
+            raise ValueError(
+                "pair_count must be a non-negative exact built-in integer"
+            )
         if not isinstance(self.evaluation, AblationEvaluation):
             raise TypeError("evaluation must be AblationEvaluation")
         if self.evaluation.target_component != self.target_component:
@@ -1483,12 +1474,10 @@ def evaluate_qualified_incremental_value(
             raise TypeError(
                 "outcome_refs must contain canonical AblationOutcomeArtifactRef values"
             )
-        if (
-            not isinstance(minimum_pairs, int)
-            or isinstance(minimum_pairs, bool)
-            or minimum_pairs < 2
-        ):
-            raise ValueError("minimum_pairs must be an integer >= 2")
+        if type(minimum_pairs) is not int or minimum_pairs < 2:
+            raise ValueError(
+                "minimum_pairs must be an exact built-in integer >= 2"
+            )
         required = _decimal(required_lower_bound, "required_lower_bound")
         multiplier = _decimal(
             uncertainty_multiplier,

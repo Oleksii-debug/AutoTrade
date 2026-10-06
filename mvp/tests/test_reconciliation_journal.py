@@ -1054,6 +1054,7 @@ class ReconciliationJournalTests(unittest.TestCase):
             store = JournalStore(path)
             aggregate_id = "submission-attempt:scoped-proof"
             prepared_payload = {
+                "attempt_id": "attempt-1",
                 "intent_id": "intent-scoped-1",
                 "provider": "TEST_PROVIDER",
                 "account_id": "test-account",

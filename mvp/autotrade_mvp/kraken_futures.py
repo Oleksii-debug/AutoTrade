@@ -163,18 +163,21 @@ def _prepared_submission_projection(
     _prepared_type=KrakenFuturesPreparedRequest,
     _canonical_type=type,
     _canonical_str=str,
+    _canonical_any=any,
+    _type_error=TypeError,
+    _error_type=ProviderCoreError,
     _object_getattribute=object.__getattribute__,
     _mapping_proxy_type=MappingProxyType,
 ) -> Mapping[str, object]:
     """Read one exact prepared request without executing virtual attributes."""
 
     if _canonical_type(prepared_request) is not _prepared_type:
-        raise TypeError(
+        raise _type_error(
             "prepared_request must be exact KrakenFuturesPreparedRequest"
         )
     body = _object_getattribute(prepared_request, "body")
     if _canonical_type(body) is not _mapping_proxy_type:
-        raise ProviderCoreError(
+        raise _error_type(
             "Kraken Futures prepared request body authority changed"
         )
     client_order_id = body.get("cliOrdId")
@@ -197,8 +200,11 @@ def _prepared_submission_projection(
         "body_sha256": _object_getattribute(prepared_request, "body_sha256"),
         "client_order_id": client_order_id,
     }
-    if any(_canonical_type(value) is not _canonical_str for value in fields.values()):
-        raise ProviderCoreError(
+    if _canonical_any(
+        _canonical_type(value) is not _canonical_str
+        for value in fields.values()
+    ):
+        raise _error_type(
             "Kraken Futures prepared request authority changed"
         )
     return _mapping_proxy_type(fields)

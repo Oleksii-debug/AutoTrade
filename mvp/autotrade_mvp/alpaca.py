@@ -515,18 +515,21 @@ def _prepared_submission_projection(
     _canonical_type=type,
     _canonical_str=str,
     _canonical_tuple=tuple,
+    _canonical_any=any,
+    _type_error=TypeError,
+    _error_type=AlpacaAdapterError,
     _object_getattribute=object.__getattribute__,
     _mapping_proxy_type=MappingProxyType,
 ) -> Mapping[str, object]:
     """Read one exact prepared order without executing virtual attributes."""
 
     if _canonical_type(prepared_request) is not _prepared_type:
-        raise TypeError(
+        raise _type_error(
             "prepared_request must be exact AlpacaPreparedRequest"
         )
     body = _object_getattribute(prepared_request, "body")
     if _canonical_type(body) is not _mapping_proxy_type:
-        raise AlpacaAdapterError(
+        raise _error_type(
             "Alpaca prepared request body authority changed"
         )
     client_order_id = body.get("client_order_id")
@@ -542,7 +545,7 @@ def _prepared_submission_projection(
         "instrument_versions",
     )
     body_sha256 = _object_getattribute(prepared_request, "body_sha256")
-    if any(
+    if _canonical_any(
         _canonical_type(value) is not _canonical_str
         for value in (
             endpoint,
@@ -552,13 +555,13 @@ def _prepared_submission_projection(
             client_order_id,
         )
     ):
-        raise AlpacaAdapterError(
+        raise _error_type(
             "Alpaca prepared request authority changed"
         )
     if (
         _canonical_type(capability_snapshot_ids) is not _canonical_tuple
         or not capability_snapshot_ids
-        or any(
+        or _canonical_any(
             _canonical_type(value) is not _canonical_str
             for value in capability_snapshot_ids
         )

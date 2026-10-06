@@ -45,7 +45,7 @@ jobs:
 
     steps:
       - name: Checkout exact AutoTrade source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
           path: autotrade
@@ -68,7 +68,7 @@ jobs:
           "license_blob=$($lean.license_blob_sha)" >> $env:GITHUB_OUTPUT
 
       - name: Checkout approved LEAN revision
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: QuantConnect/Lean
           ref: ${{ steps.lean-provenance.outputs.revision }}
@@ -121,7 +121,7 @@ jobs:
             throw "LEAN composition changed an unexpected source set: $($actual -join ', ')"
           }
 
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
         with:
           dotnet-version: "10.0.100"
 
@@ -258,7 +258,7 @@ jobs:
             Set-Content -Encoding utf8 (Join-Path $evidenceDir "evidence.json")
 
       - name: Upload exact-head adoption evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: lean-adoption-evidence-${{ runner.os }}
           path: autotrade/artifacts/lean-adoption/*

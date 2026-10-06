@@ -1130,12 +1130,15 @@ def _install_submission_response_parser(
         if scoped_provider_environment != raw_scoped_provider_environment:
             raise error_type("provider-write provenance scope mismatch")
         http_status = observed["http_status"]
-        if http_status is not None:
-            http_status = exact_integer(http_status, "http_status")
-            if http_status < 200 or http_status > 299:
-                raise error_type(
-                    "Bybit submission observation requires successful HTTP status"
-                )
+        if http_status is None:
+            raise error_type(
+                "Bybit submission observation requires successful HTTP status"
+            )
+        http_status = exact_integer(http_status, "http_status")
+        if http_status < 200 or http_status > 299:
+            raise error_type(
+                "Bybit submission observation requires successful HTTP status"
+            )
         if (
             observed["provider_id"] != "BYBIT"
             or observed["endpoint"] != prepared["endpoint"]

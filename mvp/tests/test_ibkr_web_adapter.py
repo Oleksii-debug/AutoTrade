@@ -37,6 +37,14 @@ from mvp.autotrade_mvp.ibkr_web import (
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
+class _HostileText(str):
+    strip_called = False
+
+    def strip(self, *args, **kwargs):
+        type(self).strip_called = True
+        raise AssertionError("hostile text callback executed")
+
+
 class _HostileDecimal(Decimal):
     def is_finite(self):
         raise AssertionError("hostile Decimal callback executed")
@@ -198,6 +206,20 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(normalized.order_type, "LIMIT")
         self.assertEqual(normalized.quantity, Decimal("1.25"))
         self.assertEqual(normalized.limit_price, Decimal("220.10"))
+
+    def test_intent_text_ingress_rejects_string_subclass_before_callbacks(self):
+        _HostileText.strip_called = False
+        with self.assertRaisesRegex(IbkrWebAdapterError, "side is required"):
+            IbkrWebOrderIntent.create(
+                instrument_version="AAPL-CONID-265598:v1",
+                account_id="U1234567",
+                contract=IbkrContractIdentity(conid=265598),
+                side=_HostileText("BUY"),
+                order_type="MARKET",
+                time_in_force="DAY",
+                quantity="1",
+            )
+        self.assertFalse(_HostileText.strip_called)
 
     def test_financial_numeric_ingress_rejects_decimal_subclass_before_callbacks(self):
         with self.assertRaisesRegex(

@@ -1082,6 +1082,10 @@ class DurableCorporateActionEvidenceStore:
     _AGGREGATE_TYPE = "corporate_action_evidence"
     _EVENT_TYPE = "CorporateActionEvidenceAccepted"
     _ACTOR = "corporate-action-evidence"
+    _UUID5 = staticmethod(uuid5)
+    _UUID_NAMESPACE = NAMESPACE_URL
+    _PAYLOAD_DIGEST = staticmethod(payload_digest)
+    _UTC_TEXT = staticmethod(_utc_text)
 
     def _initialize(
         self,
@@ -1239,8 +1243,8 @@ class DurableCorporateActionEvidenceStore:
             type(self)._composition(self)
         )
         return str(
-            uuid5(
-                NAMESPACE_URL,
+            type(self)._UUID5(
+                type(self)._UUID_NAMESPACE,
                 "https://commands.autotrade.local/corporate-action-evidence/"
                 + provider_id
                 + "/"
@@ -1258,7 +1262,7 @@ class DurableCorporateActionEvidenceStore:
         )
         return (
             "corporate-action-evidence:"
-            + payload_digest(
+            + type(self)._PAYLOAD_DIGEST(
                 {
                     "provider_id": provider_id,
                     "account_id": account_id,
@@ -1389,8 +1393,8 @@ class DurableCorporateActionEvidenceStore:
 
         next_version = 1 if not events else int(events[-1]["aggregate_version"]) + 1
         event_id = str(
-            uuid5(
-                NAMESPACE_URL,
+            type(self)._UUID5(
+                type(self)._UUID_NAMESPACE,
                 "https://events.autotrade.local/corporate-action-evidence/"
                 + provider_id
                 + "/"
@@ -1412,7 +1416,7 @@ class DurableCorporateActionEvidenceStore:
             "instrument_id": accepted.event.instrument_id,
             "instrument_version": accepted.event.instrument_version,
             "kind": accepted.event.kind,
-            "effective_at": _utc_text(accepted.event.effective_at),
+            "effective_at": type(self)._UTC_TEXT(accepted.event.effective_at),
             "observed_at": accepted.observed_at,
             "source_sequence": accepted.event.source_sequence,
             "evidence_ref": accepted.evidence_ref,
@@ -1432,7 +1436,7 @@ class DurableCorporateActionEvidenceStore:
             "aggregate_version": str(next_version),
             "committed_at": accepted.observed_at,
             "payload": durable_payload,
-            "payload_hash": payload_digest(durable_payload),
+            "payload_hash": type(self)._PAYLOAD_DIGEST(durable_payload),
         }
         request = {
             "schema_version": "1.0.0",

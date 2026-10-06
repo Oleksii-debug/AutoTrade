@@ -646,6 +646,34 @@ _REPLAY_EVIDENCE_FIELDS = frozenset(
 )
 
 
+def _replay_evidence_semantics_valid(record: dict) -> bool:
+    """Require evidence labels to match the fixed deterministic strategy/risk path."""
+
+    decision = record.get("decision")
+    reason = record.get("decision_reason")
+    risk_outcome = record.get("risk_outcome")
+    has_order = record.get("order_id") is not None
+    has_fill = record.get("fill_id") is not None
+    if has_order != has_fill:
+        return False
+    if decision == "BUY":
+        if reason != "fast_above_slow":
+            return False
+    elif decision == "SELL":
+        if reason != "fast_below_slow":
+            return False
+    elif decision == "HOLD":
+        if reason not in {"insufficient_history", "averages_equal"}:
+            return False
+    else:
+        return False
+    if has_order:
+        return decision in {"BUY", "SELL"} and risk_outcome == "admitted"
+    if decision == "HOLD":
+        return risk_outcome == "hold"
+    return risk_outcome in {"max_position", "max_notional", "insufficient_cash"}
+
+
 def _require_replay_evidence_record(
     record: object,
     *,
@@ -683,6 +711,8 @@ def _require_replay_evidence_record(
         != financial_configuration_hash
     ):
         raise ValueError("Corrupt checkpoint replay evidence")
+    if not _replay_evidence_semantics_valid(record):
+        raise ValueError("Corrupt checkpoint replay evidence semantics")
     financial_values: dict[str, Decimal] = {}
     try:
         for field in ("cash", "position", "equity", "valuation_price"):
@@ -1319,6 +1349,8 @@ def verify_replay(state_dir: str | Path) -> bool:
             return False
         for row in rows:
             if any(char not in "0123456789abcdef" for char in row["input_hash"]):
+                return False
+            if not _replay_evidence_semantics_valid(row):
                 return False
             if not row["reconciled"]:
                 return False

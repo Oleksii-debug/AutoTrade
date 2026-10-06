@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -773,6 +774,38 @@ class AlpacaAdapterTests(unittest.TestCase):
             projected["body_sha256"],
             object.__getattribute__(prepared, "body_sha256"),
         )
+
+    def test_guarded_projection_rejects_post_mint_financial_body_retarget(self):
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="LIMIT",
+            time_in_force="DAY",
+            quantity="1",
+            limit_price="220.10",
+        )
+        prepared = prepare_order_request(
+            intent,
+            client_order_id="alpaca-post-mint-body-retarget",
+            account_id="paper-account",
+            environment="PAPER",
+            capability=capability(),
+            at=NOW,
+        )
+        forged_body = dict(object.__getattribute__(prepared, "body"))
+        forged_body["qty"] = "999"
+        object.__setattr__(
+            prepared,
+            "body",
+            MappingProxyType(forged_body),
+        )
+        with self.assertRaisesRegex(
+            AlpacaAdapterError,
+            "prepared request authority changed",
+        ):
+            guarded_order_projection(prepared)
 
     def test_guarded_projection_rejects_post_mint_exact_digest_retarget(self):
         intent = AlpacaOrderIntent.create(

@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -760,6 +761,29 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                     transport_ambiguous=True,
                 )
         rebound.assert_not_called()
+
+    def test_submission_consumer_rejects_post_mint_financial_body_retarget(self):
+        prepared = self._prepared_submission_request(
+            intent_id="kraken-spot-post-mint-body-retarget",
+        )
+        forged_body = dict(object.__getattribute__(prepared, "body"))
+        forged_body["volume"] = "999"
+        object.__setattr__(
+            prepared,
+            "body",
+            MappingProxyType(forged_body),
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "prepared request authority changed",
+        ):
+            parse_spot_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=prepared,
+                source_uri="https://api.kraken.com/0/private/AddOrder",
+                observation=None,
+                transport_ambiguous=True,
+            )
 
     def test_submission_consumer_rejects_post_mint_prepared_digest_retarget(self):
         prepared = self._prepared_submission_request(

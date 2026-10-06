@@ -154,3 +154,40 @@ and at lease expiration.
 These changes preserve the fail-closed rule: before `SubmissionSending`, an
 expired Prepared can be proven zero-wire and BLOCKED; once `SubmissionSending`
 wins, recovery is UNKNOWN and cannot be blindly resent.
+
+## 2026-10-06 independent LIMIT/trigger oracle and stale-owner closure
+
+A further adversarial review found authority gaps that were not covered by the
+previous MARKET-focused independent oracle and Prepared recovery work.  They are
+closed on the same canonical Section-6 lineage:
+
+- positive LIMIT/STOP_LIMIT results must now have independently executable
+  quote/bar evidence and must use the frozen order limit exactly; a forged
+  economically favorable limit fill can no longer pass the independent oracle;
+- STOP_LIMIT positive fills require a previously triggered order, while a newly
+  reported trigger must itself be supported by causal post-arrival stop evidence;
+  BAR trigger evidence may not begin before venue arrival;
+- `already_triggered` is a state bit reserved to STOP_LIMIT orders rather than a
+  generic caller-controlled flag on MARKET/LIMIT orders;
+- recovery from durable `SubmissionSending` cannot timestamp terminal UNKNOWN
+  before the send barrier even when the restarted process clock moves backward;
+- Prepared lease expiry is enforced by the original final send guard itself,
+  not only opportunistically by a second recovery owner.  A stale original owner
+  therefore cannot cross into `SubmissionSending` after its exact lease boundary;
+- the fresh final authority check remains independent and is evaluated before
+  the lease fence, so an expired/revoked policy is still recorded as such while
+  an otherwise-authorized stale owner remains blocked before wire;
+- the qualified execution wrapper has an adversarial regression proving that
+  forged non-executable LIMIT fills are rejected through the actual qualified
+  path, not only when the oracle is called in isolation.
+
+Thirteen focused regressions were added across execution realism, independent
+oracle, execution qualification and dispatch recovery tests.  The prior direct
+Section-6 count of at least 239 test methods is therefore at least 252 on this
+lineage.  This count is source coverage only: it is not a PASS result.
+
+The closure rule is unchanged and fail-closed.  The exact final head still needs
+terminal baseline + Verify success, clean review state, ahead-only/current-main
+reconciliation, merge, and post-merge source readback.  Queued/pending CI is not
+qualification evidence, and none of these changes grant PAPER/LIVE/provider,
+economic-edge/profitability, signed-release or NVDA qualification.

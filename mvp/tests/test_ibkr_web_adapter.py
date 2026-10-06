@@ -31,6 +31,7 @@ from mvp.autotrade_mvp.ibkr_web import (
     IbkrReplyRequest,
     IbkrWebAdapterError,
     IbkrWebOrderIntent,
+    brokerage_session_status_from_observation,
     execution_to_reconciliation_fill,
     parse_cancel_response,
     parse_order_submission_response,
@@ -90,7 +91,12 @@ class _HostileTimezone(tzinfo):
         return None
 
 
-def capability(*, account_id="U1234567", order_types=("MARKET", "LIMIT", "STOP", "STOP_LIMIT")):
+def capability(
+    *,
+    account_id="U1234567",
+    environment="PAPER",
+    order_types=("MARKET", "LIMIT", "STOP", "STOP_LIMIT"),
+):
     observed_at = NOW - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
@@ -98,7 +104,7 @@ def capability(*, account_id="U1234567", order_types=("MARKET", "LIMIT", "STOP",
             provider_id="IBKR",
             account_id=account_id,
             entity_id="web-api",
-            environment="PAPER",
+            environment=environment,
             instrument_version="AAPL-CONID-265598:v1",
             observed_at=observed_at,
             expires_at=NOW + timedelta(hours=1),
@@ -126,7 +132,41 @@ def capability(*, account_id="U1234567", order_types=("MARKET", "LIMIT", "STOP",
     )
 
 
-def ready_session(**overrides):
+def ibkr_session_observation(
+    payload,
+    *,
+    account_id="U1234567",
+    environment="PAPER",
+    observed_at=None,
+    endpoint="/iserver/auth/status",
+    query=None,
+    permission_scope="ORDER.READ",
+):
+    point = NOW - timedelta(seconds=1) if observed_at is None else observed_at
+    binding = prepare_authenticated_read_query(
+        capability=capability(
+            account_id=account_id,
+            environment=environment,
+        ),
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint=endpoint,
+        query={} if query is None else query,
+        at=point,
+        permission_scope=permission_scope,
+    )
+    return observe_authenticated_json_response(
+        query_binding=binding,
+        http_status=200,
+        response_bytes=json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        observed_at=point,
+    )
+
+
+def ready_session(*, account_id="U1234567", environment="PAPER", **overrides):
     values = dict(
         connected=True,
         authenticated=True,
@@ -135,7 +175,15 @@ def ready_session(**overrides):
         observed_at=NOW - timedelta(seconds=1),
     )
     values.update(overrides)
-    return IbkrBrokerageSessionStatus(**values)
+    observed_at = values.pop("observed_at")
+    return brokerage_session_status_from_observation(
+        ibkr_session_observation(
+            values,
+            account_id=account_id,
+            environment=environment,
+            observed_at=observed_at,
+        )
+    )
 
 
 def ibkr_trade_observation(payload, *, account_id="U1234567"):
@@ -178,6 +226,176 @@ class IbkrWebAdapterTests(unittest.TestCase):
             with self.subTest(override=override):
                 with self.assertRaises(IbkrWebAdapterError):
                     ready_session(**override).require_trade_ready()
+
+    def test_order_preparation_rejects_locally_forged_ready_session(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        forged = IbkrBrokerageSessionStatus(
+            connected=True,
+            authenticated=True,
+            established=True,
+            competing=False,
+            observed_at=NOW - timedelta(seconds=1),
+        )
+        self.assertTrue(forged.trade_ready)
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "/iserver/auth/status provider observation",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-forged-session",
+                capability=capability(),
+                session=forged,
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+
+    def test_brokerage_status_requires_exact_authenticated_read_scope(self):
+        observation = ibkr_session_observation(
+            {
+                "connected": True,
+                "authenticated": True,
+                "established": True,
+                "competing": False,
+            },
+            endpoint="/iserver/accounts",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "endpoint mismatch",
+        ):
+            brokerage_session_status_from_observation(observation)
+
+    def test_brokerage_status_requires_empty_query_and_read_scope(self):
+        payload = {
+            "connected": True,
+            "authenticated": True,
+            "established": True,
+            "competing": False,
+        }
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "empty authenticated query",
+        ):
+            brokerage_session_status_from_observation(
+                ibkr_session_observation(
+                    payload,
+                    query={"caller": "selected"},
+                )
+            )
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "ORDER.READ scope",
+        ):
+            brokerage_session_status_from_observation(
+                ibkr_session_observation(
+                    payload,
+                    permission_scope="ORDER_WRITE",
+                )
+            )
+
+    def test_brokerage_status_rejects_malformed_flags_and_provider_failure(self):
+        base = {
+            "connected": True,
+            "authenticated": True,
+            "established": True,
+            "competing": False,
+        }
+        malformed = dict(base, connected=1)
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "connected must be exact boolean",
+        ):
+            brokerage_session_status_from_observation(
+                ibkr_session_observation(malformed)
+            )
+
+        missing = dict(base)
+        missing.pop("authenticated")
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "missing authenticated",
+        ):
+            brokerage_session_status_from_observation(
+                ibkr_session_observation(missing)
+            )
+
+        failed = dict(base, fail="competing brokerage session")
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "reports provider failure",
+        ):
+            brokerage_session_status_from_observation(
+                ibkr_session_observation(failed)
+            )
+
+    def test_brokerage_status_account_and_environment_scope_are_bound(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "session account",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-cross-account-session",
+                capability=capability(),
+                session=ready_session(account_id="OTHER"),
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "session environment",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-cross-environment-session",
+                capability=capability(),
+                session=ready_session(environment="LIVE"),
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+
+    def test_mutated_issued_brokerage_status_loses_authority(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        session = ready_session()
+        object.__setattr__(session, "connected", False)
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "changed after authenticated provider observation",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-mutated-session-evidence",
+                capability=capability(),
+                session=session,
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
 
     def test_contract_identity_never_falls_back_to_ticker(self):
         self.assertEqual(IbkrContractIdentity(conid=265598).contract_key, "265598")

@@ -476,6 +476,16 @@ def _install_ibkr_brokerage_session_observation_authority():
             raise IbkrWebAdapterError(
                 "brokerage session environment does not match order authority"
             )
+        if not connected:
+            raise IbkrWebAdapterError("brokerage session is disconnected")
+        if not authenticated:
+            raise IbkrWebAdapterError("brokerage session is not authenticated")
+        if not established:
+            raise IbkrWebAdapterError("brokerage session is not established")
+        if competing:
+            raise IbkrWebAdapterError(
+                "another competing brokerage session is active"
+            )
         return evidence_ref, response_sha256
 
     return from_observation, require
@@ -919,7 +929,6 @@ def _prepare_normalized_order_impl(
         account_id=sealed_intent.account_id,
         environment=capability_environment,
     )
-    IbkrBrokerageSessionStatus.require_trade_ready(session)
     if not CapabilitySnapshot.admits(
         capability,
         at=point,

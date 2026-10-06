@@ -362,8 +362,6 @@ def _independently_verified_evidence(
     evidence_ref = item.get("evidence_ref")
     try:
         receipt = parse_signed_qualification_attestation(receipt_payload)
-        if evidence_ref != receipt.attestation.attestation_id:
-            return False
         accepted = verify_qualification_attestation(
             receipt,
             policy=evidence_context.policy,
@@ -380,6 +378,8 @@ def _independently_verified_evidence(
             expected_requirement_id=requirement_id,
         )
     except (QualificationTrustError, TypeError, ValueError):
+        return False
+    if evidence_ref != accepted.attestation_id:
         return False
     return (
         accepted.result == "PASS"

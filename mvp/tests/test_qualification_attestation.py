@@ -1565,6 +1565,49 @@ class QualificationAttestationTests(unittest.TestCase):
                 requirement_ids=("same", "same"),
             )
 
+    def test_polymorphic_attestation_graph_is_rejected_before_signature_dispatch(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        signature = sign(original)
+
+        class ForgedQualificationAttestation(QualificationAttestation):
+            def canonical_bytes(self):
+                raise AssertionError("forged virtual canonical_bytes executed")
+
+        forged = ForgedQualificationAttestation(**{
+            field: getattr(original, field)
+            for field in (
+                "attestation_id",
+                "source_sha",
+                "domain",
+                "gate",
+                "package_id",
+                "protocol_id",
+                "protocol_version",
+                "requirement_ids",
+                "evidence_refs",
+                "producer_id",
+                "verifier_id",
+                "trust_root_id",
+                "runner_id",
+                "harness_version",
+                "started_at",
+                "completed_at",
+                "signed_at",
+                "result",
+                "unresolved_limits",
+                "release_artifact_id",
+                "release_artifact_sha256",
+            )
+        })
+        receipt = SignedQualificationAttestation(forged, signature)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with self.assertRaisesRegex(TypeError, "exact canonical QualificationAttestation"):
+                verify(receipt, store, policy(trust_root))
+
     def test_altered_signed_payload_fails_signature(self):
         trust_root = root()
         original = attestation(trust_root)

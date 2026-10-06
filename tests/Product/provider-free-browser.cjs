@@ -192,6 +192,40 @@ async function exercisePortfolioTableTools(page) {
       "Sort: host order."));
 }
 
+async function exerciseAllTableFilterEscapeBindings(page) {
+  stage = "all table filter Escape bindings";
+  const filterIds = [
+    "permissions-filter",
+    "strategy-filter",
+    "portfolio-filter",
+    "operations-filter",
+    "risk-filter",
+    "jobs-filter",
+    "event-history-filter"
+  ];
+  for (const filterId of filterIds) {
+    const statusId = filterId + "-status";
+    const filter = page.locator("#" + filterId);
+    await filter.focus();
+    await filter.fill("no-match-autotrade-escape-proof");
+    await page.waitForFunction(({filterId, statusId}) => {
+      const currentFilter = document.getElementById(filterId);
+      const status = document.getElementById(statusId);
+      return currentFilter?.value === "no-match-autotrade-escape-proof" &&
+        Boolean(status?.textContent);
+    }, {filterId, statusId});
+    await page.keyboard.press("Escape");
+    assert.equal(
+      await filter.inputValue(),
+      "",
+      filterId + " bare Escape clears the canonical table filter");
+    assert.equal(
+      await page.evaluate(() => document.activeElement.id),
+      filterId,
+      filterId + " retains keyboard focus after Escape");
+  }
+}
+
 async function exercisePortfolioPagingAndSort(page) {
   stage = "portfolio paged reading and stable sort";
   await page.evaluate(() => {
@@ -509,6 +543,7 @@ s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_tim
   await command(page, "RECOVER_SIMULATION", 3);
   assert.match(await page.locator("#portfolio-body").innerText(), /895\.696/);
   await exercisePortfolioTableTools(page);
+  await exerciseAllTableFilterEscapeBindings(page);
   await exercisePortfolioPagingAndSort(page);
   await exerciseSnapshotSelectionPreservation(page);
   await exerciseScopeSpeechIsolation(page);

@@ -421,6 +421,53 @@ class AccountingFoundationTests(unittest.TestCase):
         self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(book.cash("USD"), Decimal("100"))
 
+    def test_audit_digest_cache_detects_direct_transaction_list_mutation(self):
+        book = EconomicBook((book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="deposit-1",
+            currency="USD",
+            amount="100",
+        ),))
+        before = book.audit_digest()
+        book._transactions.append(book_external_cash_flow(
+            transaction_id="cash-2",
+            cause_event_id="deposit-2",
+            currency="USD",
+            amount="50",
+        ))
+        self.assertNotEqual(book.audit_digest(), before)
+
+    def test_audit_digest_cache_detects_frozen_transaction_tampering(self):
+        book = EconomicBook((book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="deposit-1",
+            currency="USD",
+            amount="100",
+        ),))
+        before = book.audit_digest()
+        object.__setattr__(book._transactions[0], "transaction_id", "tampered")
+        self.assertNotEqual(book.audit_digest(), before)
+
+    def test_audit_digest_rejects_hostile_transaction_container_without_callback(self):
+        class HostileList(list):
+            iterated = False
+
+            def __iter__(self):
+                self.iterated = True
+                raise AssertionError("hostile iterator callback")
+
+        book = EconomicBook((book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="deposit-1",
+            currency="USD",
+            amount="100",
+        ),))
+        hostile = HostileList(book._transactions)
+        book._transactions = hostile
+        with self.assertRaisesRegex(TypeError, "exact list"):
+            book.audit_digest()
+        self.assertFalse(hostile.iterated)
+
     def test_unbalanced_transaction_is_rejected(self):
         transaction = JournalTransaction(
             transaction_id="bad",

@@ -436,7 +436,7 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
                 payload["result"]["list"][0]["side"] = invalid_side
                 with self.assertRaisesRegex(
                     ProviderCoreError,
-                    "side must be exact Buy or Sell text",
+                    "side must be Buy or Sell",
                 ):
                     parse_option_delivery_page(observation(payload))
 

@@ -2280,6 +2280,180 @@ del _bind_direct_trading_write_receipt_access
 del _direct_trading_write_execution_receipt_state
 
 
+def _install_direct_trading_exact_response_authority(
+    receipt_reader,
+    receipt_snapshot,
+):
+    """Transfer live direct-wire proof without adding forgeable DTO fields."""
+
+    states: dict[int, tuple[object, object, tuple[object, ...]]] = {}
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_dict = dict
+    canonical_int = int
+    canonical_bytes = bytes
+    canonical_str = str
+    canonical_bool = bool
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    weakref = weakref_ref
+    exact_type = ExactJsonTransportResponse
+    wire_type = TradingWireResponse
+    transport_error = ProviderTransportError
+    canonical_sha256 = sha256
+    receipt_reader_code = receipt_reader.__code__
+    receipt_snapshot_code = receipt_snapshot.__code__
+
+    def implementation_changed() -> bool:
+        return (
+            ExactJsonTransportResponse is not exact_type
+            or TradingWireResponse is not wire_type
+            or type is not canonical_type
+            or id is not canonical_id
+            or tuple is not canonical_tuple
+            or dict is not canonical_dict
+            or int is not canonical_int
+            or bytes is not canonical_bytes
+            or str is not canonical_str
+            or bool is not canonical_bool
+            or object is not canonical_object
+            or weakref_ref is not weakref
+            or sha256 is not canonical_sha256
+            or receipt_reader.__code__ is not receipt_reader_code
+            or receipt_snapshot.__code__ is not receipt_snapshot_code
+        )
+
+    def exact_snapshot(value: ExactJsonTransportResponse) -> tuple[object, ...]:
+        if implementation_changed() or canonical_type(value) is not exact_type:
+            raise transport_error(
+                "exact trading response authority is unavailable"
+            )
+        state = object_getattribute(value, "__dict__")
+        if canonical_type(state) is not canonical_dict:
+            raise transport_error(
+                "exact trading response state is not canonical"
+            )
+        required = {
+            "response_bytes",
+            "http_status",
+            "requires_reconciliation",
+            "ambiguity_reason",
+        }
+        if canonical_type(required) is not set or set(state) != required:
+            raise transport_error(
+                "exact trading response shape changed"
+            )
+        raw = state["response_bytes"]
+        status = state["http_status"]
+        reconciliation = state["requires_reconciliation"]
+        reason = state["ambiguity_reason"]
+        if (
+            canonical_type(raw) is not canonical_bytes
+            or (status is not None and canonical_type(status) is not canonical_int)
+            or canonical_type(reconciliation) is not canonical_bool
+            or (reason is not None and canonical_type(reason) is not canonical_str)
+        ):
+            raise transport_error(
+                "exact trading response scalar authority changed"
+            )
+        return (raw, status, reconciliation, reason)
+
+    def prune() -> None:
+        for object_id, state in canonical_tuple(states.items()):
+            if state[0]() is None:
+                states.pop(object_id, None)
+
+    def inherit(
+        source: object,
+        exact: ExactJsonTransportResponse,
+    ) -> ExactJsonTransportResponse:
+        if canonical_type(source) is not wire_type:
+            return exact
+        try:
+            receipt = receipt_reader(source)
+        except transport_error:
+            return exact
+        receipt_values = receipt_snapshot(receipt)
+        exact_values = exact_snapshot(exact)
+        raw = exact_values[0]
+        status = exact_values[1]
+        if (
+            status != receipt_values["http_status"]
+            or "sha256:" + canonical_sha256(raw).hexdigest()
+            != receipt_values["response_sha256"]
+        ):
+            raise transport_error(
+                "direct trading-write receipt differs from exact response"
+            )
+        prune()
+        states[canonical_id(exact)] = (
+            weakref(exact),
+            receipt,
+            exact_values,
+        )
+        return exact
+
+    def require(
+        exact: ExactJsonTransportResponse,
+    ) -> DirectTradingWriteExecutionReceipt:
+        if implementation_changed() or canonical_type(exact) is not exact_type:
+            raise transport_error(
+                "exact direct trading-write response is required"
+            )
+        prune()
+        state = states.get(canonical_id(exact))
+        if state is None or state[0]() is not exact:
+            raise transport_error(
+                "exact response lacks direct trading-write execution authority"
+            )
+        current = exact_snapshot(exact)
+        if current != state[2]:
+            raise transport_error(
+                "exact direct trading-write response changed after wire execution"
+            )
+        receipt = state[1]
+        receipt_values = receipt_snapshot(receipt)
+        if (
+            current[1] != receipt_values["http_status"]
+            or "sha256:" + canonical_sha256(current[0]).hexdigest()
+            != receipt_values["response_sha256"]
+        ):
+            raise transport_error(
+                "direct trading-write receipt no longer matches exact response"
+            )
+        return receipt
+
+    return inherit, require
+
+
+(
+    _inherit_direct_trading_write_receipt,
+    direct_trading_write_exact_response_receipt,
+) = _install_direct_trading_exact_response_authority(
+    direct_trading_write_execution_receipt,
+    direct_trading_write_execution_receipt_snapshot,
+)
+del _install_direct_trading_exact_response_authority
+
+
+def _direct_trading_exact_response(
+    source: object,
+    response_bytes: bytes,
+    *,
+    http_status: int | None = None,
+    requires_reconciliation: bool = False,
+    ambiguity_reason: str | None = None,
+) -> ExactJsonTransportResponse:
+    exact = ExactJsonTransportResponse(
+        response_bytes,
+        http_status=http_status,
+        requires_reconciliation=requires_reconciliation,
+        ambiguity_reason=ambiguity_reason,
+    )
+    return _inherit_direct_trading_write_receipt(source, exact)
+
+
 def _trading_response_evidence(
     value: object,
 ) -> tuple[bytes, int | None]:
@@ -2350,33 +2524,41 @@ def _bybit_exact_trading_response(
 
     raw, status = _trading_response_evidence(value)
     if status is None:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+        value,
             raw,
             requires_reconciliation=True,
             ambiguity_reason="bybit_http_status_unavailable_execution_unknown",
         )
     if 500 <= status <= 599:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+        value,
             raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="bybit_http_5xx_execution_unknown",
         )
     if status < 200 or status > 299:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+        value,
             raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="bybit_http_non_2xx_execution_unknown",
         )
-    exact = ExactJsonTransportResponse(raw, http_status=status)
+    exact = _direct_trading_exact_response(
+        value,
+        raw,
+        http_status=status,
+    )
     parsed = exact.payload
     if (
         type(parsed) is dict
         and type(parsed.get("retCode")) is int
         and parsed["retCode"] in _BYBIT_AMBIGUOUS_RESPONSE_CODES
     ):
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+        value,
             raw,
             http_status=status,
             requires_reconciliation=True,
@@ -2392,13 +2574,15 @@ def _kraken_spot_exact_trading_response(
 
     raw, status = _trading_response_evidence(value)
     if status is None:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+        value,
             raw,
             requires_reconciliation=True,
             ambiguity_reason="kraken_spot_http_status_unavailable_execution_unknown",
         )
     if 500 <= status <= 599:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+        value,
             raw,
             http_status=status,
             requires_reconciliation=True,
@@ -2406,7 +2590,8 @@ def _kraken_spot_exact_trading_response(
         )
     exact = ExactJsonTransportResponse(raw, http_status=status)
     if spot_submission_requires_reconciliation(exact.payload):
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+        value,
             raw,
             http_status=status,
             requires_reconciliation=True,
@@ -2422,13 +2607,15 @@ def _alpaca_exact_trading_response(
 
     raw, status = _trading_response_evidence(value)
     if status is None:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+        value,
             raw,
             requires_reconciliation=True,
             ambiguity_reason="alpaca_http_status_unavailable_execution_unknown",
         )
     if 500 <= status <= 599:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+        value,
             raw,
             http_status=status,
             requires_reconciliation=True,
@@ -2452,13 +2639,15 @@ def _binance_exact_trading_response(
 
     raw, status = _trading_response_evidence(value)
     if status is None:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+        value,
             raw,
             requires_reconciliation=True,
             ambiguity_reason="binance_spot_http_status_unavailable_execution_unknown",
         )
     if 500 <= status <= 599:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+        value,
             raw,
             http_status=status,
             requires_reconciliation=True,
@@ -2471,7 +2660,8 @@ def _binance_exact_trading_response(
         and type(parsed.get("code")) is int
         and parsed["code"] == -1007
     ):
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+        value,
             raw,
             http_status=status,
             requires_reconciliation=True,
@@ -2492,7 +2682,8 @@ def _whitebit_exact_trading_response(
 
     raw, status = _trading_response_evidence(value)
     if status is None:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+        value,
             raw,
             requires_reconciliation=True,
             ambiguity_reason="whitebit_http_status_unavailable_execution_unknown",
@@ -2503,7 +2694,8 @@ def _whitebit_exact_trading_response(
         request_class="WRITE",
     )
     if decision.requires_reconciliation:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+        value,
             raw,
             http_status=status,
             requires_reconciliation=True,

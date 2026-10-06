@@ -348,13 +348,19 @@ class JournalStore(_JournalStoreImpl):
 
                     delivered_at = row["delivered_at"]
                     if delivered_at is not None:
-                        if not isinstance(delivered_at, str) or not delivered_at:
-                            raise ValueError("outbox delivered_at is invalid")
+                        _impl._require_canonical_durable_text(
+                            delivered_at,
+                            name="outbox delivered_at",
+                        )
+                    stored_outbox_id = _impl._require_canonical_durable_text(
+                        row["outbox_id"],
+                        name="outbox_id",
+                    )
                     result = {
-                        "outbox_id": str(row["outbox_id"]),
+                        "outbox_id": stored_outbox_id,
                         "event_id": event_id,
-                        "topic": topic,
-                        "envelope_hash": str(row["envelope_hash"]),
+                        "topic": stored_topic,
+                        "envelope_hash": actual_outbox_hash,
                         "delivered": delivered_at is not None,
                     }
                     connection.commit()

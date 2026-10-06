@@ -820,6 +820,32 @@ project = "not-a-table"
         }
         self.assertEqual(blockers, set())
 
+    def test_ci_actions_are_immutable(self):
+        blockers = {
+            item
+            for item in self.report.blockers
+            if item.startswith("NON_IMMUTABLE_CI_ACTION:")
+        }
+        self.assertEqual(blockers, set())
+
+    def test_mutable_ci_action_tag_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            workflows = root / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            (workflows / "mutable.yml").write_text(
+                "steps:\n"
+                "  - uses: actions/checkout@v4\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _ci_runtime_blockers(root),
+                [
+                    "NON_IMMUTABLE_CI_ACTION:"
+                    ".github/workflows/mutable.yml:2:actions/checkout@v4"
+                ],
+            )
+
     def test_expression_valued_python_runtime_fails_closed(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -828,7 +854,7 @@ project = "not-a-table"
             workflow = workflows / "expression.yml"
             workflow.write_text(
                 "steps:\n"
-                "  - uses: actions/setup-python@v5\n"
+                "  - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065\n"
                 "    with:\n"
                 "      python-version: ${{ matrix.python-version }}\n",
                 encoding="utf-8",

@@ -704,16 +704,36 @@ class GuardedDispatcher:
         if last["event_type"] in {"SubmissionSent", "SubmissionBlocked", "SubmissionUnknown"}:
             return self._outcome_from_terminal(last, client_order_id)
         if last["event_type"] == "SubmissionSending":
-            self._append(
-                attempt_id=attempt_id,
-                event_type="SubmissionUnknown",
-                version=last["aggregate_version"] + 1,
-                payload={
-                    "client_order_id": client_order_id,
-                    "reason": "recovered_after_send_barrier_without_terminal_result",
-                },
-                now=now,
-            )
+            try:
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionUnknown",
+                    version=last["aggregate_version"] + 1,
+                    payload={
+                        "client_order_id": client_order_id,
+                        "reason": "recovered_after_send_barrier_without_terminal_result",
+                    },
+                    now=now,
+                )
+            except ValueError:
+                # Multiple recovery owners may observe the same Sending cut.
+                # The first terminal append wins; every loser must converge on
+                # that durable result instead of surfacing an aggregate-version
+                # race as an operational retry signal.
+                current = self._events(attempt_id)
+                if not current:
+                    raise RuntimeError("submission attempt disappeared")
+                current_last = current[-1]
+                if current_last["event_type"] in {
+                    "SubmissionSent",
+                    "SubmissionBlocked",
+                    "SubmissionUnknown",
+                }:
+                    return self._outcome_from_terminal(
+                        current_last,
+                        client_order_id,
+                    )
+                raise
             return self._outcome_from_terminal(self._events(attempt_id)[-1], client_order_id)
         if last["event_type"] != "SubmissionPrepared":
             raise RuntimeError(f"unsupported submission attempt state: {last['event_type']}")

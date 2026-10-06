@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 import json
 import unittest
 
@@ -7,13 +8,14 @@ from mvp.autotrade_mvp.bybit_v5 import (
     BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
     BYBIT_OPTION_DELIVERY_PARSER_VERSION,
     BybitOptionDeliveryPage,
-    parse_option_delivery_page,
+    parse_option_delivery_page as _parse_option_delivery_page,
 )
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
     EvidenceVerification,
     derive_capability_snapshot,
 )
+from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
     Surface,
@@ -32,6 +34,55 @@ _ARTIFACT_IDS = {
     "ACCOUNT": "93333333-3333-4333-8333-333333333333",
     "INSTRUMENT": "94444444-4444-4444-8444-444444444444",
 }
+
+
+def option_registry(
+    *,
+    provider_id="BYBIT",
+    venue_id="OPTIONS",
+    asset_class="OPTION",
+    provider_symbol="BTC-29DEC22-16000-P",
+    instrument_id="95555555-5555-4555-8555-555555555555",
+):
+    version = InstrumentVersion(
+        instrument_id=instrument_id,
+        version=1,
+        provider_id=provider_id,
+        venue_id=venue_id,
+        provider_symbol=provider_symbol,
+        asset_class=asset_class,
+        base_currency="BTC",
+        quote_currency="USDC",
+        settlement_currency="USDC",
+        quantity_unit="contract",
+        contract_multiplier=Decimal("1"),
+        price_tick=Decimal("0.01"),
+        quantity_step=Decimal("0.01"),
+        minimum_quantity=Decimal("0.01"),
+        calendar_id="CONTINUOUS_24_7",
+        timezone_id="UTC",
+        effective_from=datetime(2022, 1, 1, tzinfo=timezone.utc),
+        status="EXPIRED",
+        payoff="OPTION",
+        underlying_id="96666666-6666-4666-8666-666666666666@1",
+        expiry=datetime(2022, 12, 29, 8, tzinfo=timezone.utc),
+        delivery_cutoff=datetime(2022, 12, 29, 8, tzinfo=timezone.utc),
+        settlement_method="CASH",
+        margin_model_id="bybit-option-test-v1",
+        strike=Decimal("16000"),
+        option_right="PUT",
+        exercise_style="EUROPEAN",
+    )
+    return InstrumentRegistry(versions=(version,))
+
+
+def parse_option_delivery_page(observation_value, *, instrument_registry=None):
+    if instrument_registry is None:
+        instrument_registry = option_registry()
+    return _parse_option_delivery_page(
+        observation_value,
+        instrument_registry=instrument_registry,
+    )
 
 
 def capability():
@@ -149,15 +200,79 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
             BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
             "BYBIT_OPTION_DELIVERY_V5_JSON_V1",
         )
-        self.assertEqual(BYBIT_OPTION_DELIVERY_PARSER_VERSION, "1.1.0")
+        self.assertEqual(BYBIT_OPTION_DELIVERY_PARSER_VERSION, "1.2.0")
         self.assertEqual(
             BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
-            "sha256:b26269b85ed6ae54339092502a678ddaf8b046ce65cddb0e4553aceabd2a94e7",
+            "sha256:89ec7fade832492c068d3f67e11e6a6ff77764e59950c2195c9e8848920c3e3f",
         )
         parsed = parse_option_delivery_page(observation(response()))
         self.assertIsInstance(parsed, BybitOptionDeliveryPage)
         self.assertEqual(len(parsed.records), 1)
         self.assertFalse(hasattr(parsed.records[0], "event_kind"))
+
+    def test_parser_binds_provider_symbol_to_canonical_instrument_version(self):
+        parsed = parse_option_delivery_page(observation(response()))
+        self.assertEqual(parsed.instrument_version, _INSTRUMENT_VERSION)
+        self.assertEqual(parsed.provider_symbol, "BTC-29DEC22-16000-P")
+
+        for registry, message in (
+            (
+                option_registry(provider_symbol="ETH-29DEC22-1000-P"),
+                "symbol does not match canonical instrument_version",
+            ),
+            (
+                option_registry(provider_id="OTHER"),
+                "symbol does not match canonical instrument_version",
+            ),
+            (
+                option_registry(venue_id="OTHER"),
+                "symbol does not match canonical instrument_version",
+            ),
+            (
+                option_registry(
+                    instrument_id="97777777-7777-4777-8777-777777777777"
+                ),
+                "instrument_version is not present in canonical registry",
+            ),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                ProviderCoreError,
+                message,
+            ):
+                parse_option_delivery_page(
+                    observation(response()),
+                    instrument_registry=registry,
+                )
+
+    def test_parser_rejects_registry_subclass_before_virtual_lookup(self):
+        class HostileRegistry(InstrumentRegistry):
+            exact_called = False
+
+            def exact(self, instrument_version):
+                type(self).exact_called = True
+                raise AssertionError("hostile registry callback executed")
+
+        forged = object.__new__(HostileRegistry)
+        with self.assertRaisesRegex(
+            TypeError,
+            "instrument_registry must be exact InstrumentRegistry",
+        ):
+            _parse_option_delivery_page(
+                observation(response()),
+                instrument_registry=forged,
+            )
+        self.assertFalse(HostileRegistry.exact_called)
+
+    def test_parser_class_qualifies_instrument_registry_lookup(self):
+        registry = option_registry()
+        registry.exact = lambda _instrument_version: (_ for _ in ()).throw(
+            AssertionError("instance method shadow must not execute")
+        )
+        parsed = parse_option_delivery_page(
+            observation(response()),
+            instrument_registry=registry,
+        )
+        self.assertEqual(parsed.instrument_version, _INSTRUMENT_VERSION)
 
     def test_documented_delivery_row_preserves_exact_provider_facts(self):
         source = observation(response())

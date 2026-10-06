@@ -11,6 +11,7 @@ from tools.build_provenance_manifest import (
     ROOT,
     dependency_advisory_evidence_document,
     git_blob_sha,
+    python_runtime_dependencies,
     rendered_manifest,
 )
 
@@ -65,6 +66,25 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
                     for hash_value in dependency["hashes"]
                 )
             )
+
+    def test_python_runtime_dependency_rejects_non_string_root_version(self):
+        root_pyproject = ROOT / "pyproject.toml"
+        original = root_pyproject.read_text(encoding="utf-8")
+        mutated = original.replace('version = "0.0.1"', "version = 1", 1)
+        self.assertNotEqual(mutated, original)
+        with patch.object(
+            Path,
+            "read_text",
+            side_effect=lambda *args, **kwargs: (
+                mutated
+                if args and args[0] == root_pyproject
+                else original
+                if args and args[0] == ROOT / "research" / "pyproject.toml"
+                else Path.read_text(*args, **kwargs)
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "identity is not exact"):
+                python_runtime_dependencies()
 
     def test_manifest_records_source_bound_python_runtime_dependency(self):
         document = json.loads(rendered_manifest())

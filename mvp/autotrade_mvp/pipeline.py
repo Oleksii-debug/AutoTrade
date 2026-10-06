@@ -571,45 +571,89 @@ def _require_restored_fill_evidence_identity(
 ) -> None:
     """Bind recovered fill identity to the causal evidence that issued its intent."""
 
+    embedded_evidence = None
+    embedded_evidence_id = None
     if "evidence_records" in state:
         records = state["evidence_records"]
         if type(records) is not dict:
             raise ValueError("Corrupt checkpoint evidence records")
-        candidates = list(dict.values(records))
-    else:
-        evidence_path = root / "learning-evidence.jsonl"
-        if not evidence_path.is_file():
+        matches = []
+        for evidence_id, candidate in dict.items(records):
+            evidence_id = _checkpoint_text(evidence_id, name="evidence record key")
+            if type(candidate) is not dict:
+                raise ValueError("Corrupt checkpoint evidence record")
+            if (
+                _checkpoint_text(
+                    candidate.get("evidence_id"), name="evidence record id"
+                )
+                != evidence_id
+            ):
+                raise ValueError("Corrupt checkpoint evidence record identity")
+            order_id = candidate.get("order_id")
+            if order_id is None:
+                continue
+            if type(order_id) is not str:
+                raise ValueError("Corrupt checkpoint evidence order_id")
+            if order_id == fill.client_order_id:
+                matches.append((evidence_id, candidate))
+        if len(matches) != 1:
             raise ValueError(
-                "Corrupt checkpoint fill: durable intent evidence is unavailable"
+                "Corrupt checkpoint fill: durable intent evidence is not unique"
             )
+        embedded_evidence_id, embedded_evidence = matches[0]
+
+    evidence_path = root / "learning-evidence.jsonl"
+    jsonl_rows = []
+    if evidence_path.is_file():
         try:
-            candidates = [
-                json.loads(line)
-                for line in evidence_path.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
+            for line in evidence_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                candidate = json.loads(line)
+                if type(candidate) is not dict:
+                    raise ValueError("Corrupt learning evidence record")
+                _checkpoint_text(
+                    candidate.get("evidence_id"), name="learning evidence id"
+                )
+                jsonl_rows.append(candidate)
         except (OSError, json.JSONDecodeError) as error:
             raise ValueError(
                 "Corrupt checkpoint fill: durable intent evidence is unavailable"
             ) from error
 
-    matches = []
-    for candidate in candidates:
-        if type(candidate) is not dict:
-            raise ValueError("Corrupt checkpoint evidence record")
-        order_id = candidate.get("order_id")
-        if order_id is None:
-            continue
-        if type(order_id) is not str:
-            raise ValueError("Corrupt checkpoint evidence order_id")
-        if order_id == fill.client_order_id:
-            matches.append(candidate)
-    if len(matches) != 1:
-        raise ValueError(
-            "Corrupt checkpoint fill: durable intent evidence is not unique"
-        )
+    evidence = embedded_evidence
+    if embedded_evidence is not None:
+        matching_rows = [
+            row
+            for row in jsonl_rows
+            if row.get("evidence_id") == embedded_evidence_id
+        ]
+        if len(matching_rows) > 1:
+            raise ValueError("Duplicate learning evidence ID")
+        if matching_rows and matching_rows[0] != embedded_evidence:
+            raise ValueError(
+                "Corrupt checkpoint fill: checkpoint and append-only intent evidence disagree"
+            )
+    else:
+        matching_rows = []
+        for candidate in jsonl_rows:
+            order_id = candidate.get("order_id")
+            if order_id is None:
+                continue
+            if type(order_id) is not str:
+                raise ValueError("Corrupt learning evidence order_id")
+            if order_id == fill.client_order_id:
+                matching_rows.append(candidate)
+        if len(matching_rows) != 1:
+            raise ValueError(
+                "Corrupt checkpoint fill: durable intent evidence is not unique"
+            )
+        evidence = matching_rows[0]
 
-    evidence = matches[0]
+    if evidence is None:
+        raise ValueError(
+            "Corrupt checkpoint fill: durable intent evidence is unavailable"
+        )
     input_hash = _checkpoint_text(
         evidence.get("input_hash"), name="evidence input_hash"
     )

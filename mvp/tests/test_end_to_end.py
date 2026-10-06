@@ -287,6 +287,73 @@ class VerticalSliceTests(unittest.TestCase):
 
             self.assertFalse(original_intent_path.exists())
 
+    def test_restart_rejects_checkpoint_evidence_drift_before_new_durable_write(self):
+        with TemporaryDirectory() as directory:
+            result = run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            checkpoint_path = root / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            original_id = result.order_id
+            self.assertIsNotNone(original_id)
+            fill = checkpoint["fills"][original_id]
+            forged_input_hash = "0" * 64
+            forged_payload = {
+                "symbol": fill["symbol"],
+                "side": fill["side"],
+                "quantity": fill["quantity"],
+                "price": fill["price"],
+                "input_hash": forged_input_hash,
+            }
+            forged_id = "intent-" + sha256(
+                json.dumps(
+                    forged_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()[:20]
+            if forged_id == original_id:
+                forged_input_hash = "1" * 64
+                forged_payload["input_hash"] = forged_input_hash
+                forged_id = "intent-" + sha256(
+                    json.dumps(
+                        forged_payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()[:20]
+            forged_fill_id = "fill-" + sha256(
+                forged_id.encode("utf-8")
+            ).hexdigest()[:20]
+
+            checkpoint["fills"].pop(original_id)
+            fill["client_order_id"] = forged_id
+            fill["fill_id"] = forged_fill_id
+            checkpoint["fills"][forged_id] = fill
+            checkpoint["postings"][0]["fill_id"] = forged_fill_id
+            evidence_id = checkpoint["evidence_ids"][0]
+            checkpoint_evidence = checkpoint["evidence_records"][evidence_id]
+            checkpoint_evidence["input_hash"] = forged_input_hash
+            checkpoint_evidence["order_id"] = forged_id
+            checkpoint_evidence["fill_id"] = forged_fill_id
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            original_intent_path = root / "order-intents" / f"{original_id}.json"
+            forged_intent = json.loads(
+                original_intent_path.read_text(encoding="utf-8")
+            )
+            forged_intent["client_order_id"] = forged_id
+            forged_intent_path = root / "order-intents" / f"{forged_id}.json"
+            forged_intent_path.write_text(json.dumps(forged_intent), encoding="utf-8")
+            original_intent_path.unlink()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "checkpoint and append-only intent evidence disagree",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+            self.assertFalse(original_intent_path.exists())
+
     def test_restart_legacy_checkpoint_without_embedded_evidence_uses_jsonl_identity(self):
         with TemporaryDirectory() as directory:
             first = run_vertical_slice([100, 101, 102, 103], directory)

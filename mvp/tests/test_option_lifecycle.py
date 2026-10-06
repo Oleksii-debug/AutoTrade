@@ -723,6 +723,42 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             "TESTNET",
         )
 
+    def test_provider_free_lifecycle_ids_and_payload_remain_legacy_compatible(self):
+        self.seed_option_position("1")
+        reference = self.evidence(
+            external_event_id="legacy-provider-free-domain",
+            provider_revision="legacy-provider-free-r1",
+        )
+        result = self.authority.apply(reference)
+
+        self.assertEqual(
+            result.lifecycle_event_id,
+            option_lifecycle_module._identity(
+                "option-lifecycle-event",
+                "TEST_PROVIDER",
+                "paper-1",
+                "SIMULATION",
+                "legacy-provider-free-domain",
+            ),
+        )
+        self.assertEqual(
+            result.active_transaction_ids,
+            (
+                option_lifecycle_module._identity(
+                    "option-lifecycle-economic",
+                    "TEST_PROVIDER",
+                    "paper-1",
+                    "SIMULATION",
+                    "legacy-provider-free-domain",
+                ),
+            ),
+        )
+        event = self.store.load_events(
+            "option_lifecycle",
+            self.authority.aggregate_id,
+        )[0]["payload"]
+        self.assertNotIn("provider_environment", event)
+
     def test_provider_environment_mutation_fails_before_lifecycle_read(self):
         authority = self._authority(
             registry=self.registry,

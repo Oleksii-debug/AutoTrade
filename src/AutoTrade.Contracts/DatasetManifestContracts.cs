@@ -2,10 +2,26 @@ using System.Text.Json;
 
 namespace AutoTrade.Contracts;
 
+/// <summary>
+/// Provides semantic validation rules for canonical DatasetManifest contract payloads.
+/// </summary>
 public static class DatasetManifestContracts
 {
+    /// <summary>
+    /// Gets the stable identifier of the DatasetManifest semantic validator.
+    /// </summary>
     public const string SemanticValidatorId = "dataset-manifest-content-authority-v1";
 
+    /// <summary>
+    /// Determines whether a DatasetManifest payload satisfies the cross-field semantic
+    /// requirements that cannot be expressed by JSON Schema alone.
+    /// </summary>
+    /// <param name="value">The DatasetManifest JSON value to validate.</param>
+    /// <returns>
+    /// <see langword="true"/> when every declared content hash is uniquely declared and
+    /// is backed by at least one source-evidence SHA-256 reference; otherwise,
+    /// <see langword="false"/>.
+    /// </returns>
     public static bool IsSemanticallyValid(JsonElement value)
     {
         if (value.ValueKind != JsonValueKind.Object)

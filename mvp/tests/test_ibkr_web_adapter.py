@@ -1089,7 +1089,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
             fee_amount="-0.35",
             fee_currency="USD",
             trade_time="2026-09-24T20:00:01Z",
-                evidence_refs=EXECUTION_EVIDENCE_REFS,
+            evidence_refs=EXECUTION_EVIDENCE_REFS,
         )
         self.assertEqual(fill.provider_id, "IBKR")
         self.assertEqual(fill.account_id, "U1234567")
@@ -1152,7 +1152,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
             fee_amount="0.30",
             fee_currency="USD",
             trade_time="2026-09-24T20:00:01Z",
-                evidence_refs=EXECUTION_EVIDENCE_REFS,
+            evidence_refs=EXECUTION_EVIDENCE_REFS,
         )
         self.assertEqual(
             fill.provider_execution_id,
@@ -1176,7 +1176,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
             fee_amount="0",
             fee_currency="USD",
             trade_time="2026-09-24T20:00:01Z",
-                evidence_refs=EXECUTION_EVIDENCE_REFS,
+            evidence_refs=EXECUTION_EVIDENCE_REFS,
         )
         self.assertEqual(fill.provider_execution_id, "external.1.01")
 
@@ -1578,6 +1578,20 @@ class IbkrWebAdapterTests(unittest.TestCase):
             },
         )
 
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError, "revision must be a positive integer"
+        ):
+            parse_web_api_trades(
+                ibkr_trade_observation(
+                    [dict(base, execution_id="0000e0d5.6576fd38.01.00")]
+                ),
+                instrument_versions_by_conid={265598: "AAPL:v1"},
+                fee_currency_by_execution_id={
+                    **fees,
+                    "0000e0d5.6576fd38.01.00": "USD",
+                },
+            )
+
         ambiguous = dict(
             corrected,
             execution_id="0000e0d5.6576fd38.01.2",
@@ -1660,7 +1674,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_amount="0",
                 fee_currency="USD",
                 trade_time="2026-09-24T20:00:01Z",
-                    evidence_refs=EXECUTION_EVIDENCE_REFS,
+                evidence_refs=EXECUTION_EVIDENCE_REFS,
             )
 
     def test_execution_cannot_cross_account_boundary_during_reconciliation(self):
@@ -1680,7 +1694,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_amount="0",
                 fee_currency="USD",
                 trade_time="2026-09-24T20:00:01Z",
-                    evidence_refs=EXECUTION_EVIDENCE_REFS,
+                evidence_refs=EXECUTION_EVIDENCE_REFS,
             )
 
     def test_reconciliation_execution_requires_exact_evidence_type(self):
@@ -1697,7 +1711,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_amount="0",
                 fee_currency="USD",
                 trade_time="2026-09-24T20:00:01Z",
-                    evidence_refs=EXECUTION_EVIDENCE_REFS,
+                evidence_refs=EXECUTION_EVIDENCE_REFS,
             )
 
     def test_regulated_instrument_requires_manual_indicator_evidence(self):
@@ -1933,7 +1947,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_amount="0",
                 fee_currency="USD",
                 trade_time="2026-09-24T20:00:01Z",
-                    evidence_refs=EXECUTION_EVIDENCE_REFS,
+                evidence_refs=EXECUTION_EVIDENCE_REFS,
             )
 
         execution = IbkrExecutionEvidence.create(
@@ -1955,7 +1969,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_amount="0",
                 fee_currency="USD",
                 trade_time="2026-09-24T20:00:01Z",
-                    evidence_refs=EXECUTION_EVIDENCE_REFS,
+                evidence_refs=EXECUTION_EVIDENCE_REFS,
             )
 
         _HostileText.strip_called = False
@@ -1976,7 +1990,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_amount="0",
                 fee_currency="USD",
                 trade_time="2026-09-24T20:00:01Z",
-                    evidence_refs=EXECUTION_EVIDENCE_REFS,
+                evidence_refs=EXECUTION_EVIDENCE_REFS,
             )
         self.assertFalse(_HostileText.strip_called)
 

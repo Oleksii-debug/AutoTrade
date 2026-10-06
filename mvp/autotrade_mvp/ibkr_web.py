@@ -155,6 +155,10 @@ def _execution_correction_identity(
     if not separator or not family or re.fullmatch(r"[0-9]+", revision) is None:
         return None
     normalized_revision = revision.lstrip("0") or "0"
+    if normalized_revision == "0":
+        raise IbkrWebAdapterError(
+            "IBKR execution correction revision must be a positive integer"
+        )
     return family, (len(normalized_revision), normalized_revision)
 
 

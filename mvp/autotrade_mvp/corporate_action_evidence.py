@@ -695,7 +695,10 @@ def _resolve_authoritative_corporate_action_impl(
 
 
 
-def _bind_authoritative_corporate_action_resolver(register_authority):
+def _bind_authoritative_corporate_action_resolver(
+    resolve_impl,
+    register_authority,
+):
     def resolve_authoritative_corporate_action(
         evidence_ref: str,
         *,
@@ -709,7 +712,7 @@ def _bind_authoritative_corporate_action_resolver(register_authority):
         normalizer: object | None = None,
         instrument_resolver: object | None = None,
     ) -> AuthoritativeCorporateAction:
-        return _resolve_authoritative_corporate_action_impl(
+        return resolve_impl(
             evidence_ref,
             evidence_resolver=evidence_resolver,
             instrument_registry=instrument_registry,
@@ -727,9 +730,11 @@ def _bind_authoritative_corporate_action_resolver(register_authority):
 
 
 resolve_authoritative_corporate_action = _bind_authoritative_corporate_action_resolver(
-    _register_authoritative_corporate_action
+    _resolve_authoritative_corporate_action_impl,
+    _register_authoritative_corporate_action,
 )
 del _bind_authoritative_corporate_action_resolver
+del _resolve_authoritative_corporate_action_impl
 del _register_authoritative_corporate_action
 
 

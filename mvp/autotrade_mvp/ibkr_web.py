@@ -43,6 +43,8 @@ IBKR_WEB_BROKERAGE_ACCOUNTS_ENDPOINT = "/iserver/accounts"
 IBKR_WEB_DOCS = MappingProxyType(
     {
         "session": "https://www.interactivebrokers.com/docs/web-api/trading/trading-sessions-in-the-web-api",
+        "auth_status": "https://www.interactivebrokers.com/docs/web-api/api-reference/trading/trading-session/get-brokerage-status",
+        "brokerage_accounts": "https://www.interactivebrokers.com/docs/web-api/v1/endpoints/accounts/receive-brokerage-accounts",
         "place_order": "https://www.interactivebrokers.com/docs/web-api/v1/endpoints/orders/place-order",
         "modify_order": "https://www.interactivebrokers.com/docs/web-api/api-reference/trading/trading-orders/modify-open-order",
         "execution": "https://www.interactivebrokers.com/docs/tws-api/ref/execution",
@@ -766,6 +768,11 @@ def _install_ibkr_brokerage_accounts_observation_authority():
         )
         if (
             canonical_type(current_accounts) is not tuple
+            or not current_accounts
+            or any(
+                canonical_type(account_id) is not str
+                for account_id in current_accounts
+            )
             or canonical_type(current_selected) is not str
             or canonical_type(current_session_id) is not str
             or canonical_type(current_is_paper) is not bool

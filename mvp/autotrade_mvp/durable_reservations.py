@@ -122,6 +122,28 @@ def _amount_map(values: dict[str, object], *, allow_zero: bool) -> dict[str, str
     return dict(sorted(result.items()))
 
 
+def _require_inert_json(value: object, *, name: str) -> None:
+    """Reject executable JSON-like subclasses before financial replay hashing."""
+
+    if value is None or type(value) in {str, int, float, bool}:
+        return
+    if type(value) is list:
+        for index, item in enumerate(value):
+            _require_inert_json(item, name=f"{name}[{index}]")
+        return
+    if type(value) is dict:
+        for key, item in dict.items(value):
+            if type(key) is not str:
+                raise ReservationConflict(
+                    f"{name} object keys must be exact text"
+                )
+            _require_inert_json(item, name=f"{name}.{key}")
+        return
+    raise ReservationConflict(
+        f"{name} must contain only exact inert JSON values"
+    )
+
+
 def _snapshot_payload(snapshot: ReservationSnapshot) -> dict[str, object]:
     return {
         "reservation_id": snapshot.reservation_id,
@@ -504,6 +526,7 @@ class DurableReservationBook:
         expected_version = 1
 
         for event in events:
+            _require_inert_json(event, name="reservation journal event")
             if type(event) is not dict:
                 raise ReservationConflict(
                     "reservation journal event must be an exact object"

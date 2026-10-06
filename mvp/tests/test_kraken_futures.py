@@ -3,6 +3,7 @@ from decimal import Decimal, Inexact, Rounded, localcontext
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from mvp.autotrade_mvp.capabilities import (
@@ -32,6 +33,7 @@ from mvp.autotrade_mvp.reconciliation import (
 )
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
+    ProviderSubmissionObservation,
     Surface,
     observe_authenticated_json_response,
     observe_submission_json_response,
@@ -549,6 +551,66 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 prepared_request=prepared,
                 observation={"result": "success"},
             )
+
+    def test_submission_consumer_rejects_subclass_before_virtual_callback(self):
+        attempt, prepared, _observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "provider-hostile",
+                    "status": "placed",
+                },
+            },
+            intent_id="kraken-futures-hostile-observation",
+            provider_environment="LIVE",
+        )
+
+        class HostileObservation(ProviderSubmissionObservation):
+            def __getattribute__(self, _name):
+                raise AssertionError(
+                    "virtual callback executed before authority verification"
+                )
+
+        forged = object.__new__(HostileObservation)
+        with self.assertRaisesRegex(
+            TypeError,
+            "durable ProviderSubmissionObservation",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=forged,
+            )
+
+    def test_submission_consumer_does_not_call_rebindable_require_scope(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "provider-no-virtual-scope",
+                    "status": "placed",
+                },
+            },
+            intent_id="kraken-futures-no-virtual-scope",
+            provider_environment="LIVE",
+        )
+        with patch.object(
+            ProviderSubmissionObservation,
+            "require_scope",
+            side_effect=AssertionError(
+                "rebindable require_scope callback must not execute"
+            ),
+        ):
+            result = parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+        self.assertEqual(result["outcome"], "ACKNOWLEDGED")
+        self.assertEqual(
+            result["provider_order_id"],
+            "provider-no-virtual-scope",
+        )
 
     def test_position_history_maps_only_trade_execution_facts(self):
         fills = parse_position_executions(

@@ -589,6 +589,7 @@ def _validate_pairs(target_component: str, pairs: Iterable[AblationPair]) -> lis
     seen_case_ids: set[str] = set()
     seen_input_fingerprints: set[str] = set()
     seen_population_units: set[str] = set()
+    seen_target_evidence_ids: set[str] = set()
     seen_target_content_digests: set[str] = set()
     seen_target_syndication_groups: set[str] = set()
     for pair in selected:
@@ -615,6 +616,13 @@ def _validate_pairs(target_component: str, pairs: Iterable[AblationPair]) -> lis
             if item.component_id == target_component
         ]
         for item in target_evidence:
+            if item.evidence_id in seen_target_evidence_ids:
+                raise ValueError(
+                    "duplicate target evidence identity across matched cases; "
+                    "cases are not independent"
+                )
+            seen_target_evidence_ids.add(item.evidence_id)
+
             if item.content_digest in seen_target_content_digests:
                 raise ValueError(
                     "duplicate target evidence content across matched cases; "
@@ -798,6 +806,25 @@ def evaluate_incremental_value(
             uncertainty_multiplier=multiplier,
             status="INCONCLUSIVE",
             reason="missing_causal_input_evidence",
+        )
+
+    if any(
+        not any(
+            item.component_id == target
+            for item in pair.full.input_evidence
+        )
+        for pair in selected
+    ):
+        return AblationEvaluation(
+            target_component=target,
+            pair_count=0,
+            mean_net_incremental_value=None,
+            sample_stddev=None,
+            lower_bound=None,
+            required_lower_bound=required,
+            uncertainty_multiplier=multiplier,
+            status="INCONCLUSIVE",
+            reason="missing_target_component_causal_evidence",
         )
 
     try:

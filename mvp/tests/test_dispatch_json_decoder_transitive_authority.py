@@ -273,5 +273,122 @@ class JsonDecoderTransitiveAuthorityTests(unittest.TestCase):
             )
 
 
+    def test_transport_cannot_retarget_json_module_class(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            json_module = dispatch_module.json
+            module_type = type(json_module)
+            forged_gets = 0
+
+            class ForgedJsonModule(module_type):
+                def __getattribute__(self, name):
+                    nonlocal forged_gets
+                    if name == "loads":
+                        forged_gets += 1
+
+                        def forged_loads(_text, **_kwargs):
+                            return {"forged": True}
+
+                        return forged_loads
+                    return module_type.__getattribute__(self, name)
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                module_type.__setattr__(
+                    json_module,
+                    "__class__",
+                    ForgedJsonModule,
+                )
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "json-module-class-retarget",
+                    transport,
+                )
+                self.assertIs(type(json_module), module_type)
+                self.assertEqual(forged_gets, 0)
+            finally:
+                if type(json_module) is not module_type:
+                    module_type.__setattr__(
+                        json_module,
+                        "__class__",
+                        module_type,
+                    )
+
+            self._assert_unknown_after_send(
+                path,
+                dispatcher,
+                "json-module-class-retarget",
+                result,
+            )
+
+    def test_transport_cannot_retarget_json_scanner_module_class(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            decoder_init = dispatch_module.json.JSONDecoder.__dict__["__init__"]
+            scanner_module = decoder_init.__globals__["scanner"]
+            module_type = type(scanner_module)
+            forged_gets = 0
+
+            class ForgedScannerModule(module_type):
+                def __getattribute__(self, name):
+                    nonlocal forged_gets
+                    if name == "make_scanner":
+                        forged_gets += 1
+
+                        def forged_make_scanner(_context):
+                            def forged_scan_once(text, _index):
+                                return {"forged": True}, len(text)
+
+                            return forged_scan_once
+
+                        return forged_make_scanner
+                    return module_type.__getattribute__(self, name)
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                module_type.__setattr__(
+                    scanner_module,
+                    "__class__",
+                    ForgedScannerModule,
+                )
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "json-scanner-module-class-retarget",
+                    transport,
+                )
+                self.assertIs(type(scanner_module), module_type)
+                self.assertEqual(forged_gets, 0)
+            finally:
+                if type(scanner_module) is not module_type:
+                    module_type.__setattr__(
+                        scanner_module,
+                        "__class__",
+                        module_type,
+                    )
+
+            self._assert_unknown_after_send(
+                path,
+                dispatcher,
+                "json-scanner-module-class-retarget",
+                result,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -922,6 +922,11 @@ def _repair_interrupted_replay(
     if len(ids) != len(set(ids)) or set(ids) != set(records):
         raise ValueError("Corrupt checkpoint replay evidence identity")
     if not ids:
+        evidence_path = root / "learning-evidence.jsonl"
+        if evidence_path.exists() or any(root.glob("journal.sqlite3*")):
+            raise ValueError(
+                "Durable replay state exists without checkpoint evidence authority"
+            )
         return
 
     ordered: list[tuple[int, datetime, str, dict]] = []

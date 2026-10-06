@@ -202,6 +202,75 @@ class VerticalSliceTests(unittest.TestCase):
             after = JournalStore(root / "journal.sqlite3").whole_store_state_cut()
             self.assertEqual(after, before)
 
+    def test_resume_rejects_residual_evidence_with_empty_checkpoint_authority(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(
+                pipeline_module,
+                "handle_durable_order_intent",
+                side_effect=RuntimeError("stop after initial checkpoint"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "stop after initial checkpoint"):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
+            checkpoint_path = root / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            self.assertEqual(checkpoint["evidence_ids"], [])
+            self.assertEqual(checkpoint["evidence_records"], {})
+            evidence_path = root / "learning-evidence.jsonl"
+            evidence_path.write_text("\n", encoding="utf-8")
+
+            checkpoint_before = checkpoint_path.read_bytes()
+            evidence_before = evidence_path.read_bytes()
+            with self.assertRaisesRegex(
+                ValueError,
+                "without checkpoint evidence authority",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+            self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertEqual(evidence_path.read_bytes(), evidence_before)
+            self.assertFalse((root / "journal.sqlite3").exists())
+            self.assertFalse((root / "order-intents").exists())
+
+    def test_resume_rejects_residual_journal_with_empty_checkpoint_authority(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(
+                pipeline_module,
+                "handle_durable_order_intent",
+                side_effect=RuntimeError("stop after initial checkpoint"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "stop after initial checkpoint"):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
+            checkpoint_path = root / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            self.assertEqual(checkpoint["evidence_ids"], [])
+            self.assertEqual(checkpoint["evidence_records"], {})
+            empty_store = JournalStore(root / "journal.sqlite3")
+            journal_before = empty_store.whole_store_state_cut()
+            self.assertEqual(journal_before["journal_sequence"], 0)
+
+            checkpoint_before = checkpoint_path.read_bytes()
+            with self.assertRaisesRegex(
+                ValueError,
+                "without checkpoint evidence authority",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+            self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertEqual(
+                JournalStore(root / "journal.sqlite3").whole_store_state_cut(),
+                journal_before,
+            )
+            self.assertFalse((root / "learning-evidence.jsonl").exists())
+            self.assertFalse((root / "order-intents").exists())
+
     def test_missing_evidence_after_checkpoint_is_repaired(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

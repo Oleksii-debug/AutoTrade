@@ -179,6 +179,51 @@ class PreparedZeroWireSection6Tests(unittest.TestCase):
                 [event["event_type"] for event in events],
             )
 
+    def test_multiple_recovery_owners_converge_on_one_blocked_terminal(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original = self._dispatcher(store, owner="original-owner")
+            first_recovery = self._dispatcher(store, owner="recovery-a")
+            second_recovery = self._dispatcher(store, owner="recovery-b")
+            self._leave_prepared(original)
+
+            first = first_recovery.dispatch(
+                attempt_id="section6-attempt",
+                intent_id="section6-intent",
+                intent_hash="section6-intent-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T10:00:02Z",
+                authority_check=self.authority,
+                transport_send=lambda *_args: self.fail(
+                    "first recovery reached provider transport"
+                ),
+            )
+            second = second_recovery.dispatch(
+                attempt_id="section6-attempt",
+                intent_id="section6-intent",
+                intent_hash="section6-intent-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T10:00:03Z",
+                authority_check=self.authority,
+                transport_send=lambda *_args: self.fail(
+                    "second recovery reached provider transport"
+                ),
+            )
+
+            self.assertEqual(first.status, "BLOCKED")
+            self.assertEqual(second.status, "BLOCKED")
+            self.assertEqual(
+                first.reason,
+                "prepared_owner_lease_expired_before_send",
+            )
+            self.assertEqual(second.reason, first.reason)
+            self.assertEqual(
+                [event["event_type"] for event in original._events("section6-attempt")],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
     def test_send_barrier_winning_recovery_cas_converges_unknown(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

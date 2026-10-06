@@ -1226,7 +1226,12 @@ def parse_spot_submission_response(
     errors = payload.get("error", ())
     if isinstance(errors, (str, bytes)) or not isinstance(errors, (list, tuple)):
         raise KrakenSpotAdapterError("Kraken error field must be a sequence")
-    nonempty_errors = tuple(str(item) for item in errors if str(item))
+    for item in errors:
+        if type(item) is not str or item != item.strip():
+            raise KrakenSpotAdapterError(
+                "Kraken error entries must be canonical exact text"
+            )
+    nonempty_errors = tuple(item for item in errors if item)
     if spot_submission_requires_reconciliation(payload):
         return {
             "attempt_id": aid,

@@ -266,12 +266,17 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
                 "provenance surface mismatch",
             ),
             (
-                {"query": {"category": "linear", "symbol": "BTC-29DEC22-16000-P"}},
+                {
+                    "query": {
+                        "category": "linear",
+                        "symbol": "BTC-29DEC22-16000-P",
+                    }
+                },
                 "requires ACCOUNT.READ category=option",
             ),
             (
                 {"query": {"category": "option"}},
-                None,
+                "query symbol is required for bounded delivery evidence",
             ),
             (
                 {
@@ -280,24 +285,15 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
                         "symbol": "BTC-29DEC22-16000-C",
                     }
                 },
-                "query symbol does not match instrument_version",
+                "violates bound instrument symbol",
             ),
         )
         for kwargs, message in cases:
             with self.subTest(kwargs=kwargs):
-                if message is None:
-                    parsed = parse_option_delivery_page(
+                with self.assertRaisesRegex(ProviderCoreError, message):
+                    parse_option_delivery_page(
                         observation(response(), **kwargs)
                     )
-                    self.assertEqual(
-                        parsed.instrument_version,
-                        "BTC-29DEC22-16000-P@v1",
-                    )
-                else:
-                    with self.assertRaisesRegex(ProviderCoreError, message):
-                        parse_option_delivery_page(
-                            observation(response(), **kwargs)
-                        )
 
     def test_parser_rejects_delivery_row_schema_drift(self):
         payload = response()

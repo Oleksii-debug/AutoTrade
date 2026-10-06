@@ -867,6 +867,8 @@ class GuardedDispatcher:
         client_order_id: str,
         expected_prepared: dict[str, Any],
     ) -> bool:
+        if not events:
+            return False
         aggregate_id = self._aggregate_id(attempt_id)
         versions: list[int] = []
         event_types: list[str] = []
@@ -1481,6 +1483,13 @@ class GuardedDispatcher:
             return DispatchOutcome("BLOCKED", client_order_id, None, str(error))
         except Exception as error:
             events = self._events(attempt_id)
+            if not events:
+                return DispatchOutcome(
+                    "UNKNOWN",
+                    client_order_id,
+                    None,
+                    "durable_submission_history_invalid",
+                )
             last = events[-1]
             if last["event_type"] == "SubmissionSending":
                 if not self._existing_history_is_canonical(

@@ -510,6 +510,47 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
             )
 
+    def test_post_barrier_missing_durable_history_fails_unknown(self):
+        for transport_raises in (False, True):
+            with self.subTest(transport_raises=transport_raises), TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                store = JournalStore(path)
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+
+                def transport(_client_order_id, _request, guard):
+                    guard()
+                    connection = sqlite3.connect(path)
+                    try:
+                        connection.execute("DELETE FROM events")
+                        connection.commit()
+                    finally:
+                        connection.close()
+                    if transport_raises:
+                        raise TimeoutError("provider reply lost after durable history loss")
+                    return ExactJsonTransportResponse(b'{"accepted":true}')
+
+                result = dispatcher.dispatch(
+                    attempt_id="missing-history-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T14:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    submission_scope={"endpoint": "/orders"},
+                )
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertEqual(
+                    result.reason,
+                    "durable_submission_history_invalid",
+                )
+
     def test_runtime_redispatch_rejects_submission_scope_retargeting(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

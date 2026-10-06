@@ -443,10 +443,10 @@ class InstrumentVersion:
                 evidence_sha256=convention.evidence_sha256,
             )
             if (
-                convention.provider_id != self.provider_id.upper()
+                convention.provider_id != self.provider_id
                 or convention.instrument_id != self.instrument_id
                 or convention.instrument_version != self.version
-                or convention.settlement_currency != self.settlement_currency.upper()
+                or convention.settlement_currency != self.settlement_currency
             ):
                 raise InstrumentRegistryError(
                     "settlement convention scope must match InstrumentVersion"

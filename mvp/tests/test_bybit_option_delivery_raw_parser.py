@@ -189,6 +189,7 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
             parsed.instrument_version,
             source.query_binding.instrument_version,
         )
+        self.assertEqual(parsed.provider_symbol, "BTC-29DEC22-16000-P")
         self.assertIs(parsed.surface, Surface.ACTIVITIES)
         self.assertEqual(parsed.endpoint, ENDPOINT)
         self.assertEqual(parsed.permission_scope, "ACCOUNT.READ")

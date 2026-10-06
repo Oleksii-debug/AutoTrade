@@ -535,6 +535,14 @@ def semantic_validator_surface(root: Path, manifest: dict) -> dict[str, object]:
                 f"semantic validator {validator_id} definition does not exist: "
                 f"{schema_name}#/$defs/{definition}"
             )
+        definition_payload = definitions[definition]
+        if (
+            not isinstance(definition_payload, dict)
+            or definition_payload.get("x-autotrade-semantic-validator") != validator_id
+        ):
+            raise ValueError(
+                f"semantic validator {validator_id} schema annotation mismatch"
+            )
 
         corpus_path = declared_file(
             corpus,
@@ -556,9 +564,11 @@ def semantic_validator_surface(root: Path, manifest: dict) -> dict[str, object]:
             )
 
         bindings = entry.get("bindings")
-        if not isinstance(bindings, dict) or not bindings:
+        expected_languages = {"python", "csharp", "typescript"}
+        if not isinstance(bindings, dict) or set(bindings) != expected_languages:
             raise ValueError(
-                f"semantic validator {validator_id} bindings must be a non-empty object"
+                f"semantic validator {validator_id} must declare "
+                "python/csharp/typescript bindings"
             )
         for language, relative in bindings.items():
             if not isinstance(language, str) or not language:

@@ -1,8 +1,11 @@
+from datetime import datetime, timezone
 from decimal import Decimal
 import unittest
 
+from mvp.autotrade_mvp.instruments import InstrumentVersion
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
+    ExecutionPriceGrid,
     ExecutionRealismError,
     LiquidityObservation,
     SimulatedOrder,
@@ -11,6 +14,48 @@ from mvp.autotrade_mvp.execution_realism import (
 
 
 CALIBRATION = "a" * 64
+INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
+INSTRUMENT_REF = f"{INSTRUMENT_ID}@1"
+OTHER_INSTRUMENT_ID = "22222222-2222-4222-8222-222222222222"
+OTHER_INSTRUMENT_REF = f"{OTHER_INSTRUMENT_ID}@1"
+
+
+def instrument(*, instrument_id=INSTRUMENT_ID, price_tick=Decimal("0.01")):
+    return InstrumentVersion(
+        instrument_id=instrument_id,
+        version=1,
+        provider_id="simulated",
+        venue_id="simulated-venue",
+        provider_symbol="ABC",
+        asset_class="CASH_EQUITY",
+        base_currency="ABC",
+        quote_currency="USD",
+        settlement_currency="USD",
+        quantity_unit="ABC",
+        contract_multiplier=Decimal("1"),
+        price_tick=price_tick,
+        quantity_step=Decimal("0.001"),
+        minimum_quantity=Decimal("0.001"),
+        maximum_quantity=Decimal("10"),
+        calendar_id="CONTINUOUS_24_7",
+        timezone_id="UTC",
+        effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        metadata_evidence=(
+            {
+                "artifact_id": "33333333-3333-4333-8333-333333333333",
+                "sha256": "sha256:" + "b" * 64,
+                "observed_at": "2026-09-24T09:00:00Z",
+            },
+        ),
+    )
+
+
+def price_grid(*, instrument_value=None, projection_policy_version=1):
+    bound = instrument_value or instrument()
+    return ExecutionPriceGrid.from_instrument(
+        bound,
+        projection_policy_version=projection_policy_version,
+    )
 
 
 def model(**overrides):
@@ -30,7 +75,8 @@ def model(**overrides):
         price_quantum="0.01",
         price_projection_policy_id="ADVERSE_PRICE_GRID",
         price_projection_policy_version=1,
-        price_grid_instrument_version="ABC@v1",
+        price_grid_instrument_version=INSTRUMENT_REF,
+        price_grid=price_grid(),
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -39,7 +85,7 @@ def model(**overrides):
 def order(**overrides):
     values = dict(
         order_id="sim-1",
-        instrument_version="ABC@v1",
+        instrument_version=INSTRUMENT_REF,
         side="BUY",
         order_type="MARKET",
         quantity="10",
@@ -52,7 +98,7 @@ def order(**overrides):
 
 def top(**overrides):
     values = dict(
-        instrument_version="ABC@v1",
+        instrument_version=INSTRUMENT_REF,
         market_time="2026-09-24T10:00:00.200000Z",
         available_at="2026-09-24T10:00:00.250000Z",
         available_volume="100",
@@ -70,8 +116,8 @@ class ExecutionRealismTests(unittest.TestCase):
             "instrument_version must exactly match",
         ):
             simulate_execution(
-                order(instrument_version="ABC@v1"),
-                top(instrument_version="XYZ@v9"),
+                order(instrument_version=INSTRUMENT_REF),
+                top(instrument_version=OTHER_INSTRUMENT_REF),
                 model(),
             )
 
@@ -142,16 +188,27 @@ class ExecutionRealismTests(unittest.TestCase):
 
         self.assertEqual(baseline[0], Decimal("101.10"))
 
+    def test_price_grid_requires_canonical_instrument_issuance(self):
+        with self.assertRaisesRegex(TypeError, "issued by the canonical instrument factory"):
+            ExecutionPriceGrid(
+                instrument_version=INSTRUMENT_REF,
+                price_quantum=Decimal("0.01"),
+                projection_policy_id="ADVERSE_PRICE_GRID",
+                projection_policy_version=1,
+                source_sha256="b" * 64,
+                instrument_metadata_binding="b" * 64,
+            )
+
     def test_market_projection_requires_explicit_price_quantum(self):
         with self.assertRaisesRegex(
             ExecutionRealismError,
             "complete price projection policy evidence",
         ):
-            simulate_execution(order(), top(), model(price_quantum=None))
+            simulate_execution(order(), top(), model(price_quantum=None, price_grid=None))
 
     def test_market_projection_policy_identity_changes_model_fingerprint(self):
         one = model(price_projection_policy_version=1)
-        two = model(price_projection_policy_version=2)
+        two = model(price_projection_policy_version=2, price_grid=price_grid(projection_policy_version=2))
         self.assertNotEqual(one.fingerprint, two.fingerprint)
 
     def test_market_projection_requires_all_policy_evidence_fields(self):
@@ -180,12 +237,17 @@ class ExecutionRealismTests(unittest.TestCase):
 
     def test_market_price_quantum_changes_model_identity(self):
         one = model(price_quantum="0.01")
-        two = model(price_quantum="0.001")
+        two = model(price_quantum="0.001", price_grid=price_grid(instrument_value=instrument(price_tick=Decimal("0.001"))))
         self.assertNotEqual(one.fingerprint, two.fingerprint)
 
     def test_market_price_grid_scope_changes_model_identity(self):
-        one = model(price_grid_instrument_version="ABC@v1")
-        two = model(price_grid_instrument_version="ABC@v2")
+        one = model(price_grid_instrument_version=INSTRUMENT_REF)
+        two = model(
+            price_grid_instrument_version=OTHER_INSTRUMENT_REF,
+            price_grid=price_grid(
+                instrument_value=instrument(instrument_id=OTHER_INSTRUMENT_ID)
+            ),
+        )
         self.assertNotEqual(one.fingerprint, two.fingerprint)
 
     def test_available_volume_and_participation_create_partial_fill(self):
@@ -267,7 +329,7 @@ class ExecutionRealismTests(unittest.TestCase):
                 limit_price="103",
             ),
             LiquidityObservation.create(
-                instrument_version="ABC@v1",
+                instrument_version=INSTRUMENT_REF,
                 market_time="2026-09-24T10:01:00Z",
                 available_at="2026-09-24T10:01:01Z",
                 available_volume="100",
@@ -324,7 +386,7 @@ class ExecutionRealismTests(unittest.TestCase):
                 submitted_at="2026-09-24T10:00:00Z",
             ),
             LiquidityObservation.create(
-                instrument_version="ABC@v1",
+                instrument_version=INSTRUMENT_REF,
                 market_time="2026-09-24T10:02:00Z",
                 available_at="2026-09-24T10:02:01Z",
                 available_volume="100",
@@ -380,7 +442,7 @@ class ExecutionRealismTests(unittest.TestCase):
         result = simulate_execution(
             order(side="SELL"),
             LiquidityObservation.create(
-                instrument_version="ABC@v1",
+                instrument_version=INSTRUMENT_REF,
                 market_time="2026-09-24T10:01:00Z",
                 available_at="2026-09-24T10:01:01Z",
                 available_volume="100",
@@ -459,7 +521,7 @@ class ExecutionRealismTests(unittest.TestCase):
         with self.assertRaises(ExecutionRealismError):
             SimulatedOrder(
                 order_id="direct-order",
-                instrument_version="ABC@v1",
+                instrument_version=INSTRUMENT_REF,
                 side="BUY",
                 order_type="MARKET",
                 quantity=Decimal("1.5"),
@@ -468,7 +530,7 @@ class ExecutionRealismTests(unittest.TestCase):
             )
         with self.assertRaises(ExecutionRealismError):
             LiquidityObservation(
-                instrument_version="ABC@v1",
+                instrument_version=INSTRUMENT_REF,
                 market_time="2026-09-24T10:00:01Z",
                 available_at="2026-09-24T10:00:00Z",
                 available_volume=Decimal("1"),
@@ -490,7 +552,7 @@ class ExecutionRealismTests(unittest.TestCase):
             simulate_execution(
                 order(),
                 LiquidityObservation.create(
-                    instrument_version="ABC@v1",
+                    instrument_version=INSTRUMENT_REF,
                     market_time="2026-09-24T10:01:00Z",
                     available_at="2026-09-24T10:01:01Z",
                     available_volume="100",
@@ -503,7 +565,7 @@ class ExecutionRealismTests(unittest.TestCase):
         result = simulate_execution(
             order(submitted_at="2026-09-24T10:00:30Z"),
             LiquidityObservation.create(
-                instrument_version="ABC@v1",
+                instrument_version=INSTRUMENT_REF,
                 market_time="2026-09-24T10:01:00Z",
                 available_at="2026-09-24T10:01:01Z",
                 available_volume="1000",
@@ -521,7 +583,7 @@ class ExecutionRealismTests(unittest.TestCase):
         result = simulate_execution(
             order(submitted_at="2026-09-24T10:00:00Z"),
             LiquidityObservation.create(
-                instrument_version="ABC@v1",
+                instrument_version=INSTRUMENT_REF,
                 market_time="2026-09-24T10:01:00Z",
                 available_at="2026-09-24T10:01:01Z",
                 available_volume="1000",
@@ -538,7 +600,7 @@ class ExecutionRealismTests(unittest.TestCase):
         result = simulate_execution(
             order(submitted_at="2026-09-24T10:00:00Z"),
             LiquidityObservation.create(
-                instrument_version="ABC@v1",
+                instrument_version=INSTRUMENT_REF,
                 market_time="2026-09-24T10:01:00Z",
                 available_at="2026-09-24T10:01:01Z",
                 available_volume="1000",
@@ -558,7 +620,7 @@ class ExecutionRealismTests(unittest.TestCase):
             simulate_execution(
                 order(),
                 LiquidityObservation.create(
-                    instrument_version="ABC@v1",
+                    instrument_version=INSTRUMENT_REF,
                     market_time="2026-09-24T10:01:00Z",
                     available_at="2026-09-24T10:01:01Z",
                     available_volume="100",

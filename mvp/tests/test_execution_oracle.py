@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 import unittest
 
@@ -6,8 +7,10 @@ from mvp.autotrade_mvp.execution_oracle import (
     ExecutionOracleError,
     assert_conservative_execution,
 )
+from mvp.autotrade_mvp.instruments import InstrumentVersion
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
+    ExecutionPriceGrid,
     LiquidityObservation,
     SimulatedOrder,
     simulate_execution,
@@ -15,6 +18,44 @@ from mvp.autotrade_mvp.execution_realism import (
 
 
 CALIBRATION = "a" * 64
+INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
+INSTRUMENT_REF = f"{INSTRUMENT_ID}@1"
+OTHER_INSTRUMENT_ID = "22222222-2222-4222-8222-222222222222"
+OTHER_INSTRUMENT_REF = f"{OTHER_INSTRUMENT_ID}@1"
+
+
+def instrument(*, instrument_id=INSTRUMENT_ID):
+    return InstrumentVersion(
+        instrument_id=instrument_id,
+        version=1,
+        provider_id="simulated",
+        venue_id="simulated-venue",
+        provider_symbol="ABC",
+        asset_class="CASH_EQUITY",
+        base_currency="ABC",
+        quote_currency="USD",
+        settlement_currency="USD",
+        quantity_unit="ABC",
+        contract_multiplier=Decimal("1"),
+        price_tick=Decimal("0.01"),
+        quantity_step=Decimal("0.001"),
+        minimum_quantity=Decimal("0.001"),
+        maximum_quantity=Decimal("10"),
+        calendar_id="CONTINUOUS_24_7",
+        timezone_id="UTC",
+        effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        metadata_evidence=(
+            {
+                "artifact_id": "33333333-3333-4333-8333-333333333333",
+                "sha256": "sha256:" + "b" * 64,
+                "observed_at": "2026-09-24T09:00:00Z",
+            },
+        ),
+    )
+
+
+def price_grid(instrument_value=None):
+    return ExecutionPriceGrid.from_instrument(instrument_value or instrument())
 
 
 def model(**overrides):
@@ -33,7 +74,8 @@ def model(**overrides):
         price_quantum="0.01",
         price_projection_policy_id="ADVERSE_PRICE_GRID",
         price_projection_policy_version=1,
-        price_grid_instrument_version="ABC@v1",
+        price_grid_instrument_version=INSTRUMENT_REF,
+        price_grid=price_grid(),
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -42,7 +84,7 @@ def model(**overrides):
 def order(**overrides):
     values = dict(
         order_id="sim-1",
-        instrument_version="ABC@v1",
+        instrument_version=INSTRUMENT_REF,
         side="BUY",
         order_type="MARKET",
         quantity="10",
@@ -55,7 +97,7 @@ def order(**overrides):
 
 def observation(**overrides):
     values = dict(
-        instrument_version="ABC@v1",
+        instrument_version=INSTRUMENT_REF,
         market_time="2026-09-24T10:00:00.200000Z",
         available_at="2026-09-24T10:00:00.250000Z",
         available_volume="100",
@@ -111,11 +153,11 @@ class ExecutionOracleTests(unittest.TestCase):
     def test_oracle_rejects_market_result_without_complete_price_projection_evidence(self):
         o, q, m = order(), observation(), model()
         result = simulate_execution(o, q, m)
-        changed = model(price_quantum=None)
+        changed = model(price_quantum=None, price_grid=None)
         forged = replace(result, model_fingerprint=changed.fingerprint)
         with self.assertRaisesRegex(
             ExecutionOracleError,
-            "complete price projection policy evidence",
+            "complete authoritative price-grid evidence",
         ):
             assert_conservative_execution(
                 order=o,

@@ -108,15 +108,22 @@ def assert_conservative_execution(
 
         if order.order_type == "MARKET":
             if (
-                model.price_quantum is None
+                model.price_grid is None
+                or model.price_quantum is None
                 or model.price_projection_policy_id is None
                 or model.price_projection_policy_version is None
                 or model.price_grid_instrument_version is None
             ):
                 raise ExecutionOracleError(
-                    "MARKET execution requires complete price projection policy evidence"
+                    "MARKET execution requires complete authoritative price-grid evidence"
                 )
-            if model.price_grid_instrument_version != order.instrument_version:
+            try:
+                model.price_grid.validate()
+            except (ExecutionRealismError, TypeError) as error:
+                raise ExecutionOracleError(
+                    "MARKET price grid authority is invalid"
+                ) from error
+            if model.price_grid.instrument_version != order.instrument_version:
                 raise ExecutionOracleError(
                     "MARKET price grid is not bound to the order instrument_version"
                 )
@@ -192,7 +199,7 @@ def assert_conservative_execution(
                 )
             projected = round_fraction_to_quantum(
                 target,
-                model.price_quantum,
+                model.price_grid.price_quantum,
                 mode="CEILING" if order.side == "BUY" else "FLOOR",
             )
             if result.fill_price != projected:

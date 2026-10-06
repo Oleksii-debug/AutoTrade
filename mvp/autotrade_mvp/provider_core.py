@@ -666,6 +666,10 @@ def _observe_authenticated_json_response_impl(
         raise ProviderCoreError(
             "authenticated provider state requires an HTTP 2xx response"
         )
+    if type(observed_at) is not datetime or type(observed_at.tzinfo) is not timezone:
+        raise ProviderCoreError(
+            "observed_at must be an exact stdlib timezone datetime"
+        )
     payload = _decode_exact_json(response_bytes)
     observed = _utc_text(observed_at, "observed_at")
     prepared = datetime.fromisoformat(

@@ -84,12 +84,21 @@ def _non_negative_int(value: object, *, name: str) -> int:
 
 
 def _decimal(value: object, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use exact decimal input")
-    try:
-        result = value if type(value) is Decimal else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
+    if type(value) is Decimal:
+        result = value
+    elif type(value) is int:
+        result = Decimal(value)
+    elif type(value) is str:
+        if not value or value != value.strip():
+            raise ValueError(f"{name} must use canonical decimal text")
+        try:
+            result = Decimal(value)
+        except InvalidOperation as error:
+            raise ValueError(f"{name} must be a finite decimal") from error
+    else:
+        raise TypeError(
+            f"{name} must use an exact Decimal, integer, or canonical decimal string"
+        )
     if not result.is_finite():
         raise ValueError(f"{name} must be a finite decimal")
     return result
@@ -116,6 +125,38 @@ def _canonical_bytes(value: Any) -> bytes:
 
 def _hash_payload(value: Any) -> str:
     return _SHA256_PREFIX + sha256(_canonical_bytes(value)).hexdigest()
+
+
+def _exact_tuple(value: object, *, name: str) -> tuple:
+    if type(value) is not tuple:
+        raise TypeError(f"{name} must be an exact tuple")
+    return value
+
+
+def _optional_text(value: object, *, name: str) -> str | None:
+    if value is None:
+        return None
+    return _text(value, name=name)
+
+
+def _snapshot_rights(value: object) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise TypeError("rights must be an exact dict")
+    for key in value.keys():
+        if type(key) is not str:
+            raise TypeError("rights keys must be exact strings")
+    allowed = {"storage", "export", "rights_id"}
+    if set(value) - allowed or "storage" not in value or "export" not in value:
+        raise ValueError("rights must contain storage/export and only canonical fields")
+    if type(value["storage"]) is not bool or type(value["export"]) is not bool:
+        raise TypeError("rights storage/export values must be exact booleans")
+    result: dict[str, Any] = {
+        "storage": value["storage"],
+        "export": value["export"],
+    }
+    if "rights_id" in value:
+        result["rights_id"] = _text(value["rights_id"], name="rights_id")
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,11 +255,6 @@ class MarketWaveSnapshot:
         )
         object.__setattr__(
             self,
-            "champion_artifact_hash",
-            _digest(self.champion_artifact_hash, name="champion_artifact_hash"),
-        )
-        object.__setattr__(
-            self,
             "source_cut_hash",
             _digest(self.source_cut_hash, name="source_cut_hash"),
         )
@@ -301,14 +337,278 @@ class PauseDecision:
         )
 
 
+
+def _snapshot_policy(value: object) -> LearningWavePolicy:
+    if type(value) is not LearningWavePolicy:
+        raise TypeError("policy must be exact LearningWavePolicy")
+    return LearningWavePolicy(
+        policy_id=_text(value.policy_id, name="policy_id"),
+        max_market_seconds=_positive_int_or_none(
+            value.max_market_seconds,
+            name="max_market_seconds",
+        ),
+        max_trades=_positive_int_or_none(value.max_trades, name="max_trades"),
+        min_evidence_events=_positive_int_or_none(
+            value.min_evidence_events,
+            name="min_evidence_events",
+        ),
+        max_drawdown=_positive_decimal_or_none(
+            value.max_drawdown,
+            name="max_drawdown",
+        ),
+        pause_on_regime_change=value.pause_on_regime_change,
+        promotion_mode=_text(value.promotion_mode, name="promotion_mode"),
+    )
+
+
+def _snapshot_market(value: object) -> MarketWaveSnapshot:
+    if type(value) is not MarketWaveSnapshot:
+        raise TypeError("snapshot must be exact MarketWaveSnapshot")
+    return MarketWaveSnapshot(
+        wave_id=_text(value.wave_id, name="wave_id"),
+        segment_id=_text(value.segment_id, name="segment_id"),
+        champion_artifact_hash=_digest(
+            value.champion_artifact_hash,
+            name="champion_artifact_hash",
+        ),
+        source_cut_hash=_digest(value.source_cut_hash, name="source_cut_hash"),
+        segment_started_at=_time(
+            value.segment_started_at,
+            name="segment_started_at",
+        ),
+        observed_at=_time(value.observed_at, name="observed_at"),
+        trades_since_pause=_non_negative_int(
+            value.trades_since_pause,
+            name="trades_since_pause",
+        ),
+        evidence_events_since_pause=_non_negative_int(
+            value.evidence_events_since_pause,
+            name="evidence_events_since_pause",
+        ),
+        drawdown_since_pause=_decimal(
+            value.drawdown_since_pause,
+            name="drawdown_since_pause",
+        ),
+        previous_regime_id=_text(
+            value.previous_regime_id,
+            name="previous_regime_id",
+        ),
+        current_regime_id=_text(
+            value.current_regime_id,
+            name="current_regime_id",
+        ),
+    )
+
+
+def _snapshot_pause(value: object) -> PauseDecision:
+    if type(value) is not PauseDecision:
+        raise TypeError("pause must be exact PauseDecision")
+    reasons = _exact_tuple(value.reasons, name="pause reasons")
+    if any(type(reason) is not str or not reason for reason in reasons):
+        raise TypeError("pause reasons must contain exact non-empty strings")
+    return PauseDecision(
+        wave_id=_text(value.wave_id, name="wave_id"),
+        policy_hash=_digest(value.policy_hash, name="policy_hash"),
+        champion_artifact_hash=_digest(
+            value.champion_artifact_hash,
+            name="champion_artifact_hash",
+        ),
+        source_cut_hash=_digest(value.source_cut_hash, name="source_cut_hash"),
+        paused_at=_time(value.paused_at, name="paused_at"),
+        should_pause=value.should_pause,
+        reasons=tuple(reasons),
+        decision_hash=_digest(value.decision_hash, name="decision_hash"),
+    )
+
+
+def _snapshot_population(
+    value: object,
+    *,
+    name: str,
+) -> PopulationCoverageManifest:
+    if type(value) is not PopulationCoverageManifest:
+        raise TypeError(f"{name} must be exact PopulationCoverageManifest")
+
+    permissions = tuple(
+        _text(item, name=f"{name}.permission_class")
+        for item in _exact_tuple(
+            value.permission_classes,
+            name=f"{name}.permission_classes",
+        )
+    )
+    eligible_ids = tuple(
+        _text(item, name=f"{name}.eligible_episode_id")
+        for item in _exact_tuple(
+            value.eligible_episode_ids,
+            name=f"{name}.eligible_episode_ids",
+        )
+    )
+    included_ids = tuple(
+        _text(item, name=f"{name}.included_episode_id")
+        for item in _exact_tuple(
+            value.included_episode_ids,
+            name=f"{name}.included_episode_ids",
+        )
+    )
+
+    def pair_text_rows(raw: object, *, field: str, digest_second: bool = False):
+        rows = []
+        for row in _exact_tuple(raw, name=f"{name}.{field}"):
+            if type(row) is not tuple or len(row) != 2:
+                raise TypeError(f"{name}.{field} rows must be exact pairs")
+            first = _text(row[0], name=f"{name}.{field}.key")
+            second = (
+                _digest(row[1], name=f"{name}.{field}.digest")
+                if digest_second
+                else _text(row[1], name=f"{name}.{field}.value")
+            )
+            rows.append((first, second))
+        return tuple(rows)
+
+    exclusions = pair_text_rows(value.exclusions, field="exclusions")
+    episode_digests = pair_text_rows(
+        value.episode_digests,
+        field="episode_digests",
+        digest_second=True,
+    )
+
+    def outcome_rows(raw: object, *, field: str):
+        rows = []
+        for row in _exact_tuple(raw, name=f"{name}.{field}"):
+            if type(row) is not tuple or len(row) != 3:
+                raise TypeError(f"{name}.{field} rows must be exact triples")
+            outcome = _text(row[0], name=f"{name}.{field}.outcome")
+            count = _non_negative_int(row[1], name=f"{name}.{field}.count")
+            outcome_digest = _digest(
+                row[2],
+                name=f"{name}.{field}.digest",
+            )
+            rows.append((outcome, count, outcome_digest))
+        return tuple(rows)
+
+    def regime_count_rows(raw: object, *, field: str):
+        rows = []
+        for row in _exact_tuple(raw, name=f"{name}.{field}"):
+            if type(row) is not tuple or len(row) != 2:
+                raise TypeError(f"{name}.{field} rows must be exact pairs")
+            rows.append(
+                (
+                    _text(row[0], name=f"{name}.{field}.regime"),
+                    _non_negative_int(row[1], name=f"{name}.{field}.count"),
+                )
+            )
+        return tuple(rows)
+
+    def label_rows(raw: object, *, field: str):
+        rows = []
+        for row in _exact_tuple(raw, name=f"{name}.{field}"):
+            if type(row) is not tuple or len(row) != 2:
+                raise TypeError(f"{name}.{field} rows must be exact pairs")
+            if type(row[1]) is not bool:
+                raise TypeError(f"{name}.{field} completeness must be exact bool")
+            rows.append(
+                (
+                    _text(row[0], name=f"{name}.{field}.regime"),
+                    row[1],
+                )
+            )
+        return tuple(rows)
+
+    cutoff = _population_cutoff(value.causal_cutoff, name=f"{name}.causal_cutoff")
+    return PopulationCoverageManifest(
+        candidate_hash=_digest(value.candidate_hash, name=f"{name}.candidate_hash"),
+        frozen_protocol_hash=_digest(
+            value.frozen_protocol_hash,
+            name=f"{name}.frozen_protocol_hash",
+        ),
+        input_snapshot_hash=_digest(
+            value.input_snapshot_hash,
+            name=f"{name}.input_snapshot_hash",
+        ),
+        causal_cutoff=cutoff.isoformat(),
+        permission_classes=permissions,
+        task=_optional_text(value.task, name=f"{name}.task"),
+        instrument_family=_optional_text(
+            value.instrument_family,
+            name=f"{name}.instrument_family",
+        ),
+        eligible_episode_ids=eligible_ids,
+        included_episode_ids=included_ids,
+        exclusions=exclusions,
+        episode_digests=episode_digests,
+        eligible_outcomes=outcome_rows(
+            value.eligible_outcomes,
+            field="eligible_outcomes",
+        ),
+        included_outcomes=outcome_rows(
+            value.included_outcomes,
+            field="included_outcomes",
+        ),
+        eligible_no_trade_count=_non_negative_int(
+            value.eligible_no_trade_count,
+            name=f"{name}.eligible_no_trade_count",
+        ),
+        included_no_trade_count=_non_negative_int(
+            value.included_no_trade_count,
+            name=f"{name}.included_no_trade_count",
+        ),
+        included_regime_counts=regime_count_rows(
+            value.included_regime_counts,
+            field="included_regime_counts",
+        ),
+        included_labels_complete_by_regime=label_rows(
+            value.included_labels_complete_by_regime,
+            field="included_labels_complete_by_regime",
+        ),
+        digest=_digest(value.digest, name=f"{name}.digest"),
+    )
+
+
+def _snapshot_approval(value: object) -> CandidateApproval:
+    if type(value) is not CandidateApproval:
+        raise TypeError("approval must be exact CandidateApproval")
+    if type(value.retention_passed) is not bool or type(value.risk_passed) is not bool:
+        raise TypeError("approval hard-gate fields must be exact booleans")
+    status = _text(value.evaluation_status, name="evaluation_status").upper()
+    if status not in {"PASS", "FAIL", "INCONCLUSIVE"}:
+        raise ValueError("invalid approval evaluation_status")
+    return CandidateApproval(
+        candidate_id=_text(value.candidate_id, name="approval candidate_id"),
+        artifact_hash=_digest(value.artifact_hash, name="approval artifact_hash"),
+        evidence_id=_text(value.evidence_id, name="approval evidence_id"),
+        evidence_valid_until=_time(
+            value.evidence_valid_until,
+            name="approval evidence_valid_until",
+        ),
+        evaluation_status=status,
+        retention_passed=value.retention_passed,
+        risk_passed=value.risk_passed,
+        authority_scope_id=_text(
+            value.authority_scope_id,
+            name="approval authority_scope_id",
+        ),
+        protocol_id=_text(value.protocol_id, name="approval protocol_id"),
+        protocol_hash=_digest(
+            value.protocol_hash,
+            name="approval protocol_hash",
+        ),
+        evaluation_id=_text(
+            value.evaluation_id,
+            name="approval evaluation_id",
+        ),
+        evaluation_result_hash=_digest(
+            value.evaluation_result_hash,
+            name="approval evaluation_result_hash",
+        ),
+    )
+
+
 def evaluate_pause(
     policy: LearningWavePolicy,
     snapshot: MarketWaveSnapshot,
 ) -> PauseDecision:
-    if not isinstance(policy, LearningWavePolicy):
-        raise TypeError("policy must be LearningWavePolicy")
-    if not isinstance(snapshot, MarketWaveSnapshot):
-        raise TypeError("snapshot must be MarketWaveSnapshot")
+    policy = _snapshot_policy(policy)
+    snapshot = _snapshot_market(snapshot)
 
     reasons: list[str] = []
     elapsed = int((snapshot.observed_at - snapshot.segment_started_at).total_seconds())
@@ -380,10 +680,10 @@ class CandidateWave:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "wave_id", _text(self.wave_id, name="wave_id"))
-        if not isinstance(self.policy, LearningWavePolicy):
-            raise TypeError("policy must be LearningWavePolicy")
+        policy = _snapshot_policy(self.policy)
+        object.__setattr__(self, "policy", policy)
         policy_hash = _digest(self.policy_hash, name="policy_hash")
-        if self.policy.policy_hash != policy_hash:
+        if policy.policy_hash != policy_hash:
             raise ValueError("candidate policy does not match bound policy hash")
         object.__setattr__(self, "policy_hash", policy_hash)
         champion = _digest(
@@ -445,17 +745,19 @@ class CandidateWave:
             "change_summary",
             _text(self.change_summary, name="change_summary"),
         )
-        if not isinstance(self.training_population, PopulationCoverageManifest):
-            raise TypeError(
-                "training_population must be canonical PopulationCoverageManifest"
-            )
-        if not isinstance(self.validation_population, PopulationCoverageManifest):
-            raise TypeError(
-                "validation_population must be canonical PopulationCoverageManifest"
-            )
-        if not self.training_population.complete:
+        training_population = _snapshot_population(
+            self.training_population,
+            name="training_population",
+        )
+        validation_population = _snapshot_population(
+            self.validation_population,
+            name="validation_population",
+        )
+        object.__setattr__(self, "training_population", training_population)
+        object.__setattr__(self, "validation_population", validation_population)
+        if not training_population.complete:
             raise ValueError("training population coverage must be complete")
-        if not self.validation_population.complete:
+        if not validation_population.complete:
             raise ValueError("validation population coverage must be complete")
         if self.training_population.candidate_hash != candidate:
             raise ValueError("training population must bind the exact candidate artifact")
@@ -524,12 +826,10 @@ class CandidateWave:
         validation_population: PopulationCoverageManifest,
         validation_opened_at: datetime,
     ) -> "CandidateWave":
-        if not isinstance(pause, PauseDecision):
-            raise TypeError("pause must be PauseDecision")
+        pause = _snapshot_pause(pause)
         if not pause.should_pause:
             raise ValueError("candidate wave requires a real pause decision")
-        if not isinstance(policy, LearningWavePolicy):
-            raise TypeError("policy must be LearningWavePolicy")
+        policy = _snapshot_policy(policy)
         if policy.policy_hash != pause.policy_hash:
             raise ValueError("policy does not match the exact pause decision")
         champion = _digest(champion_artifact_hash, name="champion_artifact_hash")
@@ -554,6 +854,30 @@ class CandidateWave:
             validation_population=validation_population,
             validation_opened_at=validation_opened_at,
         )
+
+
+def _snapshot_wave(value: object) -> CandidateWave:
+    if type(value) is not CandidateWave:
+        raise TypeError("wave must be exact CandidateWave")
+    return CandidateWave(
+        wave_id=value.wave_id,
+        policy=value.policy,
+        policy_hash=value.policy_hash,
+        champion_artifact_hash=value.champion_artifact_hash,
+        candidate_id=value.candidate_id,
+        candidate_artifact_hash=value.candidate_artifact_hash,
+        candidate_created_at=value.candidate_created_at,
+        pause_decision_hash=value.pause_decision_hash,
+        pause_reasons=value.pause_reasons,
+        paused_source_cut_hash=value.paused_source_cut_hash,
+        paused_at=value.paused_at,
+        error_analysis_hash=value.error_analysis_hash,
+        error_analysis_at=value.error_analysis_at,
+        change_summary=value.change_summary,
+        training_population=value.training_population,
+        validation_population=value.validation_population,
+        validation_opened_at=value.validation_opened_at,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -600,10 +924,8 @@ def resolve_candidate(
     re-verifies the approval against ScientificRegistry before routing changes.
     """
 
-    if not isinstance(wave, CandidateWave):
-        raise TypeError("wave must be CandidateWave")
-    if not isinstance(approval, CandidateApproval):
-        raise TypeError("approval must be CandidateApproval")
+    wave = _snapshot_wave(wave)
+    approval = _snapshot_approval(approval)
     current = _time(resolved_at, name="resolved_at")
     if wave.policy.policy_hash != wave.policy_hash:
         raise ValueError("bound learning-wave policy changed after candidate creation")
@@ -694,12 +1016,16 @@ def publish_wave_resolution(
     mutate routing, change risk, or grant trading authority.
     """
 
-    if not isinstance(artifact_store, ArtifactStore):
-        raise TypeError("artifact_store must be ArtifactStore")
+    if type(artifact_store) is not ArtifactStore:
+        raise TypeError("artifact_store must be exact canonical ArtifactStore")
+    rights = _snapshot_rights(rights)
+    wave = _snapshot_wave(wave)
+    approval = _snapshot_approval(approval)
+    current = _time(resolved_at, name="resolved_at")
     resolution = resolve_candidate(
         wave,
         approval,
-        resolved_at=resolved_at,
+        resolved_at=current,
     )
     record = {
         "schema_version": "1.0.0",
@@ -756,7 +1082,7 @@ def publish_wave_resolution(
             "evaluation_id": approval.evaluation_id,
             "evaluation_result_hash": approval.evaluation_result_hash,
         },
-        "resolved_at": _time(resolved_at, name="resolved_at").isoformat(),
+        "resolved_at": current.isoformat(),
         "resolution": {
             "action": resolution.action,
             "reasons": list(resolution.reasons),
@@ -771,7 +1097,8 @@ def publish_wave_resolution(
             "autotrade:learning-wave-resolution:" + resolution.resolution_hash,
         )
     )
-    manifest = artifact_store.publish_bytes(
+    manifest = ArtifactStore.publish_bytes(
+        artifact_store,
         artifact_id=artifact_id,
         data=data,
         media_type="application/json",

@@ -1386,11 +1386,7 @@ def parse_option_delivery_page(
         )
 
     requested_symbol = query.get("symbol")
-    if requested_symbol is None:
-        raise ProviderCoreError(
-            "Bybit option delivery query requires an exact symbol filter"
-        )
-    if (
+    if requested_symbol is not None and (
         type(requested_symbol) is not str
         or not requested_symbol
         or len(requested_symbol) > 160
@@ -1409,7 +1405,10 @@ def parse_option_delivery_page(
         not expected_symbol
         or not version_suffix
         or re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", expected_symbol) is None
-        or expected_symbol != requested_symbol
+        or (
+            requested_symbol is not None
+            and expected_symbol != requested_symbol
+        )
     ):
         raise ProviderCoreError(
             "Bybit option delivery query symbol does not match instrument_version"
@@ -1559,9 +1558,9 @@ def parse_option_delivery_page(
                 f"result.list[{index}].deliveryTime must be an exact non-negative integer"
             )
         delivery_time_ms = delivery_time_value
-        if symbol != requested_symbol:
+        if symbol != expected_symbol:
             raise ProviderCoreError(
-                "Bybit option delivery row violates requested symbol filter"
+                "Bybit option delivery row violates bound instrument symbol"
             )
         if (
             effective_start_ms is not None

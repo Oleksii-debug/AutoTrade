@@ -943,5 +943,232 @@ class LearningWavePersistenceTests(unittest.TestCase):
             self.assertEqual(rejected["resolution"]["action"], "REJECTED")
 
 
+
+class LearningWaveAuthorityIngressTests(unittest.TestCase):
+    def test_decimal_subclass_is_rejected_before_virtual_comparison(self):
+        touched: list[str] = []
+
+        class HostileDecimal(Decimal):
+            def __lt__(self, other):
+                touched.append("lt")
+                raise AssertionError("hostile decimal comparison")
+
+            def __le__(self, other):
+                touched.append("le")
+                raise AssertionError("hostile decimal comparison")
+
+            def __ge__(self, other):
+                touched.append("ge")
+                raise AssertionError("hostile decimal comparison")
+
+        with self.assertRaisesRegex(TypeError, "exact Decimal"):
+            snapshot(drawdown_since_pause=HostileDecimal("0.01"))
+        self.assertEqual(touched, [])
+
+    def test_policy_subclass_is_rejected_before_property_dispatch(self):
+        touched: list[str] = []
+
+        class HostilePolicy(LearningWavePolicy):
+            @property
+            def policy_hash(self):
+                touched.append("policy_hash")
+                raise AssertionError("hostile policy hash")
+
+        hostile = HostilePolicy(
+            policy_id="wave-policy-v1",
+            max_trades=20,
+        )
+        with self.assertRaisesRegex(TypeError, "exact LearningWavePolicy"):
+            evaluate_pause(hostile, snapshot(trades_since_pause=20))
+        self.assertEqual(touched, [])
+
+    def test_market_snapshot_subclass_is_rejected_before_field_use(self):
+        class HostileSnapshot(MarketWaveSnapshot):
+            pass
+
+        ordinary = snapshot(trades_since_pause=20)
+        hostile = HostileSnapshot(
+            wave_id=ordinary.wave_id,
+            segment_id=ordinary.segment_id,
+            champion_artifact_hash=ordinary.champion_artifact_hash,
+            source_cut_hash=ordinary.source_cut_hash,
+            segment_started_at=ordinary.segment_started_at,
+            observed_at=ordinary.observed_at,
+            trades_since_pause=ordinary.trades_since_pause,
+            evidence_events_since_pause=ordinary.evidence_events_since_pause,
+            drawdown_since_pause=ordinary.drawdown_since_pause,
+            previous_regime_id=ordinary.previous_regime_id,
+            current_regime_id=ordinary.current_regime_id,
+        )
+        with self.assertRaisesRegex(TypeError, "exact MarketWaveSnapshot"):
+            evaluate_pause(policy(), hostile)
+
+    def test_population_subclass_is_rejected_before_candidate_binding(self):
+        class HostilePopulation(PopulationCoverageManifest):
+            pass
+
+        p, snap, decision = paused_decision()
+        canonical = population(
+            "train",
+            causal_cut=snap.source_cut_hash,
+            available_at=BASE,
+            observations=("train",),
+        )
+        hostile = HostilePopulation(
+            candidate_hash=canonical.candidate_hash,
+            frozen_protocol_hash=canonical.frozen_protocol_hash,
+            input_snapshot_hash=canonical.input_snapshot_hash,
+            causal_cutoff=canonical.causal_cutoff,
+            permission_classes=canonical.permission_classes,
+            task=canonical.task,
+            instrument_family=canonical.instrument_family,
+            eligible_episode_ids=canonical.eligible_episode_ids,
+            included_episode_ids=canonical.included_episode_ids,
+            exclusions=canonical.exclusions,
+            episode_digests=canonical.episode_digests,
+            eligible_outcomes=canonical.eligible_outcomes,
+            included_outcomes=canonical.included_outcomes,
+            eligible_no_trade_count=canonical.eligible_no_trade_count,
+            included_no_trade_count=canonical.included_no_trade_count,
+            included_regime_counts=canonical.included_regime_counts,
+            included_labels_complete_by_regime=canonical.included_labels_complete_by_regime,
+            digest=canonical.digest,
+        )
+        validation = population(
+            "validation",
+            causal_cut=digest("validation-cut"),
+            available_at=BASE,
+            observations=("validation",),
+        )
+        with self.assertRaisesRegex(TypeError, "exact PopulationCoverageManifest"):
+            CandidateWave.from_pause(
+                pause=decision,
+                policy=p,
+                champion_artifact_hash=snap.champion_artifact_hash,
+                candidate_id="candidate",
+                candidate_artifact_hash=digest("candidate"),
+                candidate_created_at=BASE + timedelta(minutes=15),
+                error_analysis_hash=digest("error-analysis"),
+                error_analysis_at=BASE + timedelta(minutes=12),
+                change_summary="bounded repair",
+                training_population=hostile,
+                validation_population=validation,
+                validation_opened_at=BASE + timedelta(minutes=16),
+            )
+
+    def test_candidate_detaches_population_from_later_caller_mutation(self):
+        p, snap, decision = paused_decision()
+        training = population(
+            "train",
+            causal_cut=snap.source_cut_hash,
+            available_at=BASE,
+            observations=("train",),
+        )
+        validation = population(
+            "validation",
+            causal_cut=digest("validation-cut"),
+            available_at=BASE,
+            observations=("validation",),
+        )
+        wave = CandidateWave.from_pause(
+            pause=decision,
+            policy=p,
+            champion_artifact_hash=snap.champion_artifact_hash,
+            candidate_id="candidate",
+            candidate_artifact_hash=digest("candidate"),
+            candidate_created_at=BASE + timedelta(minutes=15),
+            error_analysis_hash=digest("error-analysis"),
+            error_analysis_at=BASE + timedelta(minutes=12),
+            change_summary="bounded repair",
+            training_population=training,
+            validation_population=validation,
+            validation_opened_at=BASE + timedelta(minutes=16),
+        )
+        original_digest = wave.training_population.digest
+        object.__setattr__(training, "digest", digest("forged-later"))
+        self.assertEqual(wave.training_population.digest, original_digest)
+        self.assertIsNot(wave.training_population, training)
+
+    def test_post_construction_wave_mutation_is_revalidated(self):
+        wave = candidate_wave()
+        object.__setattr__(wave, "candidate_artifact_hash", "not-a-digest")
+        with self.assertRaisesRegex(ValueError, "sha256"):
+            resolve(wave)
+
+    def test_approval_subclass_is_rejected_before_resolution(self):
+        class HostileApproval(CandidateApproval):
+            pass
+
+        canonical = approval()
+        hostile = HostileApproval(
+            candidate_id=canonical.candidate_id,
+            artifact_hash=canonical.artifact_hash,
+            evidence_id=canonical.evidence_id,
+            evidence_valid_until=canonical.evidence_valid_until,
+            evaluation_status=canonical.evaluation_status,
+            retention_passed=canonical.retention_passed,
+            risk_passed=canonical.risk_passed,
+            authority_scope_id=canonical.authority_scope_id,
+            protocol_id=canonical.protocol_id,
+            protocol_hash=canonical.protocol_hash,
+            evaluation_id=canonical.evaluation_id,
+            evaluation_result_hash=canonical.evaluation_result_hash,
+        )
+        with self.assertRaisesRegex(TypeError, "exact CandidateApproval"):
+            resolve(candidate_wave(), hostile)
+
+    def test_post_construction_approval_mutation_is_revalidated(self):
+        accepted = approval()
+        object.__setattr__(accepted, "retention_passed", 1)
+        with self.assertRaisesRegex(TypeError, "exact booleans"):
+            resolve(candidate_wave(), accepted)
+
+    def test_artifact_store_subclass_cannot_override_publication(self):
+        touched: list[str] = []
+
+        class HostileStore(ArtifactStore):
+            def publish_bytes(self, *args, **kwargs):
+                touched.append("publish")
+                raise AssertionError("hostile publication")
+
+        with TemporaryDirectory() as directory:
+            store = HostileStore(directory)
+            with self.assertRaisesRegex(TypeError, "exact canonical ArtifactStore"):
+                publish_wave_resolution(
+                    store,
+                    candidate_wave(),
+                    approval(),
+                    resolved_at=RESOLUTION_TIME,
+                    rights={"storage": True, "export": False},
+                )
+        self.assertEqual(touched, [])
+
+    def test_rights_text_subclass_is_rejected_before_virtual_dispatch(self):
+        touched: list[str] = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile rights text")
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            with self.assertRaisesRegex(TypeError, "canonical text"):
+                publish_wave_resolution(
+                    store,
+                    candidate_wave(),
+                    approval(),
+                    resolved_at=RESOLUTION_TIME,
+                    rights={
+                        "storage": True,
+                        "export": False,
+                        "rights_id": HostileText("rights-v1"),
+                    },
+                )
+        self.assertEqual(touched, [])
+
+
+
+
 if __name__ == "__main__":
     unittest.main()

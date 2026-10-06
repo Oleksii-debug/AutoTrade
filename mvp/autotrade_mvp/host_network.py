@@ -19,7 +19,9 @@ import ssl
 from threading import Lock
 from types import MappingProxyType
 from typing import Callable, Mapping
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import unquote, urlsplit
+
+from contracts.bindings.python.common_scalars import is_valid_common_scalar
 
 from .durable_host_api import JournalBackedHostCommandStore
 from .host_api import EventGap, command_result_payload, operation_result_payload
@@ -77,9 +79,9 @@ def public_session_reference(token: str) -> str:
     """
 
     if (
-        not isinstance(token, str)
+        type(token) is not str
         or not token
-        or token != token.strip()
+        or token != str.strip(token)
     ):
         raise ValueError("session token is invalid")
     material = ("autotrade-ui-session-v1\0" + token).encode("utf-8")
@@ -93,19 +95,19 @@ class HostPrincipal:
     session: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.actor, str) or not self.actor.strip():
+        if type(self.actor) is not str or not str.strip(self.actor):
             raise ValueError("principal actor is required")
         if (
-            not isinstance(self.token, str)
+            type(self.token) is not str
             or not self.token
-            or self.token != self.token.strip()
+            or self.token != str.strip(self.token)
         ):
             raise ValueError("principal bearer token is required")
-        if not isinstance(self.session, str) or not self.session.strip():
+        if type(self.session) is not str or not str.strip(self.session):
             raise ValueError("principal session reference is required")
         if self.session != public_session_reference(self.token):
             raise ValueError("principal session reference does not match bearer token")
-        object.__setattr__(self, "actor", self.actor.strip())
+        object.__setattr__(self, "actor", str.strip(self.actor))
 
 
 @dataclass(frozen=True)
@@ -146,10 +148,10 @@ def header_principal_resolver(
     authorization = headers.get("authorization")
     prefix = "AutoTrade-Session "
     if (
-        not isinstance(actor, str)
-        or not actor.strip()
-        or not isinstance(authorization, str)
-        or not authorization.startswith(prefix)
+        type(actor) is not str
+        or not str.strip(actor)
+        or type(authorization) is not str
+        or not str.startswith(authorization, prefix)
     ):
         raise PermissionError("Authenticated host session is required")
     token = authorization[len(prefix) :]
@@ -198,10 +200,12 @@ def _error(status: int, code: str) -> TransportResponse:
 def _headers(values: Mapping[str, str]) -> Mapping[str, str]:
     normalized: dict[str, str] = {}
     for key, value in values.items():
-        name = str(key).strip().lower()
+        if type(key) is not str or type(value) is not str:
+            raise ValueError("Request headers must contain exact text")
+        name = str.lower(str.strip(key))
         if not name or name in normalized:
             raise ValueError("Duplicate or invalid request header")
-        normalized[name] = str(value).strip()
+        normalized[name] = str.strip(value)
     return MappingProxyType(normalized)
 
 
@@ -235,14 +239,14 @@ class AuthenticatedHostApplication:
             raise TypeError("journal must be JournalStore")
         if not isinstance(security_boundary, SecurityBoundary):
             raise TypeError("security_boundary must be SecurityBoundary")
-        if not isinstance(host_id, str) or not host_id.strip():
+        if type(host_id) is not str or not str.strip(host_id):
             raise ValueError("host_id is required")
         if not callable(principal_resolver):
             raise TypeError("principal_resolver must be callable")
         if not callable(snapshot_provider):
             raise TypeError("snapshot_provider must be callable")
         self.security_boundary = security_boundary
-        self.host_id = host_id.strip()
+        self.host_id = str.strip(host_id)
         self.public_origin = _authenticated_origin(public_origin)
         self._principal_resolver = principal_resolver
         self._snapshot_provider = snapshot_provider
@@ -351,10 +355,33 @@ class AuthenticatedHostApplication:
         payload = dict(projected)
         if set(payload) != _SNAPSHOT_FIELDS:
             raise ValueError("UiSnapshot fields do not match the canonical contract")
-        for field in ("state_version", "event_cursor", "account_id", "environment"):
-            if str(payload[field]) != str(durable[field]):
-                raise ValueError(f"UiSnapshot {field} does not match durable host truth")
-        if payload["host_id"] != self.host_id:
+        for field in ("state_version", "event_cursor"):
+            value = payload[field]
+            if (
+                not is_valid_common_scalar("Sequence", value)
+                or value != durable[field]
+            ):
+                raise ValueError(
+                    f"UiSnapshot {field} does not match canonical durable host truth"
+                )
+        account_id = payload["account_id"]
+        durable_account_id = durable["account_id"]
+        if (
+            type(account_id) is not str
+            or type(durable_account_id) is not str
+            or account_id != durable_account_id
+        ):
+            raise ValueError("UiSnapshot account_id does not match durable host truth")
+        environment = payload["environment"]
+        if (
+            not is_valid_common_scalar("Environment", environment)
+            or environment != durable["environment"]
+        ):
+            raise ValueError(
+                "UiSnapshot environment does not match canonical durable host truth"
+            )
+        snapshot_host_id = payload["host_id"]
+        if type(snapshot_host_id) is not str or snapshot_host_id != self.host_id:
             raise ValueError("UiSnapshot host_id does not match the configured host")
         for field in (
             "permission_summary",
@@ -376,20 +403,23 @@ class AuthenticatedHostApplication:
             raise ValueError(
                 "UiSnapshot permission_summary does not match the canonical contract"
             )
-        if permission.get("actor") != principal.actor:
+        actor = permission.get("actor")
+        if type(actor) is not str or actor != principal.actor:
             raise ValueError("UiSnapshot actor does not match authenticated principal")
-        if permission.get("session") != principal.session:
+        session = permission.get("session")
+        if type(session) is not str or session != principal.session:
             raise ValueError("UiSnapshot session does not match authenticated principal")
-        if permission.get("role") != authenticated_role:
+        role = permission.get("role")
+        if type(role) is not str or role != authenticated_role:
             raise ValueError("UiSnapshot role does not match authenticated session")
         capabilities = permission.get("capabilities")
         if capabilities is not None:
             if (
                 not isinstance(capabilities, list)
                 or any(
-                    not isinstance(item, str)
+                    type(item) is not str
                     or not item
-                    or item != item.strip()
+                    or item != str.strip(item)
                     for item in capabilities
                 )
                 or len(capabilities) != len(set(capabilities))
@@ -403,12 +433,12 @@ class AuthenticatedHostApplication:
             raise ValueError("UiSnapshot jobs must be an array of objects")
         reasons = payload["reason_codes"]
         if not isinstance(reasons, list) or any(
-            not isinstance(item, str) or not item for item in reasons
+            type(item) is not str or not item for item in reasons
         ):
             raise ValueError("UiSnapshot reason_codes must be non-empty strings")
         server_time = payload["server_time"]
         if (
-            not isinstance(server_time, str)
+            type(server_time) is not str
             or re.fullmatch(
                 r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z",
                 server_time,
@@ -484,7 +514,6 @@ class AuthenticatedHostApplication:
             if parsed.scheme or parsed.netloc or parsed.fragment:
                 return _error(400, "INVALID_REQUEST_TARGET")
             path = parsed.path
-            query = parse_qs(parsed.query, keep_blank_values=True)
             if path != "/api/v1/events" and parsed.query:
                 return _error(400, "INVALID_QUERY")
             if method != "POST" and body:
@@ -552,9 +581,18 @@ class AuthenticatedHostApplication:
                 )
 
             if method == "GET" and path == "/api/v1/events":
-                if set(query) - {"after"} or len(query.get("after", ["0"])) != 1:
+                if not parsed.query:
+                    after = "0"
+                else:
+                    key, separator, after = parsed.query.partition("=")
+                    if (
+                        separator != "="
+                        or key != "after"
+                        or not is_valid_common_scalar("Sequence", after)
+                    ):
+                        return _error(400, "INVALID_EVENT_CURSOR")
+                if not is_valid_common_scalar("Sequence", after):
                     return _error(400, "INVALID_EVENT_CURSOR")
-                after = query.get("after", ["0"])[0]
                 events = tuple(
                     self._event_payload(event)
                     for event in self.store.events_after(after)

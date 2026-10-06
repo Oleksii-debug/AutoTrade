@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
   "baseline_date": "2026-09-22",
-  "evidence_as_of": "2026-09-24T16:21:04Z",
+  "evidence_as_of": "2026-10-06T14:18:24Z",
   "overall_status": "IMPLEMENTATION_IN_PROGRESS_SIMULATED_VERTICAL_SLICE_AVAILABLE",
   "gates": {
     "engineering_baseline": "RECONCILED_00_16_WITH_GENERATED_BANK_AND_EXPORT_VALIDATION",
@@ -14,7 +14,7 @@
     "accessibility": "NOT_STARTED",
     "release": "NOT_STARTED",
     "quality_pipeline": "ACTIVE_WINDOWS_AND_LINUX_PR_VERIFICATION_OBSERVED_PASSING",
-    "canonical_contracts": "IN_PROGRESS_FULL_SCHEMA_SURFACE_AND_OPENAPI_COMMITTED",
+    "canonical_contracts": "COMPLETE_V6_CROSS_LANGUAGE_CONTRACT_AUTHORITY_MERGED",
     "dependency_provenance": "IN_PROGRESS_EXACT_UPSTREAM_LICENSE_SNAPSHOT_RECORDED",
     "control_plane": "PARALLEL_ISOLATED_WORKTREES_ACTIVE_REGISTRY_SERVICE_UNQUALIFIED",
     "selected_first_party_reuse": "TRANSFER_COMPLETE_APPROVED_NEUTRAL_PRIMITIVES_AND_SWARM_INVARIANTS",
@@ -39,6 +39,7 @@
     "Economic edge remains unproven. No backtest, paper result or simulated result is treated as evidence of expected profitability.",
     "PR head 4f5ed15d1afff0c20bc2e71672e152d78bef899e completed both repository verification and the Windows/Ubuntu baseline matrix successfully. This is useful cross-platform evidence but is not an exact-head qualification of the latest main commit.",
     "Canonical contract generation/codegen, release dependency locks, provider qualification, Windows packaging, NVDA qualification, recovery release evidence and bounded-real qualification remain open.",
-    "The repository control mode is PARALLEL_ISOLATED_WORKTREES. The Git-backed registry primitive exists, but the deployed authenticated claim service and protected publication path remain unqualified."
+    "The repository control mode is PARALLEL_ISOLATED_WORKTREES. The Git-backed registry primitive exists, but the deployed authenticated claim service and protected publication path remain unqualified.",
+    "Section 1 / WP-01 canonical contracts completed on main via PR #1440, merge commit 57f1064fbdf0e13ecdf563da6f0ebdbf3ab0131a. Contract v6.0.0 includes JSON Schema/OpenAPI, Python/C#/TypeScript cross-language conformance (51 common-scalar cases, 13 DatasetManifest semantic cases, 201 closed-object shape cases across 48 definitions), major-version breaking-change enforcement, exact-numeric package 0.0.2, canonical Host Sequence contract/runtime alignment, MarketEvent adapter-build provenance, and CI evidence bound to exact source SHA, versions, tested commands and unresolved limits. This closes WP-01 only; provider, PAPER/LIVE, economic-edge, release and Windows/NVDA qualification remain separate gates."
   ]
 }

@@ -471,6 +471,136 @@ def contract_bytes(root: Path) -> dict[str, bytes]:
     return files
 
 
+
+def semantic_validator_surface(root: Path, manifest: dict) -> dict[str, object]:
+    """Return and validate the canonical semantic-validator contract surface."""
+
+    declared = manifest.get("semantic_validators", [])
+    if declared is None:
+        declared = []
+    if not isinstance(declared, list):
+        raise ValueError("manifest semantic_validators must be an array")
+
+    schemas = manifest.get("schemas", [])
+    if not isinstance(schemas, list) or any(
+        not isinstance(name, str) or not name for name in schemas
+    ):
+        raise ValueError("manifest schemas must be an array of non-empty names")
+
+    root_resolved = root.resolve()
+    contracts_root = (root / "contracts").resolve()
+
+    def declared_file(relative: object, *, label: str, contracts_only: bool = False):
+        if not isinstance(relative, str) or not relative:
+            raise ValueError(f"{label} must be non-empty text")
+        path = (root / relative).resolve()
+        boundary = contracts_root if contracts_only else root_resolved
+        if not path.is_relative_to(boundary):
+            raise ValueError(f"{label} escapes its authority tree: {relative}")
+        if not path.is_file():
+            raise ValueError(f"{label} does not exist: {relative}")
+        return path
+
+    result: dict[str, object] = {}
+    for entry in declared:
+        if not isinstance(entry, dict):
+            raise ValueError("semantic validator declaration must be an object")
+
+        validator_id = entry.get("id")
+        schema_name = entry.get("schema")
+        definition = entry.get("definition")
+        corpus = entry.get("corpus")
+        if not isinstance(validator_id, str) or not validator_id:
+            raise ValueError("semantic validator id must be non-empty text")
+        if validator_id in result:
+            raise ValueError(f"duplicate semantic validator id: {validator_id}")
+        if not isinstance(schema_name, str) or schema_name not in schemas:
+            raise ValueError(
+                f"semantic validator {validator_id} schema must name a manifest schema"
+            )
+        if not isinstance(definition, str) or not definition:
+            raise ValueError(
+                f"semantic validator {validator_id} definition must be non-empty text"
+            )
+
+        schema_path = declared_file(
+            f"contracts/jsonschema/{schema_name}",
+            label=f"semantic validator {validator_id} schema",
+            contracts_only=True,
+        )
+        schema_payload = json.loads(schema_path.read_text(encoding="utf-8"))
+        definitions = schema_payload.get("$defs", {})
+        if not isinstance(definitions, dict) or definition not in definitions:
+            raise ValueError(
+                f"semantic validator {validator_id} definition does not exist: "
+                f"{schema_name}#/$defs/{definition}"
+            )
+        definition_payload = definitions[definition]
+        if (
+            not isinstance(definition_payload, dict)
+            or definition_payload.get("x-autotrade-semantic-validator") != validator_id
+        ):
+            raise ValueError(
+                f"semantic validator {validator_id} schema annotation mismatch"
+            )
+
+        corpus_path = declared_file(
+            corpus,
+            label=f"semantic validator {validator_id} corpus",
+            contracts_only=True,
+        )
+        corpus_payload = json.loads(corpus_path.read_text(encoding="utf-8"))
+        if not isinstance(corpus_payload, dict):
+            raise ValueError(
+                f"semantic validator {validator_id} corpus must be a JSON object"
+            )
+        if corpus_payload.get("validator_id") != validator_id:
+            raise ValueError(
+                f"semantic validator {validator_id} corpus validator_id mismatch"
+            )
+        if corpus_payload.get("contract_version") != manifest.get("contract_version"):
+            raise ValueError(
+                f"semantic validator {validator_id} corpus contract_version mismatch"
+            )
+
+        bindings = entry.get("bindings")
+        expected_languages = {"python", "csharp", "typescript"}
+        if not isinstance(bindings, dict) or set(bindings) != expected_languages:
+            raise ValueError(
+                f"semantic validator {validator_id} must declare "
+                "python/csharp/typescript bindings"
+            )
+        for language, relative in bindings.items():
+            if not isinstance(language, str) or not language:
+                raise ValueError(
+                    f"semantic validator {validator_id} binding language must be text"
+                )
+            declared_file(
+                relative,
+                label=f"semantic validator {validator_id} {language} binding",
+            )
+
+        installed = entry.get("installed_bindings", {})
+        if not isinstance(installed, dict):
+            raise ValueError(
+                f"semantic validator {validator_id} installed_bindings must be an object"
+            )
+        for language, relative in installed.items():
+            if not isinstance(language, str) or not language:
+                raise ValueError(
+                    f"semantic validator {validator_id} installed binding language must be text"
+                )
+            declared_file(
+                relative,
+                label=f"semantic validator {validator_id} installed {language} binding",
+            )
+
+        result[validator_id] = {
+            "declaration": entry,
+            "corpus": corpus_payload,
+        }
+    return result
+
 def evaluate(base_root: Path, current_root: Path) -> list[str]:
     base = load_manifest(base_root)
     current = load_manifest(current_root)
@@ -556,6 +686,17 @@ def evaluate(base_root: Path, current_root: Path) -> list[str]:
         if base_security_schemes[name] != current_security_schemes[name]
     )
 
+    base_semantic_validators = semantic_validator_surface(base_root, base)
+    current_semantic_validators = semantic_validator_surface(current_root, current)
+    changed_semantic_validators = sorted(
+        validator_id
+        for validator_id in (
+            set(base_semantic_validators) | set(current_semantic_validators)
+        )
+        if base_semantic_validators.get(validator_id)
+        != current_semantic_validators.get(validator_id)
+    )
+
     breaking_change = bool(
         removed_schemas
         or removed_defs
@@ -566,6 +707,7 @@ def evaluate(base_root: Path, current_root: Path) -> list[str]:
         or changed_default_security
         or removed_security_schemes
         or changed_security_schemes
+        or changed_semantic_validators
     )
     if breaking_change and current_version[0] <= base_version[0]:
         details = []
@@ -601,6 +743,11 @@ def evaluate(base_root: Path, current_root: Path) -> list[str]:
             details.append(
                 "changed OpenAPI security schemes: "
                 + ", ".join(changed_security_schemes)
+            )
+        if changed_semantic_validators:
+            details.append(
+                "changed semantic validators: "
+                + ", ".join(changed_semantic_validators)
             )
         errors.append("breaking contract change requires a new major version; " + "; ".join(details))
 

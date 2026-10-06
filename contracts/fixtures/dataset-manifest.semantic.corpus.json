@@ -1,0 +1,215 @@
+{
+  "contract_version": "6.0.0",
+  "validator_id": "dataset-manifest-content-authority-v1",
+  "cases": [
+    {
+      "name": "one_exact_binding",
+      "value": {
+        "content_hashes": [
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "source_evidence": [
+          {
+            "artifact_id": "77777777-7777-4777-8777-777777777777",
+            "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "expected": true
+    },
+    {
+      "name": "provenance_plus_exact_binding",
+      "value": {
+        "content_hashes": [
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "source_evidence": [
+          {
+            "artifact_id": "77777777-7777-4777-8777-777777777777",
+            "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          {
+            "artifact_id": "77777777-7777-4777-8777-777777777777",
+            "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "expected": true
+    },
+    {
+      "name": "multiple_declared_hashes_all_bound",
+      "value": {
+        "content_hashes": [
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "source_evidence": [
+          {
+            "artifact_id": "77777777-7777-4777-8777-777777777777",
+            "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "artifact_id": "77777777-7777-4777-8777-777777777777",
+            "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        ]
+      },
+      "expected": true
+    },
+    {
+      "name": "multiple_declared_hashes_with_extra_provenance",
+      "value": {
+        "content_hashes": [
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "source_evidence": [
+          {
+            "artifact_id": "77777777-7777-4777-8777-777777777777",
+            "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          },
+          {
+            "artifact_id": "77777777-7777-4777-8777-777777777777",
+            "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "artifact_id": "77777777-7777-4777-8777-777777777777",
+            "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        ]
+      },
+      "expected": true
+    },
+    {
+      "name": "partial_declared_hash_coverage",
+      "value": {
+        "content_hashes": [
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "source_evidence": [
+          {
+            "artifact_id": "77777777-7777-4777-8777-777777777777",
+            "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "expected": false
+    },
+    {
+      "name": "non_empty_but_disjoint",
+      "value": {
+        "content_hashes": [
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "source_evidence": [
+          {
+            "artifact_id": "77777777-7777-4777-8777-777777777777",
+            "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        ]
+      },
+      "expected": false
+    },
+    {
+      "name": "empty_content_hashes",
+      "value": {
+        "content_hashes": [],
+        "source_evidence": [
+          {
+            "artifact_id": "77777777-7777-4777-8777-777777777777",
+            "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "expected": false
+    },
+    {
+      "name": "duplicate_content_hashes",
+      "value": {
+        "content_hashes": [
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "source_evidence": [
+          {
+            "artifact_id": "77777777-7777-4777-8777-777777777777",
+            "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "expected": false
+    },
+    {
+      "name": "empty_source_evidence",
+      "value": {
+        "content_hashes": [
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "source_evidence": []
+      },
+      "expected": false
+    },
+    {
+      "name": "evidence_missing_sha256",
+      "value": {
+        "content_hashes": [
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "source_evidence": [
+          {
+            "artifact_id": "77777777-7777-4777-8777-777777777777"
+          }
+        ]
+      },
+      "expected": false
+    },
+    {
+      "name": "evidence_not_object",
+      "value": {
+        "content_hashes": [
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "source_evidence": [
+          "not-an-evidence-ref"
+        ]
+      },
+      "expected": false
+    },
+    {
+      "name": "sha256_not_string",
+      "value": {
+        "content_hashes": [
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "source_evidence": [
+          {
+            "artifact_id": "77777777-7777-4777-8777-777777777777",
+            "sha256": 7
+          }
+        ]
+      },
+      "expected": false
+    },
+    {
+      "name": "one_of_two_matches_is_not_enough",
+      "value": {
+        "content_hashes": [
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        ],
+        "source_evidence": [
+          {
+            "artifact_id": "77777777-7777-4777-8777-777777777777",
+            "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          {
+            "artifact_id": "77777777-7777-4777-8777-777777777777",
+            "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          }
+        ]
+      },
+      "expected": false
+    }
+  ]
+}

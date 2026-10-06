@@ -827,6 +827,159 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                     attempt_id="terminal-semantic-retarget-a1",
                 )
 
+    def test_dispatch_rejects_rebound_journal_class_load_before_callbacks(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            rebound_calls = []
+            authority_calls = []
+            transport_calls = []
+
+            def rebound_load(*_args, **_kwargs):
+                rebound_calls.append("load_events")
+                raise AssertionError("rebound load_events must not execute")
+
+            original = JournalStore.load_events
+            JournalStore.load_events = rebound_load
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "submission journal operation changed: load_events",
+                ):
+                    dispatcher.dispatch(
+                        attempt_id="class-load-a1",
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=lambda *_args: authority_calls.append(True),
+                        transport_send=lambda *_args: transport_calls.append(True),
+                        submission_scope={"endpoint": "/orders"},
+                    )
+            finally:
+                JournalStore.load_events = original
+
+            self.assertEqual(rebound_calls, [])
+            self.assertEqual(authority_calls, [])
+            self.assertEqual(transport_calls, [])
+            self.assertEqual(
+                JournalStore.load_events(
+                    store,
+                    "submission_attempt",
+                    dispatcher._aggregate_id("class-load-a1"),
+                ),
+                [],
+            )
+
+    def test_final_send_rejects_rebound_journal_append_without_wire_effect(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            authority_calls = 0
+            rebound_calls = []
+            wire_calls = 0
+            original = JournalStore.append_event
+
+            def rebound_append(*_args, **_kwargs):
+                rebound_calls.append("append_event")
+                raise AssertionError("rebound append_event must not execute")
+
+            def authority(_intent_hash, _now):
+                nonlocal authority_calls
+                authority_calls += 1
+                if authority_calls == 2:
+                    JournalStore.append_event = rebound_append
+                return True, "allowed"
+
+            def transport(_client_order_id, _request, guard):
+                nonlocal wire_calls
+                guard()
+                wire_calls += 1
+                return ExactJsonTransportResponse(b'{"accepted":true}')
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "submission journal operation changed: append_event",
+                ):
+                    dispatcher.dispatch(
+                        attempt_id="class-append-a1",
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=authority,
+                        transport_send=transport,
+                        submission_scope={"endpoint": "/orders"},
+                    )
+            finally:
+                JournalStore.append_event = original
+
+            self.assertEqual(authority_calls, 2)
+            self.assertEqual(rebound_calls, [])
+            self.assertEqual(wire_calls, 0)
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("class-append-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared"],
+            )
+
+    def test_dispatch_rejects_rebound_store_identity_descriptor(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            descriptor_calls = []
+
+            def rebound_identity(_self):
+                descriptor_calls.append("store_identity")
+                return vars(store)["_store_identity"]
+
+            original = JournalStore.store_identity
+            JournalStore.store_identity = property(rebound_identity)
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "submission journal identity authority changed",
+                ):
+                    dispatcher.dispatch(
+                        attempt_id="identity-rebind-a1",
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=lambda *_args: (True, "allowed"),
+                        transport_send=lambda *_args: (
+                            _ for _ in ()
+                        ).throw(AssertionError("transport must not run")),
+                        submission_scope={"endpoint": "/orders"},
+                    )
+            finally:
+                JournalStore.store_identity = original
+
+            self.assertEqual(descriptor_calls, [])
+
     def test_runtime_redispatch_rejects_submission_scope_retargeting(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

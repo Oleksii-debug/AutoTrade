@@ -9,6 +9,8 @@ from mvp.autotrade_mvp.dispatch import (
     GuardedDispatcher,
     SubmissionResponseBinding,
     load_submission_response_binding,
+    require_canonical_submission_response_binding,
+    submission_response_binding_projection,
     stable_client_order_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
@@ -764,6 +766,46 @@ class DispatchTests(unittest.TestCase):
                 after_restart.submission_scope_hash,
                 binding.submission_scope_hash,
             )
+            projected = submission_response_binding_projection(binding)
+            self.assertEqual(projected["response_bytes"], raw)
+            self.assertEqual(projected["terminal_state"], "SENT")
+
+            forged = object.__new__(SubmissionResponseBinding)
+            for field_name, field_value in vars(binding).items():
+                object.__setattr__(forged, field_name, field_value)
+            with self.assertRaisesRegex(
+                ValueError,
+                "submission response binding authority is unavailable",
+            ):
+                require_canonical_submission_response_binding(forged)
+
+            for target, replacement in (
+                (
+                    "mvp.autotrade_mvp.dispatch.require_provider_response_bytes",
+                    lambda raw, **_kwargs: raw,
+                ),
+                (
+                    "mvp.autotrade_mvp.dispatch.require_provider_json_depth",
+                    lambda _raw: None,
+                ),
+                (
+                    "mvp.autotrade_mvp.dispatch.HARD_MAX_PROVIDER_RESPONSE_BYTES",
+                    1,
+                ),
+            ):
+                with self.subTest(authority=target), patch(target, replacement):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "submission response binding authority is unavailable",
+                    ):
+                        require_canonical_submission_response_binding(binding)
+
+            object.__setattr__(after_restart, "response_encoding", "hex")
+            with self.assertRaisesRegex(
+                ValueError,
+                "submission response binding authority is unavailable",
+            ):
+                require_canonical_submission_response_binding(after_restart)
 
     def test_unknown_json_binding_cannot_mint_provider_observation(self):
         request = {"symbol": "BTCUSDT", "side": "BUY", "quantity": "1"}
@@ -823,6 +865,23 @@ class DispatchTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ProviderCoreError,
                 "requires definitive SENT response",
+            ):
+                observe_submission_json_response(
+                    response_binding=binding,
+                    provider_id="BYBIT",
+                    endpoint="/v5/order/create",
+                    prepared_request_sha256=request_hash,
+                    capability_snapshot_ids=("cap-1",),
+                    instrument_versions=("BTCUSDT:v1",),
+                )
+
+            # Frozen dataclass fields are not a trust boundary against
+            # object.__setattr__. A forged UNKNOWN -> SENT retarget must still
+            # fail the issuer registry before provider evidence can be minted.
+            object.__setattr__(binding, "terminal_state", "SENT")
+            with self.assertRaisesRegex(
+                ValueError,
+                "submission response binding authority is unavailable",
             ):
                 observe_submission_json_response(
                     response_binding=binding,

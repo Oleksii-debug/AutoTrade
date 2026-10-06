@@ -306,6 +306,35 @@ class ProviderOriginJournalTests(unittest.TestCase):
             finally:
                 AuthenticatedReadResponseBinding.require_provider_origin = original
 
+    def test_self_consistent_unissued_query_binding_cannot_enter_origin_journal(self):
+        query = authenticated_read_binding()
+        forged = object.__new__(type(query))
+        for name, value in vars(query).items():
+            object.__setattr__(forged, name, value)
+        self.assertEqual(vars(forged), vars(query))
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            journal = ProviderOriginJournal(store)
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "lacks canonical preparation authority",
+            ):
+                journal.prepare(
+                    forged,
+                    transport_identity="UrllibJsonWireClient:v1",
+                    network_policy_identity="sha256:" + "c" * 64,
+                    recorded_at=READ_NOW,
+                )
+            self.assertEqual(
+                JournalStore.load_events(
+                    store,
+                    "authenticated_provider_read",
+                    "provider-read:forged",
+                ),
+                [],
+            )
+
     def test_prepared_only_attempt_cannot_become_response_binding(self):
         query = authenticated_read_binding()
         with TemporaryDirectory() as directory:

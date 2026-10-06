@@ -264,18 +264,18 @@ def evaluate_retention(
     if type(policy) is not RetentionPolicy:
         raise TypeError("policy must be exact RetentionPolicy")
     canonical_policy = RetentionPolicy(
-        protected_regimes=canonical_policy.protected_regimes,
-        recent_regimes=canonical_policy.recent_regimes,
-        max_protected_degradation=canonical_policy.max_protected_degradation,
-        max_recent_degradation=canonical_policy.max_recent_degradation,
-        min_recent_improvement=canonical_policy.min_recent_improvement,
-        min_observations_per_regime=canonical_policy.min_observations_per_regime,
-        require_complete_labels=canonical_policy.require_complete_labels,
-        independent_science_gate_passed=canonical_policy.independent_science_gate_passed,
-        risk_gate_passed=canonical_policy.risk_gate_passed,
+        protected_regimes=policy.protected_regimes,
+        recent_regimes=policy.recent_regimes,
+        max_protected_degradation=policy.max_protected_degradation,
+        max_recent_degradation=policy.max_recent_degradation,
+        min_recent_improvement=policy.min_recent_improvement,
+        min_observations_per_regime=policy.min_observations_per_regime,
+        require_complete_labels=policy.require_complete_labels,
+        independent_science_gate_passed=policy.independent_science_gate_passed,
+        risk_gate_passed=policy.risk_gate_passed,
     )
     metric_snapshot = _metrics_snapshot(metrics)
-    required = set(canonical_canonical_policy.protected_regimes) | set(canonical_canonical_policy.recent_regimes)
+    required = set(canonical_policy.protected_regimes) | set(canonical_policy.recent_regimes)
     missing = sorted(required - set(metric_snapshot))
     reasons: list[str] = []
     if missing:
@@ -369,9 +369,23 @@ def evaluate_population_bound_retention(
     the same causal population that scientific qualification will attest.
     """
 
-    if not isinstance(population, PopulationCoverageManifest):
-        raise TypeError("population must be PopulationCoverageManifest")
-    base = evaluate_retention(metrics, policy)
+    if type(population) is not PopulationCoverageManifest:
+        raise TypeError("population must be exact PopulationCoverageManifest")
+    if type(policy) is not RetentionPolicy:
+        raise TypeError("policy must be exact RetentionPolicy")
+    canonical_policy = RetentionPolicy(
+        protected_regimes=policy.protected_regimes,
+        recent_regimes=policy.recent_regimes,
+        max_protected_degradation=policy.max_protected_degradation,
+        max_recent_degradation=policy.max_recent_degradation,
+        min_recent_improvement=policy.min_recent_improvement,
+        min_observations_per_regime=policy.min_observations_per_regime,
+        require_complete_labels=policy.require_complete_labels,
+        independent_science_gate_passed=policy.independent_science_gate_passed,
+        risk_gate_passed=policy.risk_gate_passed,
+    )
+    metric_snapshot = _metrics_snapshot(metrics)
+    base = evaluate_retention(metric_snapshot, canonical_policy)
     reasons = list(base.reasons)
     evidence_incomplete = not population.complete
     if evidence_incomplete:
@@ -382,7 +396,7 @@ def evaluate_population_bound_retention(
     required = set(canonical_policy.protected_regimes) | set(canonical_policy.recent_regimes)
 
     for regime in sorted(required):
-        metric = metrics.get(regime)
+        metric = metric_snapshot.get(regime)
         if metric is None:
             continue
         expected_observations = counts.get(regime, 0)

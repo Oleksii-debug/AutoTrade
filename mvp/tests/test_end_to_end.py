@@ -1,5 +1,5 @@
 import json
-from decimal import Inexact, Rounded, ROUND_CEILING, localcontext
+from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, localcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -151,6 +151,108 @@ class VerticalSliceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "checkpoint fill quantity"):
                 run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_rejects_self_consistent_negative_fill_fee(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            fill = next(iter(checkpoint["fills"].values()))
+            posting = checkpoint["postings"][0]
+            quantity = Decimal(fill["quantity"])
+            price = Decimal(fill["price"])
+            forged_fee = Decimal("-1")
+            fill["fee"] = str(forged_fee)
+            posting["fee"] = str(forged_fee)
+            posting["cash_delta"] = str(-(quantity * price) - forged_fee)
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "fill fee.*non-negative"):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_rejects_noncanonical_fill_side_before_sell_semantics(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            fill = next(iter(checkpoint["fills"].values()))
+            posting = checkpoint["postings"][0]
+            quantity = Decimal(fill["quantity"])
+            price = Decimal(fill["price"])
+            fee = Decimal(fill["fee"])
+            fill["side"] = "FORGED"
+            posting["position_delta"] = str(-quantity)
+            posting["cash_delta"] = str(quantity * price - fee)
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "side must be BUY or SELL"):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_rejects_fill_symbol_outside_run_scope(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            fill = next(iter(checkpoint["fills"].values()))
+            fill["symbol"] = "OTHER"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "symbol does not match run scope"):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_cross_binds_posting_fee_to_fill(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint["postings"][0]["fee"] = "0"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "reconcile"):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_cross_binds_fill_map_and_deterministic_fill_identity(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            key, fill = next(iter(checkpoint["fills"].items()))
+            checkpoint["fills"] = {"different-intent": fill}
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "map key does not match client_order_id",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+            checkpoint["fills"] = {key: fill}
+            fill["fill_id"] = "fill-" + "0" * 20
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError,
+                "fill_id does not match simulated identity",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_simulated_symbol_requires_exact_canonical_text(self):
+        class HostileSymbol(str):
+            def strip(self):
+                raise AssertionError("hostile symbol strip executed")
+
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "canonical simulated symbol"):
+                run_vertical_slice(
+                    [100, 101, 102, 103],
+                    directory,
+                    symbol=HostileSymbol("SIM"),
+                )
+            with self.assertRaisesRegex(ValueError, "canonical simulated symbol"):
+                run_vertical_slice(
+                    [100, 101, 102, 103],
+                    directory,
+                    symbol=" SIM ",
+                )
 
     def test_market_data_rejects_oversized_text_before_decimal_construction(self):
         import mvp.autotrade_mvp.pipeline as pipeline_module

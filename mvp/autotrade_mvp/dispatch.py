@@ -2519,6 +2519,8 @@ class GuardedDispatcher:
         snapshot_setattr = setattr
         snapshot_type = type
         snapshot_id = id
+        snapshot_frozenset = frozenset
+        snapshot_delattr = delattr
         snapshot_isinstance = isinstance
         snapshot_str = str
         snapshot_int = int
@@ -2561,6 +2563,8 @@ class GuardedDispatcher:
             "TypeError",
             "RuntimeError",
             "PermissionError",
+            "DispatchBlocked",
+            "_DispatchAuthorityChanged",
         )
         snapshot_postsend_global_state = snapshot_tuple(
             (
@@ -2669,6 +2673,8 @@ class GuardedDispatcher:
         decoder_function = snapshot_defaults[1]
         decoder_digest = snapshot_defaults[2]
         decoder_json_module = json
+        decoder_json_module_type = snapshot_type(decoder_json_module)
+        decoder_json_module_type_setattr = decoder_json_module_type.__setattr__
         decoder_json_namespace = vars(decoder_json_module)
         decoder_json_namespace_get = decoder_json_namespace.get
         decoder_json_namespace_set = decoder_json_namespace.__setitem__
@@ -2696,7 +2702,7 @@ class GuardedDispatcher:
             decoder_json_loads_kwdefaults.items()
         )
         if any(
-            snapshot_type(key) is not str
+            snapshot_type(key) is not snapshot_str
             for key, _value in decoder_json_loads_kwdefault_items
         ):
             raise RuntimeError(
@@ -2707,6 +2713,12 @@ class GuardedDispatcher:
         decoder_json_decoder_namespace = vars(decoder_json_decoder)
         decoder_json_decoder_namespace_get = (
             decoder_json_decoder_namespace.get
+        )
+        decoder_json_decoder_surface = snapshot_tuple(
+            decoder_json_decoder_namespace.items()
+        )
+        decoder_json_decoder_expected_names = snapshot_tuple(
+            name for name, _member in decoder_json_decoder_surface
         )
         decoder_json_decoder_methods = snapshot_tuple(
             (
@@ -2764,6 +2776,10 @@ class GuardedDispatcher:
             if name in {"JSONObject", "JSONArray", "scanstring"}
         )
         decoder_scanner_module = decoder_runtime_globals_get("scanner")
+        decoder_scanner_module_type = snapshot_type(decoder_scanner_module)
+        decoder_scanner_module_type_setattr = (
+            decoder_scanner_module_type.__setattr__
+        )
         decoder_scanner_namespace = vars(decoder_scanner_module)
         decoder_scanner_namespace_get = decoder_scanner_namespace.get
         decoder_scanner_namespace_set = decoder_scanner_namespace.__setitem__
@@ -2799,6 +2815,192 @@ class GuardedDispatcher:
             None,
         )
         decoder_exact_decimal_error = ExactDecimalError
+
+        # Direct parser code/default authority is already retained above.
+        # Complete the bounded dependency cut by retaining the global/builtin
+        # bindings used by those roots and executable state of same-module
+        # helper functions reached from them.
+        decoder_dependency_function_type = snapshot_type(decoder_number_parser)
+        decoder_dependency_modules = snapshot_frozenset(
+            (
+                snapshot_getattr(decoder_depth_guard, "__module__", None),
+                snapshot_getattr(decoder_number_parser, "__module__", None),
+                snapshot_getattr(decoder_integer_parser, "__module__", None),
+            )
+        )
+        decoder_dependency_root_ids = snapshot_frozenset(
+            snapshot_id(root)
+            for root in (
+                decoder_depth_guard,
+                decoder_number_parser,
+                decoder_integer_parser,
+            )
+        )
+        decoder_dependency_missing = object()
+        decoder_dependency_function_states = []
+        decoder_dependency_global_bindings = []
+        decoder_dependency_builtin_bindings = []
+        decoder_dependency_seen_functions = set()
+        decoder_dependency_seen_globals = set()
+        decoder_dependency_seen_builtins = set()
+
+        def capture_decoder_dependency(function) -> None:
+            if (
+                snapshot_type(function)
+                is not decoder_dependency_function_type
+            ):
+                return
+            function_identity = snapshot_id(function)
+            if function_identity in decoder_dependency_seen_functions:
+                return
+            decoder_dependency_seen_functions.add(function_identity)
+
+            function_code = snapshot_getattr(function, "__code__", None)
+            if function_code is None:
+                raise RuntimeError(
+                    "exact response decoder dependency code is unavailable"
+                )
+            if function_identity not in decoder_dependency_root_ids:
+                function_defaults = snapshot_getattr(
+                    function,
+                    "__defaults__",
+                    None,
+                )
+                if (
+                    function_defaults is not None
+                    and snapshot_type(function_defaults) is not snapshot_tuple
+                ):
+                    raise RuntimeError(
+                        "exact response decoder dependency defaults are unavailable"
+                    )
+                function_kwdefaults = snapshot_getattr(
+                    function,
+                    "__kwdefaults__",
+                    None,
+                )
+                if function_kwdefaults is None:
+                    function_kwdefault_items = None
+                else:
+                    if (
+                        snapshot_type(function_kwdefaults)
+                        is not snapshot_dict
+                    ):
+                        raise RuntimeError(
+                            "exact response decoder dependency keyword defaults "
+                            "are unavailable"
+                        )
+                    function_kwdefault_items = snapshot_tuple(
+                        function_kwdefaults.items()
+                    )
+                    if any(
+                        snapshot_type(key) is not snapshot_str
+                        for key, _value in function_kwdefault_items
+                    ):
+                        raise RuntimeError(
+                            "exact response decoder dependency keyword default "
+                            "keys are unavailable"
+                        )
+                decoder_dependency_function_states.append(
+                    (
+                        function,
+                        function_code,
+                        function_defaults,
+                        function_kwdefault_items,
+                    )
+                )
+
+            function_globals = snapshot_getattr(
+                function,
+                "__globals__",
+                None,
+            )
+            function_builtins = snapshot_getattr(
+                function,
+                "__builtins__",
+                None,
+            )
+            if (
+                snapshot_type(function_globals) is not snapshot_dict
+                or snapshot_type(function_builtins) is not snapshot_dict
+            ):
+                raise RuntimeError(
+                    "exact response decoder dependency namespace is unavailable"
+                )
+
+            for dependency_name in function_code.co_names:
+                if dependency_name in function_globals:
+                    binding_key = (
+                        snapshot_id(function_globals),
+                        dependency_name,
+                    )
+                    dependency = snapshot_dict.get(
+                        function_globals,
+                        dependency_name,
+                    )
+                    if (
+                        binding_key
+                        not in decoder_dependency_seen_globals
+                    ):
+                        decoder_dependency_seen_globals.add(binding_key)
+                        decoder_dependency_global_bindings.append(
+                            (
+                                function_globals,
+                                dependency_name,
+                                dependency,
+                            )
+                        )
+                    if (
+                        snapshot_type(dependency)
+                        is decoder_dependency_function_type
+                        and snapshot_getattr(
+                            dependency,
+                            "__module__",
+                            None,
+                        )
+                        in decoder_dependency_modules
+                    ):
+                        capture_decoder_dependency(dependency)
+                    continue
+
+                if dependency_name in function_builtins:
+                    binding_key = (
+                        snapshot_id(function_builtins),
+                        dependency_name,
+                    )
+                    dependency = snapshot_dict.get(
+                        function_builtins,
+                        dependency_name,
+                    )
+                    if (
+                        binding_key
+                        not in decoder_dependency_seen_builtins
+                    ):
+                        decoder_dependency_seen_builtins.add(binding_key)
+                        decoder_dependency_builtin_bindings.append(
+                            (
+                                function_builtins,
+                                dependency_name,
+                                dependency,
+                            )
+                        )
+
+        for decoder_dependency_root in (
+            decoder_depth_guard,
+            decoder_number_parser,
+            decoder_integer_parser,
+        ):
+            capture_decoder_dependency(decoder_dependency_root)
+
+        decoder_dependency_function_states = snapshot_tuple(
+            decoder_dependency_function_states
+        )
+        decoder_dependency_global_bindings = snapshot_tuple(
+            decoder_dependency_global_bindings
+        )
+        decoder_dependency_builtin_bindings = snapshot_tuple(
+            decoder_dependency_builtin_bindings
+        )
+
         exact_response_module_bindings = (
             ("ExactJsonTransportResponse", exact_response_type),
             ("_snapshot_exact_transport_response", exact_response_snapshot),
@@ -2884,7 +3086,7 @@ class GuardedDispatcher:
                     dependency_kwdefaults.items()
                 )
                 if any(
-                    snapshot_type(key) is not str
+                    snapshot_type(key) is not snapshot_str
                     for key, _value in dependency_kwdefault_items
                 ):
                     raise RuntimeError(
@@ -2904,6 +3106,23 @@ class GuardedDispatcher:
 
         def restore_exact_response_authority() -> bool:
             changed = False
+            if snapshot_type(decoder_json_module) is not decoder_json_module_type:
+                decoder_json_module_type_setattr(
+                    decoder_json_module,
+                    "__class__",
+                    decoder_json_module_type,
+                )
+                changed = True
+            if (
+                snapshot_type(decoder_scanner_module)
+                is not decoder_scanner_module_type
+            ):
+                decoder_scanner_module_type_setattr(
+                    decoder_scanner_module,
+                    "__class__",
+                    decoder_scanner_module_type,
+                )
+                changed = True
             for name, expected in exact_response_module_bindings:
                 if snapshot_module_globals_get(name) is not expected:
                     snapshot_module_globals_set(name, expected)
@@ -3013,6 +3232,103 @@ class GuardedDispatcher:
                     )
                     changed = True
 
+            for (
+                dependency,
+                expected_code,
+                expected_defaults,
+                expected_kwdefault_items,
+            ) in decoder_dependency_function_states:
+                if (
+                    snapshot_getattr(dependency, "__code__", None)
+                    is not expected_code
+                ):
+                    snapshot_setattr(
+                        dependency,
+                        "__code__",
+                        expected_code,
+                    )
+                    changed = True
+                if (
+                    snapshot_getattr(dependency, "__defaults__", None)
+                    is not expected_defaults
+                ):
+                    snapshot_setattr(
+                        dependency,
+                        "__defaults__",
+                        expected_defaults,
+                    )
+                    changed = True
+                current_kwdefaults = snapshot_getattr(
+                    dependency,
+                    "__kwdefaults__",
+                    None,
+                )
+                if expected_kwdefault_items is None:
+                    if current_kwdefaults is not None:
+                        snapshot_setattr(
+                            dependency,
+                            "__kwdefaults__",
+                            None,
+                        )
+                        changed = True
+                else:
+                    kwdefaults_changed = (
+                        snapshot_type(current_kwdefaults) is not snapshot_dict
+                        or snapshot_len(current_kwdefaults)
+                        != snapshot_len(expected_kwdefault_items)
+                    )
+                    if not kwdefaults_changed:
+                        for current_key in current_kwdefaults:
+                            if snapshot_type(current_key) is not snapshot_str:
+                                kwdefaults_changed = True
+                                break
+                    if not kwdefaults_changed:
+                        current_kwdefault_get = current_kwdefaults.get
+                        for key, expected_value in expected_kwdefault_items:
+                            if (
+                                current_kwdefault_get(
+                                    key,
+                                    decoder_dependency_missing,
+                                )
+                                is not expected_value
+                            ):
+                                kwdefaults_changed = True
+                                break
+                    if kwdefaults_changed:
+                        snapshot_setattr(
+                            dependency,
+                            "__kwdefaults__",
+                            snapshot_dict(expected_kwdefault_items),
+                        )
+                        changed = True
+
+            for namespace, name, expected in (
+                decoder_dependency_global_bindings
+            ):
+                if (
+                    snapshot_dict.get(
+                        namespace,
+                        name,
+                        decoder_dependency_missing,
+                    )
+                    is not expected
+                ):
+                    snapshot_dict.__setitem__(namespace, name, expected)
+                    changed = True
+            for namespace, name, expected in (
+                decoder_dependency_builtin_bindings
+            ):
+                if (
+                    snapshot_dict.get(
+                        namespace,
+                        name,
+                        decoder_dependency_missing,
+                    )
+                    is not expected
+                ):
+                    snapshot_dict.__setitem__(namespace, name, expected)
+                    changed = True
+
             if decoder_json_namespace_get("loads") is not decoder_json_loads:
                 decoder_json_namespace_set("loads", decoder_json_loads)
                 changed = True
@@ -3089,6 +3405,25 @@ class GuardedDispatcher:
                         decoder_json_decoder,
                         method_name,
                         expected_method,
+                    )
+                    changed = True
+            current_decoder_names = snapshot_tuple(
+                decoder_json_decoder.__dict__
+            )
+            if current_decoder_names != decoder_json_decoder_expected_names:
+                for name in current_decoder_names:
+                    if name not in decoder_json_decoder_expected_names:
+                        snapshot_delattr(decoder_json_decoder, name)
+                        changed = True
+            for name, expected_member in decoder_json_decoder_surface:
+                if (
+                    decoder_json_decoder.__dict__.get(name)
+                    is not expected_member
+                ):
+                    snapshot_setattr(
+                        decoder_json_decoder,
+                        name,
+                        expected_member,
                     )
                     changed = True
             if (

@@ -3,8 +3,10 @@ from decimal import Decimal, Inexact, Rounded, localcontext
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
+import mvp.autotrade_mvp.kraken_futures as kraken_futures_module
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
     EvidenceVerification,
@@ -32,6 +34,7 @@ from mvp.autotrade_mvp.reconciliation import (
 )
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
+    ProviderSubmissionObservation,
     Surface,
     observe_authenticated_json_response,
     observe_submission_json_response,
@@ -549,6 +552,264 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 prepared_request=prepared,
                 observation={"result": "success"},
             )
+
+    def test_submission_consumer_ignores_exact_prepared_getattribute_callback(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "prepared-callback-fence",
+                    "status": "placed",
+                },
+            },
+            intent_id="kraken-futures-prepared-callback-fence",
+            provider_environment="LIVE",
+        )
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            raise AssertionError(
+                "prepared-request virtual callback executed"
+            )
+
+        with patch.object(KrakenFuturesPreparedRequest, "__getattribute__", forged):
+            result = parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+        self.assertEqual(callbacks, [])
+        self.assertEqual(result["outcome"], "ACKNOWLEDGED")
+        self.assertEqual(result["provider_order_id"], "prepared-callback-fence")
+
+    def test_submission_consumer_rejects_rebound_prepared_projection_without_callback(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "prepared-helper-rebound",
+                    "status": "placed",
+                },
+            },
+            intent_id="kraken-futures-prepared-helper-rebound",
+            provider_environment="LIVE",
+        )
+        with patch(
+            "mvp.autotrade_mvp.kraken_futures._prepared_submission_projection",
+            side_effect=AssertionError("rebound prepared projector executed"),
+        ) as rebound:
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "prepared response authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
+                )
+        rebound.assert_not_called()
+
+    def test_submission_consumer_rejects_rebound_response_helpers_without_callback(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "response-helper-rebound",
+                    "status": "placed",
+                },
+            },
+            intent_id="kraken-futures-response-helper-rebound",
+            provider_environment="LIVE",
+        )
+        for helper in ("_submission_projection", "_response_evidence", "_uuid_text"):
+            with self.subTest(helper=helper):
+                with patch(
+                    f"mvp.autotrade_mvp.kraken_futures.{helper}",
+                    side_effect=AssertionError("rebound response helper executed"),
+                ) as rebound:
+                    with self.assertRaisesRegex(
+                        ProviderCoreError,
+                        "prepared response authority is unavailable",
+                    ):
+                        parse_submission_response(
+                            attempt_id=attempt,
+                            prepared_request=prepared,
+                            observation=observation,
+                        )
+                rebound.assert_not_called()
+
+    def test_submission_consumer_rejects_rebound_transitive_authorities(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "kraken-futures-transitive-authority-rebound",
+                    "status": "placed",
+                },
+            },
+            intent_id="kraken-futures-transitive-authority-rebound",
+            provider_environment="LIVE",
+        )
+        for helper in ("uuid5", "futures_base_url", "_text"):
+            with self.subTest(helper=helper):
+                with patch(
+                    f"mvp.autotrade_mvp.kraken_futures.{helper}",
+                    side_effect=AssertionError("rebound transitive helper executed"),
+                ) as rebound:
+                    with self.assertRaisesRegex(
+                        ProviderCoreError,
+                        "prepared response authority is unavailable",
+                    ):
+                        parse_submission_response(
+                            attempt_id=attempt,
+                            prepared_request=prepared,
+                            observation=observation,
+                        )
+                rebound.assert_not_called()
+
+        with patch.dict(
+            "mvp.autotrade_mvp.kraken_futures._RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT",
+            {"LIVE": "PAPER"},
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "prepared response authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
+                )
+
+        with patch.dict(
+            "mvp.autotrade_mvp.kraken_futures.KRAKEN_FUTURES_BASE_URLS",
+            {"TEST": "https://attacker.invalid"},
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "prepared response authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
+                )
+
+
+    def test_submission_authority_helpers_hide_mutable_keyword_defaults(self):
+        for helper in (
+            kraken_futures_module._prepared_submission_projection,
+            kraken_futures_module._submission_projection,
+        ):
+            with self.subTest(helper=helper.__name__):
+                self.assertIsNone(helper.__kwdefaults__)
+
+    def test_submission_consumer_rejects_prepared_subclass_before_virtual_callback(self):
+        callbacks = []
+
+        class HostilePrepared(KrakenFuturesPreparedRequest):
+            def __getattribute__(self, _name):
+                callbacks.append(True)
+                raise AssertionError(
+                    "prepared-request virtual callback executed before type verification"
+                )
+
+        forged = object.__new__(HostilePrepared)
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact KrakenFuturesPreparedRequest",
+        ):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=forged,
+                observation=None,
+                transport_ambiguous=True,
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_submission_evidence_rejects_provider_environment_retarget(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "provider-domain-retarget",
+                    "status": "placed",
+                },
+            },
+            intent_id="kraken-futures-provider-domain-retarget",
+            provider_environment="LIVE",
+        )
+        object.__setattr__(prepared, "provider_environment", "DEMO")
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "provider environment does not match runtime environment",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+
+    def test_submission_consumer_rejects_subclass_before_virtual_callback(self):
+        attempt, prepared, _observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "provider-hostile",
+                    "status": "placed",
+                },
+            },
+            intent_id="kraken-futures-hostile-observation",
+            provider_environment="LIVE",
+        )
+
+        class HostileObservation(ProviderSubmissionObservation):
+            def __getattribute__(self, _name):
+                raise AssertionError(
+                    "virtual callback executed before authority verification"
+                )
+
+        forged = object.__new__(HostileObservation)
+        with self.assertRaisesRegex(
+            TypeError,
+            "durable ProviderSubmissionObservation",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=forged,
+            )
+
+    def test_submission_consumer_rejects_rebound_require_scope_without_callback(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "provider-no-virtual-scope",
+                    "status": "placed",
+                },
+            },
+            intent_id="kraken-futures-no-virtual-scope",
+            provider_environment="LIVE",
+        )
+        with patch.object(
+            ProviderSubmissionObservation,
+            "require_scope",
+            side_effect=AssertionError(
+                "rebindable require_scope callback must not execute"
+            ),
+        ) as rebound:
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "provider submission observation authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
+                )
+        rebound.assert_not_called()
 
     def test_position_history_maps_only_trade_execution_facts(self):
         fills = parse_position_executions(

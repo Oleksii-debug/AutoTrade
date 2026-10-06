@@ -3,8 +3,10 @@ from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
+import mvp.autotrade_mvp.alpaca as alpaca_module
 from mvp.autotrade_mvp.alpaca import (
     AlpacaAbsenceEvidence,
     AlpacaAdapterError,
@@ -16,6 +18,7 @@ from mvp.autotrade_mvp.alpaca import (
     parse_submission_response,
     parse_trade_activities,
     prepare_order_request,
+    guarded_order_projection,
 )
 from mvp.autotrade_mvp.accounting import ScopedEconomicBook
 from mvp.autotrade_mvp.fill_accounting import (
@@ -36,6 +39,8 @@ from mvp.autotrade_mvp.dispatch import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
+    ProviderCoreError,
+    ProviderSubmissionObservation,
     Surface,
     observe_authenticated_json_response,
     observe_submission_json_response,
@@ -729,6 +734,405 @@ class AlpacaAdapterTests(unittest.TestCase):
                     "client_order_id": client_id,
                 },
             )
+
+    def test_guarded_projection_ignores_exact_prepared_getattribute_callback(self):
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="LIMIT",
+            time_in_force="DAY",
+            quantity="1",
+            limit_price="220.10",
+        )
+        prepared = prepare_order_request(
+            intent,
+            client_order_id="alpaca-projection-callback",
+            account_id="paper-account",
+            environment="PAPER",
+            capability=capability(),
+            at=NOW,
+        )
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            raise AssertionError("final-send prepared callback executed")
+
+        with patch.object(AlpacaPreparedRequest, "__getattribute__", forged):
+            projected = guarded_order_projection(prepared)
+        self.assertEqual(callbacks, [])
+        self.assertEqual(projected["account_id"], "paper-account")
+        self.assertEqual(projected["environment"], "PAPER")
+        self.assertEqual(
+            projected["body"]["client_order_id"],
+            "alpaca-projection-callback",
+        )
+        self.assertEqual(
+            projected["body_sha256"],
+            object.__getattribute__(prepared, "body_sha256"),
+        )
+
+    def test_guarded_projection_rejects_hostile_scope_tuple_before_iteration(self):
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="LIMIT",
+            time_in_force="DAY",
+            quantity="1",
+            limit_price="220.10",
+        )
+        prepared = prepare_order_request(
+            intent,
+            client_order_id="alpaca-projection-hostile-tuple",
+            account_id="paper-account",
+            environment="PAPER",
+            capability=capability(),
+            at=NOW,
+        )
+        callbacks = []
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                callbacks.append(True)
+                raise AssertionError("hostile prepared scope iterator executed")
+
+        object.__setattr__(
+            prepared,
+            "capability_snapshot_ids",
+            HostileTuple(object.__getattribute__(prepared, "capability_snapshot_ids")),
+        )
+        with self.assertRaisesRegex(
+            AlpacaAdapterError,
+            "prepared request authority changed",
+        ):
+            guarded_order_projection(prepared)
+        self.assertEqual(callbacks, [])
+
+    def test_guarded_projection_rejects_scalar_subclass_scope(self):
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="LIMIT",
+            time_in_force="DAY",
+            quantity="1",
+            limit_price="220.10",
+        )
+        prepared = prepare_order_request(
+            intent,
+            client_order_id="alpaca-projection-hostile-scalar",
+            account_id="paper-account",
+            environment="PAPER",
+            capability=capability(),
+            at=NOW,
+        )
+
+        class HostileStr(str):
+            pass
+
+        object.__setattr__(prepared, "environment", HostileStr("PAPER"))
+        with self.assertRaisesRegex(
+            AlpacaAdapterError,
+            "prepared request authority changed",
+        ):
+            guarded_order_projection(prepared)
+
+
+    def test_submission_authority_helpers_hide_mutable_keyword_defaults(self):
+        for helper in (
+            alpaca_module.guarded_order_projection,
+            alpaca_module._prepared_submission_projection,
+            alpaca_module._submission_projection,
+        ):
+            with self.subTest(helper=helper.__name__):
+                self.assertIsNone(helper.__kwdefaults__)
+
+    def test_submission_consumer_ignores_exact_prepared_getattribute_callback(self):
+        intent_id = "alpaca-prepared-callback-fence"
+        client_id = stable_client_order_id(
+            "ALPACA",
+            intent_id,
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "id": str(uuid4()),
+                "client_order_id": client_id,
+            },
+            intent_id=intent_id,
+        )
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            raise AssertionError(
+                "prepared-request virtual callback executed"
+            )
+
+        with patch.object(AlpacaPreparedRequest, "__getattribute__", forged):
+            result = parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+        self.assertEqual(callbacks, [])
+        self.assertEqual(result["outcome"], "ACKNOWLEDGED")
+
+    def test_submission_consumer_rejects_rebound_prepared_projection_without_callback(self):
+        intent_id = "alpaca-prepared-helper-rebound"
+        client_id = stable_client_order_id(
+            "ALPACA",
+            intent_id,
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "id": str(uuid4()),
+                "client_order_id": client_id,
+            },
+            intent_id=intent_id,
+        )
+        with patch(
+            "mvp.autotrade_mvp.alpaca._prepared_submission_projection",
+            side_effect=AssertionError("rebound prepared projector executed"),
+        ) as rebound:
+            with self.assertRaisesRegex(
+                AlpacaAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
+                )
+        rebound.assert_not_called()
+
+    def test_submission_consumer_rejects_rebound_response_helpers_without_callback(self):
+        intent_id = "alpaca-response-helper-rebound"
+        client_id = stable_client_order_id(
+            "ALPACA",
+            intent_id,
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "id": str(uuid4()),
+                "client_order_id": client_id,
+            },
+            intent_id=intent_id,
+        )
+        for helper in ("_submission_projection", "_response_evidence", "_uuid_text"):
+            with self.subTest(helper=helper):
+                with patch(
+                    f"mvp.autotrade_mvp.alpaca.{helper}",
+                    side_effect=AssertionError("rebound response helper executed"),
+                ) as rebound:
+                    with self.assertRaisesRegex(
+                        AlpacaAdapterError,
+                        "prepared response authority is unavailable",
+                    ):
+                        parse_submission_response(
+                            attempt_id=attempt,
+                            prepared_request=prepared,
+                            observation=observation,
+                        )
+                rebound.assert_not_called()
+
+    def test_submission_consumer_rejects_rebound_transitive_authorities(self):
+        intent_id = "alpaca-transitive-authority-rebound"
+        client_id = stable_client_order_id(
+            "ALPACA",
+            intent_id,
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "id": str(uuid4()),
+                "client_order_id": client_id,
+            },
+            intent_id=intent_id,
+        )
+        with patch(
+            "mvp.autotrade_mvp.alpaca.uuid5",
+            side_effect=AssertionError("rebound uuid5 executed"),
+        ) as rebound_uuid5:
+            with self.assertRaisesRegex(
+                AlpacaAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
+                )
+        rebound_uuid5.assert_not_called()
+
+        with patch("mvp.autotrade_mvp.alpaca._CLIENT_ID", object()):
+            with self.assertRaisesRegex(
+                AlpacaAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
+                )
+
+        with patch("mvp.autotrade_mvp.alpaca.NAMESPACE_URL", object()):
+            with self.assertRaisesRegex(
+                AlpacaAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
+                )
+
+    def test_submission_consumer_rejects_prepared_subclass_before_virtual_callback(self):
+        callbacks = []
+
+        class HostilePrepared(AlpacaPreparedRequest):
+            def __getattribute__(self, _name):
+                callbacks.append(True)
+                raise AssertionError(
+                    "prepared-request virtual callback executed before type verification"
+                )
+
+        forged = object.__new__(HostilePrepared)
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact AlpacaPreparedRequest",
+        ):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=forged,
+                observation=None,
+                transport_ambiguous=True,
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_prepared_projection_uses_captured_primitives_on_invalid_instrument_scope(self):
+        intent_id = "alpaca-prepared-primitive-fence"
+        client_id = stable_client_order_id(
+            "ALPACA",
+            intent_id,
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        _attempt, prepared, _observation = self._durable_submission_observation(
+            payload={
+                "id": str(uuid4()),
+                "client_order_id": client_id,
+            },
+            intent_id=intent_id,
+        )
+        object.__setattr__(prepared, "instrument_versions", (object(),))
+
+        callbacks = []
+
+        def rebound_any(*_args, **_kwargs):
+            callbacks.append("any")
+            raise AssertionError("mutable module any must not execute")
+
+        def rebound_error(*_args, **_kwargs):
+            callbacks.append("error")
+            raise AssertionError("mutable module error class must not execute")
+
+        with patch.dict(
+            parse_submission_response.__globals__,
+            {
+                "any": rebound_any,
+                "AlpacaAdapterError": rebound_error,
+            },
+        ):
+            with self.assertRaisesRegex(
+                AlpacaAdapterError,
+                "prepared request authority changed",
+            ):
+                parse_submission_response(
+                    attempt_id=str(uuid4()),
+                    prepared_request=prepared,
+                    observation=None,
+                    transport_ambiguous=True,
+                )
+        self.assertEqual(callbacks, [])
+
+    def test_submission_consumer_rejects_subclass_before_virtual_callback(self):
+        intent_id = "alpaca-hostile-observation"
+        client_id = stable_client_order_id(
+            "ALPACA",
+            intent_id,
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        attempt, prepared, _observation = self._durable_submission_observation(
+            payload={
+                "id": str(uuid4()),
+                "client_order_id": client_id,
+            },
+            intent_id=intent_id,
+        )
+
+        class HostileObservation(ProviderSubmissionObservation):
+            def __getattribute__(self, _name):
+                raise AssertionError(
+                    "virtual callback executed before authority verification"
+                )
+
+        forged = object.__new__(HostileObservation)
+        with self.assertRaisesRegex(
+            TypeError,
+            "durable ProviderSubmissionObservation",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=forged,
+            )
+
+    def test_submission_consumer_rejects_rebound_require_scope_without_callback(self):
+        intent_id = "alpaca-no-virtual-scope"
+        client_id = stable_client_order_id(
+            "ALPACA",
+            intent_id,
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        order_id = str(uuid4())
+        attempt, prepared, observation = self._durable_submission_observation(
+            payload={
+                "id": order_id,
+                "client_order_id": client_id,
+            },
+            intent_id=intent_id,
+        )
+        with patch.object(
+            ProviderSubmissionObservation,
+            "require_scope",
+            side_effect=AssertionError(
+                "rebindable require_scope callback must not execute"
+            ),
+        ) as rebound:
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "provider submission observation authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
+                )
+        rebound.assert_not_called()
 
     def test_trade_activity_requires_order_and_fee_evidence(self):
         order_id = str(uuid4())

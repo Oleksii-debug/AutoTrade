@@ -23,6 +23,7 @@ from .provider_core import (
     ProviderResponseObservation,
     ProviderSubmissionObservation,
     Surface,
+    provider_submission_observation_projection,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
@@ -368,29 +369,133 @@ def prepare_order_request(
 
 def guarded_order_projection(
     prepared_request: AlpacaPreparedRequest,
+    *,
+    _prepared_type=AlpacaPreparedRequest,
+    _canonical_type=type,
+    _object_getattribute=object.__getattribute__,
+    _mapping_proxy_type=MappingProxyType,
+    _canonical_dict=dict,
+    _canonical_list=list,
+    _canonical_str=str,
+    _canonical_tuple=tuple,
+    _canonical_any=any,
+    _type_error=TypeError,
+    _error_type=AlpacaAdapterError,
 ) -> Mapping[str, object]:
-    """Project one canonical prepared order into the shared guarded transport seam.
+    """Project one canonical prepared order without virtual prepared callbacks.
 
-    The projection preserves the exact account/environment/capability/instrument
-    binding and canonical body digest so the network layer cannot silently
-    retarget or rewrite an adapter decision before the final send guard.
+    The final transport projection must not execute caller-rebindable
+    __getattribute__ behavior while reading financial scope. Read the exact
+    dataclass through captured base-object access and retain the canonical body
+    container requirement before handing the request to the shared send guard.
     """
 
-    if not isinstance(prepared_request, AlpacaPreparedRequest):
-        raise TypeError("prepared_request must be AlpacaPreparedRequest")
-    return MappingProxyType(
+    if _canonical_type(prepared_request) is not _prepared_type:
+        raise _type_error("prepared_request must be exact AlpacaPreparedRequest")
+    body = _object_getattribute(prepared_request, "body")
+    if _canonical_type(body) is not _mapping_proxy_type:
+        raise _error_type("Alpaca prepared request body authority changed")
+    endpoint = _object_getattribute(prepared_request, "endpoint")
+    account_id = _object_getattribute(prepared_request, "account_id")
+    environment = _object_getattribute(prepared_request, "environment")
+    capability_snapshot_id = _object_getattribute(
+        prepared_request,
+        "capability_snapshot_id",
+    )
+    capability_snapshot_ids = _object_getattribute(
+        prepared_request,
+        "capability_snapshot_ids",
+    )
+    instrument_versions = _object_getattribute(
+        prepared_request,
+        "instrument_versions",
+    )
+    body_sha256 = _object_getattribute(prepared_request, "body_sha256")
+    if _canonical_any(
+        _canonical_type(value) is not _canonical_str
+        for value in (
+            endpoint,
+            account_id,
+            environment,
+            capability_snapshot_id,
+            body_sha256,
+        )
+    ):
+        raise _error_type("Alpaca prepared request authority changed")
+    if (
+        _canonical_type(capability_snapshot_ids) is not _canonical_tuple
+        or not capability_snapshot_ids
+        or _canonical_any(
+            _canonical_type(value) is not _canonical_str
+            for value in capability_snapshot_ids
+        )
+        or _canonical_type(instrument_versions) is not _canonical_tuple
+        or not instrument_versions
+        or _canonical_any(
+            _canonical_type(value) is not _canonical_str
+            for value in instrument_versions
+        )
+    ):
+        raise _error_type("Alpaca prepared request authority changed")
+    return _mapping_proxy_type(
         {
-            "endpoint": prepared_request.endpoint,
-            "body": dict(prepared_request.body),
-            "account_id": prepared_request.account_id,
-            "environment": prepared_request.environment,
-            "capability_snapshot_id": prepared_request.capability_snapshot_id,
-            "capability_snapshot_ids": list(prepared_request.capability_snapshot_ids),
-            "instrument_versions": list(prepared_request.instrument_versions),
-            "body_sha256": prepared_request.body_sha256,
+            "endpoint": endpoint,
+            "body": _canonical_dict(body),
+            "account_id": account_id,
+            "environment": environment,
+            "capability_snapshot_id": capability_snapshot_id,
+            "capability_snapshot_ids": _canonical_list(capability_snapshot_ids),
+            "instrument_versions": _canonical_list(instrument_versions),
+            "body_sha256": body_sha256,
         }
     )
 
+
+def _install_guarded_order_projection_authority(projector):
+    """Seal the final transport projector against mutable function defaults."""
+
+    projector_code = projector.__code__
+    prepared_type = AlpacaPreparedRequest
+    canonical_type = type
+    object_getattribute = object.__getattribute__
+    mapping_proxy_type = MappingProxyType
+    canonical_dict = dict
+    canonical_list = list
+    canonical_str = str
+    canonical_tuple = tuple
+    canonical_any = any
+    type_error = TypeError
+    error_type = AlpacaAdapterError
+
+    def sealed_guarded_order_projection(
+        prepared_request: AlpacaPreparedRequest,
+    ) -> Mapping[str, object]:
+        if projector.__code__ is not projector_code:
+            raise error_type("Alpaca guarded projection authority is unavailable")
+        return projector(
+            prepared_request,
+            _prepared_type=prepared_type,
+            _canonical_type=canonical_type,
+            _object_getattribute=object_getattribute,
+            _mapping_proxy_type=mapping_proxy_type,
+            _canonical_dict=canonical_dict,
+            _canonical_list=canonical_list,
+            _canonical_str=canonical_str,
+            _canonical_tuple=canonical_tuple,
+            _canonical_any=canonical_any,
+            _type_error=type_error,
+            _error_type=error_type,
+        )
+
+    return sealed_guarded_order_projection
+
+
+_unsealed_guarded_order_projection = guarded_order_projection
+guarded_order_projection = _install_guarded_order_projection_authority(
+    _unsealed_guarded_order_projection
+)
+del _unsealed_guarded_order_projection
+del _install_guarded_order_projection_authority
 
 @dataclass(frozen=True)
 class AlpacaOrderObservation:
@@ -507,32 +612,225 @@ def _uuid_text(value: object, *, name: str) -> str:
     return text
 
 
-def _response_evidence(
+def _prepared_submission_projection(
+    prepared_request: AlpacaPreparedRequest,
+    *,
+    _prepared_type=AlpacaPreparedRequest,
+    _canonical_type=type,
+    _canonical_str=str,
+    _canonical_tuple=tuple,
+    _canonical_any=any,
+    _type_error=TypeError,
+    _error_type=AlpacaAdapterError,
+    _object_getattribute=object.__getattribute__,
+    _mapping_proxy_type=MappingProxyType,
+) -> Mapping[str, object]:
+    """Read one exact prepared order without executing virtual attributes."""
+
+    if _canonical_type(prepared_request) is not _prepared_type:
+        raise _type_error(
+            "prepared_request must be exact AlpacaPreparedRequest"
+        )
+    body = _object_getattribute(prepared_request, "body")
+    if _canonical_type(body) is not _mapping_proxy_type:
+        raise _error_type(
+            "Alpaca prepared request body authority changed"
+        )
+    client_order_id = body.get("client_order_id")
+    endpoint = _object_getattribute(prepared_request, "endpoint")
+    account_id = _object_getattribute(prepared_request, "account_id")
+    environment = _object_getattribute(prepared_request, "environment")
+    capability_snapshot_ids = _object_getattribute(
+        prepared_request,
+        "capability_snapshot_ids",
+    )
+    instrument_versions = _object_getattribute(
+        prepared_request,
+        "instrument_versions",
+    )
+    body_sha256 = _object_getattribute(prepared_request, "body_sha256")
+    if _canonical_any(
+        _canonical_type(value) is not _canonical_str
+        for value in (
+            endpoint,
+            account_id,
+            environment,
+            body_sha256,
+            client_order_id,
+        )
+    ):
+        raise _error_type(
+            "Alpaca prepared request authority changed"
+        )
+    if (
+        _canonical_type(capability_snapshot_ids) is not _canonical_tuple
+        or not capability_snapshot_ids
+        or _canonical_any(
+            _canonical_type(value) is not _canonical_str
+            for value in capability_snapshot_ids
+        )
+        or _canonical_type(instrument_versions) is not _canonical_tuple
+        or not instrument_versions
+        or _canonical_any(
+            _canonical_type(value) is not _canonical_str
+            for value in instrument_versions
+        )
+    ):
+        raise _error_type(
+            "Alpaca prepared request authority changed"
+        )
+    return _mapping_proxy_type(
+        {
+            "endpoint": endpoint,
+            "account_id": account_id,
+            "environment": environment,
+            "capability_snapshot_ids": capability_snapshot_ids,
+            "instrument_versions": instrument_versions,
+            "body_sha256": body_sha256,
+            "client_order_id": client_order_id,
+        }
+    )
+
+
+def _install_prepared_submission_projection_authority(projector):
+    """Keep prepared-scope authority outside mutable keyword defaults."""
+
+    projector_code = projector.__code__
+    prepared_type = AlpacaPreparedRequest
+    canonical_type = type
+    canonical_str = str
+    canonical_tuple = tuple
+    canonical_any = any
+    type_error = TypeError
+    error_type = AlpacaAdapterError
+    object_getattribute = object.__getattribute__
+    mapping_proxy_type = MappingProxyType
+
+    def sealed_prepared_submission_projection(
+        prepared_request: AlpacaPreparedRequest,
+    ) -> Mapping[str, object]:
+        if projector.__code__ is not projector_code:
+            raise error_type("Alpaca prepared response authority is unavailable")
+        return projector(
+            prepared_request,
+            _prepared_type=prepared_type,
+            _canonical_type=canonical_type,
+            _canonical_str=canonical_str,
+            _canonical_tuple=canonical_tuple,
+            _canonical_any=canonical_any,
+            _type_error=type_error,
+            _error_type=error_type,
+            _object_getattribute=object_getattribute,
+            _mapping_proxy_type=mapping_proxy_type,
+        )
+
+    return sealed_prepared_submission_projection
+
+
+_unsealed_prepared_submission_projection = _prepared_submission_projection
+_prepared_submission_projection = _install_prepared_submission_projection_authority(
+    _unsealed_prepared_submission_projection
+)
+del _unsealed_prepared_submission_projection
+del _install_prepared_submission_projection_authority
+
+
+def _submission_projection(
     observation: ProviderSubmissionObservation,
     *,
     prepared_request: AlpacaPreparedRequest,
-) -> dict[str, str]:
-    if not isinstance(observation, ProviderSubmissionObservation):
-        raise TypeError("observation must be ProviderSubmissionObservation")
-    if not isinstance(prepared_request, AlpacaPreparedRequest):
-        raise TypeError("prepared_request must be AlpacaPreparedRequest")
+    _projection=provider_submission_observation_projection,
+    _projection_code=provider_submission_observation_projection.__code__,
+    _observation_type=ProviderSubmissionObservation,
+) -> Mapping[str, object]:
+    """Authenticate one durable Alpaca write response before virtual access."""
+
+    if _projection.__code__ is not _projection_code:
+        raise AlpacaAdapterError(
+            "provider submission observation consumer authority is unavailable"
+        )
+    if type(observation) is not _observation_type:
+        raise TypeError(
+            "observation must be durable ProviderSubmissionObservation"
+        )
+    prepared = _prepared_submission_projection(prepared_request)
     cid = validate_client_order_id(
         _text(
-            prepared_request.body.get("client_order_id"),
+            prepared["client_order_id"],
             name="prepared_request.client_order_id",
         )
     )
-    observation.require_scope(
-        provider_id="ALPACA",
-        endpoint=prepared_request.endpoint,
-        prepared_request_sha256=prepared_request.body_sha256,
-        capability_snapshot_ids=prepared_request.capability_snapshot_ids,
-        instrument_versions=prepared_request.instrument_versions,
-        account_id=prepared_request.account_id,
-        environment=prepared_request.environment,
-        client_order_id=cid,
+    projected = _projection(observation)
+    expected = (
+        ("provider_id", "ALPACA", "provider"),
+        ("endpoint", prepared["endpoint"], "endpoint"),
+        ("request_sha256", prepared["body_sha256"], "request digest"),
+        (
+            "capability_snapshot_ids",
+            prepared["capability_snapshot_ids"],
+            "capability",
+        ),
+        (
+            "instrument_versions",
+            prepared["instrument_versions"],
+            "instrument",
+        ),
+        ("account_id", prepared["account_id"], "account"),
+        ("environment", prepared["environment"], "environment"),
+        ("client_order_id", cid, "client-order"),
     )
-    env = prepared_request.environment
+    for key, expected_value, label in expected:
+        if projected[key] != expected_value:
+            raise AlpacaAdapterError(
+                f"provider-write provenance {label} mismatch"
+            )
+    return projected
+
+
+def _install_submission_projection_authority(projector):
+    """Keep durable observation projection authority outside mutable defaults."""
+
+    projector_code = projector.__code__
+    projection = provider_submission_observation_projection
+    projection_code = projection.__code__
+    observation_type = ProviderSubmissionObservation
+    error_type = AlpacaAdapterError
+
+    def sealed_submission_projection(
+        observation: ProviderSubmissionObservation,
+        *,
+        prepared_request: AlpacaPreparedRequest,
+    ) -> Mapping[str, object]:
+        if projector.__code__ is not projector_code:
+            raise error_type(
+                "provider submission observation consumer authority is unavailable"
+            )
+        return projector(
+            observation,
+            prepared_request=prepared_request,
+            _projection=projection,
+            _projection_code=projection_code,
+            _observation_type=observation_type,
+        )
+
+    return sealed_submission_projection
+
+
+_unsealed_submission_projection = _submission_projection
+_submission_projection = _install_submission_projection_authority(
+    _unsealed_submission_projection
+)
+del _unsealed_submission_projection
+del _install_submission_projection_authority
+
+
+def _response_evidence(
+    projection: Mapping[str, object],
+    *,
+    prepared_request: AlpacaPreparedRequest,
+) -> dict[str, str]:
+    prepared = _prepared_submission_projection(prepared_request)
+    env = prepared["environment"]
     if env == "PAPER":
         host = "paper-api.alpaca.markets"
     elif env == "LIVE":
@@ -544,12 +842,12 @@ def _response_evidence(
         "artifact_id": str(
             uuid5(
                 NAMESPACE_URL,
-                f"{source}#{observation.evidence_ref}",
+                f"{source}#{projection['evidence_ref']}",
             )
         ),
-        "sha256": observation.response_sha256,
+        "sha256": projection["response_sha256"],
         "source_uri": source,
-        "observed_at": observation.observed_at,
+        "observed_at": projection["sent_at"],
         "rights_id": "provider-observation-alpaca",
     }
 
@@ -569,11 +867,10 @@ def parse_submission_response(
     """
 
     aid = _uuid_text(attempt_id, name="attempt_id")
-    if not isinstance(prepared_request, AlpacaPreparedRequest):
-        raise TypeError("prepared_request must be AlpacaPreparedRequest")
+    prepared = _prepared_submission_projection(prepared_request)
     cid = validate_client_order_id(
         _text(
-            prepared_request.body.get("client_order_id"),
+            prepared["client_order_id"],
             name="prepared_request.client_order_id",
         )
     )
@@ -592,17 +889,17 @@ def parse_submission_response(
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",
         }
-    if not isinstance(observation, ProviderSubmissionObservation):
-        raise TypeError(
-            "observation must be durable ProviderSubmissionObservation"
-        )
-    if observation.response_binding.attempt_id != aid:
-        raise AlpacaAdapterError("submission observation attempt_id mismatch")
-    evidence = _response_evidence(
+    projection = _submission_projection(
         observation,
         prepared_request=prepared_request,
     )
-    response = observation.payload
+    if projection["attempt_id"] != aid:
+        raise AlpacaAdapterError("submission observation attempt_id mismatch")
+    evidence = _response_evidence(
+        projection,
+        prepared_request=prepared_request,
+    )
+    response = projection["payload"]
     if not isinstance(response, Mapping):
         raise AlpacaAdapterError("provider response payload must be an object")
     provider_order_id = _uuid_text(response.get("id"), name="response.id")
@@ -622,6 +919,139 @@ def parse_submission_response(
         "retry_disposition": "NEVER",
     }
 
+
+def _install_submission_response_parser(parser, prepared_projection):
+    """Pin the prepared-scope verifier across Alpaca response normalization."""
+
+    parser_code = parser.__code__
+    projection_code = prepared_projection.__code__
+    error_type = AlpacaAdapterError
+    canonical_getattr = getattr
+
+    def sealed_parse_submission_response(
+        *,
+        attempt_id: str,
+        prepared_request: AlpacaPreparedRequest,
+        observation: ProviderSubmissionObservation | None = None,
+        transport_ambiguous: bool = False,
+    ) -> dict[str, object]:
+        if (
+            _prepared_submission_projection is not prepared_projection
+            or canonical_getattr(prepared_projection, "__code__", None)
+            is not projection_code
+            or canonical_getattr(parser, "__code__", None) is not parser_code
+        ):
+            raise error_type(
+                "Alpaca prepared response authority is unavailable"
+            )
+        return parser(
+            attempt_id=attempt_id,
+            prepared_request=prepared_request,
+            observation=observation,
+            transport_ambiguous=transport_ambiguous,
+        )
+
+    return sealed_parse_submission_response
+
+
+parse_submission_response = _install_submission_response_parser(
+    parse_submission_response,
+    _prepared_submission_projection,
+)
+del _install_submission_response_parser
+
+def _install_submission_response_parser_authority(parser):
+    """Fence mutable parser dependencies before financial normalization."""
+
+    parser_code = parser.__code__
+    uuid_text = _uuid_text
+    uuid_text_code = uuid_text.__code__
+    prepared_projection = _prepared_submission_projection
+    prepared_projection_code = prepared_projection.__code__
+    client_order_validator = validate_client_order_id
+    client_order_validator_code = client_order_validator.__code__
+    canonical_text = _text
+    canonical_text_code = canonical_text.__code__
+    submission_projection = _submission_projection
+    submission_projection_code = submission_projection.__code__
+    response_evidence = _response_evidence
+    response_evidence_code = response_evidence.__code__
+    canonical_uuid = UUID
+    value_error_type = ValueError
+    client_id_pattern = _CLIENT_ID
+    canonical_uuid5 = uuid5
+    canonical_uuid5_code = canonical_uuid5.__code__
+    canonical_namespace = NAMESPACE_URL
+    error_type = AlpacaAdapterError
+    type_error = TypeError
+    canonical_type = type
+    canonical_bool = bool
+    canonical_isinstance = isinstance
+    canonical_str = str
+    mapping_type = Mapping
+    canonical_getattr = getattr
+
+    def guarded(
+        *,
+        attempt_id: str,
+        prepared_request: AlpacaPreparedRequest,
+        observation: ProviderSubmissionObservation | None = None,
+        transport_ambiguous: bool = False,
+    ) -> dict[str, object]:
+        if (
+            canonical_getattr(parser, "__code__", None) is not parser_code
+            or _uuid_text is not uuid_text
+            or canonical_getattr(uuid_text, "__code__", None) is not uuid_text_code
+            or _prepared_submission_projection is not prepared_projection
+            or canonical_getattr(prepared_projection, "__code__", None)
+            is not prepared_projection_code
+            or validate_client_order_id is not client_order_validator
+            or canonical_getattr(client_order_validator, "__code__", None)
+            is not client_order_validator_code
+            or _text is not canonical_text
+            or canonical_getattr(canonical_text, "__code__", None)
+            is not canonical_text_code
+            or _submission_projection is not submission_projection
+            or canonical_getattr(submission_projection, "__code__", None)
+            is not submission_projection_code
+            or _response_evidence is not response_evidence
+            or canonical_getattr(response_evidence, "__code__", None)
+            is not response_evidence_code
+            or UUID is not canonical_uuid
+            or ValueError is not value_error_type
+            or _CLIENT_ID is not client_id_pattern
+            or uuid5 is not canonical_uuid5
+            or canonical_getattr(canonical_uuid5, "__code__", None)
+            is not canonical_uuid5_code
+            or NAMESPACE_URL is not canonical_namespace
+            or AlpacaAdapterError is not error_type
+            or TypeError is not type_error
+            or type is not canonical_type
+            or bool is not canonical_bool
+            or isinstance is not canonical_isinstance
+            or str is not canonical_str
+            or Mapping is not mapping_type
+            or getattr is not canonical_getattr
+        ):
+            raise error_type(
+                "Alpaca prepared response authority is unavailable"
+            )
+        return parser(
+            attempt_id=attempt_id,
+            prepared_request=prepared_request,
+            observation=observation,
+            transport_ambiguous=transport_ambiguous,
+        )
+
+    return guarded
+
+
+_unsealed_parse_submission_response = parse_submission_response
+parse_submission_response = _install_submission_response_parser_authority(
+    _unsealed_parse_submission_response
+)
+del _unsealed_parse_submission_response
+del _install_submission_response_parser_authority
 
 def parse_trade_activities(
     observation: ProviderResponseObservation,

@@ -1,11 +1,14 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
+import mvp.autotrade_mvp.bybit_v5 as bybit_v5_module
 from mvp.autotrade_mvp.bybit_v5 import (
+    BybitPreparedSubmission,
     build_order_payload,
     prepare_order_submission,
     coverage_evidence,
@@ -28,6 +31,7 @@ from mvp.autotrade_mvp.dispatch import (
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
+    ProviderSubmissionObservation,
     Surface,
     observe_authenticated_json_response,
     observe_submission_json_response,
@@ -676,6 +680,262 @@ class BybitV5AdapterTests(unittest.TestCase):
             "2026-09-24T20:00:00Z",
         )
 
+    def test_raw_option_payload_fails_closed_without_option_semantics(self):
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "dedicated option semantics",
+        ):
+            build_order_payload(
+                product_family="OPTIONS",
+                symbol="BTC-30OCT26-100000-C",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.1",
+                price="100",
+                client_order_id="option-payload-unqualified",
+                time_in_force="GTC",
+            )
+
+    def test_canonical_preparation_rejects_cross_provider_environment_capability(self):
+        capability = submission_write_capability(
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "capability provider environment does not match target",
+        ):
+            prepare_order_submission(
+                capability=capability,
+                at=READ_AT,
+                provider_environment="DEMO",
+                product_family="SPOT",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.01",
+                price="100",
+                client_order_id="domain-mismatch-rejected",
+                time_in_force="GTC",
+            )
+
+    def test_derivative_payload_rejects_cross_provider_environment_capability(self):
+        capability = write_capability(provider_environment="TESTNET")
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "capability provider environment does not match target",
+        ):
+            build_order_payload(
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.01",
+                price="100",
+                client_order_id="derivative-domain-mismatch",
+                time_in_force="GTC",
+                position_side="LONG",
+                capability=capability,
+                capability_at=READ_AT,
+                account_id=capability.account_id,
+                instrument_version=capability.instrument_version,
+                provider_environment="DEMO",
+            )
+
+    def test_canonical_preparation_rejects_executable_tzinfo_before_callback(self):
+        capability = submission_write_capability(
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        callbacks = []
+
+        class ExecutableTimezone(tzinfo):
+            def utcoffset(self, _dt):
+                callbacks.append("utcoffset")
+                return timedelta(0)
+
+            def dst(self, _dt):
+                callbacks.append("dst")
+                return timedelta(0)
+
+            def tzname(self, _dt):
+                callbacks.append("tzname")
+                return "forged"
+
+        at = datetime(2026, 9, 24, 20, tzinfo=ExecutableTimezone())
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "exact stdlib timezone",
+        ):
+            prepare_order_submission(
+                capability=capability,
+                at=at,
+                provider_environment="DEMO",
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.01",
+                price="100",
+                client_order_id="tzinfo-authority-required",
+                time_in_force="GTC",
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_canonical_preparation_refuses_margin_without_borrow_authority(self):
+        capability = submission_write_capability(
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "dedicated spot-margin borrow/collateral authority",
+        ):
+            prepare_order_submission(
+                capability=capability,
+                at=READ_AT,
+                provider_environment="DEMO",
+                product_family="MARGIN",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.01",
+                price="100",
+                client_order_id="margin-authority-required",
+                time_in_force="GTC",
+            )
+
+    def test_canonical_preparation_refuses_options_without_payoff_authority(self):
+        capability = submission_write_capability(
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "dedicated option capability/payoff authority",
+        ):
+            prepare_order_submission(
+                capability=capability,
+                at=READ_AT,
+                provider_environment="DEMO",
+                product_family="OPTIONS",
+                symbol="BTC-30OCT26-100000-C",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.1",
+                price="100",
+                client_order_id="option-authority-required",
+                time_in_force="GTC",
+            )
+
+    def test_prepared_issuer_runtime_shadowing_fails_before_callback(self):
+        capability = submission_write_capability()
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            return None
+
+        for name in (
+            "type",
+            "id",
+            "tuple",
+            "getattr",
+            "isinstance",
+            "object",
+            "AttributeError",
+            "MappingProxyType",
+            "ProviderCoreError",
+            "datetime",
+            "timezone",
+            "CapabilitySnapshot",
+            "BybitPreparedSubmission",
+        ):
+            with self.subTest(name=name):
+                with patch.object(
+                    bybit_v5_module,
+                    name,
+                    forged,
+                    create=True,
+                ):
+                    with self.assertRaisesRegex(
+                        ProviderCoreError,
+                        "prepared submission authority changed",
+                    ):
+                        bybit_v5_module.prepare_order_submission(
+                            capability=capability,
+                            at=READ_AT,
+                            provider_environment="MAINNET",
+                            product_family="SPOT",
+                            symbol="BTCUSDT",
+                            side="BUY",
+                            order_type="MARKET",
+                            quantity="0.01",
+                            client_order_id=f"shadow-{name.lower()}",
+                            time_in_force="IOC",
+                        )
+                self.assertEqual(callbacks, [])
+
+    def test_guarded_projection_rejects_runtime_shadowing_before_callback(self):
+        prepared = prepare_order_submission(
+            capability=submission_write_capability(),
+            at=READ_AT,
+            provider_environment="MAINNET",
+            product_family="SPOT",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="0.01",
+            client_order_id="projection-shadow",
+            time_in_force="IOC",
+        )
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            return None
+
+        for name in (
+            "require_canonical_bybit_prepared_submission",
+            "BybitPreparedSubmission",
+            "ProviderCoreError",
+            "object",
+            "dict",
+            "MappingProxyType",
+            "getattr",
+        ):
+            with self.subTest(name=name):
+                with patch.object(
+                    bybit_v5_module,
+                    name,
+                    forged,
+                    create=True,
+                ):
+                    with self.assertRaisesRegex(
+                        ProviderCoreError,
+                        "guarded projection authority changed",
+                    ):
+                        bybit_v5_module.guarded_order_projection(prepared)
+                self.assertEqual(callbacks, [])
+
+        with patch.object(
+            BybitPreparedSubmission,
+            "__getattribute__",
+            forged,
+        ):
+            projected = bybit_v5_module.guarded_order_projection(prepared)
+        self.assertEqual(callbacks, [])
+        self.assertEqual(projected["endpoint"], "/v5/order/create")
+        self.assertEqual(projected["body"]["category"], "spot")
+        self.assertEqual(
+            projected["capability_snapshot_ids"],
+            [prepared.capability_snapshot_id],
+        )
+        self.assertEqual(
+            projected["instrument_versions"],
+            [prepared.instrument_version],
+        )
+
     def test_transport_loss_after_possible_write_is_unknown(self):
         client_id = stable_client_order_id(
             "BYBIT",
@@ -705,6 +965,136 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
         self.assertEqual(result["reason_code"], "BYBIT_TRANSPORT_AMBIGUOUS")
         self.assertEqual(result["evidence"], [])
+
+    def test_submission_response_rejects_unissued_exact_prepared_clone(self):
+        issued = prepare_order_submission(
+            capability=submission_write_capability(),
+            at=READ_AT,
+            provider_environment="MAINNET",
+            product_family="SPOT",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="0.01",
+            client_order_id=stable_client_order_id(
+                "BYBIT",
+                "bybit-unissued-response",
+                environment="LIVE",
+                account_id="bybit-account",
+            ),
+            time_in_force="IOC",
+        )
+        forged = object.__new__(BybitPreparedSubmission)
+        for name in (
+            "endpoint",
+            "body",
+            "account_id",
+            "environment",
+            "provider_environment",
+            "capability_snapshot_id",
+            "entity_id",
+            "instrument_version",
+            "body_sha256",
+        ):
+            object.__setattr__(
+                forged,
+                name,
+                object.__getattribute__(issued, name),
+            )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "prepared submission authority changed",
+        ):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=forged,
+                observation=None,
+                transport_ambiguous=True,
+            )
+
+    def test_submission_response_rejects_provider_environment_retarget(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-env-retarget",
+                    "orderLinkId": "__CLIENT__",
+                },
+            }
+        )
+        object.__setattr__(prepared, "provider_environment", "TESTNET")
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "prepared submission authority changed",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+
+    def test_submission_response_ignores_prepared_getattribute_callback(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-prepared-callback",
+                    "orderLinkId": "__CLIENT__",
+                },
+            }
+        )
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            raise AssertionError("prepared virtual callback executed")
+
+        with patch.object(BybitPreparedSubmission, "__getattribute__", forged):
+            result = parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+        self.assertEqual(callbacks, [])
+        self.assertEqual(result["outcome"], "ACKNOWLEDGED")
+        self.assertEqual(result["provider_order_id"], "provider-prepared-callback")
+
+    def test_submission_response_rejects_rebound_prepared_projection_without_callback(self):
+        prepared = prepare_order_submission(
+            capability=submission_write_capability(),
+            at=READ_AT,
+            provider_environment="MAINNET",
+            product_family="SPOT",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="0.01",
+            client_order_id="prepared-projection-rebound",
+            time_in_force="IOC",
+        )
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            return {}
+
+        with patch.object(
+            bybit_v5_module,
+            "guarded_order_projection",
+            forged,
+        ) as rebound:
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "submission response parser authority changed",
+            ):
+                parse_submission_response(
+                    attempt_id=str(uuid4()),
+                    prepared_request=prepared,
+                    observation=None,
+                    transport_ambiguous=True,
+                )
+        rebound.assert_not_called()
+        self.assertEqual(callbacks, [])
 
     def test_transport_ambiguity_requires_boolean_flag(self):
         client_id = stable_client_order_id(
@@ -780,6 +1170,191 @@ class BybitV5AdapterTests(unittest.TestCase):
                     prepared_request=prepared,
                     observation=invalid,
                 )
+
+    def test_submission_consumer_rejects_unregistered_exact_clone(self):
+        attempt, prepared, _observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-clone",
+                    "orderLinkId": "__CLIENT__",
+                },
+            }
+        )
+        forged = object.__new__(ProviderSubmissionObservation)
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "provider submission observation authority is unavailable",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=forged,
+            )
+
+    def test_submission_consumer_rejects_rebound_projection_alias_before_forgery(self):
+        attempt, prepared, _observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-alias-forgery",
+                    "orderLinkId": "__CLIENT__",
+                },
+            }
+        )
+        forged = object.__new__(ProviderSubmissionObservation)
+        with patch.object(
+            bybit_v5_module,
+            "provider_submission_observation_projection",
+            return_value={
+                "attempt_id": attempt,
+                "provider_id": "BYBIT",
+                "endpoint": prepared.endpoint,
+                "request_sha256": prepared.body_sha256,
+                "capability_snapshot_ids": prepared.capability_snapshot_ids,
+                "instrument_versions": prepared.instrument_versions,
+                "account_id": prepared.account_id,
+                "environment": prepared.environment,
+                "client_order_id": prepared.body["orderLinkId"],
+                "evidence_ref": "provider-write:sha256:" + "0" * 64,
+                "response_sha256": "sha256:" + "0" * 64,
+                "sent_at": "2026-09-24T20:00:00Z",
+                "payload": {
+                    "retCode": 0,
+                    "result": {
+                        "orderId": "forged",
+                        "orderLinkId": prepared.body["orderLinkId"],
+                    },
+                },
+            },
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "submission response parser authority changed",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=forged,
+                )
+
+    def test_submission_parser_rejects_uuid5_code_mutation_before_execution(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-uuid5-code-fence",
+                    "orderLinkId": "__CLIENT__",
+                },
+            }
+        )
+
+        def forged_uuid5(_namespace, _name):
+            raise AssertionError("mutated uuid5 code executed")
+
+        with patch.object(
+            bybit_v5_module.uuid5,
+            "__code__",
+            forged_uuid5.__code__,
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "submission response parser authority changed",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
+                )
+
+    def test_submission_consumer_rejects_subclass_before_virtual_callback(self):
+        attempt, prepared, _observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-subclass",
+                    "orderLinkId": "__CLIENT__",
+                },
+            }
+        )
+
+        class HostileObservation(ProviderSubmissionObservation):
+            def __getattribute__(self, _name):
+                raise AssertionError(
+                    "virtual callback executed before authority verification"
+                )
+
+        forged = object.__new__(HostileObservation)
+        with self.assertRaisesRegex(
+            TypeError,
+            "durable ProviderSubmissionObservation",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=forged,
+            )
+
+    def test_submission_consumer_rejects_rebound_require_scope_without_callback(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "orderId": "provider-no-virtual-scope",
+                    "orderLinkId": "__CLIENT__",
+                },
+                "time": 1790280000123,
+            }
+        )
+        with patch.object(
+            ProviderSubmissionObservation,
+            "require_scope",
+            side_effect=AssertionError(
+                "rebindable require_scope callback must not execute"
+            ),
+        ) as rebound:
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "provider submission observation authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
+                )
+        rebound.assert_not_called()
+
+    def test_submission_consumer_rejects_post_mint_payload_retargeting(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-original",
+                    "orderLinkId": "__CLIENT__",
+                },
+            }
+        )
+        object.__setattr__(
+            observation,
+            "payload",
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-forged",
+                    "orderLinkId": "__CLIENT__",
+                },
+            },
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "provider submission observation authority is unavailable",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
 
     def test_ambiguous_bybit_codes_require_reconciliation(self):
         for code in (429, 10000, 10014, 10016):

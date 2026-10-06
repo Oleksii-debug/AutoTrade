@@ -277,7 +277,11 @@ def _order_projection_binding_operations():
             entry = bindings.get(id(value))
             if entry is None or entry[0]() is not value:
                 raise OrderProjectionConflict("durable OMS selection authority is unavailable")
-            _, store, identity, scope, evidence = entry
+            _, store_reference, identity, scope, evidence_reference = entry
+            store = store_reference()
+            evidence = None if evidence_reference is None else evidence_reference()
+            if store is None or (evidence_reference is not None and evidence is None):
+                raise OrderProjectionConflict("durable OMS selected authority was released")
             state = object.__getattribute__(value, "__dict__")
             if type(state) is not dict or any(type(key) is not str for key in state) or set(state) != _ORDER_STATE_FIELDS:
                 raise OrderProjectionConflict("durable OMS instance state is shadowed")

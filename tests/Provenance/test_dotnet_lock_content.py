@@ -141,6 +141,34 @@ class NugetLockGateCandidateTests(unittest.TestCase):
         self.assertEqual(commands, [])
         self.assertEqual(unscoped_lines, [2])
 
+    def test_folded_scalar_split_restore_is_reported_as_unscoped(self):
+        commands, unscoped_lines = dotnet_restore_workflow_commands(
+            "steps:\n"
+            "  - run: >\n"
+            "      dotnet\n"
+            "      restore src/App/App.csproj --locked-mode\n"
+            "  - run: dotnet restore src/App/App.csproj --locked-mode\n"
+        )
+        self.assertEqual(
+            commands,
+            ["run: dotnet restore src/App/App.csproj --locked-mode"],
+        )
+        self.assertEqual(unscoped_lines, [3])
+
+    def test_shell_continuation_split_restore_is_reported_as_unscoped(self):
+        commands, unscoped_lines = dotnet_restore_workflow_commands(
+            "steps:\n"
+            "  - run: |\n"
+            "      dotnet \\\n"
+            "        restore src/App/App.csproj\n"
+            "  - run: dotnet restore src/App/App.csproj --locked-mode\n"
+        )
+        self.assertEqual(
+            commands,
+            ["run: dotnet restore src/App/App.csproj --locked-mode"],
+        )
+        self.assertEqual(unscoped_lines, [3])
+
     def test_canonical_restore_line_is_discovered_once(self):
         commands, unscoped_lines = dotnet_restore_workflow_commands(
             "steps:\n"

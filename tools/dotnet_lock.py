@@ -10,6 +10,10 @@ import xml.etree.ElementTree as ET
 
 
 _DOTNET_RESTORE_TEXT = re.compile(r"\bdotnet[ \t]+restore\b", re.IGNORECASE)
+_DOTNET_RESTORE_MULTILINE_TEXT = re.compile(
+    r"\bdotnet(?:[ \t]*\\?[ \t]*\r?\n[ \t]+)+restore\b",
+    re.IGNORECASE,
+)
 
 
 def _strict_json(text: str):
@@ -58,6 +62,7 @@ def dotnet_restore_workflow_commands(
 
     commands: list[str] = []
     unscoped_lines: list[int] = []
+    unscoped_line_set: set[int] = set()
     for line_number, raw in enumerate(workflow_text.splitlines(), start=1):
         command = raw.strip()
         if command.startswith("- "):
@@ -72,6 +77,19 @@ def dotnet_restore_workflow_commands(
             commands.append(command)
         else:
             unscoped_lines.append(line_number)
+            unscoped_line_set.add(line_number)
+
+    # YAML folded scalars and shell continuations can join physical lines into
+    # one executable "dotnet restore" command. Scan source text across newline
+    # boundaries so an additional non-canonical restore cannot hide beside an
+    # otherwise valid locked restore command.
+    for match in _DOTNET_RESTORE_MULTILINE_TEXT.finditer(workflow_text):
+        line_number = workflow_text.count("\n", 0, match.start()) + 1
+        if line_number not in unscoped_line_set:
+            unscoped_lines.append(line_number)
+            unscoped_line_set.add(line_number)
+
+    unscoped_lines.sort()
     return commands, unscoped_lines
 
 def dotnet_restore_command_tokens(command: str) -> tuple[str, ...]:

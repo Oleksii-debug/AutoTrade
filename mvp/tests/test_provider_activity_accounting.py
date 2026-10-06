@@ -1,5 +1,5 @@
 from dataclasses import replace
-from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, localcontext
+from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, ROUND_FLOOR, localcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -120,12 +120,17 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 amount,
             )
 
-            reopened = load_paper_book(
-                JournalStore(path),
-                provider_id="ALPACA",
-                account_id="acct-exact-cash",
-            )
-            self.assertEqual(reopened.cash("USD"), Decimal(amount))
+            with localcontext() as restart_context:
+                restart_context.prec = 5
+                restart_context.rounding = ROUND_FLOOR
+                restart_context.traps[Inexact] = True
+                restart_context.traps[Rounded] = True
+                reopened = load_paper_book(
+                    JournalStore(path),
+                    provider_id="ALPACA",
+                    account_id="acct-exact-cash",
+                )
+                self.assertEqual(reopened.cash("USD"), Decimal(amount))
 
     def test_environment_is_part_of_durable_provider_activity_identity(self):
         paper = paper_activity_identity(

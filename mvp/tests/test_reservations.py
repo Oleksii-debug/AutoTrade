@@ -98,7 +98,7 @@ class ReservationFoundationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             TypeError,
-            "capital reservation_resources\(\) must return an exact dict",
+            r"capital reservation_resources\(\) must return an exact dict",
         ):
             book.reserve_from_capital(
                 reservation_id="reservation-capital-hostile-map",

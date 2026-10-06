@@ -934,6 +934,345 @@ PROVIDERS: Mapping[str, ProviderDefinition] = {
 }
 
 
+def _install_provider_submission_observation_authority(binding_projection):
+    """Mint write observations only from sealed durable response bindings."""
+
+    observation_type = ProviderSubmissionObservation
+    binding_type = SubmissionResponseBinding
+    error_type = ProviderCoreError
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_len = len
+    canonical_frozenset = frozenset
+    canonical_str = str
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    object_setattr = canonical_object.__setattr__
+    mapping_proxy_type = MappingProxyType
+    canonical_binding_projection = binding_projection
+    binding_projection_code = binding_projection.__code__
+    canonical_decode = _decode_exact_json
+    decode_code = canonical_decode.__code__
+    canonical_depth_guard = require_provider_json_depth
+    depth_guard_code = canonical_depth_guard.__code__
+    canonical_number_parser = parse_bounded_json_number_token
+    number_parser_code = canonical_number_parser.__code__
+    canonical_integer_parser = parse_bounded_json_integer_token
+    integer_parser_code = canonical_integer_parser.__code__
+    canonical_freeze_json = _freeze_json
+    freeze_json_code = canonical_freeze_json.__code__
+    canonical_sha256 = sha256
+    canonical_json_module = json
+    canonical_json_loads = json.loads
+    canonical_json_dumps = json.dumps
+    canonical_exact_decimal_error = ExactDecimalError
+    canonical_value_error = ValueError
+    canonical_unicode_decode_error = UnicodeDecodeError
+    canonical_recursion_error = RecursionError
+    canonical_bytes = bytes
+    canonical_isinstance = isinstance
+    canonical_dict = dict
+    canonical_list = list
+    canonical_decimal = Decimal
+    canonical_float = float
+    canonical_bool = bool
+    canonical_int = int
+    canonical_re_module = re
+    digest_pattern = re.compile(r"^sha256:[0-9a-f]{64}$")
+    evidence_pattern = re.compile(r"^provider-write:sha256:[0-9a-f]{64}$")
+    canonical_weakref_module = weakref
+    canonical_weakref_ref = weakref.ref
+    provider_ids = frozenset(PROVIDERS)
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+    def authority_changed():
+        raise error_type("provider submission observation authority is unavailable")
+
+    def implementation_changed():
+        if (
+            ProviderSubmissionObservation is not observation_type
+            or SubmissionResponseBinding is not binding_type
+            or ProviderCoreError is not error_type
+            or type is not canonical_type
+            or id is not canonical_id
+            or tuple is not canonical_tuple
+            or len is not canonical_len
+            or frozenset is not canonical_frozenset
+            or str is not canonical_str
+            or object is not canonical_object
+            or MappingProxyType is not mapping_proxy_type
+            or submission_response_binding_projection
+            is not canonical_binding_projection
+            or canonical_binding_projection.__code__ is not binding_projection_code
+            or _decode_exact_json is not canonical_decode
+            or canonical_decode.__code__ is not decode_code
+            or require_provider_json_depth is not canonical_depth_guard
+            or canonical_depth_guard.__code__ is not depth_guard_code
+            or parse_bounded_json_number_token is not canonical_number_parser
+            or canonical_number_parser.__code__ is not number_parser_code
+            or parse_bounded_json_integer_token is not canonical_integer_parser
+            or canonical_integer_parser.__code__ is not integer_parser_code
+            or _freeze_json is not canonical_freeze_json
+            or canonical_freeze_json.__code__ is not freeze_json_code
+            or sha256 is not canonical_sha256
+            or json is not canonical_json_module
+            or json.loads is not canonical_json_loads
+            or json.dumps is not canonical_json_dumps
+            or ExactDecimalError is not canonical_exact_decimal_error
+            or ValueError is not canonical_value_error
+            or UnicodeDecodeError is not canonical_unicode_decode_error
+            or RecursionError is not canonical_recursion_error
+            or bytes is not canonical_bytes
+            or isinstance is not canonical_isinstance
+            or dict is not canonical_dict
+            or list is not canonical_list
+            or Decimal is not canonical_decimal
+            or float is not canonical_float
+            or bool is not canonical_bool
+            or int is not canonical_int
+            or re is not canonical_re_module
+            or weakref is not canonical_weakref_module
+            or weakref.ref is not canonical_weakref_ref
+        ):
+            authority_changed()
+
+    def canonical_text(value, name):
+        if canonical_type(value) is not canonical_str:
+            raise error_type(f"{name} must be exact text")
+        normalized = value.strip()
+        if not normalized or normalized != value:
+            raise error_type(f"{name} must be canonical text")
+        return normalized
+
+    def canonical_text_tuple(value, name):
+        if canonical_type(value) is not canonical_tuple or not value:
+            raise error_type(f"{name} must be a non-empty exact tuple")
+        normalized = canonical_tuple(canonical_text(item, name) for item in value)
+        if canonical_len(canonical_frozenset(normalized)) != canonical_len(normalized):
+            raise error_type(f"{name} must be unique")
+        return normalized
+
+    def raw_snapshot(value):
+        return (
+            object_getattribute(value, "response_binding"),
+            object_getattribute(value, "endpoint"),
+            object_getattribute(value, "capability_snapshot_ids"),
+            object_getattribute(value, "instrument_versions"),
+            object_getattribute(value, "evidence_ref"),
+            object_getattribute(value, "payload"),
+        )
+
+    def prune():
+        for object_id, (value_ref, _snapshot) in canonical_tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def register(value):
+        implementation_changed()
+        if canonical_type(value) is not observation_type:
+            authority_changed()
+        current = raw_snapshot(value)
+        canonical_binding_projection(current[0])
+        if canonical_type(current[1]) is not canonical_str:
+            authority_changed()
+        if canonical_type(current[2]) is not canonical_tuple:
+            authority_changed()
+        if canonical_type(current[3]) is not canonical_tuple:
+            authority_changed()
+        if canonical_type(current[4]) is not canonical_str:
+            authority_changed()
+        prune()
+        object_id = canonical_id(value)
+        previous = states.get(object_id)
+        if previous is not None and previous[0]() is not None:
+            authority_changed()
+        states[object_id] = (canonical_weakref_ref(value), current)
+
+    def require_canonical_provider_submission_observation(value):
+        implementation_changed()
+        if canonical_type(value) is not observation_type:
+            authority_changed()
+        prune()
+        state = states.get(canonical_id(value))
+        if state is None or state[0]() is not value:
+            authority_changed()
+        expected = state[1]
+        current = raw_snapshot(value)
+        if current[0] is not expected[0]:
+            authority_changed()
+        canonical_binding_projection(current[0])
+        if (
+            canonical_type(current[1]) is not canonical_str
+            or current[1] != expected[1]
+            or current[2] is not expected[2]
+            or current[3] is not expected[3]
+            or canonical_type(current[4]) is not canonical_str
+            or current[4] != expected[4]
+            or current[5] is not expected[5]
+        ):
+            authority_changed()
+        return value
+
+    def provider_submission_observation_projection(value):
+        require_canonical_provider_submission_observation(value)
+        current = raw_snapshot(value)
+        binding = canonical_binding_projection(current[0])
+        return mapping_proxy_type(
+            {
+                "response_binding": current[0],
+                "attempt_id": binding["attempt_id"],
+                "aggregate_id": binding["aggregate_id"],
+                "provider_id": binding["provider"].upper(),
+                "request_sha256": binding["request_hash"],
+                "client_order_id": binding["client_order_id"],
+                "environment": binding["environment"],
+                "account_id": binding["account_id"],
+                "sent_at": binding["sent_at"],
+                "response_sha256": binding["response_sha256"],
+                "response_encoding": binding["response_encoding"],
+                "terminal_state": binding["terminal_state"],
+                "ambiguity_reason": binding["ambiguity_reason"],
+                "retry_disposition": binding["retry_disposition"],
+                "http_status": binding["http_status"],
+                "submission_scope": binding["submission_scope"],
+                "submission_scope_hash": binding["submission_scope_hash"],
+                "endpoint": current[1],
+                "capability_snapshot_ids": current[2],
+                "instrument_versions": current[3],
+                "evidence_ref": current[4],
+                "payload": current[5],
+            }
+        )
+
+    def observe_submission_json_response(
+        *,
+        response_binding: SubmissionResponseBinding,
+        provider_id: str,
+        endpoint: str,
+        prepared_request_sha256: str,
+        capability_snapshot_ids: tuple[str, ...],
+        instrument_versions: tuple[str, ...],
+    ) -> ProviderSubmissionObservation:
+        implementation_changed()
+        binding = canonical_binding_projection(response_binding)
+        if binding["terminal_state"] != "SENT":
+            raise error_type(
+                "provider submission observation requires definitive SENT response"
+            )
+        if binding["response_encoding"] != "utf-8-json":
+            raise error_type(
+                "provider-write JSON observation requires durable utf-8-json response bytes"
+            )
+
+        provider = canonical_text(provider_id, "provider_id").upper()
+        if provider not in provider_ids:
+            raise error_type("unknown provider")
+        if binding["provider"].upper() != provider:
+            raise error_type("durable submission provider mismatch")
+
+        normalized_endpoint = canonical_text(endpoint, "endpoint")
+        if not normalized_endpoint.startswith("/") or "://" in normalized_endpoint:
+            raise error_type(
+                "submission endpoint must be a canonical provider-relative path"
+            )
+
+        request_sha = canonical_text(
+            prepared_request_sha256,
+            "prepared_request_sha256",
+        )
+        if digest_pattern.fullmatch(request_sha) is None:
+            raise error_type(
+                "prepared_request_sha256 must be a canonical SHA-256 digest"
+            )
+        if binding["request_hash"] != request_sha:
+            raise error_type("durable submission request digest mismatch")
+
+        capabilities = canonical_text_tuple(
+            capability_snapshot_ids,
+            "capability_snapshot_ids",
+        )
+        instruments = canonical_text_tuple(
+            instrument_versions,
+            "instrument_versions",
+        )
+        scope = binding["submission_scope"]
+        if canonical_type(scope) is not mapping_proxy_type:
+            authority_changed()
+        expected_keys = canonical_frozenset(
+            (
+                "endpoint",
+                "prepared_request_sha256",
+                "capability_snapshot_ids",
+                "instrument_versions",
+            )
+        )
+        if canonical_frozenset(scope.keys()) != expected_keys:
+            raise error_type(
+                "durable submission scope does not match prepared provider request"
+            )
+        if (
+            scope["endpoint"] != normalized_endpoint
+            or scope["prepared_request_sha256"] != request_sha
+            or canonical_type(scope["capability_snapshot_ids"]) is not canonical_tuple
+            or scope["capability_snapshot_ids"] != capabilities
+            or canonical_type(scope["instrument_versions"]) is not canonical_tuple
+            or scope["instrument_versions"] != instruments
+        ):
+            raise error_type(
+                "durable submission scope does not match prepared provider request"
+            )
+
+        identity_material = canonical_json_dumps(
+            {
+                "aggregate_id": binding["aggregate_id"],
+                "provider_id": provider,
+                "request_sha256": binding["request_hash"],
+                "submission_scope_hash": binding["submission_scope_hash"],
+                "response_sha256": binding["response_sha256"],
+                "sent_at": binding["sent_at"],
+                "endpoint": normalized_endpoint,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        evidence_ref = (
+            "provider-write:sha256:"
+            + canonical_sha256(identity_material).hexdigest()
+        )
+        if evidence_pattern.fullmatch(evidence_ref) is None:
+            authority_changed()
+
+        payload = canonical_decode(binding["response_bytes"])
+        observation = canonical_object.__new__(observation_type)
+        object_setattr(observation, "response_binding", response_binding)
+        object_setattr(observation, "endpoint", normalized_endpoint)
+        object_setattr(observation, "capability_snapshot_ids", capabilities)
+        object_setattr(observation, "instrument_versions", instruments)
+        object_setattr(observation, "evidence_ref", evidence_ref)
+        object_setattr(observation, "payload", payload)
+        register(observation)
+        return observation
+
+    return (
+        observe_submission_json_response,
+        require_canonical_provider_submission_observation,
+        provider_submission_observation_projection,
+    )
+
+
+(
+    observe_submission_json_response,
+    require_canonical_provider_submission_observation,
+    provider_submission_observation_projection,
+) = _install_provider_submission_observation_authority(
+    submission_response_binding_projection
+)
+del _install_provider_submission_observation_authority
+
+
 REQUIRED_QUALIFICATION_CASES = frozenset(
     {
         "metadata",

@@ -279,6 +279,52 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
                 _require_bybit_prepared_request_origin(material, prepared)
         self.assertEqual(calls, [])
 
+    def test_preparation_rebinding_of_provider_constants_fails_closed(self):
+        material, prepared = canonical_case()
+        del material
+        del prepared
+        cases = (
+            ("BYBIT_DOCUMENTED_ENDPOINTS", {"PLACE_ORDER": "/v5/order/amend"}),
+            (
+                "_REST_BASE_BY_ENVIRONMENT",
+                {"TESTNET": "https://attacker.invalid"},
+            ),
+            (
+                "_RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT",
+                {"TESTNET": "LIVE"},
+            ),
+        )
+        for name, forged in cases:
+            with self.subTest(name=name):
+                with patch.object(bybit_module, name, forged):
+                    with self.assertRaisesRegex(
+                        ProviderCoreError,
+                        "prepared submission authority changed|authority is unavailable",
+                    ):
+                        canonical_case()
+
+    def test_preparation_constructor_code_rebinding_fails_closed(self):
+        _material, prepared = canonical_case()
+        del prepared
+
+        original = bybit_module.BybitPreparedSubmission.__post_init__
+        forged = lambda self: None
+        forged.__code__ = (lambda self: None).__code__
+        with patch.object(
+            bybit_module.BybitPreparedSubmission,
+            "__post_init__",
+            forged,
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "prepared submission authority changed",
+            ):
+                canonical_case()
+        self.assertIs(
+            bybit_module.BybitPreparedSubmission.__post_init__,
+            original,
+        )
+
     def test_shared_projection_pins_provenance_verifier(self):
         _material, prepared = canonical_case()
         calls = []

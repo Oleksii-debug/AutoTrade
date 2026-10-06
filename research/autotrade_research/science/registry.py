@@ -14,6 +14,12 @@ import sqlite3
 from typing import Any
 from uuid import UUID, uuid4
 
+from autotrade_numeric.exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    parse_canonical_decimal_text,
+)
+
 
 REQUIRED_PROTOCOL_FIELDS = {
     "hypothesis",
@@ -69,6 +75,105 @@ def _canonical(payload: Any) -> str:
 
 def _hash(payload: Any) -> str:
     return "sha256:" + sha256(_canonical(payload).encode("utf-8")).hexdigest()
+
+
+_ABLATION_DECISION_POLICY_FIELDS = {
+    "schema_version",
+    "minimum_pairs",
+    "required_lower_bound",
+    "uncertainty_multiplier",
+    "decision_rule",
+}
+
+
+def _canonical_policy_decimal(
+    value: Any,
+    name: str,
+    *,
+    non_negative: bool = False,
+) -> str:
+    """Admit one exact bounded canonical Decimal spelling for scientific policy."""
+    if type(value) is not str or not value or value != value.strip():
+        raise ProtocolViolation(f"{name} must be canonical decimal text")
+    try:
+        number = parse_canonical_decimal_text(value)
+        rendered = canonical_decimal_text(number)
+    except ExactDecimalError as error:
+        raise ProtocolViolation(
+            f"{name} exceeds the bounded canonical decimal resource envelope"
+        ) from error
+    if rendered != value:
+        raise ProtocolViolation(f"{name} must be canonical decimal text")
+    if non_negative and number < 0:
+        raise ProtocolViolation(f"{name} must be non-negative")
+    return rendered
+
+
+def _validated_ablation_decision_policy(payload: Any) -> dict[str, Any]:
+    """Validate the nested policy graph before canonical hashing can observe it."""
+    if type(payload) is not dict:
+        raise ProtocolViolation("ablation_decision_policy must be an exact object")
+    keys = tuple(payload.keys())
+    if any(type(key) is not str for key in keys):
+        raise ProtocolViolation("ablation_decision_policy keys must be exact text")
+    if set(keys) != _ABLATION_DECISION_POLICY_FIELDS:
+        raise ProtocolViolation(
+            "ablation_decision_policy must contain exactly schema_version, "
+            "minimum_pairs, required_lower_bound, uncertainty_multiplier and decision_rule"
+        )
+    schema_version = payload["schema_version"]
+    if type(schema_version) is not str or schema_version != "1.0.0":
+        raise ProtocolViolation(
+            "ablation_decision_policy.schema_version must be exact 1.0.0 text"
+        )
+    minimum_pairs = payload["minimum_pairs"]
+    if type(minimum_pairs) is not int or minimum_pairs < 2:
+        raise ProtocolViolation(
+            "ablation_decision_policy.minimum_pairs must be an integer >= 2"
+        )
+    required = _canonical_policy_decimal(
+        payload["required_lower_bound"],
+        "ablation_decision_policy.required_lower_bound",
+    )
+    multiplier = _canonical_policy_decimal(
+        payload["uncertainty_multiplier"],
+        "ablation_decision_policy.uncertainty_multiplier",
+        non_negative=True,
+    )
+    decision_rule = payload["decision_rule"]
+    if (
+        type(decision_rule) is not str
+        or not decision_rule
+        or decision_rule != decision_rule.strip()
+    ):
+        raise ProtocolViolation(
+            "ablation_decision_policy.decision_rule must be canonical non-empty text"
+        )
+    return {
+        "schema_version": "1.0.0",
+        "minimum_pairs": minimum_pairs,
+        "required_lower_bound": required,
+        "uncertainty_multiplier": multiplier,
+        "decision_rule": decision_rule,
+    }
+
+
+def _validated_protocol_ablation_decision_policy(
+    protocol_payload: dict[str, Any],
+) -> dict[str, Any]:
+    policy = _validated_ablation_decision_policy(
+        protocol_payload["ablation_decision_policy"]
+    )
+    practical_effect = _canonical_policy_decimal(
+        protocol_payload["minimum_practical_effect"],
+        "minimum_practical_effect",
+    )
+    if policy["required_lower_bound"] != practical_effect:
+        raise ProtocolViolation(
+            "ablation_decision_policy.required_lower_bound must equal "
+            "minimum_practical_effect for net_incremental_value"
+        )
+    return policy
 
 
 def _now() -> str:
@@ -248,10 +353,120 @@ def _immutable_artifact_ref(value: Any, name: str) -> str:
 
 
 @dataclass(frozen=True)
+class AblationValuePolicy:
+    """Preregistered dimensional policy for terminal ablation economics.
+
+    This freezes the common value unit and immutable projection-rule identities.
+    It does not authenticate the referenced utility/cost/FX evidence by itself;
+    terminal qualification must resolve those refs through their owning
+    authorities at the frozen evaluation cut.
+    """
+
+    protocol_id: str
+    protocol_hash: str
+    schema_version: str
+    value_unit: str
+    utility_projection_ref: str
+    cost_projection_ref: str
+    fx_valuation_ref: str | None
+
+
+def _ablation_value_policy_fields(payload: Any) -> tuple[str, str, str, str | None]:
+    """Validate the untrusted policy graph before JSON/hash callbacks can observe it."""
+    if type(payload) is not dict:
+        raise ProtocolViolation("ablation_value_policy must be an exact object")
+    keys = tuple(payload.keys())
+    if any(type(key) is not str for key in keys):
+        raise ProtocolViolation("ablation_value_policy keys must be exact text")
+    expected = {
+        "schema_version",
+        "value_unit",
+        "utility_projection_ref",
+        "cost_projection_ref",
+        "fx_valuation_ref",
+    }
+    if set(keys) != expected:
+        raise ProtocolViolation(
+            "ablation_value_policy must contain exactly schema_version, value_unit, "
+            "utility_projection_ref, cost_projection_ref and fx_valuation_ref"
+        )
+    schema_version = payload["schema_version"]
+    if type(schema_version) is not str or schema_version != "1.0.0":
+        raise ProtocolViolation(
+            "ablation_value_policy.schema_version must be exact 1.0.0 text"
+        )
+    value_unit = payload["value_unit"]
+    if (
+        type(value_unit) is not str
+        or not value_unit
+        or value_unit != value_unit.strip()
+        or value_unit != value_unit.upper()
+        or re.fullmatch(r"[A-Z0-9][A-Z0-9._:-]{0,63}", value_unit) is None
+    ):
+        raise ProtocolViolation(
+            "ablation_value_policy.value_unit must be canonical exact uppercase unit text"
+        )
+    exact_refs: list[str] = []
+    for field in ("utility_projection_ref", "cost_projection_ref"):
+        reference = payload[field]
+        if type(reference) is not str or not reference or reference != reference.strip():
+            raise ProtocolViolation(
+                f"ablation_value_policy.{field} must be canonical exact text"
+            )
+        exact_refs.append(
+            _immutable_artifact_ref(
+                reference,
+                f"ablation_value_policy.{field}",
+            )
+        )
+    raw_fx = payload["fx_valuation_ref"]
+    fx_valuation_ref = None
+    if raw_fx is not None:
+        if type(raw_fx) is not str or not raw_fx or raw_fx != raw_fx.strip():
+            raise ProtocolViolation(
+                "ablation_value_policy.fx_valuation_ref must be canonical exact text"
+            )
+        fx_valuation_ref = _immutable_artifact_ref(
+            raw_fx,
+            "ablation_value_policy.fx_valuation_ref",
+        )
+    return value_unit, exact_refs[0], exact_refs[1], fx_valuation_ref
+
+
+def _ablation_value_policy(payload: Any, *, protocol_id: str, protocol_hash: str) -> AblationValuePolicy:
+    (
+        value_unit,
+        utility_projection_ref,
+        cost_projection_ref,
+        fx_valuation_ref,
+    ) = _ablation_value_policy_fields(payload)
+    return AblationValuePolicy(
+        protocol_id=protocol_id,
+        protocol_hash=protocol_hash,
+        schema_version="1.0.0",
+        value_unit=value_unit,
+        utility_projection_ref=utility_projection_ref,
+        cost_projection_ref=cost_projection_ref,
+        fx_valuation_ref=fx_valuation_ref,
+    )
+
+@dataclass(frozen=True)
 class ProtocolRegistration:
     protocol_id: str
     protocol_hash: str
     created_at: str
+
+@dataclass(frozen=True)
+class RegisteredAblationDecisionPolicy:
+    protocol_id: str
+    protocol_hash: str
+    policy_digest: str
+    schema_version: str
+    minimum_pairs: int
+    required_lower_bound: str
+    uncertainty_multiplier: str
+    decision_rule: str
+
 
 
 @dataclass(frozen=True)
@@ -465,11 +680,19 @@ class ScientificRegistry:
                 )
 
     def register_protocol(self, payload: dict[str, Any], *, protocol_id: str | None = None) -> ProtocolRegistration:
-        if not isinstance(payload, dict):
-            raise TypeError("protocol payload must be an object")
-        missing = sorted(REQUIRED_PROTOCOL_FIELDS - set(payload))
+        if type(payload) is not dict:
+            raise TypeError("protocol payload must be an exact object")
+        payload_keys = tuple(payload.keys())
+        if any(type(key) is not str for key in payload_keys):
+            raise ProtocolViolation("protocol payload keys must be exact text")
+        missing = sorted(REQUIRED_PROTOCOL_FIELDS - set(payload_keys))
         if missing:
             raise ProtocolViolation("missing required protocol fields: " + ", ".join(missing))
+        if "ablation_decision_policy" in payload:
+            # This policy is semantically bound to minimum_practical_effect.
+            # Validate both before the generic required-field emptiness pass can
+            # dispatch str/list/dict subclass methods on caller-owned values.
+            _validated_protocol_ablation_decision_policy(payload)
         empty = sorted(
             name
             for name in REQUIRED_PROTOCOL_FIELDS
@@ -483,6 +706,10 @@ class ScientificRegistry:
             raise ProtocolViolation("trial_budget must be a positive integer")
         _validate_causal_periods(payload)
         identifier = _id(protocol_id)
+        if "ablation_value_policy" in payload:
+            # Admit this untrusted nested graph before canonical JSON/hash
+            # traversal can invoke polymorphic container/scalar callbacks.
+            _ablation_value_policy_fields(payload["ablation_value_policy"])
         canonical = _canonical(payload)
         digest = _hash(payload)
         created = _now()
@@ -525,6 +752,82 @@ class ScientificRegistry:
             protocol_id=protocol,
             protocol_hash=row["protocol_hash"],
             created_at=row["created_at"],
+        )
+
+    def ablation_value_policy(self, protocol_id: str) -> AblationValuePolicy:
+        """Load the protocol-hash-bound dimensional policy for WP-63 economics.
+
+        Registration stays backward compatible: protocols without this optional
+        extension remain valid for non-terminal workflows, but callers that need
+        terminal ablation economics must obtain this policy and therefore fail
+        closed when it is absent or malformed.
+        """
+
+        protocol = _id(protocol_id)
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT protocol_hash,payload_json FROM protocols WHERE protocol_id=?",
+                (protocol,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(protocol)
+        try:
+            payload = json.loads(row["payload_json"])
+        except json.JSONDecodeError as error:
+            raise ProtocolViolation("registered protocol payload is corrupt") from error
+        if (
+            not isinstance(payload, dict)
+            or _canonical(payload) != row["payload_json"]
+            or _hash(payload) != row["protocol_hash"]
+        ):
+            raise ProtocolViolation("registered protocol integrity mismatch")
+        if "ablation_value_policy" not in payload:
+            raise ProtocolViolation(
+                "registered protocol has no ablation_value_policy"
+            )
+        return _ablation_value_policy(
+            payload["ablation_value_policy"],
+            protocol_id=protocol,
+            protocol_hash=row["protocol_hash"],
+        )
+
+    def ablation_decision_policy(
+        self,
+        protocol_id: str,
+    ) -> RegisteredAblationDecisionPolicy:
+        """Load the protocol-hash-bound terminal ablation decision policy."""
+        protocol = _id(protocol_id)
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT protocol_hash,payload_json FROM protocols WHERE protocol_id=?",
+                (protocol,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(protocol)
+        try:
+            payload = json.loads(row["payload_json"])
+        except json.JSONDecodeError as error:
+            raise ProtocolViolation("registered protocol payload is corrupt") from error
+        if (
+            type(payload) is not dict
+            or _canonical(payload) != row["payload_json"]
+            or _hash(payload) != row["protocol_hash"]
+        ):
+            raise ProtocolViolation("registered protocol integrity mismatch")
+        if "ablation_decision_policy" not in payload:
+            raise ProtocolViolation(
+                "registered protocol lacks ablation_decision_policy"
+            )
+        policy = _validated_protocol_ablation_decision_policy(payload)
+        return RegisteredAblationDecisionPolicy(
+            protocol_id=protocol,
+            protocol_hash=row["protocol_hash"],
+            policy_digest=_hash(policy),
+            schema_version=policy["schema_version"],
+            minimum_pairs=policy["minimum_pairs"],
+            required_lower_bound=policy["required_lower_bound"],
+            uncertainty_multiplier=policy["uncertainty_multiplier"],
+            decision_rule=policy["decision_rule"],
         )
 
     def record_trial(

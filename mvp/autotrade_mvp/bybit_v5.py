@@ -663,6 +663,28 @@ def _install_bybit_prepared_submission_authority(
     canonical_position_idx_code = _position_idx_from_capability.__code__
     canonical_capability_admits = capability_type.admits
     canonical_capability_admits_code = capability_type.admits.__code__
+    canonical_prepared_init = prepared_type.__dict__.get("__post_init__")
+    canonical_prepared_init_code = getattr(
+        canonical_prepared_init, "__code__", None
+    )
+    canonical_documented_endpoints = BYBIT_DOCUMENTED_ENDPOINTS
+    canonical_documented_endpoints_items = tuple(
+        sorted(BYBIT_DOCUMENTED_ENDPOINTS.items())
+    )
+    canonical_rest_base = _REST_BASE_BY_ENVIRONMENT
+    canonical_rest_base_items = tuple(sorted(_REST_BASE_BY_ENVIRONMENT.items()))
+    canonical_runtime_mapping = _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT
+    canonical_runtime_mapping_items = tuple(
+        sorted(_RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT.items())
+    )
+
+    if (
+        canonical_prepared_init_code is None
+        or type(canonical_documented_endpoints) is not dict
+        or type(canonical_rest_base) is not dict
+        or type(canonical_runtime_mapping) is not dict
+    ):
+        raise ProviderCoreError("Bybit prepared submission authority is unavailable")
 
     bindings: dict[int, tuple[object, tuple[object, ...]]] = {}
 
@@ -689,6 +711,23 @@ def _install_bybit_prepared_submission_authority(
         if (
             type(value) is not prepared_type
             or BybitPreparedSubmission is not prepared_type
+            or prepared_type.__dict__.get("__post_init__")
+            is not canonical_prepared_init
+            or getattr(canonical_prepared_init, "__code__", None)
+            is not canonical_prepared_init_code
+            or BYBIT_DOCUMENTED_ENDPOINTS is not canonical_documented_endpoints
+            or type(BYBIT_DOCUMENTED_ENDPOINTS) is not dict
+            or tuple(sorted(BYBIT_DOCUMENTED_ENDPOINTS.items()))
+            != canonical_documented_endpoints_items
+            or _REST_BASE_BY_ENVIRONMENT is not canonical_rest_base
+            or type(_REST_BASE_BY_ENVIRONMENT) is not dict
+            or tuple(sorted(_REST_BASE_BY_ENVIRONMENT.items()))
+            != canonical_rest_base_items
+            or _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT
+            is not canonical_runtime_mapping
+            or type(_RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT) is not dict
+            or tuple(sorted(_RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT.items()))
+            != canonical_runtime_mapping_items
         ):
             authority_changed()
         binding = bindings.get(id(value))
@@ -734,6 +773,28 @@ def _install_bybit_prepared_submission_authority(
         if type(at) is not datetime:
             raise ProviderCoreError("Bybit preparation time must be exact datetime")
         if getattr(builder, "__code__", None) is not builder_code:
+            authority_changed()
+        if (
+            prepared_type.__dict__.get("__post_init__") is not canonical_prepared_init
+            or getattr(canonical_prepared_init, "__code__", None)
+            is not canonical_prepared_init_code
+        ):
+            authority_changed()
+        if (
+            BYBIT_DOCUMENTED_ENDPOINTS is not canonical_documented_endpoints
+            or type(BYBIT_DOCUMENTED_ENDPOINTS) is not dict
+            or tuple(sorted(BYBIT_DOCUMENTED_ENDPOINTS.items()))
+            != canonical_documented_endpoints_items
+            or _REST_BASE_BY_ENVIRONMENT is not canonical_rest_base
+            or type(_REST_BASE_BY_ENVIRONMENT) is not dict
+            or tuple(sorted(_REST_BASE_BY_ENVIRONMENT.items()))
+            != canonical_rest_base_items
+            or _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT
+            is not canonical_runtime_mapping
+            or type(_RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT) is not dict
+            or tuple(sorted(_RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT.items()))
+            != canonical_runtime_mapping_items
+        ):
             authority_changed()
         function_authorities = (
             (

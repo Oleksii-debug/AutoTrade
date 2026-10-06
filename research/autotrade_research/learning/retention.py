@@ -56,6 +56,8 @@ def _detached_dataclass_state(
         raise TypeError(f"{name} must be exact {expected_type.__name__}")
     state = object.__getattribute__(value, "__dict__")
     expected_fields = {field.name for field in fields(expected_type)}
+    if any(field_name in expected_type.__dict__ for field_name in expected_fields):
+        raise TypeError(f"{name} class field descriptors changed")
     if type(state) is not dict or set(state) != expected_fields:
         raise TypeError(f"{name} has unexpected state fields")
     return {field_name: state[field_name] for field_name in expected_fields}

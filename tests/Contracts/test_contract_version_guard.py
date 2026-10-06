@@ -27,6 +27,41 @@ def write_tree(root: Path, version="1.0.0", schemas=None, defs=None):
         )
 
 
+
+def write_semantic_validator(
+    root: Path,
+    *,
+    validator_id: str = "dataset-authority-v1",
+    expected: str = "valid",
+):
+    corpus = root / "contracts" / "fixtures" / "semantic.corpus.json"
+    corpus.parent.mkdir(parents=True, exist_ok=True)
+    corpus.write_text(
+        json.dumps({
+            "cases": [
+                {
+                    "id": "shared-case",
+                    "expected": expected,
+                }
+            ]
+        }),
+        encoding="utf-8",
+    )
+    manifest_path = root / "contracts" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["semantic_validators"] = [
+        {
+            "id": validator_id,
+            "schema": "a.schema.json",
+            "definition": "A",
+            "corpus": "contracts/fixtures/semantic.corpus.json",
+            "bindings": {
+                "python": "contracts/bindings/python/a.py",
+            },
+        }
+    ]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
 def write_openapi(
     root: Path,
     version: str,
@@ -144,6 +179,45 @@ class ContractVersionGuardTests(unittest.TestCase):
             )
 
             write_tree(Path(right), version="6.0.0", defs=current_defs)
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_semantic_validator_corpus_change_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left), version="6.0.0")
+            write_semantic_validator(Path(left), expected="valid")
+            write_tree(Path(right), version="6.1.0")
+            write_semantic_validator(Path(right), expected="invalid")
+
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(
+                any(
+                    "breaking contract change requires a new major version" in item
+                    and "changed semantic validators: dataset-authority-v1" in item
+                    for item in errors
+                )
+            )
+
+            write_tree(Path(right), version="7.0.0")
+            write_semantic_validator(Path(right), expected="invalid")
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_adding_semantic_validator_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left), version="6.0.0")
+            write_tree(Path(right), version="6.1.0")
+            write_semantic_validator(Path(right))
+
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(
+                any(
+                    "breaking contract change requires a new major version" in item
+                    and "changed semantic validators: dataset-authority-v1" in item
+                    for item in errors
+                )
+            )
+
+            write_tree(Path(right), version="7.0.0")
+            write_semantic_validator(Path(right))
             self.assertEqual(evaluate(Path(left), Path(right)), [])
 
     def test_decimal_envelope_member_change_requires_major_increment(self):

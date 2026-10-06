@@ -87,5 +87,84 @@ class AccessibleStatusTests(unittest.TestCase):
             self.assertNotIn("{", text)
 
 
+    def test_malformed_nested_state_is_reported_without_crashing(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "evidence_count": 1,
+                "fills": [],
+                "state_format": "canonical_journal",
+                "episode_id": "episode-1",
+                "session_status": "RUNNING",
+                "active_reservations": [
+                    {"remaining": None, "state": "ACTIVE"},
+                    "corrupt-reservation",
+                ],
+            },
+            {
+                "final_equity": "1000",
+                "net_pnl": "0",
+                "total_fees": "0",
+                "turnover": "0",
+                "max_drawdown": "0",
+                "reconciled": False,
+                "cash_buckets": {"currency": "USD", "account_cash": "1000"},
+            },
+        )
+        self.assertIn("Recorded fills: Unavailable", text)
+        self.assertIn("Reservation 1: unavailable; state: ACTIVE", text)
+        self.assertIn("Reservation 2: unavailable", text)
+        self.assertIn("Гроші на рахунку (USD): 1000", text)
+        self.assertIn("Розраховані кошти: Unavailable", text)
+        self.assertIn("Нереалізований прибуток/збиток: Unavailable", text)
+        self.assertIn("Economic edge: unproven", text)
+
+    def test_hostile_value_objects_are_not_executed_by_accessible_status(self):
+        class TrapText(str):
+            def __str__(self):
+                raise AssertionError("caller-controlled __str__ executed")
+
+        class TrapDict(dict):
+            def get(self, *args, **kwargs):
+                raise AssertionError("caller-controlled get executed")
+
+            def items(self):
+                raise AssertionError("caller-controlled items executed")
+
+            def __len__(self):
+                raise AssertionError("caller-controlled len executed")
+
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "symbol": TrapText("SIM"),
+                "initial_cash": "1000",
+                "evidence_count": 1,
+                "fills": TrapDict({"fill-1": {}}),
+                "state_format": "canonical_journal",
+                "session_status": "RUNNING",
+                "active_reservations": TrapDict(),
+            }
+        )
+        self.assertIn("Instrument: Unavailable", text)
+        self.assertIn("Recorded fills: Unavailable", text)
+        self.assertIn("Active reservations: unavailable", text)
+
+    def test_non_dict_status_fails_closed_as_corrupt(self):
+        class TrapDict(dict):
+            def get(self, *args, **kwargs):
+                raise AssertionError("caller-controlled get executed")
+
+        text = format_accessible_status(TrapDict({"status": "running"}))
+        self.assertIn("System state: Corrupt or unreadable state", text)
+        self.assertIn(
+            "Action required: inspect or restore the simulated state before continuing",
+            text,
+        )
+        self.assertIn("Economic edge: unproven", text)
+
+
 if __name__ == "__main__":
     unittest.main()

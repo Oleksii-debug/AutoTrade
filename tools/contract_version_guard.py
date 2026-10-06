@@ -473,13 +473,7 @@ def contract_bytes(root: Path) -> dict[str, bytes]:
 
 
 def semantic_validator_surface(root: Path, manifest: dict) -> dict[str, object]:
-    """Return the canonical semantic-validator contract surface.
-
-    JSON Schema cannot express every cross-field validity rule. Validators
-    declared in contracts/manifest.json therefore form part of the public
-    contract. Their declaration and shared corpus are versioned together so a
-    semantic accept/reject change cannot hide behind a minor version bump.
-    """
+    """Return and validate the canonical semantic-validator contract surface."""
 
     declared = manifest.get("semantic_validators", [])
     if declared is None:
@@ -487,31 +481,110 @@ def semantic_validator_surface(root: Path, manifest: dict) -> dict[str, object]:
     if not isinstance(declared, list):
         raise ValueError("manifest semantic_validators must be an array")
 
-    result: dict[str, object] = {}
+    schemas = manifest.get("schemas", [])
+    if not isinstance(schemas, list) or any(
+        not isinstance(name, str) or not name for name in schemas
+    ):
+        raise ValueError("manifest schemas must be an array of non-empty names")
+
     root_resolved = root.resolve()
+    contracts_root = (root / "contracts").resolve()
+
+    def declared_file(relative: object, *, label: str, contracts_only: bool = False):
+        if not isinstance(relative, str) or not relative:
+            raise ValueError(f"{label} must be non-empty text")
+        path = (root / relative).resolve()
+        boundary = contracts_root if contracts_only else root_resolved
+        if not path.is_relative_to(boundary):
+            raise ValueError(f"{label} escapes its authority tree: {relative}")
+        if not path.is_file():
+            raise ValueError(f"{label} does not exist: {relative}")
+        return path
+
+    result: dict[str, object] = {}
     for entry in declared:
         if not isinstance(entry, dict):
             raise ValueError("semantic validator declaration must be an object")
+
         validator_id = entry.get("id")
+        schema_name = entry.get("schema")
+        definition = entry.get("definition")
         corpus = entry.get("corpus")
         if not isinstance(validator_id, str) or not validator_id:
             raise ValueError("semantic validator id must be non-empty text")
         if validator_id in result:
             raise ValueError(f"duplicate semantic validator id: {validator_id}")
-        if not isinstance(corpus, str) or not corpus:
+        if not isinstance(schema_name, str) or schema_name not in schemas:
             raise ValueError(
-                f"semantic validator {validator_id} corpus must be non-empty text"
+                f"semantic validator {validator_id} schema must name a manifest schema"
             )
-        corpus_path = (root / corpus).resolve()
-        if not corpus_path.is_relative_to(root_resolved):
+        if not isinstance(definition, str) or not definition:
             raise ValueError(
-                f"semantic validator {validator_id} corpus escapes contract tree"
+                f"semantic validator {validator_id} definition must be non-empty text"
             )
-        if not corpus_path.is_file():
+
+        schema_path = declared_file(
+            f"contracts/jsonschema/{schema_name}",
+            label=f"semantic validator {validator_id} schema",
+            contracts_only=True,
+        )
+        schema_payload = json.loads(schema_path.read_text(encoding="utf-8"))
+        definitions = schema_payload.get("$defs", {})
+        if not isinstance(definitions, dict) or definition not in definitions:
             raise ValueError(
-                f"semantic validator {validator_id} corpus does not exist: {corpus}"
+                f"semantic validator {validator_id} definition does not exist: "
+                f"{schema_name}#/$defs/{definition}"
             )
+
+        corpus_path = declared_file(
+            corpus,
+            label=f"semantic validator {validator_id} corpus",
+            contracts_only=True,
+        )
         corpus_payload = json.loads(corpus_path.read_text(encoding="utf-8"))
+        if not isinstance(corpus_payload, dict):
+            raise ValueError(
+                f"semantic validator {validator_id} corpus must be a JSON object"
+            )
+        if corpus_payload.get("validator_id") != validator_id:
+            raise ValueError(
+                f"semantic validator {validator_id} corpus validator_id mismatch"
+            )
+        if corpus_payload.get("contract_version") != manifest.get("contract_version"):
+            raise ValueError(
+                f"semantic validator {validator_id} corpus contract_version mismatch"
+            )
+
+        bindings = entry.get("bindings")
+        if not isinstance(bindings, dict) or not bindings:
+            raise ValueError(
+                f"semantic validator {validator_id} bindings must be a non-empty object"
+            )
+        for language, relative in bindings.items():
+            if not isinstance(language, str) or not language:
+                raise ValueError(
+                    f"semantic validator {validator_id} binding language must be text"
+                )
+            declared_file(
+                relative,
+                label=f"semantic validator {validator_id} {language} binding",
+            )
+
+        installed = entry.get("installed_bindings", {})
+        if not isinstance(installed, dict):
+            raise ValueError(
+                f"semantic validator {validator_id} installed_bindings must be an object"
+            )
+        for language, relative in installed.items():
+            if not isinstance(language, str) or not language:
+                raise ValueError(
+                    f"semantic validator {validator_id} installed binding language must be text"
+                )
+            declared_file(
+                relative,
+                label=f"semantic validator {validator_id} installed {language} binding",
+            )
+
         result[validator_id] = {
             "declaration": entry,
             "corpus": corpus_payload,

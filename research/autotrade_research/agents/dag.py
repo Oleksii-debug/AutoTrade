@@ -96,13 +96,25 @@ def _score_decimal(value: Fraction) -> Decimal:
         ) from error
 
 
+def _exact_sequence(value: object, name: str) -> tuple[object, ...]:
+    """Detach one caller collection without invoking polymorphic iteration."""
+
+    if type(value) not in (list, tuple):
+        raise SpecialistDagError(f"{name} must be an exact built-in list or tuple")
+    return tuple(value)
+
+
 def _utc(value: datetime, name: str) -> datetime:
-    if (
-        type(value) is not datetime
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
-        raise SpecialistDagError(f"{name} must be an exact timezone-aware datetime")
+    # The outer datetime type alone is not enough: an exact datetime may embed
+    # caller-defined tzinfo whose utcoffset/dst/fromutc callbacks would execute
+    # while this authority-bearing deadline/evidence time is normalized.
+    # Admit only the non-polymorphic stdlib timezone implementation first.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise SpecialistDagError(
+            f"{name} must use an exact datetime with built-in timezone"
+        )
+    if value.utcoffset() is None:
+        raise SpecialistDagError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc)
 
 
@@ -242,9 +254,23 @@ class DagPlan:
         object.__setattr__(self, "total_budget", budget)
 
 
+def _require_canonical_record_accessor(record_type: type, name: str) -> None:
+    """Fail closed if a canonical authority DTO's instance accessor was rebound.
+
+    The public readmission boundary must not execute caller-controlled class
+    callbacks before it has detached and revalidated the DTO fields.
+    """
+
+    if type.__getattribute__(record_type, "__getattribute__") is not object.__getattribute__:
+        raise SpecialistDagError(
+            f"{name} canonical instance accessor has been rebound"
+        )
+
+
 def _readmit_spec(value: object) -> SpecialistSpec:
     if type(value) is not SpecialistSpec:
         raise SpecialistDagError("specialist specification must be exact SpecialistSpec")
+    _require_canonical_record_accessor(SpecialistSpec, "SpecialistSpec")
     return SpecialistSpec(
         role_id=value.role_id,
         correlation_group=value.correlation_group,
@@ -258,6 +284,7 @@ def _readmit_spec(value: object) -> SpecialistSpec:
 def _readmit_run(value: object) -> SpecialistRun:
     if type(value) is not SpecialistRun:
         raise SpecialistDagError("specialist result must be exact SpecialistRun")
+    _require_canonical_record_accessor(SpecialistRun, "SpecialistRun")
     return SpecialistRun(
         role_id=value.role_id,
         input_snapshot_id=value.input_snapshot_id,
@@ -274,6 +301,7 @@ def _readmit_run(value: object) -> SpecialistRun:
 def _readmit_plan(value: object) -> DagPlan:
     if type(value) is not DagPlan:
         raise SpecialistDagError("plan must be an exact DagPlan")
+    _require_canonical_record_accessor(DagPlan, "DagPlan")
     return DagPlan(
         input_snapshot_id=value.input_snapshot_id,
         scheduled_roles=value.scheduled_roles,
@@ -363,15 +391,16 @@ def plan_specialists(
 ) -> DagPlan:
     """Choose useful dependency-satisfied roles without exceeding the hard budget."""
 
+    raw_items = _exact_sequence(specs, "specs")
+    raw_available = _exact_sequence(available_inputs, "available_inputs")
     snapshot_id = _text(input_snapshot_id, "input_snapshot_id")
     budget = _decimal(total_budget, "total_budget", non_negative=True)
-    raw_items = tuple(specs)
     items = tuple(_readmit_spec(item) for item in raw_items)
     by_id = {item.role_id: item for item in items}
     if len(by_id) != len(items):
         raise SpecialistDagError("specialist role ids must be unique")
 
-    available = {_text(item, "available input") for item in available_inputs}
+    available = {_text(item, "available input") for item in raw_available}
     scheduled: list[str] = []
     skipped: list[tuple[str, str]] = []
     reserved = Decimal("0")
@@ -436,8 +465,14 @@ def aggregate_specialists(
 ) -> AggregatedProposal:
     """Aggregate only outputs admitted by the exact canonical specialist plan."""
 
+    raw_spec_items = _exact_sequence(specs, "specs")
+    raw_runs = _exact_sequence(runs, "runs")
+    raw_available = _exact_sequence(available_inputs, "available_inputs")
+    raw_blockers = _exact_sequence(
+        blocking_critique_terms,
+        "blocking_critique_terms",
+    )
     deadline = _utc(decision_deadline, "decision_deadline")
-    raw_spec_items = tuple(specs)
     spec_items = tuple(_readmit_spec(spec) for spec in raw_spec_items)
     by_id = {spec.role_id: spec for spec in spec_items}
     if not by_id:
@@ -450,10 +485,31 @@ def aggregate_specialists(
     canonical_plan = plan_specialists(
         spec_items,
         input_snapshot_id=snapshot_id,
-        available_inputs=available_inputs,
+        available_inputs=raw_available,
         total_budget=total_budget,
     )
-    if plan != canonical_plan:
+    # Never dispatch through DagPlan.__eq__: the canonical class is public
+    # Python state and can be monkey-patched after a plan was created. Compare
+    # detached, already-readmitted fields through object.__getattribute__
+    # instead, so class-level equality rebinding cannot self-authenticate a
+    # forged schedule.
+    plan_state = (
+        object.__getattribute__(plan, "input_snapshot_id"),
+        object.__getattribute__(plan, "scheduled_roles"),
+        object.__getattribute__(plan, "skipped_roles"),
+        object.__getattribute__(plan, "reserved_cost"),
+        object.__getattribute__(plan, "available_inputs"),
+        object.__getattribute__(plan, "total_budget"),
+    )
+    canonical_plan_state = (
+        object.__getattribute__(canonical_plan, "input_snapshot_id"),
+        object.__getattribute__(canonical_plan, "scheduled_roles"),
+        object.__getattribute__(canonical_plan, "skipped_roles"),
+        object.__getattribute__(canonical_plan, "reserved_cost"),
+        object.__getattribute__(canonical_plan, "available_inputs"),
+        object.__getattribute__(canonical_plan, "total_budget"),
+    )
+    if plan_state != canonical_plan_state:
         raise SpecialistDagError(
             "DagPlan does not match canonical planner output for this context"
         )
@@ -464,10 +520,10 @@ def aggregate_specialists(
     accepted: list[tuple[SpecialistSpec, SpecialistRun]] = []
     rejected: list[tuple[str, str]] = []
     blockers: set[str] = set()
-    for item in blocking_critique_terms:
+    for item in raw_blockers:
         blockers.add(_text(item, "blocking critique term").lower())
 
-    for raw_run in runs:
+    for raw_run in raw_runs:
         run = _readmit_run(raw_run)
         if run.role_id in seen:
             raise SpecialistDagError("duplicate specialist result")
@@ -558,7 +614,9 @@ def aggregate_specialists(
                 "specialist group weighted score",
             )
         if weight_sum == 0:
-            group_scores.append(Fraction(0, 1))
+            # A zero-confidence group is evidence with no numerical weight.
+            # Counting it in the equal-group denominator would let a
+            # zero-confidence specialist dilute an independent signal.
             continue
         group_scores.append(
             _bounded_fraction(
@@ -567,17 +625,20 @@ def aggregate_specialists(
             )
         )
 
-    aggregate_fraction = Fraction(0, 1)
-    for group_score in group_scores:
+    if group_scores:
+        aggregate_fraction = Fraction(0, 1)
+        for group_score in group_scores:
+            aggregate_fraction = _bounded_fraction(
+                aggregate_fraction + group_score,
+                "aggregate specialist score",
+            )
         aggregate_fraction = _bounded_fraction(
-            aggregate_fraction + group_score,
+            aggregate_fraction / len(group_scores),
             "aggregate specialist score",
         )
-    aggregate_fraction = _bounded_fraction(
-        aggregate_fraction / len(group_scores),
-        "aggregate specialist score",
-    )
-    aggregate = _score_decimal(aggregate_fraction)
+        aggregate = _score_decimal(aggregate_fraction)
+    else:
+        aggregate = Decimal("0")
     if aggregate > 0:
         direction: Literal["LONG", "SHORT", "FLAT"] = "LONG"
     elif aggregate < 0:

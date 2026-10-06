@@ -1,0 +1,309 @@
+# Section 6 deterministic simulator closure — DONE
+
+Initial date: 2026-10-04
+Latest closure review: 2026-10-06
+Current reconvergence base main: `60e7c95b3b572810dcfb6c4ab34e0b338b0ace02` (#1702)
+
+Current main already contains canonical simulation ownership/recovery, deterministic protocol identity, atomic OMS/finance/settlement convergence, partial fills, and crash-safe ZERO continuation. This candidate closes the remaining demonstrated provider-free simulator determinism/trust gaps.
+
+## Residuals closed
+
+1. Simulation policy chronology
+- SIMULATION policy registration uses the frozen simulation timestamp rather than physical process time;
+- uninterrupted vs pause/resume durable policy events can remain identical;
+- non-SIMULATION scopes cannot consume simulation_time.
+
+2. Execution DTO/scalar authority
+- simulator and independent conservative oracle accept exact canonical DTO types;
+- caller-owned frozen dataclass instances are detached/reconstructed before authority-bearing use;
+- hostile Decimal/string/integer subclasses and post-construction mutation fail closed;
+- exact bounded numeric primitives remove ambient Decimal-context authority.
+
+3. MARKET price projection
+- MARKET execution uses a versioned price-projection policy bound to InstrumentVersion.price_tick;
+- BUY rounds adversely upward and SELL downward to the declared instrument quantum;
+- independent oracle reconstructs and verifies the same adverse tick bound;
+- mismatched instrument grid/policy fails qualification.
+
+4. Execution qualification evidence
+- qualification reads immutable evidence through one authenticated ArtifactStore snapshot and verifies the exact bytes/digest.
+
+## Closure requirements
+
+Section 6 is DONE only after:
+1. focused simulation/execution qualification passes on the exact head;
+2. full baseline and Verify are terminal green;
+3. review state is clean;
+4. one integrated provider-free simulation scenario remains deterministic across restart;
+5. merge completes;
+6. post-merge readback confirms accepted source identity.
+
+No provider/PAPER/LIVE, profitability, economic-edge, signed-release or NVDA qualification is granted.
+
+## Follow-up source review: qualification authority closure
+
+Exact source review after the initial convergence found additional qualification gaps and repaired them on the same canonical Section 6 lineage:
+
+- execution_qualification imported ArtifactStore from a runtime package absent from this exact current-main tree; production and test imports now use the existing canonical autotrade_research.artifacts authority on this lineage;
+- execution qualification used non-canonical asset labels (EQUITY/SPOT/MARGIN) instead of the InstrumentVersion asset enum; qualification now uses CASH_EQUITY/FUND/FX/CRYPTO_SPOT/FUTURE/PERPETUAL/OPTION and requires caller/qualification asset identity to equal the canonical instrument;
+- qualified order lot size and quantity are bound to InstrumentVersion quantity_step/min/max rules;
+- qualified limit/stop and bid/ask/bar prices are bound to InstrumentVersion price_tick/bands;
+- qualified order time and market observation time must both lie inside the exact InstrumentVersion effective interval;
+- regressions cover false asset-class agreement, sub-step lots, off-grid order/liquidity prices and pre/post-effective instrument use.
+
+These are qualification-integrity repairs only. They do not turn simulation evidence into provider/PAPER/LIVE authority or profitability/edge evidence. Fresh exact-head baseline and Verify are required after these changes.
+
+
+## Follow-up source review: authoritative instrument metadata cut
+
+The qualified execution path now rejects caller-constructed InstrumentVersion facts unless
+their canonical metadata_evidence resolves through the existing authenticated ArtifactStore
+reader and is bound to the exact instrument-version facts. Qualified simulation additionally
+requires that metadata evidence to have been immutably committed by the order submission cut,
+preventing a later-discovered price tick or quantity rule from leaking backward into replay.
+Focused regressions cover missing metadata authority and post-order metadata publication.
+
+
+## 2026-10-06 recovery/send-boundary closure
+
+The candidate was mechanically reconverged onto current main #1702 after the
+older full Verify failure was traced exclusively to the independent
+research/tests/test_update_producer.py chronology fixtures. The current-main
+#1702 repair is inherited rather than duplicated.
+
+Live source review then found a real Section-6 composition gap documented by the
+newer isolated simulation lineage #1736: a process death after durable
+SubmissionPrepared but before the final send guard could later age beyond the
+Prepared owner lease. The simulator already had an atomic zero-wire BLOCKED
+terminalizer, but the older current-main dispatcher converted this provably
+pre-wire expiry into UNKNOWN and the simulator did not consume recovered
+BLOCKED.
+
+The same Section-6 lineage now closes both sides of that boundary:
+
+- an expired SubmissionPrepared with no SubmissionSending evidence becomes
+  durable SubmissionBlocked with reason
+  prepared_owner_lease_expired_before_send;
+- an active Prepared lease remains IN_PROGRESS;
+- Sending or later ambiguous states remain UNKNOWN and are never blindly resent;
+- the simulator consumes recovered BLOCKED through its existing atomic terminal
+  mutation, releasing the reservation and completing the session without
+  provider resend or fresh admission;
+- the terminal simulation timestamp is inherited from durable SubmissionBlocked
+  evidence, so a later restart cannot rewrite causal chronology;
+- a concurrent recovery BLOCKED fence prevents a late original final_guard from
+  committing SubmissionSending or reaching provider transport;
+- no broader cross-attempt WP-18 economic-intent fence is imported here.
+
+Focused regressions:
+- mvp/tests/test_simulation_expired_prepared_recovery.py;
+- mvp/tests/test_dispatch_prepared_zero_wire_section6.py.
+
+Together with the previously enumerated simulation/execution suites, the
+direct Section-6 regression surface now contains at least 239 test methods
+across 15 focused files, including 120-episode uninterrupted-vs-restart
+equivalence, real os._exit partial-fill recovery, zero-network denial,
+build/protocol/config drift, exact execution qualification and conservative
+independent-oracle checks.
+
+## Final exact-head rule
+
+This file is durable source evidence, not a self-certifying PASS. The final
+accepted SHA is the PR #1617 head created after this documentation update.
+Queued, pending, cancelled or older-head CI is not PASS.
+
+Section 6 may be marked DONE only when that final head has:
+1. baseline SUCCESS;
+2. Verify AutoTrade SUCCESS on both hosted OS jobs;
+3. reconvergence-integrity SUCCESS;
+4. clean review/thread state;
+5. ahead-only topology from the then-current main or a fresh non-loss
+   reconvergence if main has advanced;
+6. merge to main;
+7. post-merge readback proving the accepted Section-6 source identities.
+
+The result remains provider-free simulation authority only. It does not grant
+PAPER/LIVE/provider qualification, economic-edge/profitability, signed-release,
+native-Windows or human-NVDA qualification.
+
+
+## 2026-10-06 final Prepared/send race and exact-lease hardening
+
+A final adversarial review of the zero-wire recovery seam found two residuals and
+closed both on this canonical Section-6 lineage:
+
+- if recovery had already read durable `SubmissionPrepared` but the original
+  final send barrier committed `SubmissionSending` before recovery could commit
+  version-2 `SubmissionBlocked`, the recovery CAS conflict could escape as a
+  `ValueError`; recovery now reloads durable truth and converges to terminal
+  state or the existing `SubmissionSending -> SubmissionUnknown` path instead
+  of fabricating zero-wire safety or leaking the version race;
+- Prepared lease age no longer passes through
+  `timedelta.total_seconds()`/binary float.  It is compared as exact
+  `timedelta` chronology, and `prepared_lease_seconds` must be an exact
+  built-in positive integer.
+
+Focused regressions now cover both Prepared/send race orders (BLOCKED wins
+and Sending wins), repeated Prepared recovery owners converging through durable
+truth, concurrent recovery owners racing from the same SubmissionSending cut
+and converging on one SubmissionUnknown terminal, no repeated recovery authority
+call, hostile integer lease input, very large exact-integer lease values without
+timedelta overflow, and the exact microsecond expiry boundary immediately before
+and at lease expiration.
+
+These changes preserve the fail-closed rule: before `SubmissionSending`, an
+expired Prepared can be proven zero-wire and BLOCKED; once `SubmissionSending`
+wins, recovery is UNKNOWN and cannot be blindly resent.
+
+## 2026-10-06 independent LIMIT/trigger oracle and stale-owner closure
+
+A further adversarial review found authority gaps that were not covered by the
+previous MARKET-focused independent oracle and Prepared recovery work.  They are
+closed on the same canonical Section-6 lineage:
+
+- positive LIMIT/STOP_LIMIT results must now have independently executable
+  quote/bar evidence and must use the frozen order limit exactly; a forged
+  economically favorable limit fill can no longer pass the independent oracle;
+- STOP_LIMIT positive fills require a previously triggered order, while a newly
+  reported trigger must itself be supported by causal post-arrival stop evidence;
+  BAR trigger evidence may not begin before venue arrival;
+- `already_triggered` is a state bit reserved to STOP_LIMIT orders rather than a
+  generic caller-controlled flag on MARKET/LIMIT orders;
+- recovery from durable `SubmissionSending` cannot timestamp terminal UNKNOWN
+  before the send barrier even when the restarted process clock moves backward;
+- Prepared lease expiry is enforced by the original final send guard itself,
+  not only opportunistically by a second recovery owner.  A stale original owner
+  therefore cannot cross into `SubmissionSending` after its exact lease boundary;
+- the fresh final authority check remains independent and is evaluated before
+  the lease fence, so an expired/revoked policy is still recorded as such while
+  an otherwise-authorized stale owner remains blocked before wire;
+- the qualified execution wrapper has an adversarial regression proving that
+  forged non-executable LIMIT fills are rejected through the actual qualified
+  path, not only when the oracle is called in isolation.
+
+Thirteen focused regressions were added across execution realism, independent
+oracle, execution qualification and dispatch recovery tests.  The prior direct
+Section-6 count of at least 239 test methods is therefore at least 252 on this
+lineage.  This count is source coverage only: it is not a PASS result.
+
+The closure rule is unchanged and fail-closed.  The exact final head still needs
+terminal baseline + Verify success, clean review state, ahead-only/current-main
+reconciliation, merge, and post-merge source readback.  Queued/pending CI is not
+qualification evidence, and none of these changes grant PAPER/LIVE/provider,
+economic-edge/profitability, signed-release or NVDA qualification.
+
+
+## 2026-10-06 STOP_LIMIT trigger-state monotonicity closure
+
+Final oracle review found two symmetric state-authority gaps and closed both:
+
+- once a STOP_LIMIT order is already durably triggered, a simulated/qualified
+  result may not regress triggered state back to false, including partial fills;
+- when one causally eligible post-arrival observation with positive qualified
+  capacity independently proves the stop was touched, the result may not omit
+  the newly observed trigger.
+
+The inverse fence already remains active: a result cannot mint triggered=true
+without causal stop evidence. Direct oracle regressions and the actual qualified
+execution wrapper now exercise both directions. These are execution-state
+integrity repairs; they do not grant provider/PAPER/LIVE or profitability
+authority.
+
+The final closure rule remains exact-head terminal baseline + Verify +
+reconvergence-integrity success, clean review state, current-main topology,
+merge and post-merge readback.
+
+
+## 2026-10-06 trigger/capacity and zero-fill chronology closure
+
+The final execution-state audit closed two additional deterministic-state gaps:
+
+- STOP_LIMIT trigger authority is now independent from participation/fill capacity.
+  A causally observed stop touch is retained even when available volume produces
+  less than one executable lot; capacity controls fill quantity, not whether the
+  order became triggered. The independent oracle applies the same separation and
+  rejects omission of the observed trigger even at zero fill capacity.
+- zero-fill status is bound to causal chronology. A pre-arrival observation must
+  remain WAITING_FOR_LATENCY; a post-arrival result cannot claim waiting;
+  a BAR interval that began before arrival must remain AMBIGUOUS_NO_FILL; and
+  AMBIGUOUS_NO_FILL is invalid outside BAR fidelity.
+
+Focused simulation/oracle regressions cover zero-volume stop triggering, forged
+trigger omission, pre/post-arrival status forgery, BAR overlap status forgery and
+non-BAR ambiguity forgery.
+
+Source mutation is frozen after this evidence update unless exact-head CI or
+review identifies a concrete defect. Closure still requires terminal exact-head
+baseline + Verify + reconvergence-integrity success, clean review, current-main
+topology, merge and post-merge readback.
+
+
+## 2026-10-06 final BAR causal-status boundary
+
+A mechanical review of the zero-fill status hardening caught and repaired one
+boundary overreach before acceptance: pre-arrival BAR observations legitimately
+remain WAITING_FOR_LATENCY without requiring interval_start, because the
+simulator returns before post-arrival BAR-volume classification.
+
+The independent oracle now classifies BAR ambiguity exactly after arrival:
+- interval_start before venue arrival => AMBIGUOUS_NO_FILL;
+- a causally future, untriggered STOP_LIMIT with positive capacity and both stop
+  and limit touched in the same bar => AMBIGUOUS_NO_FILL because intrabar
+  stop-before-limit ordering is unknowable;
+- BAR results lacking either ambiguity cause cannot claim AMBIGUOUS_NO_FILL;
+- pre-arrival BAR WAITING does not require interval_start.
+
+Regressions cover all four directions, including forged NO_FILL for real
+ambiguity and forged ambiguity where no causal ambiguity exists.
+
+This is the final source/evidence update before acceptance. The branch head must
+remain stable unless exact-head CI or review proves a concrete defect. Closure
+requires terminal baseline + Verify + reconvergence-integrity success on that
+stable head, clean review, 0-behind current-main topology, merge, and post-merge
+readback.
+
+
+## 2026-10-06 final integration closure
+
+Section 6 provider-free deterministic simulator / exact execution-model authority is
+**DONE on main**.
+
+Accepted source:
+- closure PR: #1617;
+- accepted exact head: `3a45ee494bed07b1b637d95b9e03636aa2f36cf3`;
+- accepted Git tree: `f85a4fa2dddd5e05482de9f04582df2bf0eff871`;
+- merge commit: `a66acd4b80fbb179246888b42b05440eb116ed71`;
+- merge Git tree: `f85a4fa2dddd5e05482de9f04582df2bf0eff871`;
+- merge-tree equality with the accepted candidate: PASS.
+
+Post-merge/current-main non-regression proof:
+- the accepted Section-6 head is an ancestor of current main;
+- all 15 declared Section-6 mutation paths are still byte-identical to the accepted head;
+- later Section-0, Section-4 and Section-5 convergence therefore did not replace or
+  weaken the accepted Section-6 simulator/execution authority.
+
+The closed source authority includes:
+- deterministic frozen simulation-time policy;
+- exact/detached simulator ingress;
+- exact instrument-grid MARKET projection with adverse BUY/SELL rounding;
+- independent MARKET/LIMIT/STOP_LIMIT conservative oracle reconstruction;
+- trigger-state monotonicity and causal BAR ambiguity rules;
+- canonical InstrumentVersion asset/lot/quantity/price/effective-interval checks;
+- authenticated immutable instrument-metadata evidence bound to the order-time cut;
+- single authenticated execution-qualification snapshot;
+- crash/restart continuation for partial fills;
+- expired durable Prepared -> zero-wire BLOCKED recovery before the send barrier;
+- Sending-or-later ambiguity -> UNKNOWN with no blind resend;
+- exact Prepared lease chronology and stale-owner send fencing;
+- Prepared/send race convergence without fabricated zero-wire claims.
+
+Exact-head hosted baseline and Verify runs on the final PR head remained queued because
+GitHub did not assign runners. They are not recorded as PASS. Closure here is the
+canonical source/integration closure proven by exact expected source, merge and
+post-merge byte readback. Provider/PAPER/LIVE qualification, economic-edge evidence,
+signed release and physical Windows/NVDA qualification remain separate gates.
+
+This Section-6 closure is intentionally narrower than WP-13 as a whole. WP-13 remains
+IN_PROGRESS for terminal per-asset/provider/data-quality execution-realism
+qualification and independent economic validation; that broader work does not reopen
+the completed provider-free deterministic-simulator section.

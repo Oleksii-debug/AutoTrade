@@ -5,11 +5,16 @@ from __future__ import annotations
 from dataclasses import InitVar, dataclass
 from datetime import datetime, timezone
 import hashlib
+from pathlib import Path
 import re
 from types import MappingProxyType
 from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 from uuid import UUID
+
+from autotrade_runtime.artifacts import trusted_authenticated_reader
+
+from .provider_domain import ProviderDomainError, normalize_provider_environment
 
 
 class CapabilityError(ValueError):
@@ -145,6 +150,7 @@ class CapabilityClaim:
     rate_limit_policy_id: str
     data_entitlements: frozenset[str]
     evidence_ref: Mapping[str, object]
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         source = _text(self.source, "source").upper()
@@ -157,6 +163,15 @@ class CapabilityClaim:
         if environment not in ENVIRONMENTS:
             raise CapabilityError("environment is unsupported")
         object.__setattr__(self, "environment", environment)
+        try:
+            provider_environment = normalize_provider_environment(
+                provider_id=self.provider_id,
+                environment=environment,
+                provider_environment=self.provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise CapabilityError(str(error)) from error
+        object.__setattr__(self, "provider_environment", provider_environment)
         observed = _instant(self.observed_at, "observed_at")
         expires = _instant(self.expires_at, "expires_at")
         if expires <= observed:
@@ -188,6 +203,62 @@ class CapabilityClaim:
         object.__setattr__(self, "evidence_ref", evidence)
 
 
+def _snapshot_capability_claim(claim: CapabilityClaim) -> CapabilityClaim:
+    """Detach one exact claim graph before crossing any verifier callback."""
+
+    if type(claim) is not CapabilityClaim:
+        raise TypeError("claims must contain exact CapabilityClaim values")
+
+    values: dict[str, object] = {}
+    for field in (
+        "source",
+        "provider_id",
+        "account_id",
+        "entity_id",
+        "environment",
+        "provider_environment",
+        "instrument_version",
+        "position_mode",
+        "rate_limit_policy_id",
+    ):
+        current = object.__getattribute__(claim, field)
+        if type(current) is not str:
+            raise TypeError(f"claim.{field} must use exact str")
+        values[field] = current
+
+    for field in ("observed_at", "expires_at"):
+        current = object.__getattribute__(claim, field)
+        if type(current) is not datetime:
+            raise TypeError(f"claim.{field} must use exact datetime")
+        values[field] = current
+
+    for field in (
+        "supported_order_types",
+        "time_in_force",
+        "permission_scopes",
+        "native_protection",
+        "data_entitlements",
+    ):
+        current = object.__getattribute__(claim, field)
+        if type(current) is not frozenset or any(
+            type(value) is not str for value in current
+        ):
+            raise TypeError(f"claim.{field} must use exact frozenset[str]")
+        values[field] = frozenset(current)
+
+    evidence = object.__getattribute__(claim, "evidence_ref")
+    if type(evidence) is not MappingProxyType:
+        raise TypeError("claim.evidence_ref must use the canonical immutable mapping")
+    evidence_copy: dict[str, object] = {}
+    for key, value in evidence.items():
+        if type(key) is not str or type(value) is not str:
+            raise TypeError("claim.evidence_ref must contain exact string values")
+        evidence_copy[key] = value
+    values["evidence_ref"] = evidence_copy
+
+    return CapabilityClaim(**values)
+
+
 @dataclass(frozen=True)
 class EvidenceVerification:
     """Result of resolving one capability claim to immutable evidence."""
@@ -216,21 +287,38 @@ _CAPABILITY_PRODUCER_TYPES = {
 
 
 def artifact_store_evidence_verifier(
-    store: object,
+    store: object | None = None,
     *,
+    evidence_root: str | Path | None = None,
+    publication_store: object | None = None,
     issuer_verifiers: Mapping[
         str,
         Callable[[CapabilityClaim, str, str], EvidenceVerification],
     ]
     | None = None,
 ) -> Callable[[CapabilityClaim], EvidenceVerification]:
-    """Verify artifact integrity and independent source-specific issuer authority.
+    """Bind capability evidence to one independently selected authenticated root.
 
-    ArtifactStore is an immutable byte/integrity store, not an issuer trust
-    root. A capability source can verify only when the claim carries an
-    immutable issuer identity/digest and a separately supplied verifier for
-    that exact source validates the upstream authority record.
+    evidence_root is the trust input. publication_store is optional provenance
+    used by the shared ArtifactStore root authority to prove the same retained
+    namespace generation. Reads use only the captured trusted authenticated
+    reader, never caller object methods.
+
+    store remains only as a compatibility alias for publication_store. It never
+    selects the trusted root, so an explicit evidence_root is mandatory.
     """
+
+    if store is not None:
+        if publication_store is not None:
+            raise TypeError("pass either store or publication_store, not both")
+        publication_store = store
+    if evidence_root is None:
+        raise TypeError("evidence_root is required for trusted capability evidence")
+
+    read_authenticated_snapshot = trusted_authenticated_reader(
+        evidence_root,
+        publication_store=publication_store,
+    )
 
     normalized_issuers: dict[
         str,
@@ -248,13 +336,12 @@ def artifact_store_evidence_verifier(
             normalized_issuers[normalized_source] = verifier
 
     def verify(claim: CapabilityClaim) -> EvidenceVerification:
+        if type(claim) is not CapabilityClaim:
+            raise TypeError("capability verifier accepts only exact CapabilityClaim values")
         artifact_id = str(claim.evidence_ref["artifact_id"])
         expected_digest = str(claim.evidence_ref["sha256"])
         try:
-            load_manifest = getattr(store, "load_manifest")
-            read_bytes = getattr(store, "read_bytes")
-            manifest = load_manifest(artifact_id)
-            payload = read_bytes(artifact_id)
+            manifest, payload = read_authenticated_snapshot(artifact_id)
         except FileNotFoundError:
             return EvidenceVerification(
                 valid=False,
@@ -303,6 +390,7 @@ def artifact_store_evidence_verifier(
             "account_id": claim.account_id,
             "entity_id": claim.entity_id,
             "environment": claim.environment,
+            "provider_environment": claim.provider_environment,
             "instrument_version": claim.instrument_version,
             "observed_at": claim.evidence_ref["observed_at"],
         }
@@ -382,10 +470,8 @@ def artifact_store_evidence_verifier(
                 valid=False,
                 reason="trusted issuer provenance verification failed",
             )
-        if not isinstance(issuer_result, EvidenceVerification):
-            raise TypeError(
-                "issuer verifier must return EvidenceVerification"
-            )
+        if type(issuer_result) is not EvidenceVerification:
+            raise TypeError("issuer verifier must return exact EvidenceVerification")
         return issuer_result
 
     return verify
@@ -411,6 +497,7 @@ class CapabilitySnapshot:
     evidence: tuple[Mapping[str, object], ...]
     status: str
     sources: frozenset[str]
+    provider_environment: str | None = None
     _verification_token: InitVar[object | None] = None
     _admission_token: InitVar[object | None] = None
 
@@ -429,6 +516,15 @@ class CapabilitySnapshot:
         if environment not in ENVIRONMENTS:
             raise CapabilityError("environment is unsupported")
         object.__setattr__(self, "environment", environment)
+        try:
+            provider_environment = normalize_provider_environment(
+                provider_id=self.provider_id,
+                environment=environment,
+                provider_environment=self.provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise CapabilityError(str(error)) from error
+        object.__setattr__(self, "provider_environment", provider_environment)
         observed = _instant(self.observed_at, "observed_at")
         expires = _instant(self.expires_at, "expires_at")
         if expires < observed:
@@ -489,12 +585,13 @@ class CapabilitySnapshot:
         )
 
     @property
-    def identity(self) -> tuple[str, str, str, str, str]:
+    def identity(self) -> tuple[str, str, str, str, str, str]:
         return (
             self.provider_id,
             self.account_id,
             self.entity_id,
             self.environment,
+            self.provider_environment,
             self.instrument_version,
         )
 
@@ -523,6 +620,7 @@ class CapabilitySnapshot:
             "account_id": self.account_id,
             "entity_id": self.entity_id,
             "environment": self.environment,
+            "provider_environment": self.provider_environment,
             "instrument_version": self.instrument_version,
             "observed_at": self.observed_at.isoformat().replace("+00:00", "Z"),
             "expires_at": self.expires_at.isoformat().replace("+00:00", "Z"),
@@ -557,15 +655,12 @@ def derive_capability_snapshot(
     evidence_verifier: Callable[[CapabilityClaim], EvidenceVerification] | None = None,
 ) -> CapabilitySnapshot:
     point = _instant(observed_at, "observed_at")
-    records = tuple(claims)
+    records = tuple(_snapshot_capability_claim(claim) for claim in claims)
     if not records:
         raise CapabilityError("at least one capability claim is required")
     required = frozenset(_text(source, "required_source").upper() for source in required_sources)
     if required != SOURCES:
         raise CapabilityError("all canonical capability sources are required for verification")
-
-    if any(not isinstance(claim, CapabilityClaim) for claim in records):
-        raise TypeError("claims must contain CapabilityClaim values")
 
     first = records[0]
     identity = (
@@ -573,6 +668,7 @@ def derive_capability_snapshot(
         first.account_id,
         first.entity_id,
         first.environment,
+        first.provider_environment,
         first.instrument_version,
     )
     for claim in records[1:]:
@@ -581,6 +677,7 @@ def derive_capability_snapshot(
             claim.account_id,
             claim.entity_id,
             claim.environment,
+            claim.provider_environment,
             claim.instrument_version,
         )
         if other != identity:
@@ -610,14 +707,14 @@ def derive_capability_snapshot(
         verified_results: list[EvidenceVerification] = []
         for claim in live:
             try:
-                result = evidence_verifier(claim)
+                result = evidence_verifier(_snapshot_capability_claim(claim))
             except Exception:
                 result = EvidenceVerification(
                     valid=False,
                     reason="immutable evidence verification failed",
                 )
-            if not isinstance(result, EvidenceVerification):
-                raise TypeError("evidence_verifier must return EvidenceVerification")
+            if type(result) is not EvidenceVerification:
+                raise TypeError("evidence_verifier must return exact EvidenceVerification")
             verified_results.append(result)
         evidence_results = tuple(verified_results)
 
@@ -666,7 +763,8 @@ def derive_capability_snapshot(
         account_id=identity[1],
         entity_id=identity[2],
         environment=identity[3],
-        instrument_version=identity[4],
+        provider_environment=identity[4],
+        instrument_version=identity[5],
         observed_at=point,
         expires_at=expires_at,
         supported_order_types=order_types,
@@ -680,9 +778,7 @@ def derive_capability_snapshot(
         status=status,
         sources=verified_sources,
         _verification_token=_DERIVED_SNAPSHOT_TOKEN,
-        _admission_token=(
-            _FRESH_ADMISSION_TOKEN if status == "VERIFIED" else None
-        ),
+        _admission_token=None,
     )
 
 
@@ -691,9 +787,11 @@ class CapabilityRegistry:
 
     def __init__(self) -> None:
         self._by_id: dict[str, CapabilitySnapshot] = {}
-        self._by_identity: dict[tuple[str, str, str, str, str], list[CapabilitySnapshot]] = {}
+        self._by_identity: dict[tuple[str, str, str, str, str, str], list[CapabilitySnapshot]] = {}
 
     def add(self, snapshot: CapabilitySnapshot) -> None:
+        if type(snapshot) is not CapabilitySnapshot:
+            raise TypeError("registry accepts only exact CapabilitySnapshot values")
         existing = self._by_id.get(snapshot.snapshot_id)
         if existing is not None:
             if existing != snapshot:
@@ -714,13 +812,25 @@ class CapabilityRegistry:
         environment: str,
         instrument_version: str,
         at: datetime,
+        provider_environment: str | None = None,
     ) -> CapabilitySnapshot:
         point = _instant(at, "at")
+        provider = _text(provider_id, "provider_id")
+        runtime_environment = _text(environment, "environment").upper()
+        try:
+            provider_domain = normalize_provider_environment(
+                provider_id=provider,
+                environment=runtime_environment,
+                provider_environment=provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise CapabilityError(str(error)) from error
         identity = (
-            _text(provider_id, "provider_id"),
+            provider,
             _text(account_id, "account_id"),
             _text(entity_id, "entity_id"),
-            _text(environment, "environment").upper(),
+            runtime_environment,
+            provider_domain,
             _text(instrument_version, "instrument_version"),
         )
         history = self._by_identity.get(identity, ())
@@ -732,8 +842,12 @@ class CapabilityRegistry:
     def require_verified(self, **kwargs) -> CapabilitySnapshot:
         snapshot = self.latest(**kwargs)
         point = _instant(kwargs["at"], "at")
+        if type(snapshot) is not CapabilitySnapshot:
+            raise CapabilityError("capability snapshot is not canonical")
         if snapshot.status != "VERIFIED":
             raise CapabilityError(f"capability status is {snapshot.status}")
         if point >= snapshot.expires_at:
             raise CapabilityError("capability snapshot is expired")
+        if not getattr(snapshot, "_can_admit", False):
+            raise CapabilityError("capability snapshot lacks fresh admission authority")
         return snapshot

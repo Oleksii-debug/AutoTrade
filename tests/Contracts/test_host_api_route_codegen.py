@@ -233,6 +233,23 @@ paths:
 """,
                 "must use schema type: string",
             ),
+            (
+                "referenced-path-schema",
+                """openapi: 3.1.0
+paths:
+  /api/v1/operations/{operation_id}:
+    get:
+      operationId: getOperation
+      parameters:
+        - in: path
+          name: operation_id
+          required: true
+          schema:
+            $ref: ../jsonschema/common.schema.json#/$defs/Sequence
+      responses: {}
+""",
+                "must use schema type: string",
+            ),
         )
         for name, document, message in cases:
             with self.subTest(name=name):

@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from mvp.autotrade_mvp.export_boundary import (
     ExportBoundaryError,
+    PreparedExport,
     prepare_json_export,
     verify_prepared_export,
     write_prepared_export,
@@ -217,6 +218,140 @@ class ExportBoundaryTests(unittest.TestCase):
                 list(Path(directory).glob("*.tmp")),
                 [],
             )
+
+
+    def test_prepare_rejects_executable_subclasses_before_callbacks(self):
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("text callback must not execute")
+
+        class HostileDict(dict):
+            def items(self):
+                raise AssertionError("mapping items callback must not execute")
+
+            def get(self, *args, **kwargs):
+                raise AssertionError("mapping get callback must not execute")
+
+        class HostileList(list):
+            def __iter__(self):
+                raise AssertionError("collection callback must not execute")
+
+        class HostileInt(int):
+            def __lt__(self, other):
+                raise AssertionError("integer comparison callback must not execute")
+
+            def __gt__(self, other):
+                raise AssertionError("integer comparison callback must not execute")
+
+        with self.assertRaisesRegex(ExportBoundaryError, "export_id must be exact text"):
+            self.prepare({"safe": True}, export_id=HostileText(str(uuid4())))
+        with self.assertRaisesRegex(ExportBoundaryError, "unsupported export value type"):
+            self.prepare(HostileDict({"safe": True}))
+        with self.assertRaisesRegex(ExportBoundaryError, "rights must be an exact object"):
+            self.prepare(
+                {"safe": True},
+                rights=HostileDict({"export": True, "rights_id": "rights:test"}),
+            )
+        with self.assertRaisesRegex(ExportBoundaryError, "source_refs must be an exact collection"):
+            self.prepare({"safe": True}, source_refs=HostileList(["evidence:1"]))
+        with self.assertRaisesRegex(ExportBoundaryError, "max_bytes must be a positive integer"):
+            self.prepare({"safe": True}, max_bytes=HostileInt(1024))
+
+    def test_verify_rejects_forged_field_subclasses_before_callbacks(self):
+        export = self.prepare({"value": "ok"})
+
+        class HostileText(str):
+            def __eq__(self, other):
+                raise AssertionError("text equality callback must not execute")
+
+            def strip(self, *args, **kwargs):
+                raise AssertionError("text strip callback must not execute")
+
+        class HostileBytes(bytes):
+            def decode(self, *args, **kwargs):
+                raise AssertionError("bytes decode callback must not execute")
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                raise AssertionError("tuple iteration callback must not execute")
+
+        self.assertFalse(
+            verify_prepared_export(replace(export, media_type=HostileText("application/json")))
+        )
+        self.assertFalse(
+            verify_prepared_export(replace(export, sha256=HostileText(export.sha256)))
+        )
+        self.assertFalse(
+            verify_prepared_export(replace(export, data=HostileBytes(export.data)))
+        )
+        self.assertFalse(
+            verify_prepared_export(
+                replace(export, source_refs=HostileTuple(export.source_refs))
+            )
+        )
+
+    def test_verify_rejects_prepared_export_subclass_before_attribute_dispatch(self):
+        export = self.prepare({"value": "ok"})
+
+        class PreparedSubclass(PreparedExport):
+            pass
+
+        forged = PreparedSubclass(
+            export_id=export.export_id,
+            filename=export.filename,
+            media_type=export.media_type,
+            data=export.data,
+            sha256=export.sha256,
+            rights_id=export.rights_id,
+            source_refs=export.source_refs,
+        )
+        with self.assertRaisesRegex(TypeError, "exact PreparedExport"):
+            verify_prepared_export(forged)
+
+    def test_publication_rejects_executable_directory_object(self):
+        export = self.prepare({"value": "ok"})
+
+        class HostilePath:
+            def __fspath__(self):
+                raise AssertionError("path callback must not execute")
+
+        with self.assertRaisesRegex(TypeError, "exact str or platform Path"):
+            write_prepared_export(
+                export,
+                HostilePath(),
+                rights={"export": True, "rights_id": "rights:test"},
+            )
+
+
+    def test_prepare_rejects_invalid_utf8_and_oversized_integer_fail_closed(self):
+        invalid = "\ud800"
+        with self.assertRaisesRegex(ExportBoundaryError, "valid UTF-8 text"):
+            self.prepare({"text": invalid})
+        with self.assertRaisesRegex(ExportBoundaryError, "valid UTF-8 text"):
+            self.prepare({invalid: "value"})
+        with self.assertRaisesRegex(ExportBoundaryError, "numeric hard limit"):
+            self.prepare({"value": 1 << 4096})
+
+    def test_verifier_rejects_forged_oversized_integer_without_valueerror_escape(self):
+        export = self.prepare({"value": 1})
+        oversized_integer = b"9" * 2000
+        forged_data = b'{"value":' + oversized_integer + b"}\n"
+        forged = replace(
+            export,
+            data=forged_data,
+            sha256="sha256:" + sha256(forged_data).hexdigest(),
+        )
+        self.assertFalse(verify_prepared_export(forged))
+
+    def test_verifier_rejects_json_surrogate_text_even_when_rehashed(self):
+        export = self.prepare({"value": "safe"})
+        forged_data = b'{"value":"\\ud800"}\n'
+        forged = replace(
+            export,
+            data=forged_data,
+            sha256="sha256:" + sha256(forged_data).hexdigest(),
+        )
+        self.assertFalse(verify_prepared_export(forged))
 
 
 if __name__ == "__main__":

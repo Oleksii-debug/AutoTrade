@@ -1029,6 +1029,70 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertEqual(list(root.glob("journal.sqlite3*")), [])
 
 
+    def test_resume_rejects_rebound_intent_identity_before_tail_repair(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            checkpoint_path = root / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(checkpoint["fills"]), 1)
+
+            original_order_id, fill = next(iter(checkpoint["fills"].items()))
+            original_fill_id = fill["fill_id"]
+            forged_order_id = "intent-" + "e" * 20
+            self.assertNotEqual(forged_order_id, original_order_id)
+            forged_fill_id = (
+                "fill-"
+                + sha256(forged_order_id.encode("utf-8")).hexdigest()[:20]
+            )
+
+            intents_root = root / "order-intents"
+            original_intent_path = intents_root / f"{original_order_id}.json"
+            forged_intent_path = intents_root / f"{forged_order_id}.json"
+            intent_payload = json.loads(
+                original_intent_path.read_text(encoding="utf-8")
+            )
+            intent_payload["client_order_id"] = forged_order_id
+            forged_intent_path.write_text(
+                json.dumps(intent_payload),
+                encoding="utf-8",
+            )
+            original_intent_path.unlink()
+
+            forged_fill = dict(fill)
+            forged_fill["client_order_id"] = forged_order_id
+            forged_fill["fill_id"] = forged_fill_id
+            checkpoint["fills"] = {forged_order_id: forged_fill}
+            for posting in checkpoint["postings"]:
+                if posting["fill_id"] == original_fill_id:
+                    posting["fill_id"] = forged_fill_id
+            evidence_id = checkpoint["evidence_ids"][0]
+            evidence = checkpoint["evidence_records"][evidence_id]
+            evidence["order_id"] = forged_order_id
+            evidence["fill_id"] = forged_fill_id
+            checkpoint_path.write_text(
+                json.dumps(checkpoint),
+                encoding="utf-8",
+            )
+
+            (root / "learning-evidence.jsonl").unlink()
+            for journal_path in root.glob("journal.sqlite3*"):
+                journal_path.unlink()
+
+            checkpoint_before = checkpoint_path.read_bytes()
+            intent_before = forged_intent_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Checkpoint replay intent identity is not causally bound",
+            ):
+                run_vertical_slice([103, 102, 101, 100], directory)
+
+            self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertEqual(forged_intent_path.read_bytes(), intent_before)
+            self.assertFalse((root / "learning-evidence.jsonl").exists())
+            self.assertEqual(list(root.glob("journal.sqlite3*")), [])
+
     def test_resume_rejects_orphan_durable_order_intent_before_mutation(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

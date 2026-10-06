@@ -141,6 +141,129 @@ class DispatchReconciliationAttemptIdentityTests(unittest.TestCase):
             self.assertEqual(recovered[0].account_id, "acct")
             self.assertEqual(recovered[0].environment, "SIMULATION")
 
+    def test_bybit_unknown_recovery_preserves_durable_provider_environment(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="acct",
+                owner_token="owner",
+            )
+
+            def ambiguous_transport(_client_order_id, _request, final_guard):
+                final_guard()
+                raise RuntimeError("ambiguous after send barrier")
+
+            result = dispatcher.dispatch(
+                attempt_id="bybit-attempt",
+                intent_id="bybit-intent",
+                intent_hash="sha256:" + "2" * 64,
+                provider="BYBIT",
+                request={"symbol": "BTCUSDT", "side": "BUY"},
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                sender_check=lambda _owner, _epoch: None,
+                transport_send=ambiguous_transport,
+                submission_scope={
+                    "provider_environment": "TESTNET",
+                    "provider_route_provider_environment": "TESTNET",
+                },
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+
+            recovered = unknown_submissions_from_dispatch(
+                store,
+                attempt_ids=("bybit-attempt",),
+                environment="PAPER",
+                account_id="acct",
+            )
+            self.assertEqual(len(recovered), 1)
+            self.assertEqual(recovered[0].provider_id, "BYBIT")
+            self.assertEqual(recovered[0].environment, "PAPER")
+            self.assertEqual(recovered[0].provider_environment, "TESTNET")
+
+    def test_bybit_unknown_recovery_rejects_missing_durable_provider_environment(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="acct",
+                owner_token="owner",
+            )
+
+            def ambiguous_transport(_client_order_id, _request, final_guard):
+                final_guard()
+                raise RuntimeError("ambiguous after send barrier")
+
+            result = dispatcher.dispatch(
+                attempt_id="bybit-missing-domain",
+                intent_id="bybit-intent",
+                intent_hash="sha256:" + "3" * 64,
+                provider="BYBIT",
+                request={"symbol": "BTCUSDT", "side": "BUY"},
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                sender_check=lambda _owner, _epoch: None,
+                transport_send=ambiguous_transport,
+                submission_scope={},
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "lacks durable provider_environment",
+            ):
+                unknown_submissions_from_dispatch(
+                    store,
+                    attempt_ids=("bybit-missing-domain",),
+                    environment="PAPER",
+                    account_id="acct",
+                )
+
+    def test_bybit_unknown_recovery_rejects_conflicting_durable_domains(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="acct",
+                owner_token="owner",
+            )
+
+            def ambiguous_transport(_client_order_id, _request, final_guard):
+                final_guard()
+                raise RuntimeError("ambiguous after send barrier")
+
+            result = dispatcher.dispatch(
+                attempt_id="bybit-conflicting-domain",
+                intent_id="bybit-intent",
+                intent_hash="sha256:" + "4" * 64,
+                provider="BYBIT",
+                request={"symbol": "BTCUSDT", "side": "BUY"},
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                sender_check=lambda _owner, _epoch: None,
+                transport_send=ambiguous_transport,
+                submission_scope={
+                    "provider_environment": "TESTNET",
+                    "provider_route_provider_environment": "DEMO",
+                },
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "provider_environment authorities disagree",
+            ):
+                unknown_submissions_from_dispatch(
+                    store,
+                    attempt_ids=("bybit-conflicting-domain",),
+                    environment="PAPER",
+                    account_id="acct",
+                )
+
     def test_legacy_original_aggregate_identity_remains_readable(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

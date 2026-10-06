@@ -160,7 +160,7 @@ def futures_base_url(environment: str) -> str:
 def _prepared_submission_projection(
     prepared_request: "KrakenFuturesPreparedRequest",
     *,
-    _prepared_type=KrakenFuturesPreparedRequest,
+    _prepared_type=None,
     _canonical_type=type,
     _canonical_str=str,
     _canonical_any=any,
@@ -241,14 +241,6 @@ def _install_prepared_submission_projection_authority(projector):
         )
 
     return sealed_prepared_submission_projection
-
-
-_unsealed_prepared_submission_projection = _prepared_submission_projection
-_prepared_submission_projection = _install_prepared_submission_projection_authority(
-    _unsealed_prepared_submission_projection
-)
-del _unsealed_prepared_submission_projection
-del _install_prepared_submission_projection_authority
 
 
 def _submission_projection(
@@ -577,6 +569,14 @@ def prepare_order_request(
         instrument_version=instrument,
         _factory_token=_KRAKEN_FUTURES_PREPARED_REQUEST_FACTORY_TOKEN,
     )
+
+_unsealed_prepared_submission_projection = _prepared_submission_projection
+_prepared_submission_projection = _install_prepared_submission_projection_authority(
+    _unsealed_prepared_submission_projection
+)
+del _unsealed_prepared_submission_projection
+del _install_prepared_submission_projection_authority
+
 
 def parse_submission_response(
     *,

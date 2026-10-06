@@ -5370,5 +5370,65 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
         self.assertEqual(body.calls, [9])
 
 
+    def test_provider_scope_rejects_hostile_text_subclasses_before_virtual_dispatch(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self):
+                callbacks.append("strip")
+                raise AssertionError("hostile strip executed")
+
+            def upper(self):
+                callbacks.append("upper")
+                raise AssertionError("hostile upper executed")
+
+            def lower(self):
+                callbacks.append("lower")
+                raise AssertionError("hostile lower executed")
+
+            def rstrip(self, *_args):
+                callbacks.append("rstrip")
+                raise AssertionError("hostile rstrip executed")
+
+        cases = (
+            dict(
+                provider_id=HostileText("BINANCE"),
+                environment="PAPER",
+                base_url="https://testnet.binance.vision",
+                allowed_hosts=frozenset({"testnet.binance.vision"}),
+            ),
+            dict(
+                provider_id="BINANCE",
+                environment="PAPER",
+                base_url="https://testnet.binance.vision",
+                allowed_hosts=frozenset({HostileText("testnet.binance.vision")}),
+            ),
+            dict(
+                provider_id="BINANCE",
+                environment="PAPER",
+                base_url=HostileText("https://testnet.binance.vision"),
+                allowed_hosts=frozenset({"testnet.binance.vision"}),
+            ),
+        )
+        for kwargs in cases:
+            with self.subTest(field=repr(kwargs)):
+                with self.assertRaisesRegex(
+                    ProviderTransportScopeError,
+                    r"is required|bare DNS name|HTTPS URL",
+                ):
+                    ProviderEndpointPolicy(**kwargs)
+                self.assertEqual(callbacks, [])
+
+        policy = ProviderEndpointPolicy(
+            provider_id="BINANCE",
+            environment="PAPER",
+            base_url="https://testnet.binance.vision",
+            allowed_hosts=frozenset({"testnet.binance.vision"}),
+        )
+        with self.assertRaisesRegex(ProviderTransportScopeError, "is required"):
+            policy.absolute_url(HostileText("/api/v3/order"))
+        self.assertEqual(callbacks, [])
+
+
 if __name__ == "__main__":
     unittest.main()

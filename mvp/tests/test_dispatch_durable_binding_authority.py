@@ -2090,6 +2090,7 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             "_journal_store_call",
             "_envelope",
             "_detach_submission_json",
+            "_validated_authority_result",
             "submission_attempt_aggregate_id",
             "_event_id",
             "_identity_digest",
@@ -2211,6 +2212,74 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                         "SubmissionUnknown",
                     ],
                 )
+
+    def test_authority_callback_cannot_rebind_result_validator_before_send(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            original = dispatch_module._validated_authority_result
+            hostile_calls = 0
+            wire_calls = 0
+
+            def forged(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("rebound authority-result validator executed")
+
+            def authority(_intent_hash, _now):
+                dispatch_module._validated_authority_result = forged
+                return True, "allowed"
+
+            def transport(*_args):
+                nonlocal wire_calls
+                wire_calls += 1
+                raise AssertionError("wire must remain zero")
+
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "dispatcher authority changed during dispatch",
+                ):
+                    dispatcher.dispatch(
+                        attempt_id="authority-result-helper-rebind-a1",
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=authority,
+                        transport_send=transport,
+                        submission_scope={"endpoint": "/orders"},
+                    )
+                self.assertIs(
+                    dispatch_module._validated_authority_result,
+                    original,
+                )
+            finally:
+                dispatch_module._validated_authority_result = original
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(wire_calls, 0)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        store,
+                        "submission_attempt",
+                        dispatcher._aggregate_id(
+                            "authority-result-helper-rebind-a1"
+                        ),
+                    )
+                ],
+                ["SubmissionPrepared"],
+            )
 
     def test_post_send_exception_class_rebinding_cannot_escape_unknown(self):
         from mvp.autotrade_mvp import dispatch as dispatch_module

@@ -33,6 +33,7 @@ PROTECTED_SENTINELS = frozenset(
         ".github/workflows/futures-qualification.yml",
         ".github/workflows/lean-adoption.yml",
         ".github/workflows/reconvergence-integrity.yml",
+        ".github/workflows/recovery-qualification.yml",
         ".github/workflows/research-primitives.yml",
         ".github/workflows/science-qualification.yml",
         ".github/workflows/verify.yml",

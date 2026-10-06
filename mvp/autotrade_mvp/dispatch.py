@@ -2521,6 +2521,8 @@ class GuardedDispatcher:
         snapshot_tuple = tuple
         snapshot_dict = dict
         snapshot_len = len
+        snapshot_id = id
+        snapshot_frozenset = frozenset
         snapshot_delattr = delattr
         snapshot_module_globals = globals()
         snapshot_module_globals_get = snapshot_module_globals.get
@@ -2708,6 +2710,192 @@ class GuardedDispatcher:
             None,
         )
         decoder_exact_decimal_error = ExactDecimalError
+
+        # Direct parser code/default authority is already retained above.
+        # Complete the bounded dependency cut by retaining the global/builtin
+        # bindings used by those roots and executable state of same-module
+        # helper functions reached from them.
+        decoder_dependency_function_type = snapshot_type(decoder_number_parser)
+        decoder_dependency_modules = snapshot_frozenset(
+            (
+                snapshot_getattr(decoder_depth_guard, "__module__", None),
+                snapshot_getattr(decoder_number_parser, "__module__", None),
+                snapshot_getattr(decoder_integer_parser, "__module__", None),
+            )
+        )
+        decoder_dependency_root_ids = snapshot_frozenset(
+            snapshot_id(root)
+            for root in (
+                decoder_depth_guard,
+                decoder_number_parser,
+                decoder_integer_parser,
+            )
+        )
+        decoder_dependency_missing = object()
+        decoder_dependency_function_states = []
+        decoder_dependency_global_bindings = []
+        decoder_dependency_builtin_bindings = []
+        decoder_dependency_seen_functions = set()
+        decoder_dependency_seen_globals = set()
+        decoder_dependency_seen_builtins = set()
+
+        def capture_decoder_dependency(function) -> None:
+            if (
+                snapshot_type(function)
+                is not decoder_dependency_function_type
+            ):
+                return
+            function_identity = snapshot_id(function)
+            if function_identity in decoder_dependency_seen_functions:
+                return
+            decoder_dependency_seen_functions.add(function_identity)
+
+            function_code = snapshot_getattr(function, "__code__", None)
+            if function_code is None:
+                raise RuntimeError(
+                    "exact response decoder dependency code is unavailable"
+                )
+            if function_identity not in decoder_dependency_root_ids:
+                function_defaults = snapshot_getattr(
+                    function,
+                    "__defaults__",
+                    None,
+                )
+                if (
+                    function_defaults is not None
+                    and snapshot_type(function_defaults) is not snapshot_tuple
+                ):
+                    raise RuntimeError(
+                        "exact response decoder dependency defaults are unavailable"
+                    )
+                function_kwdefaults = snapshot_getattr(
+                    function,
+                    "__kwdefaults__",
+                    None,
+                )
+                if function_kwdefaults is None:
+                    function_kwdefault_items = None
+                else:
+                    if (
+                        snapshot_type(function_kwdefaults)
+                        is not snapshot_dict
+                    ):
+                        raise RuntimeError(
+                            "exact response decoder dependency keyword defaults "
+                            "are unavailable"
+                        )
+                    function_kwdefault_items = snapshot_tuple(
+                        function_kwdefaults.items()
+                    )
+                    if any(
+                        snapshot_type(key) is not str
+                        for key, _value in function_kwdefault_items
+                    ):
+                        raise RuntimeError(
+                            "exact response decoder dependency keyword default "
+                            "keys are unavailable"
+                        )
+                decoder_dependency_function_states.append(
+                    (
+                        function,
+                        function_code,
+                        function_defaults,
+                        function_kwdefault_items,
+                    )
+                )
+
+            function_globals = snapshot_getattr(
+                function,
+                "__globals__",
+                None,
+            )
+            function_builtins = snapshot_getattr(
+                function,
+                "__builtins__",
+                None,
+            )
+            if (
+                snapshot_type(function_globals) is not snapshot_dict
+                or snapshot_type(function_builtins) is not snapshot_dict
+            ):
+                raise RuntimeError(
+                    "exact response decoder dependency namespace is unavailable"
+                )
+
+            for dependency_name in function_code.co_names:
+                if dependency_name in function_globals:
+                    binding_key = (
+                        snapshot_id(function_globals),
+                        dependency_name,
+                    )
+                    dependency = snapshot_dict.get(
+                        function_globals,
+                        dependency_name,
+                    )
+                    if (
+                        binding_key
+                        not in decoder_dependency_seen_globals
+                    ):
+                        decoder_dependency_seen_globals.add(binding_key)
+                        decoder_dependency_global_bindings.append(
+                            (
+                                function_globals,
+                                dependency_name,
+                                dependency,
+                            )
+                        )
+                    if (
+                        snapshot_type(dependency)
+                        is decoder_dependency_function_type
+                        and snapshot_getattr(
+                            dependency,
+                            "__module__",
+                            None,
+                        )
+                        in decoder_dependency_modules
+                    ):
+                        capture_decoder_dependency(dependency)
+                    continue
+
+                if dependency_name in function_builtins:
+                    binding_key = (
+                        snapshot_id(function_builtins),
+                        dependency_name,
+                    )
+                    dependency = snapshot_dict.get(
+                        function_builtins,
+                        dependency_name,
+                    )
+                    if (
+                        binding_key
+                        not in decoder_dependency_seen_builtins
+                    ):
+                        decoder_dependency_seen_builtins.add(binding_key)
+                        decoder_dependency_builtin_bindings.append(
+                            (
+                                function_builtins,
+                                dependency_name,
+                                dependency,
+                            )
+                        )
+
+        for decoder_dependency_root in (
+            decoder_depth_guard,
+            decoder_number_parser,
+            decoder_integer_parser,
+        ):
+            capture_decoder_dependency(decoder_dependency_root)
+
+        decoder_dependency_function_states = snapshot_tuple(
+            decoder_dependency_function_states
+        )
+        decoder_dependency_global_bindings = snapshot_tuple(
+            decoder_dependency_global_bindings
+        )
+        decoder_dependency_builtin_bindings = snapshot_tuple(
+            decoder_dependency_builtin_bindings
+        )
+
         exact_response_module_bindings = (
             ("ExactJsonTransportResponse", exact_response_type),
             ("_snapshot_exact_transport_response", exact_response_snapshot),
@@ -2937,6 +3125,103 @@ class GuardedDispatcher:
                         "__kwdefaults__",
                         snapshot_dict(expected_kwdefault_items),
                     )
+                    changed = True
+
+            for (
+                dependency,
+                expected_code,
+                expected_defaults,
+                expected_kwdefault_items,
+            ) in decoder_dependency_function_states:
+                if (
+                    snapshot_getattr(dependency, "__code__", None)
+                    is not expected_code
+                ):
+                    snapshot_setattr(
+                        dependency,
+                        "__code__",
+                        expected_code,
+                    )
+                    changed = True
+                if (
+                    snapshot_getattr(dependency, "__defaults__", None)
+                    is not expected_defaults
+                ):
+                    snapshot_setattr(
+                        dependency,
+                        "__defaults__",
+                        expected_defaults,
+                    )
+                    changed = True
+                current_kwdefaults = snapshot_getattr(
+                    dependency,
+                    "__kwdefaults__",
+                    None,
+                )
+                if expected_kwdefault_items is None:
+                    if current_kwdefaults is not None:
+                        snapshot_setattr(
+                            dependency,
+                            "__kwdefaults__",
+                            None,
+                        )
+                        changed = True
+                else:
+                    kwdefaults_changed = (
+                        snapshot_type(current_kwdefaults) is not snapshot_dict
+                        or snapshot_len(current_kwdefaults)
+                        != snapshot_len(expected_kwdefault_items)
+                    )
+                    if not kwdefaults_changed:
+                        for current_key in current_kwdefaults:
+                            if snapshot_type(current_key) is not str:
+                                kwdefaults_changed = True
+                                break
+                    if not kwdefaults_changed:
+                        current_kwdefault_get = current_kwdefaults.get
+                        for key, expected_value in expected_kwdefault_items:
+                            if (
+                                current_kwdefault_get(
+                                    key,
+                                    decoder_dependency_missing,
+                                )
+                                is not expected_value
+                            ):
+                                kwdefaults_changed = True
+                                break
+                    if kwdefaults_changed:
+                        snapshot_setattr(
+                            dependency,
+                            "__kwdefaults__",
+                            snapshot_dict(expected_kwdefault_items),
+                        )
+                        changed = True
+
+            for namespace, name, expected in (
+                decoder_dependency_global_bindings
+            ):
+                if (
+                    snapshot_dict.get(
+                        namespace,
+                        name,
+                        decoder_dependency_missing,
+                    )
+                    is not expected
+                ):
+                    snapshot_dict.__setitem__(namespace, name, expected)
+                    changed = True
+            for namespace, name, expected in (
+                decoder_dependency_builtin_bindings
+            ):
+                if (
+                    snapshot_dict.get(
+                        namespace,
+                        name,
+                        decoder_dependency_missing,
+                    )
+                    is not expected
+                ):
+                    snapshot_dict.__setitem__(namespace, name, expected)
                     changed = True
 
             if decoder_json_namespace_get("loads") is not decoder_json_loads:

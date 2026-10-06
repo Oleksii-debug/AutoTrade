@@ -134,23 +134,22 @@ class ExactJsonTransportResponse:
 
     def __post_init__(self) -> None:
         raw = self.response_bytes
-        try:
-            require_provider_response_bytes(
-                raw,
-                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
-            )
-        except (TypeError, ValueError) as error:
+        if type(self.requires_reconciliation) is not bool:
+            raise TypeError("requires_reconciliation must be boolean")
+        if (
+            type(raw) is not bytes
+            or len(raw) > HARD_MAX_PROVIDER_RESPONSE_BYTES
+            or (not raw and not self.requires_reconciliation)
+        ):
             raise ValueError(
                 "provider response bytes violate shared byte budget"
-            ) from error
+            )
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
             or self.http_status > 599
         ):
             raise ValueError("http_status must be an integer 100..599 when provided")
-        if type(self.requires_reconciliation) is not bool:
-            raise TypeError("requires_reconciliation must be boolean")
         if self.requires_reconciliation:
             if (
                 type(self.ambiguity_reason) is not str
@@ -233,15 +232,13 @@ class SubmissionResponseBinding:
             )
         if re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None:
             raise ValueError("response_sha256 must be a canonical SHA-256 digest")
-        try:
-            require_provider_response_bytes(
-                self.response_bytes,
-                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
-            )
-        except (TypeError, ValueError) as error:
+        if (
+            type(self.response_bytes) is not bytes
+            or len(self.response_bytes) > HARD_MAX_PROVIDER_RESPONSE_BYTES
+        ):
             raise ValueError(
                 "durable provider response bytes violate shared byte budget"
-            ) from error
+            )
         if (
             "sha256:" + sha256(self.response_bytes).hexdigest()
             != self.response_sha256
@@ -253,6 +250,10 @@ class SubmissionResponseBinding:
         ):
             raise ValueError("durable provider response encoding is invalid")
         if self.response_encoding == "utf-8-json":
+            if not self.response_bytes:
+                raise ValueError(
+                    "durable JSON provider response bytes must be non-empty"
+                )
             _decode_exact_json_bytes(self.response_bytes)
         if type(self.terminal_state) is not str:
             raise TypeError("terminal_state must be a string")
@@ -577,13 +578,16 @@ def load_submission_response_binding(
     response_encoding = sent_payload.get("response_encoding")
     if (
         not isinstance(response_text, str)
-        or not response_text
         or not isinstance(response_sha256, str)
     ):
         raise ValueError(
             "durable exact provider response bytes are unavailable"
         )
     if response_encoding == "utf-8-json":
+        if not response_text:
+            raise ValueError(
+                "durable exact provider response bytes are unavailable"
+            )
         response_bytes = response_text.encode("utf-8")
         _decode_exact_json_bytes(response_bytes)
     elif (
@@ -609,14 +613,17 @@ def load_submission_response_binding(
             raise ValueError(
                 "durable exact provider response bytes are unavailable"
             ) from error
-        if not response_bytes or response_text != response_bytes.hex():
+        if response_text != response_bytes.hex():
             raise ValueError(
                 "durable exact provider response bytes are unavailable"
             )
-        require_provider_response_bytes(
-            response_bytes,
-            max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
-        )
+        if (
+            type(response_bytes) is not bytes
+            or len(response_bytes) > HARD_MAX_PROVIDER_RESPONSE_BYTES
+        ):
+            raise ValueError(
+                "durable exact provider response bytes are unavailable"
+            )
     else:
         raise ValueError(
             "durable exact provider response bytes are unavailable"

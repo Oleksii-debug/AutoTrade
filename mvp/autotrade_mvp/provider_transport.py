@@ -981,10 +981,11 @@ class TradingWireResponse:
             or self.http_status > 599
         ):
             raise ProviderTransportScopeError("HTTP status must be an integer 100..599")
-        try:
-            require_provider_response_bytes(self.body, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
-        except (TypeError, ValueError) as error:
-            raise ProviderTransportError("invalid or oversized trading response") from error
+        if (
+            type(self.body) is not bytes
+            or len(self.body) > HARD_MAX_PROVIDER_RESPONSE_BYTES
+        ):
+            raise ProviderTransportError("invalid or oversized trading response")
 
 
 @dataclass(frozen=True)
@@ -1033,7 +1034,21 @@ class UrllibJsonWireClient:
             )
         return budget
 
-    def _bounded_body(self, raw: bytes, *, max_bytes: int) -> bytes:
+    def _bounded_body(
+        self,
+        raw: bytes,
+        *,
+        max_bytes: int,
+        allow_empty: bool = False,
+    ) -> bytes:
+        if type(allow_empty) is not bool:
+            raise TypeError("allow_empty must be boolean")
+        if allow_empty:
+            if type(raw) is not bytes or len(raw) > max_bytes:
+                raise ProviderTransportError(
+                    "invalid or oversized provider HTTP response"
+                )
+            return raw
         try:
             return require_provider_response_bytes(raw, max_bytes=max_bytes)
         except (TypeError, ValueError) as error:
@@ -1083,6 +1098,7 @@ class UrllibJsonWireClient:
                 raw = self._bounded_body(
                     response.read(response_budget + 1),
                     max_bytes=response_budget,
+                    allow_empty=not is_authenticated_read,
                 )
         except HTTPError as error:
             # An HTTPError retains its request URL and sometimes provider
@@ -1120,7 +1136,11 @@ class UrllibJsonWireClient:
                 raise ProviderTransportError("provider redirect is prohibited")
             if http_error_read_failed:
                 raise ProviderTransportError("provider HTTP error body unavailable")
-            raw = self._bounded_body(raw, max_bytes=response_budget)
+            raw = self._bounded_body(
+                raw,
+                max_bytes=response_budget,
+                allow_empty=not is_authenticated_read,
+            )
             if is_authenticated_read:
                 return AuthenticatedReadWireResponse(
                     http_status=http_error_status,
@@ -1130,9 +1150,9 @@ class UrllibJsonWireClient:
                 http_status=http_error_status,
                 body=raw,
             )
-        if type(raw) is not bytes or not raw:
+        if type(raw) is not bytes:
             raise ProviderTransportError(
-                "provider returned an empty or non-byte response"
+                "provider returned a non-byte response"
             )
         if is_authenticated_read:
             if http_status is None:
@@ -1171,26 +1191,18 @@ def _trading_response_evidence(
         status = value.http_status
         if type(status) is not int or not 100 <= status <= 599:
             raise ProviderTransportError("invalid trading HTTP response status")
-        try:
-            raw = require_provider_response_bytes(
-                value.body,
-                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
-            )
-        except (TypeError, ValueError) as error:
+        raw = value.body
+        if type(raw) is not bytes or len(raw) > HARD_MAX_PROVIDER_RESPONSE_BYTES:
             raise ProviderTransportError(
                 "invalid or oversized trading response"
-            ) from error
+            )
         return raw, status
     if type(value) is bytes:
-        try:
-            raw = require_provider_response_bytes(
-                value,
-                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
-            )
-        except (TypeError, ValueError) as error:
+        raw = value
+        if len(raw) > HARD_MAX_PROVIDER_RESPONSE_BYTES:
             raise ProviderTransportError(
                 "invalid or oversized trading response"
-            ) from error
+            )
         return raw, None
     raise ProviderTransportError(
         "trading wire client returned an unsupported response contract"
@@ -1241,6 +1253,13 @@ def _bybit_exact_trading_response(
             requires_reconciliation=True,
             ambiguity_reason="bybit_http_non_2xx_execution_unknown",
         )
+    if not raw:
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="bybit_empty_response_execution_unknown",
+        )
     exact = ExactJsonTransportResponse(raw, http_status=status)
     parsed = exact.payload
     if (
@@ -1276,6 +1295,13 @@ def _kraken_spot_exact_trading_response(
             requires_reconciliation=True,
             ambiguity_reason="kraken_spot_http_5xx_execution_unknown",
         )
+    if not raw:
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="kraken_spot_empty_response_execution_unknown",
+        )
     exact = ExactJsonTransportResponse(raw, http_status=status)
     if spot_submission_requires_reconciliation(exact.payload):
         return ExactJsonTransportResponse(
@@ -1306,6 +1332,13 @@ def _alpaca_exact_trading_response(
             requires_reconciliation=True,
             ambiguity_reason="alpaca_http_5xx_execution_unknown",
         )
+    if not raw:
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="alpaca_empty_response_execution_unknown",
+        )
     return ExactJsonTransportResponse(raw, http_status=status)
 
 
@@ -1335,6 +1368,13 @@ def _binance_exact_trading_response(
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="binance_spot_http_5xx_execution_unknown",
+        )
+    if not raw:
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="binance_spot_empty_response_execution_unknown",
         )
     exact = ExactJsonTransportResponse(raw, http_status=status)
     parsed = exact.payload
@@ -1380,6 +1420,13 @@ def _whitebit_exact_trading_response(
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="whitebit_" + decision.classification.lower(),
+        )
+    if not raw:
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="whitebit_empty_response_execution_unknown",
         )
     return ExactJsonTransportResponse(raw, http_status=status)
 

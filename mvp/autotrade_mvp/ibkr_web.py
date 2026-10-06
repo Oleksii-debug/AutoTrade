@@ -62,15 +62,19 @@ def _text(value: str, *, name: str) -> str:
 
 
 def _provider_text(value: object, *, name: str) -> str:
-    """Admit only inert JSON string values at provider-response boundaries."""
+    """Admit canonical inert JSON strings without changing provider identity."""
 
-    if type(value) is not str:
-        raise IbkrWebAdapterError(f"{name} must be provider text")
-    return _text(value, name=name)
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+    ):
+        raise IbkrWebAdapterError(f"{name} must be canonical provider text")
+    return value
 
 
 def _optional_provider_text(value: object, *, name: str) -> str | None:
-    """Classify optional provider text without invoking caller virtual methods."""
+    """Classify optional provider text without changing provider identity."""
 
     if value is None:
         return None
@@ -78,7 +82,9 @@ def _optional_provider_text(value: object, *, name: str) -> str | None:
         raise IbkrWebAdapterError(f"{name} must be provider text")
     if value == "":
         return None
-    return _text(value, name=name)
+    if value != value.strip():
+        raise IbkrWebAdapterError(f"{name} must be canonical provider text")
+    return value
 
 
 def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
@@ -129,7 +135,12 @@ def _canonical_web_trade_time(
         raise IbkrWebAdapterError(
             "trade_time_r must be a non-negative exact integer"
         )
-    expected_epoch_milliseconds = int(parsed.timestamp()) * 1000
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    elapsed = parsed - epoch
+    expected_epoch_milliseconds = (
+        (elapsed.days * 86_400 + elapsed.seconds) * 1000
+        + elapsed.microseconds // 1000
+    )
     if epoch_milliseconds != expected_epoch_milliseconds:
         raise IbkrWebAdapterError("trade_time and trade_time_r conflict")
     return parsed.isoformat().replace("+00:00", "Z")
@@ -1183,7 +1194,7 @@ def parse_web_api_trades(
         raise TypeError("observation must be exact ProviderResponseObservation")
     observation.require_scope(
         provider_id="IBKR",
-        surface=Surface.AUTHENTICATED_READ,
+        surface=Surface.ACTIVITIES,
         endpoint="/iserver/account/trades",
     )
     payload = observation.payload

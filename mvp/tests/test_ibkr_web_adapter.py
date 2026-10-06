@@ -134,7 +134,7 @@ def ready_session(**overrides):
 def ibkr_trade_observation(payload, *, account_id="U1234567"):
     binding = prepare_authenticated_read_query(
         capability=capability(account_id=account_id),
-        surface=Surface.AUTHENTICATED_READ,
+        surface=Surface.ACTIVITIES,
         endpoint="/iserver/account/trades",
         query={},
         at=NOW,
@@ -1021,6 +1021,27 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 price=Decimal("100"),
             )
 
+    def test_web_api_trades_require_activity_surface_provenance(self):
+        binding = prepare_authenticated_read_query(
+            capability=capability(),
+            surface=Surface.AUTHENTICATED_READ,
+            endpoint="/iserver/account/trades",
+            query={},
+            at=NOW,
+        )
+        observation = observe_authenticated_json_response(
+            query_binding=binding,
+            http_status=200,
+            response_bytes=b"[]",
+            observed_at=NOW,
+        )
+        with self.assertRaisesRegex(Exception, "surface mismatch"):
+            parse_web_api_trades(
+                observation,
+                instrument_versions_by_conid={},
+                fee_currency_by_execution_id={},
+            )
+
     def test_web_api_trades_use_execution_identity_coid_and_explicit_fee_currency(self):
         rows = [
             {
@@ -1082,6 +1103,12 @@ class IbkrWebAdapterTests(unittest.TestCase):
             fee_currency_by_execution_id={"exec-time-1": "USD"},
         )
         self.assertIsNone(manual[0].client_order_id)
+        with self.assertRaisesRegex(IbkrWebAdapterError, "canonical provider text"):
+            parse_web_api_trades(
+                ibkr_trade_observation([dict(base, order_ref=" at-ibkr-time")]),
+                instrument_versions_by_conid={265598: "AAPL:v1"},
+                fee_currency_by_execution_id={"exec-time-1": "USD"},
+            )
 
         combo = parse_web_api_trades(
             ibkr_trade_observation(

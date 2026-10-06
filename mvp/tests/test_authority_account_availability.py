@@ -865,6 +865,72 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     provider_environment="DEMO",
                 )
 
+    def test_authoritative_risk_provider_domain_fences_availability_evidence(self):
+        snapshot = {
+            "provider_id": "BYBIT",
+            "account_id": "bybit-account",
+            "environment": "PAPER",
+            "provider_environment": "TESTNET",
+        }
+        matching = {
+            "provider_id": "BYBIT",
+            "account_id": "bybit-account",
+            "environment": "PAPER",
+            "provider_environment": "TESTNET",
+        }
+        self.assertEqual(
+            authority_module._require_provider_scope_matches_authoritative_risk_snapshot(
+                snapshot,
+                matching,
+                evidence_name="test availability",
+            ),
+            ("BYBIT", "TESTNET"),
+        )
+
+        wrong_domain = {
+            **matching,
+            "provider_environment": "DEMO",
+        }
+        with self.assertRaisesRegex(
+            AuthorityConflict,
+            "provider domain differs from authoritative risk snapshot",
+        ):
+            authority_module._require_provider_scope_matches_authoritative_risk_snapshot(
+                snapshot,
+                wrong_domain,
+                evidence_name="test availability",
+            )
+
+        wrong_provider = {
+            **matching,
+            "provider_id": "KRAKEN",
+            "provider_environment": "PAPER",
+        }
+        with self.assertRaisesRegex(
+            AuthorityConflict,
+            "provider domain differs from authoritative risk snapshot",
+        ):
+            authority_module._require_provider_scope_matches_authoritative_risk_snapshot(
+                snapshot,
+                wrong_provider,
+                evidence_name="test availability",
+            )
+
+        missing_snapshot_domain = {
+            "provider_id": "BYBIT",
+            "account_id": "bybit-account",
+            "environment": "PAPER",
+        }
+        with self.assertRaisesRegex(
+            AuthorityConflict,
+            "lacks provider_environment",
+        ):
+            authority_module._require_provider_scope_matches_authoritative_risk_snapshot(
+                missing_snapshot_domain,
+                matching,
+                evidence_name="test availability",
+            )
+
     def test_admission_uses_exact_reconciled_cash_and_survives_restart_retry(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

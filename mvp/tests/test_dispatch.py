@@ -924,6 +924,19 @@ class DispatchTests(unittest.TestCase):
             ):
                 response.response_sha256
 
+    def test_exact_response_digest_projection_rejects_sha_authority_rebinding(self):
+        response = ExactJsonTransportResponse(b'{"ok":true}')
+        with patch.object(
+            dispatch_module,
+            "sha256",
+            side_effect=AssertionError("forged digest authority reached"),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "exact transport response authority is unavailable",
+            ):
+                response.response_sha256
+
     def test_transport_callback_cannot_rebind_exact_response_authority_to_force_sent(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)

@@ -122,7 +122,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             economic_book=self.book,
         )
 
-    def _authority(self, *, registry, economic_book):
+    def _authority(self, *, registry, economic_book, provider_environment=None):
         def resolve(reference):
             return self._evidence[reference]
 
@@ -133,6 +133,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             evidence_resolver=resolve,
             lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
             permission_scope=LIFECYCLE_SCOPE,
+            provider_environment=provider_environment,
         )
 
     @staticmethod
@@ -345,6 +346,12 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                 new_callable=property,
                 return_value="autotrade.option-lifecycle.sealed-json",
             ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "provider_environment",
+                new_callable=property,
+                return_value="TESTNET",
+            ),
         ):
             observation, provider_evidence, qualified = (
                 self.authority._observation_from_evidence("qualified-lifecycle")
@@ -354,6 +361,11 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self.assertIs(provider_evidence, neutral_source)
         self.assertIs(qualified, forged)
         self.assertEqual(observation.raw_evidence_digest, neutral_source.response_sha256)
+        self.assertEqual(observation.provider_environment, "TESTNET")
+        self.assertEqual(
+            canonical_option_lifecycle_observation(observation)["provider_environment"],
+            "TESTNET",
+        )
 
     def test_qualified_lifecycle_apply_persists_full_provider_q_provenance(self):
         self.seed_option_position("1")
@@ -374,6 +386,11 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         object.__setattr__(forged, "observation", neutral_source)
         object.__setattr__(forged, "query_binding", QualifiedBinding())
         self._evidence["qualified-lifecycle-apply"] = forged
+        authority = self._authority(
+            registry=self.registry,
+            economic_book=self.book,
+            provider_environment="TESTNET",
+        )
 
         patches = (
             patch.object(
@@ -418,12 +435,18 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                 new_callable=property,
                 return_value="ACCOUNT",
             ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "provider_environment",
+                new_callable=property,
+                return_value="TESTNET",
+            ),
         )
         for item in patches:
             item.start()
         try:
-            result = self.authority.apply("qualified-lifecycle-apply")
-            retry = self.authority.apply("qualified-lifecycle-apply")
+            result = authority.apply("qualified-lifecycle-apply")
+            retry = authority.apply("qualified-lifecycle-apply")
         finally:
             for item in reversed(patches):
                 item.stop()
@@ -432,7 +455,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self.assertFalse(retry.inserted)
         event = self.store.load_events(
             "option_lifecycle",
-            self.authority.aggregate_id,
+            authority.aggregate_id,
         )[0]["payload"]
         evidence = event["provider_evidence"]
         self.assertEqual(
@@ -451,6 +474,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             "sha256:" + "0" * 64,
         )
         self.assertEqual(evidence["data_entitlement"], "ACCOUNT")
+        self.assertEqual(event["provider_environment"], "TESTNET")
         self.assertEqual(evidence["provider_environment"], "TESTNET")
         self.assertEqual(evidence["authority_journal_sequence_cut"], 17)
         self.assertEqual(evidence["adapter_code_sha"], "b" * 40)
@@ -458,6 +482,69 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             evidence["packaged_artifact_digest"],
             "sha256:" + "c" * 64,
         )
+
+    def test_qualified_provider_environment_mismatch_fails_before_economic_mutation(self):
+        self.seed_option_position("1")
+        neutral_ref = self.evidence(
+            external_event_id="qualified-domain-mismatch",
+            provider_revision="qualified-domain-r1",
+        )
+        neutral_source = self._evidence[neutral_ref]
+        forged = object.__new__(QualifiedProviderResponseObservation)
+        object.__setattr__(forged, "observation", neutral_source)
+
+        class QualifiedBinding:
+            provider_environment = "TESTNET"
+
+        object.__setattr__(forged, "query_binding", QualifiedBinding())
+        self._evidence["qualified-domain-mismatch"] = forged
+        authority = self._authority(
+            registry=self.registry,
+            economic_book=self.book,
+            provider_environment="DEMO",
+        )
+
+        with (
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "evidence_ref",
+                new_callable=property,
+                return_value="qualified-domain-mismatch",
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "parser_identity",
+                new_callable=property,
+                return_value="autotrade.option-lifecycle.sealed-json",
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "provider_environment",
+                new_callable=property,
+                return_value="TESTNET",
+            ),
+        ):
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "provider_environment scope does not match lifecycle authority",
+            ):
+                authority.apply("qualified-domain-mismatch")
+
+        self.assertEqual(self.book.transactions, ())
+        self.assertEqual(authority._events(), [])
+
+    def test_qualified_provider_environment_changes_aggregate_identity(self):
+        testnet = self._authority(
+            registry=self.registry,
+            economic_book=self.book,
+            provider_environment="TESTNET",
+        )
+        demo = self._authority(
+            registry=self.registry,
+            economic_book=self.book,
+            provider_environment="DEMO",
+        )
+        self.assertNotEqual(testnet.aggregate_id, demo.aggregate_id)
 
     def test_lifecycle_financial_decimals_reject_subclasses_before_virtual_dispatch(self):
         class HostileDecimal(Decimal):

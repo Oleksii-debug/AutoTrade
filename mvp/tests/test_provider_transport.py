@@ -33,6 +33,7 @@ from mvp.autotrade_mvp.dispatch import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_core import (
+    AuthenticatedReadQueryBinding,
     Surface,
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
@@ -462,6 +463,26 @@ def authenticated_read_binding(
         at=READ_NOW,
         permission_scope=permission_scope,
     )
+
+
+def unissued_authenticated_read_binding_clone(binding):
+    forged = object.__new__(AuthenticatedReadQueryBinding)
+    for field in (
+        "provider_id",
+        "account_id",
+        "entity_id",
+        "environment",
+        "capability_snapshot_id",
+        "instrument_version",
+        "surface",
+        "endpoint",
+        "query",
+        "prepared_at",
+        "permission_scope",
+        "query_digest",
+    ):
+        object.__setattr__(forged, field, getattr(binding, field))
+    return forged
 
 
 KRAKEN_READ_NOW = datetime(2026, 9, 26, 1, 0, tzinfo=timezone.utc)
@@ -3281,6 +3302,21 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         )
         return transport, resolver
 
+    def test_binance_read_signer_rejects_unissued_exact_binding_clone(self):
+        forged = unissued_authenticated_read_binding_clone(
+            authenticated_read_binding()
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "construction authority is unavailable",
+        ):
+            BinanceSpotAuthenticatedReadSigner.sign(
+                policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+                query_binding=forged,
+                credential_plaintext='{"api_key":"key","api_secret":"secret"}',
+                timestamp_ms=1700000000000,
+            )
+
     def test_authenticated_read_signer_has_fixed_exact_vector(self):
         request = BinanceSpotAuthenticatedReadSigner.sign(
             policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
@@ -3809,6 +3845,23 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
             wire_client=wire or RecordingWire(events),
         )
         return transport, resolver, allocator
+
+    def test_kraken_read_signer_rejects_unissued_exact_binding_clone(self):
+        forged = unissued_authenticated_read_binding_clone(
+            kraken_authenticated_read_binding(
+                query={"trades": "true"}
+            )
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "construction authority is unavailable",
+        ):
+            KrakenSpotAuthenticatedReadSigner.sign(
+                policy=KRAKEN_SPOT_ENDPOINT_POLICIES["LIVE"],
+                query_binding=forged,
+                credential_plaintext=self.credential_plaintext(),
+                nonce=1_616_492_376_594,
+            )
 
     def test_private_read_signer_has_fixed_exact_hmac_vector(self):
         request = KrakenSpotAuthenticatedReadSigner.sign(

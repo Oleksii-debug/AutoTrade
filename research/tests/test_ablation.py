@@ -564,6 +564,75 @@ class AblationTests(unittest.TestCase):
             "missing_target_component_causal_evidence",
         )
 
+    def test_descriptive_summary_remains_available_without_target_causal_evidence(self):
+        base = causal_evidence()
+        diagnostic = AblationPair(
+            "agent",
+            outcome(
+                case_id="descriptive-target-evidence-missing",
+                variant="FULL",
+                utility="0.4",
+                cost="0.1",
+                elapsed=10,
+                components=("base", "agent"),
+                input_evidence=(base,),
+            ),
+            outcome(
+                case_id="descriptive-target-evidence-missing",
+                variant="ABLATED",
+                utility="0.2",
+                cost="0",
+                elapsed=9,
+                components=("base",),
+                input_evidence=(base,),
+            ),
+        )
+        summary = summarize_ablation("agent", [diagnostic])
+        self.assertEqual(summary.status, "DESCRIPTIVE_ONLY")
+        self.assertEqual(summary.total_pairs, 1)
+
+    def test_locked_bundle_preserves_missing_target_evidence_as_inconclusive(self):
+        base = causal_evidence()
+        diagnostic = AblationPair(
+            "agent",
+            outcome(
+                case_id="locked-target-evidence-missing",
+                variant="FULL",
+                utility="1",
+                cost="0",
+                elapsed=10,
+                components=("base", "agent"),
+                input_evidence=(base,),
+            ),
+            outcome(
+                case_id="locked-target-evidence-missing",
+                variant="ABLATED",
+                utility="0",
+                cost="0",
+                elapsed=10,
+                components=("base",),
+                input_evidence=(base,),
+            ),
+        )
+        bundle = build_ablation_evidence_bundle(
+            "agent",
+            [diagnostic],
+            source_revision="6" * 40,
+            protocol_digest=FINGERPRINT_C,
+            dataset_digest=FINGERPRINT_D,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(bundle.evaluation.status, "INCONCLUSIVE")
+        self.assertEqual(
+            bundle.evaluation.reason,
+            "missing_target_component_causal_evidence",
+        )
+        self.assertIn(
+            '"reason":"missing_target_component_causal_evidence"',
+            bundle.payload,
+        )
+
     def test_inferential_value_requires_causal_input_evidence(self):
         unbound = AblationPair(
             "agent",

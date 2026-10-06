@@ -801,6 +801,15 @@ class DurableOptionLifecycleAuthority:
             raise OptionLifecycleError(
                 "PAPER/LIVE option lifecycle economics require durable PROVIDER_ORIGIN evidence"
             )
+
+        # The resolver is an arbitrary callback even in provider-free modes.
+        # Pin the exact sealed-response scope validator and normalization helper
+        # before crossing it so callback-time class/module mutation cannot turn
+        # neutral evidence into a different lifecycle fact.
+        require_scope = ProviderResponseObservation.require_scope
+        require_scope_code = getattr(require_scope, "__code__", None)
+        observation_parser = _canonical_observation_from_sealed_response
+        observation_parser_code = getattr(observation_parser, "__code__", None)
         try:
             source = self.evidence_resolver(reference)
         except Exception as error:
@@ -810,6 +819,22 @@ class DurableOptionLifecycleAuthority:
         # Validate captured financial scope immediately after the callback,
         # before the source is interpreted using any caller-retargeted owner.
         self._require_canonical_authorities()
+        if (
+            ProviderResponseObservation.require_scope is not require_scope
+            or _canonical_observation_from_sealed_response is not observation_parser
+            or (
+                require_scope_code is not None
+                and getattr(require_scope, "__code__", None) is not require_scope_code
+            )
+            or (
+                observation_parser_code is not None
+                and getattr(observation_parser, "__code__", None)
+                is not observation_parser_code
+            )
+        ):
+            raise OptionLifecycleError(
+                "provider lifecycle evidence authority changed during resolution"
+            )
         if type(source) is not ProviderResponseObservation:
             raise OptionLifecycleError(
                 "provider lifecycle evidence must be an exact sealed ProviderResponseObservation"
@@ -824,7 +849,8 @@ class DurableOptionLifecycleAuthority:
                 "provider lifecycle evidence endpoint is not allowed"
             )
         try:
-            source.require_scope(
+            require_scope(
+                source,
                 provider_id=self.economic_book.provider_id,
                 surface=Surface.ACTIVITIES,
                 endpoint=endpoint,
@@ -839,7 +865,7 @@ class DurableOptionLifecycleAuthority:
             raise OptionLifecycleError(
                 "provider lifecycle evidence permission scope mismatch"
             )
-        observation = _canonical_observation_from_sealed_response(source)
+        observation = observation_parser(source)
         observed_at = datetime.fromisoformat(
             source.observed_at.replace("Z", "+00:00")
         ).astimezone(timezone.utc)

@@ -1042,8 +1042,11 @@ internal static class Program
                 StringComparison.Ordinal),
             "durable recovery record did not persist the canonical public session reference");
         Check.True(
-            pendingStore.Payload!.Contains("\"schema_version\":\"2\"", StringComparison.Ordinal),
-            "durable recovery record was not upgraded to the bearer-free v2 schema");
+            pendingStore.Payload!.Contains("\"schema_version\":\"3\"", StringComparison.Ordinal)
+                && pendingStore.Payload.Contains(
+                    "\"host_id\":\"host-local-1\"",
+                    StringComparison.Ordinal),
+            "new unresolved emergency command did not persist the host-bound bearer-free v3 schema");
 
         AuthenticatedEmergencyHostClient restartedProcess = new(
             new HttpClient(handler),
@@ -1225,10 +1228,10 @@ internal static class Program
             "uncertain command was not persisted before session rotation");
         Check.True(
             pendingStore.Payload!.Contains(
-                ""schema_version":"3"",
+                "\"schema_version\":\"3\"",
                 StringComparison.Ordinal)
                 && pendingStore.Payload.Contains(
-                    ""host_id":"host-local-1"",
+                    "\"host_id\":\"host-local-1\"",
                     StringComparison.Ordinal),
             "new unresolved emergency command did not persist the exact authenticated host identity");
 

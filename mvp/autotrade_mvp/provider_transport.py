@@ -146,9 +146,12 @@ def _exclusive_nonce_send_lock(thread_lock, lock_path):
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
         raise ProviderTransportScopeError(f"{name} is required")
-    return value.strip()
+    text = value.strip()
+    if not text:
+        raise ProviderTransportScopeError(f"{name} is required")
+    return text
 
 
 def _canonical_text(value: object, *, name: str) -> str:
@@ -1440,7 +1443,7 @@ class WhiteBitCredential:
 
     @classmethod
     def parse(cls, plaintext: object) -> "WhiteBitCredential":
-        if not isinstance(plaintext, str) or not plaintext:
+        if type(plaintext) is not str or not plaintext:
             raise ProviderTransportScopeError(
                 "WhiteBIT credential material is unavailable"
             )
@@ -2005,9 +2008,8 @@ class KrakenSpotDurableNonceAllocator:
             handle_id = payload.get("credential_handle_id")
             generation = payload.get("credential_generation")
             if (
-                not isinstance(handle_id, str)
+                type(handle_id) is not str
                 or not handle_id
-                or handle_id != handle_id.strip()
                 or any(ord(character) < 0x20 for character in handle_id)
                 or isinstance(generation, bool)
                 or not isinstance(generation, int)
@@ -2511,7 +2513,7 @@ class KrakenSpotCredential:
 
     @classmethod
     def parse(cls, plaintext: object) -> "KrakenSpotCredential":
-        if not isinstance(plaintext, str) or not plaintext:
+        if type(plaintext) is not str or not plaintext:
             raise ProviderTransportScopeError(
                 "Kraken Spot credential material is unavailable"
             )
@@ -3218,7 +3220,7 @@ class AlpacaTradingCredential:
 
     @classmethod
     def parse(cls, plaintext: object) -> "AlpacaTradingCredential":
-        if not isinstance(plaintext, str) or not plaintext:
+        if type(plaintext) is not str or not plaintext:
             raise ProviderTransportScopeError(
                 "Alpaca credential material is unavailable"
             )
@@ -3500,7 +3502,7 @@ class BybitV5Credential:
 
     @classmethod
     def parse(cls, plaintext: object) -> "BybitV5Credential":
-        if not isinstance(plaintext, str) or not plaintext:
+        if type(plaintext) is not str or not plaintext:
             raise ProviderTransportScopeError(
                 "Bybit credential material is unavailable"
             )
@@ -3993,7 +3995,7 @@ class BybitV5AuthenticatedReadSigner:
         query: dict[str, str] = {}
         for raw_key, raw_value in query_binding.query.items():
             key = _canonical_text(raw_key, name="query parameter")
-            if not isinstance(raw_value, str) or raw_value != raw_value.strip():
+            if type(raw_value) is not str or raw_value != raw_value.strip():
                 raise ProviderTransportScopeError(
                     "Bybit authenticated-read query values must be canonical strings"
                 )
@@ -4253,7 +4255,7 @@ class BinanceSpotCredential:
 
     @classmethod
     def parse(cls, plaintext: object) -> "BinanceSpotCredential":
-        if not isinstance(plaintext, str) or not plaintext:
+        if type(plaintext) is not str or not plaintext:
             raise ProviderTransportScopeError(
                 "Binance credential material is unavailable"
             )
@@ -4306,7 +4308,7 @@ class BinanceSpotSigner:
         canonical: dict[str, str] = {}
         for raw_key, raw_value in body.items():
             key = _canonical_text(raw_key, name="order parameter")
-            if not isinstance(raw_value, str) or raw_value != raw_value.strip():
+            if type(raw_value) is not str or raw_value != raw_value.strip():
                 raise ProviderTransportScopeError(
                     "Binance order parameters must be canonical strings"
                 )
@@ -4475,7 +4477,7 @@ class BinanceSpotHttpTransport:
         normalized: dict[str, str] = {}
         for raw_key, raw_value in body.items():
             key = _canonical_text(raw_key, name="order parameter")
-            if not isinstance(raw_value, str) or raw_value != raw_value.strip():
+            if type(raw_value) is not str or raw_value != raw_value.strip():
                 raise ProviderTransportScopeError(
                     "prepared Binance body values must be canonical strings"
                 )
@@ -4596,7 +4598,7 @@ class BinanceSpotAuthenticatedReadSigner:
         canonical: dict[str, str] = {}
         for raw_key, raw_value in query_binding.query.items():
             key = _canonical_text(raw_key, name="query parameter")
-            if not isinstance(raw_value, str) or raw_value != raw_value.strip():
+            if type(raw_value) is not str or raw_value != raw_value.strip():
                 raise ProviderTransportScopeError(
                     "authenticated-read query values must be canonical strings"
                 )

@@ -84,6 +84,8 @@ class OptionLifecycleConflict(OptionLifecycleError):
 
 def _canonical_observation_from_sealed_response(
     source: ProviderResponseObservation,
+    *,
+    provider_environment: str | None = None,
 ) -> "OptionLifecycleObservation":
     """Parse the only admitted canonical lifecycle response shape.
 
@@ -180,6 +182,7 @@ def _canonical_observation_from_sealed_response(
                 "corrects_external_event_id",
             )
         ),
+        provider_environment=provider_environment,
     )
 
 
@@ -257,11 +260,17 @@ class OptionLifecycleObservation:
     underlying_price: Decimal | None = None
     cash_settlement_amount: Decimal | None = None
     corrects_external_event_id: str | None = None
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         provider = _text(self.provider_id, "provider_id").upper()
         account = _text(self.account_id, "account_id")
         environment = _text(self.environment, "environment").upper()
+        provider_environment = (
+            None
+            if self.provider_environment is None
+            else _text(self.provider_environment, "provider_environment").upper()
+        )
         venue = _text(self.venue_id, "venue_id")
         instrument_version = _text(self.instrument_version, "instrument_version")
         external_event_id = _text(self.external_event_id, "external_event_id")
@@ -310,6 +319,7 @@ class OptionLifecycleObservation:
         object.__setattr__(self, "provider_id", provider)
         object.__setattr__(self, "account_id", account)
         object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "provider_environment", provider_environment)
         object.__setattr__(self, "venue_id", venue)
         object.__setattr__(self, "instrument_version", instrument_version)
         object.__setattr__(self, "external_event_id", external_event_id)
@@ -342,6 +352,7 @@ def canonical_option_lifecycle_observation(
         "provider_id": observation.provider_id,
         "account_id": observation.account_id,
         "environment": observation.environment,
+        "provider_environment": observation.provider_environment,
         "venue_id": observation.venue_id,
         "instrument_version": observation.instrument_version,
         "external_event_id": observation.external_event_id,
@@ -488,6 +499,7 @@ def _economic_transaction(
         observation.provider_id,
         observation.account_id,
         observation.environment,
+        observation.provider_environment or "UNSPECIFIED",
         observation.external_event_id,
     )
 
@@ -698,6 +710,7 @@ class DurableOptionLifecycleAuthority:
         evidence_resolver: OptionLifecycleEvidenceResolver,
         lifecycle_endpoints: frozenset[str],
         permission_scope: str,
+        provider_environment: str | None = None,
     ) -> None:
         if type(store) is not JournalStore:
             raise TypeError("store must be exact JournalStore")
@@ -720,12 +733,19 @@ class DurableOptionLifecycleAuthority:
                 "lifecycle endpoints must be canonical provider-relative paths"
             )
         scope = _text(permission_scope, "permission_scope")
+        scoped_provider_environment = (
+            None
+            if provider_environment is None
+            else _text(provider_environment, "provider_environment").upper()
+        )
         self.store = store
         self.registry = registry
         self.economic_book = economic_book
         self.evidence_resolver = evidence_resolver
         self.lifecycle_endpoints = endpoints
         self.permission_scope = scope
+        self.provider_environment = scoped_provider_environment
+        self._expected_provider_environment = scoped_provider_environment
         self._expected_economic_scope = (
             economic_book.provider_id,
             economic_book.account_id,
@@ -738,6 +758,7 @@ class DurableOptionLifecycleAuthority:
             economic_book.provider_id,
             economic_book.account_id,
             economic_book.environment,
+            self.provider_environment or "UNSPECIFIED",
         )
 
     def _require_canonical_authorities(self) -> None:
@@ -770,6 +791,19 @@ class DurableOptionLifecycleAuthority:
         if current_scope != self._expected_economic_scope:
             raise OptionLifecycleConflict(
                 "durable economic-book scope changed after lifecycle construction"
+            )
+        if self.provider_environment != self._expected_provider_environment:
+            raise OptionLifecycleConflict(
+                "provider_environment authority changed after lifecycle construction"
+            )
+        if self.provider_environment is not None and (
+            type(self.provider_environment) is not str
+            or not self.provider_environment
+            or self.provider_environment != self.provider_environment.strip()
+            or self.provider_environment != self.provider_environment.upper()
+        ):
+            raise OptionLifecycleConflict(
+                "provider_environment authority is not canonical"
             )
 
     def _events(self) -> list[dict[str, Any]]:
@@ -826,6 +860,8 @@ class DurableOptionLifecycleAuthority:
         )
         expected_endpoints = self.lifecycle_endpoints
         expected_permission_scope = self.permission_scope
+        expected_provider_environment = self.provider_environment
+        expected_provider_environment_authority = self._expected_provider_environment
         expected_resolver = self.evidence_resolver
         try:
             source = expected_resolver(reference)
@@ -849,6 +885,8 @@ class DurableOptionLifecycleAuthority:
             or current_economic_scope != expected_economic_scope
             or self.lifecycle_endpoints != expected_endpoints
             or self.permission_scope != expected_permission_scope
+            or self.provider_environment != expected_provider_environment
+            or self._expected_provider_environment != expected_provider_environment_authority
             or self.evidence_resolver is not expected_resolver
             or "_require_canonical_authorities" in vars(self)
         ):
@@ -914,6 +952,7 @@ class DurableOptionLifecycleAuthority:
             != source.query_binding.instrument_version
             or observation.raw_evidence_digest != source.response_sha256
             or observation.observed_at != observed_at
+            or observation.provider_environment is not None
         ):
             raise OptionLifecycleError(
                 "normalized lifecycle fact does not match sealed provider evidence"
@@ -935,6 +974,10 @@ class DurableOptionLifecycleAuthority:
             raise OptionLifecycleError("account scope does not match economic book")
         if observation.environment != self.economic_book.environment:
             raise OptionLifecycleError("environment scope does not match economic book")
+        if observation.provider_environment != self.provider_environment:
+            raise OptionLifecycleError(
+                "provider_environment scope does not match lifecycle authority"
+            )
 
         version = _bind_version(self.registry, observation)
         observation_payload = canonical_option_lifecycle_observation(observation)
@@ -961,8 +1004,12 @@ class DurableOptionLifecycleAuthority:
         same_identity = [
             event
             for event in events
-            if self._payload(event).get("external_event_id")
-            == observation.external_event_id
+            if (
+                self._payload(event).get("external_event_id")
+                == observation.external_event_id
+                and self._payload(event).get("provider_environment")
+                == observation.provider_environment
+            )
         ]
         if same_identity:
             if len(same_identity) != 1:
@@ -1002,16 +1049,24 @@ class DurableOptionLifecycleAuthority:
             matches = [
                 event
                 for event in events
-                if self._payload(event).get("external_event_id")
-                == observation.corrects_external_event_id
+                if (
+                    self._payload(event).get("external_event_id")
+                    == observation.corrects_external_event_id
+                    and self._payload(event).get("provider_environment")
+                    == observation.provider_environment
+                )
             ]
             if len(matches) != 1:
                 raise OptionLifecycleConflict(
                     "correction target must identify exactly one prior lifecycle event"
                 )
             if any(
-                self._payload(event).get("corrects_external_event_id")
-                == observation.corrects_external_event_id
+                (
+                    self._payload(event).get("corrects_external_event_id")
+                    == observation.corrects_external_event_id
+                    and self._payload(event).get("provider_environment")
+                    == observation.provider_environment
+                )
                 for event in events
             ):
                 raise OptionLifecycleConflict(
@@ -1085,6 +1140,7 @@ class DurableOptionLifecycleAuthority:
             observation.provider_id,
             observation.account_id,
             observation.environment,
+            observation.provider_environment or "UNSPECIFIED",
             observation.external_event_id,
         )
 
@@ -1100,6 +1156,7 @@ class DurableOptionLifecycleAuthority:
                         observation.provider_id,
                         observation.account_id,
                         observation.environment,
+                        observation.provider_environment or "UNSPECIFIED",
                         observation.external_event_id,
                         original.transaction_id,
                     ),
@@ -1164,6 +1221,7 @@ class DurableOptionLifecycleAuthority:
             "provider_id": observation.provider_id,
             "account_id": observation.account_id,
             "environment": observation.environment,
+            "provider_environment": observation.provider_environment,
             "venue_id": observation.venue_id,
             "instrument_version": observation.instrument_version,
             "instrument_digest": instrument_digest,
@@ -1221,6 +1279,7 @@ class DurableOptionLifecycleAuthority:
             observation.provider_id,
             observation.account_id,
             observation.environment,
+            observation.provider_environment or "UNSPECIFIED",
             observation.external_event_id,
         )
         self._require_canonical_authorities()
@@ -1230,7 +1289,9 @@ class DurableOptionLifecycleAuthority:
             actor=self._ACTOR,
             environment=observation.environment,
             idempotency_key=(
-                f"option-lifecycle:{self.aggregate_id}:{observation.external_event_id}"
+                f"option-lifecycle:{self.aggregate_id}:"
+                f"{observation.provider_environment or 'UNSPECIFIED'}:"
+                f"{observation.external_event_id}"
             ),
             request=request,
             result=result,

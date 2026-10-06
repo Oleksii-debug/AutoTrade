@@ -224,7 +224,11 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
             json_module = dispatch_module.json
             original_loads = json_module.loads
 
+            forged_calls = 0
+
             def forged_loads(_text, **_kwargs):
+                nonlocal forged_calls
+                forged_calls += 1
                 return {"forged": True}
 
             def transport(_client_order_id, _request, final_guard):
@@ -243,6 +247,7 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
                     transport,
                 )
                 self.assertIs(json_module.loads, original_loads)
+                self.assertEqual(forged_calls, 0)
             finally:
                 json_module.loads = original_loads
 
@@ -413,6 +418,57 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
                 terminal["retry_disposition"],
                 "RECONCILE_FIRST",
             )
+
+
+    def test_transport_exception_restores_decoder_before_unknown_journal_read(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            json_module = dispatch_module.json
+            original_loads = json_module.loads
+            forged_calls = 0
+
+            def forged_loads(_text, **_kwargs):
+                nonlocal forged_calls
+                forged_calls += 1
+                return {"forged": True}
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                json_module.loads = forged_loads
+                raise RuntimeError("provider transport failed after wire")
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "snapshot-transport-raise-restores-json",
+                    transport,
+                )
+                self.assertIs(json_module.loads, original_loads)
+                self.assertEqual(forged_calls, 0)
+            finally:
+                json_module.loads = original_loads
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "transport_result_ambiguous")
+            events = self._events(
+                path,
+                dispatcher,
+                "snapshot-transport-raise-restores-json",
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "transport_exception_after_send_barrier:RuntimeError",
+            )
+            self.assertNotIn("response_text", events[-1]["payload"])
 
 
 if __name__ == "__main__":

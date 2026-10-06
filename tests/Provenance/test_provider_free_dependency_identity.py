@@ -272,6 +272,21 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
         )
         self.assertEqual(document["spdxVersion"], "SPDX-2.3")
 
+
+    def test_workflow_requalifies_when_candidate_provenance_tcb_changes(self):
+        workflow = (
+            candidate.ROOT / ".github/workflows/provider-free-product.yml"
+        ).read_text(encoding="utf-8")
+        for path in (
+            'tools/release_scope_mapping.py',
+            'tools/dotnet_package_rights.py',
+            'tools/dotnet_lock.py',
+            'provenance/**',
+            'tests/Provenance/**',
+        ):
+            with self.subTest(path=path):
+                self.assertIn(f'"{path}"', workflow)
+
     def test_workflow_uses_source_controlled_runtime_urls(self):
         workflow = (
             candidate.ROOT / ".github/workflows/provider-free-product.yml"

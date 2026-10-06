@@ -638,6 +638,49 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                         )
                 rebound.assert_not_called()
 
+    def test_submission_consumer_rejects_rebound_transitive_authorities(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "kraken-futures-transitive-authority-rebound",
+                    "status": "placed",
+                },
+            },
+            intent_id="kraken-futures-transitive-authority-rebound",
+            provider_environment="LIVE",
+        )
+        for helper in ("uuid5", "futures_base_url", "_text"):
+            with self.subTest(helper=helper):
+                with patch(
+                    f"mvp.autotrade_mvp.kraken_futures.{helper}",
+                    side_effect=AssertionError("rebound transitive helper executed"),
+                ) as rebound:
+                    with self.assertRaisesRegex(
+                        ProviderCoreError,
+                        "prepared response authority is unavailable",
+                    ):
+                        parse_submission_response(
+                            attempt_id=attempt,
+                            prepared_request=prepared,
+                            observation=observation,
+                        )
+                rebound.assert_not_called()
+
+        with patch.dict(
+            "mvp.autotrade_mvp.kraken_futures._RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT",
+            {"LIVE": "PAPER"},
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "prepared response authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
+                )
+
     def test_submission_consumer_rejects_prepared_subclass_before_virtual_callback(self):
         callbacks = []
 

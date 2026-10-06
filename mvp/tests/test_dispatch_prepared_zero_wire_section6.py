@@ -74,6 +74,35 @@ class PreparedZeroWireSection6Tests(unittest.TestCase):
                 )
         self.assertEqual(HostileLease.callbacks, 0)
 
+    def test_prepared_lease_large_exact_integer_does_not_overflow(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="section6-account",
+                owner_token="owner-a",
+                prepared_lease_seconds=10**30,
+            )
+            self._leave_prepared(dispatcher)
+
+            recovered = dispatcher.dispatch(
+                attempt_id="section6-attempt",
+                intent_id="section6-intent",
+                intent_hash="section6-intent-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="9999-12-31T23:59:59.999999Z",
+                authority_check=lambda *_args: self.fail(
+                    "large-lease recovery repeated authority"
+                ),
+                transport_send=lambda *_args: self.fail(
+                    "large-lease recovery reached provider transport"
+                ),
+            )
+            self.assertEqual(recovered.status, "IN_PROGRESS")
+            self.assertEqual(recovered.reason, "prepared_owner_lease_active")
+
     def test_prepared_lease_exact_microsecond_boundary(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

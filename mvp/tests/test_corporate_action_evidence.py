@@ -12,6 +12,7 @@ from mvp.autotrade_mvp.corporate_action_evidence import (
     CorporateActionEvidenceError,
     CorporateActionObservation,
     DurableCorporateActionEvidenceStore,
+    authoritative_corporate_action_projection,
     resolve_authoritative_corporate_action,
 )
 from mvp.autotrade_mvp.capabilities import (
@@ -252,6 +253,38 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         second = resolve(source)
         self.assertEqual(first, second)
         self.assertEqual(first.event, second.event)
+
+    def test_authoritative_projection_is_inert_and_requires_issuer_authority(self):
+        source = sealed_dividend()
+        accepted = resolve(source)
+
+        projection = authoritative_corporate_action_projection(accepted)
+        self.assertEqual(projection["provider_id"], "BINANCE")
+        self.assertEqual(projection["account_id"], "acct-1")
+        self.assertEqual(projection["external_event_id"], "corp-1")
+        self.assertEqual(
+            projection["provider_revision"],
+            accepted.provider_revision,
+        )
+        self.assertEqual(
+            projection["provenance_digest"],
+            accepted.provenance_digest,
+        )
+        self.assertEqual(
+            dict(projection["payload"]),
+            {"per_share": "1.25", "currency": "USDT"},
+        )
+        with self.assertRaises(TypeError):
+            projection["provider_id"] = "FORGED"
+        with self.assertRaises(TypeError):
+            projection["payload"]["per_share"] = "999"
+
+        forged = AuthoritativeCorporateAction(**accepted.__dict__)
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "lacks canonical resolver issuance authority",
+        ):
+            authoritative_corporate_action_projection(forged)
 
     def test_provider_observation_subclass_is_rejected_before_attribute_access(self):
         class ForgedObservation(ProviderResponseObservation):

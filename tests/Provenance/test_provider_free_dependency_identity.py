@@ -21,9 +21,17 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
             ).read_bytes(),
             label="provider-free inputs",
         )
+        nuget_lock = strict_json_bytes(
+            (
+                candidate.ROOT
+                / "src/AutoTrade.Desktop/packages.lock.json"
+            ).read_bytes(),
+            label="Desktop NuGet lock",
+        )
         digest = candidate._require_webview2_input_identity(
             candidate.ROOT,
             inputs,
+            nuget_lock,
         )
         self.assertEqual(inputs["webview2_sdk"]["version"], "1.0.4258.31")
         self.assertEqual(
@@ -136,11 +144,82 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
                     "content_hash_sha512_base64": "stale",
                 }
             }
+            nuget_lock = {
+                "version": 1,
+                "dependencies": {
+                    "net10.0-windows7.0": {
+                        "Microsoft.Web.WebView2": {
+                            "type": "Direct",
+                            "requested": "[1.0.4191.47, )",
+                            "resolved": "1.0.4191.47",
+                            "contentHash": "stale",
+                        }
+                    }
+                },
+            }
             with self.assertRaisesRegex(
                 ValueError,
-                "differs from release provenance",
+                "lock differs from release provenance",
             ):
-                candidate._require_webview2_input_identity(root, inputs)
+                candidate._require_webview2_input_identity(
+                    root,
+                    inputs,
+                    nuget_lock,
+                )
+
+
+    def test_lock_drift_from_frozen_input_fails_before_candidate_build(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "provenance").mkdir()
+            manifest = {
+                "dotnet_package_dependencies": [{
+                    "project": "src/AutoTrade.Desktop/AutoTrade.Desktop.csproj",
+                    "target": "net10.0-windows7.0",
+                    "name": "Microsoft.Web.WebView2",
+                    "type": "Direct",
+                    "version": "1.0.4258.31",
+                    "content_hash_sha512_base64": "canonical",
+                    "dependencies": [],
+                    "requested": "[1.0.4258.31, )",
+                }]
+            }
+            (root / "provenance/release-dependency-manifest.json").write_text(
+                json.dumps(manifest),
+                encoding="utf-8",
+            )
+            inputs = {
+                "webview2_sdk": {
+                    "version": "1.0.4258.31",
+                    "url": (
+                        "https://api.nuget.org/v3-flatcontainer/"
+                        "microsoft.web.webview2/1.0.4258.31/"
+                        "microsoft.web.webview2.1.0.4258.31.nupkg"
+                    ),
+                    "content_hash_sha512_base64": "canonical",
+                }
+            }
+            drifted_lock = {
+                "version": 1,
+                "dependencies": {
+                    "net10.0-windows7.0": {
+                        "Microsoft.Web.WebView2": {
+                            "type": "Direct",
+                            "requested": "[1.0.4258.31, )",
+                            "resolved": "1.0.4258.31",
+                            "contentHash": "different",
+                        }
+                    }
+                },
+            }
+            with self.assertRaisesRegex(
+                ValueError, "lock differs from frozen input"
+            ):
+                candidate._require_webview2_input_identity(
+                    root,
+                    inputs,
+                    drifted_lock,
+                )
 
 
 if __name__ == "__main__":

@@ -431,7 +431,7 @@ def _require_copied_executable(expected, snapshot, *, label):
         raise ValueError(label + ' executable changed between admission and candidate copy')
 
 
-def _require_webview2_input_identity(product_root, inputs):
+def _require_webview2_input_identity(product_root, inputs, nuget_lock):
     if type(inputs) is not dict or type(inputs.get('webview2_sdk')) is not dict:
         raise ValueError('provider-free WebView2 input is missing')
     webview = inputs['webview2_sdk']
@@ -453,6 +453,50 @@ def _require_webview2_input_identity(product_root, inputs):
     )
     if url != expected_url:
         raise ValueError('provider-free WebView2 URL does not match exact version')
+    if (
+        type(nuget_lock) is not dict
+        or set(nuget_lock) != {'version', 'dependencies'}
+        or nuget_lock.get('version') != 1
+        or type(nuget_lock.get('dependencies')) is not dict
+    ):
+        raise ValueError('provider-free NuGet lock schema is unsupported')
+    lock_rows = []
+    for target, target_dependencies in nuget_lock['dependencies'].items():
+        if (
+            type(target) is not str
+            or not target
+            or target != target.strip()
+            or type(target_dependencies) is not dict
+        ):
+            raise ValueError('provider-free NuGet lock target is invalid')
+        item = target_dependencies.get('Microsoft.Web.WebView2')
+        if item is None:
+            continue
+        if (
+            type(item) is not dict
+            or set(item) != {'type', 'requested', 'resolved', 'contentHash'}
+            or item.get('type') != 'Direct'
+            or type(item.get('requested')) is not str
+            or not item.get('requested')
+            or item.get('requested') != item.get('requested').strip()
+            or item.get('resolved') != version
+            or item.get('contentHash') != content_hash
+        ):
+            raise ValueError(
+                'provider-free WebView2 lock differs from frozen input'
+            )
+        lock_rows.append({
+            'target': target,
+            'type': item['type'],
+            'requested': item['requested'],
+            'resolved': item['resolved'],
+            'content_hash_sha512_base64': item['contentHash'],
+        })
+    if len(lock_rows) != 1:
+        raise ValueError(
+            'provider-free WebView2 lock identity is not singular'
+        )
+
     manifest_path = product_root / 'provenance/release-dependency-manifest.json'
     manifest = strict_json_bytes(
         manifest_path.read_bytes(),
@@ -465,20 +509,31 @@ def _require_webview2_input_identity(product_root, inputs):
     )
     if type(dependencies) is not list:
         raise ValueError('release provenance has no .NET dependency graph')
-    identities = {
-        (
-            item.get('name'),
-            item.get('version'),
-            item.get('content_hash_sha512_base64'),
-        )
+    manifest_rows = [
+        item
         for item in dependencies
         if type(item) is dict
         and item.get('name') == 'Microsoft.Web.WebView2'
-    }
-    expected = {('Microsoft.Web.WebView2', version, content_hash)}
-    if identities != expected:
+    ]
+    if len(manifest_rows) != 1:
         raise ValueError(
-            'provider-free WebView2 input differs from release provenance'
+            'provider-free WebView2 release provenance is not singular'
+        )
+    lock_row = lock_rows[0]
+    manifest_row = manifest_rows[0]
+    expected_manifest = {
+        'project': 'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj',
+        'target': lock_row['target'],
+        'name': 'Microsoft.Web.WebView2',
+        'type': lock_row['type'],
+        'version': version,
+        'content_hash_sha512_base64': content_hash,
+        'dependencies': [],
+        'requested': lock_row['requested'],
+    }
+    if manifest_row != expected_manifest:
+        raise ValueError(
+            'provider-free WebView2 lock differs from release provenance'
         )
     return content_hash
 
@@ -492,9 +547,17 @@ def build_candidate(*, source_root, source_sha, desktop, host, python_archive, w
         (payload / 'product/packaging/windows/provider-free-inputs.json').read_bytes(),
         label='provider-free inputs',
     )
+    nuget_lock = strict_json_bytes(
+        (
+            payload
+            / 'product/src/AutoTrade.Desktop/packages.lock.json'
+        ).read_bytes(),
+        label='provider-free Desktop NuGet lock',
+    )
     webview_content_hash = _require_webview2_input_identity(
         payload / 'product',
         inputs,
+        nuget_lock,
     )
 
     desktop_publish_snapshot = _capture_publish(desktop)
@@ -525,7 +588,7 @@ def build_candidate(*, source_root, source_sha, desktop, host, python_archive, w
     dependencies = {
         'source_sha': source_sha,
         'inputs': inputs,
-        'nuget_lock': json.loads((payload / 'product/src/AutoTrade.Desktop/packages.lock.json').read_text()),
+        'nuget_lock': nuget_lock,
         'executables': {
             'desktop': {**desktop_identity, 'installed_path': 'AutoTrade.Desktop.exe'},
             'host': {**host_identity, 'installed_path': 'host/AutoTrade.Host.exe'},

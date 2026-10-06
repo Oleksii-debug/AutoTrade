@@ -517,7 +517,15 @@ def parse_cancel_response(
     fills.
     """
 
-    order_id = _text(provider_order_id, name="provider_order_id")
+    if (
+        type(provider_order_id) is not str
+        or not provider_order_id
+        or provider_order_id != provider_order_id.strip()
+    ):
+        raise IbkrWebAdapterError(
+            "provider_order_id must be canonical exact text"
+        )
+    order_id = provider_order_id
     if type(payload) is not dict:
         raise TypeError("cancel response must be an exact object")
 
@@ -964,18 +972,30 @@ def parse_web_api_trades(
             raise IbkrWebAdapterError(
                 "instrument_versions_by_conid keys must be positive exact integers"
             )
-        if type(instrument_value) is not str or not instrument_value.strip():
+        if (
+            type(instrument_value) is not str
+            or not instrument_value
+            or instrument_value != instrument_value.strip()
+        ):
             raise IbkrWebAdapterError(
-                "instrument_versions_by_conid values must be exact text"
+                "instrument_versions_by_conid values must be canonical exact text"
             )
     for execution_key, currency_value in fee_currency_by_execution_id.items():
-        if type(execution_key) is not str or not execution_key.strip():
+        if (
+            type(execution_key) is not str
+            or not execution_key
+            or execution_key != execution_key.strip()
+        ):
             raise IbkrWebAdapterError(
-                "fee_currency_by_execution_id keys must be exact text"
+                "fee_currency_by_execution_id keys must be canonical exact text"
             )
-        if type(currency_value) is not str or not currency_value.strip():
+        if (
+            type(currency_value) is not str
+            or not currency_value
+            or currency_value != currency_value.strip()
+        ):
             raise IbkrWebAdapterError(
-                "fee_currency_by_execution_id values must be exact text"
+                "fee_currency_by_execution_id values must be canonical exact text"
             )
     account = observation.account_id
     environment = observation.environment

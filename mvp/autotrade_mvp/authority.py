@@ -613,17 +613,10 @@ def _authority_service_capital_operations():
                 scope.provider_id != economic_book.provider_id
                 or scope.account_id != economic_book.account_id
                 or scope.environment != economic_book.environment
+                or scope.provider_environment != economic_book.provider_environment
             ):
                 raise AuthorityConflict(
                     "settlement and economic capital scopes do not match"
-                )
-            # DurableProviderEconomicBook does not yet retain provider_environment.
-            # Until it does, never collapse a provider-specific domain into the
-            # broader runtime environment for any provider.
-            if scope.provider_environment != scope.environment:
-                raise AuthorityConflict(
-                    "capital authority requires provider_environment "
-                    "in the durable economic book"
                 )
 
         object_id = id(service)
@@ -694,13 +687,9 @@ def _authority_service_capital_operations():
             scope.provider_id != economic_book.provider_id
             or scope.account_id != economic_book.account_id
             or scope.environment != economic_book.environment
+            or scope.provider_environment != economic_book.provider_environment
         ):
             raise AuthorityConflict("capital authority scope changed")
-        if scope.provider_environment != scope.environment:
-            raise AuthorityConflict(
-                "capital authority requires provider_environment "
-                "in the durable economic book"
-            )
         return settlement_book, economic_book
 
     def resolve(
@@ -872,6 +861,7 @@ def _canonical_settlement_capital_adjustment(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
     risk_journal_sequence: int | None = None,
     expected_journal_sequence: int | None = None,
 ) -> tuple[dict[str, object], dict[str, Decimal]]:
@@ -922,15 +912,37 @@ def _canonical_settlement_capital_adjustment(
         or value.get("environment") != canonical_environment
     ):
         raise AuthorityConflict("settlement capital scope is inconsistent")
+    if canonical_provider == "BYBIT" and provider_environment is None:
+        raise AuthorityConflict(
+            "BYBIT settlement capital requires exact provider_environment"
+        )
+    expected_provider_environment = (
+        canonical_environment
+        if provider_environment is None
+        else _text(
+            provider_environment,
+            name="expected_provider_environment",
+        ).upper()
+    )
+    if canonical_provider == "BYBIT":
+        if expected_provider_environment not in {"MAINNET", "TESTNET", "DEMO"}:
+            raise AuthorityConflict(
+                "BYBIT settlement capital provider_environment is unsupported"
+            )
+        expected_runtime = (
+            "LIVE" if expected_provider_environment == "MAINNET" else "PAPER"
+        )
+        if canonical_environment != expected_runtime:
+            raise AuthorityConflict(
+                "BYBIT settlement capital provider domain does not match runtime"
+            )
     provider_environment = _text(
         value.get("provider_environment"),
         name="provider_environment",
     ).upper()
-    # Until DurableProviderEconomicBook carries provider_environment, only an
-    # unambiguous runtime==provider domain can be consumed here.
-    if provider_environment != canonical_environment:
+    if provider_environment != expected_provider_environment:
         raise AuthorityConflict(
-            "settlement capital provider domain is not represented by economic authority"
+            "settlement capital provider domain is inconsistent"
         )
     settlement_scope_id = _text(
         value.get("settlement_scope_id"),
@@ -1796,6 +1808,107 @@ class AuthoritativeRiskSnapshot:
         }
 
 
+def _authoritative_risk_provider_scope(
+    authoritative_snapshot: Mapping[str, Any],
+) -> tuple[str, str]:
+    """Resolve the exact provider domain already bound by the risk snapshot."""
+
+    if not isinstance(authoritative_snapshot, Mapping):
+        raise AuthorityConflict("authoritative risk snapshot is malformed")
+    provider = _text(
+        authoritative_snapshot.get("provider_id"),
+        name="authoritative risk provider_id",
+    ).upper()
+    runtime = _text(
+        authoritative_snapshot.get("environment"),
+        name="authoritative risk environment",
+    ).upper()
+    raw_provider_environment = authoritative_snapshot.get(
+        "provider_environment"
+    )
+    if raw_provider_environment is None:
+        if provider == "BYBIT":
+            raise AuthorityConflict(
+                "BYBIT authoritative risk snapshot lacks provider_environment"
+            )
+        provider_environment = runtime
+    else:
+        provider_environment = _text(
+            raw_provider_environment,
+            name="authoritative risk provider_environment",
+        ).upper()
+    if provider == "BYBIT":
+        if provider_environment not in {"MAINNET", "TESTNET", "DEMO"}:
+            raise AuthorityConflict(
+                "BYBIT authoritative risk provider_environment is unsupported"
+            )
+        expected_runtime = (
+            "LIVE" if provider_environment == "MAINNET" else "PAPER"
+        )
+        if runtime != expected_runtime:
+            raise AuthorityConflict(
+                "BYBIT authoritative risk provider domain does not match runtime"
+            )
+    return provider, provider_environment
+
+
+def _require_provider_scope_matches_authoritative_risk_snapshot(
+    authoritative_snapshot: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    *,
+    evidence_name: str,
+) -> tuple[str, str]:
+    """Reject provider/account evidence that self-asserts a different domain."""
+
+    expected_provider, expected_provider_environment = (
+        _authoritative_risk_provider_scope(authoritative_snapshot)
+    )
+    expected_account = _text(
+        authoritative_snapshot.get("account_id"),
+        name="authoritative risk account_id",
+    )
+    expected_runtime = _text(
+        authoritative_snapshot.get("environment"),
+        name="authoritative risk environment",
+    ).upper()
+    if not isinstance(evidence, Mapping):
+        raise AuthorityConflict(f"{evidence_name} is malformed")
+    evidence_provider = _text(
+        evidence.get("provider_id"),
+        name=f"{evidence_name} provider_id",
+    ).upper()
+    evidence_account = _text(
+        evidence.get("account_id"),
+        name=f"{evidence_name} account_id",
+    )
+    evidence_runtime = _text(
+        evidence.get("environment"),
+        name=f"{evidence_name} environment",
+    ).upper()
+    raw_provider_environment = evidence.get("provider_environment")
+    if raw_provider_environment is None:
+        if evidence_provider == "BYBIT":
+            raise AuthorityConflict(
+                f"{evidence_name} lacks exact BYBIT provider_environment"
+            )
+        evidence_provider_environment = evidence_runtime
+    else:
+        evidence_provider_environment = _text(
+            raw_provider_environment,
+            name=f"{evidence_name} provider_environment",
+        ).upper()
+    if (
+        evidence_provider != expected_provider
+        or evidence_account != expected_account
+        or evidence_runtime != expected_runtime
+        or evidence_provider_environment != expected_provider_environment
+    ):
+        raise AuthorityConflict(
+            f"{evidence_name} provider/account scope differs from authoritative risk snapshot"
+        )
+    return expected_provider, expected_provider_environment
+
+
 def _authority_event_id(event_type: str, key: str) -> str:
     return str(uuid5(NAMESPACE_URL, f"https://events.autotrade.local/authority/{event_type}/{key}"))
 
@@ -2585,6 +2698,13 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "historical admitted command lacks availability evidence"
                 )
+            snapshot_provider_id, snapshot_provider_environment = (
+                _require_provider_scope_matches_authoritative_risk_snapshot(
+                    authoritative_snapshot,
+                    availability_evidence,
+                    evidence_name="historical availability evidence",
+                )
+            )
             checkpoint_event_id = _text(
                 availability_evidence.get("checkpoint_event_id"),
                 name="checkpoint_event_id",
@@ -2615,14 +2735,27 @@ class AuthorityService:
                     "historical availability checkpoint identity is inconsistent"
                 )
             checkpoint_payload = checkpoint.get("payload")
+            if not isinstance(checkpoint_payload, Mapping):
+                raise AuthorityConflict(
+                    "historical availability checkpoint scope is inconsistent"
+                )
+            _require_provider_scope_matches_authoritative_risk_snapshot(
+                authoritative_snapshot,
+                checkpoint_payload,
+                evidence_name="historical availability checkpoint",
+            )
             if (
-                not isinstance(checkpoint_payload, Mapping)
-                or checkpoint_payload.get("provider_id")
-                != availability_evidence.get("provider_id")
-                or checkpoint_payload.get("account_id")
-                != record.account_id
-                or checkpoint_payload.get("environment")
-                != record.environment
+                checkpoint_payload.get("provider_id") != snapshot_provider_id
+                or checkpoint_payload.get("account_id") != record.account_id
+                or checkpoint_payload.get("environment") != record.environment
+                or _text(
+                    checkpoint_payload.get(
+                        "provider_environment",
+                        checkpoint_payload.get("environment"),
+                    ),
+                    name="historical checkpoint provider_environment",
+                ).upper()
+                != snapshot_provider_environment
             ):
                 raise AuthorityConflict(
                     "historical availability checkpoint scope is inconsistent"
@@ -2922,6 +3055,30 @@ class AuthorityService:
             raise AuthorityConflict(
                 "durable admission lacks reservation availability evidence"
             )
+        if authoritative_snapshot is not None:
+            snapshot_provider_id, snapshot_provider_environment = (
+                _require_provider_scope_matches_authoritative_risk_snapshot(
+                    authoritative_snapshot,
+                    availability_evidence,
+                    evidence_name="durable reservation availability evidence",
+                )
+            )
+        else:
+            snapshot_provider_id = _text(
+                availability_evidence.get("provider_id"),
+                name="provider_id",
+            ).upper()
+            snapshot_provider_environment = _text(
+                availability_evidence.get(
+                    "provider_environment",
+                    availability_evidence.get("environment"),
+                ),
+                name="provider_environment",
+            ).upper()
+            if snapshot_provider_id == "BYBIT":
+                raise AuthorityConflict(
+                    "BYBIT durable admission lacks authoritative risk provider domain"
+                )
         try:
             regenerated_availability = (
                 load_account_resource_availability_evidence(
@@ -2930,12 +3087,10 @@ class AuthorityService:
                         availability_evidence.get("checkpoint_event_id"),
                         name="checkpoint_event_id",
                     ),
-                    provider_id=_text(
-                        availability_evidence.get("provider_id"),
-                        name="provider_id",
-                    ),
+                    provider_id=snapshot_provider_id,
                     account_id=record.account_id,
                     environment=record.environment,
+                    provider_environment=snapshot_provider_environment,
                     resources=tuple(sorted(risk_requirements)),
                     now=record.admitted_at,
                     max_age_seconds=availability_evidence.get(
@@ -3178,6 +3333,13 @@ class AuthorityService:
                     ),
                     account_id=record.account_id,
                     environment=record.environment,
+                    provider_environment=_text(
+                        regenerated_availability.get(
+                            "provider_environment",
+                            regenerated_availability.get("environment"),
+                        ),
+                        name="provider_environment",
+                    ),
                     risk_journal_sequence=risk_journal_sequence,
                     expected_journal_sequence=journal_sequence_cut,
                 )
@@ -4426,6 +4588,7 @@ class AuthorityService:
                         provider_id=provider_id,
                         account_id=account_id,
                         environment=environment,
+                        provider_environment=risk_authority_request.provider_environment,
                         resources=tuple(
                             resource
                             for resource, _amount in normalized_requirements
@@ -4632,6 +4795,13 @@ class AuthorityService:
                             provider_id=provider_id,
                             account_id=account_id,
                             environment=environment,
+                            provider_environment=_text(
+                                availability_evidence.get(
+                                    "provider_environment",
+                                    availability_evidence.get("environment"),
+                                ),
+                                name="provider_environment",
+                            ),
                         )
                     )
                     authoritative_available.update(effective_cash)
@@ -4656,6 +4826,13 @@ class AuthorityService:
                             provider_id=provider_id,
                             account_id=account_id,
                             environment=environment,
+                            provider_environment=_text(
+                                availability_evidence.get(
+                                    "provider_environment",
+                                    availability_evidence.get("environment"),
+                                ),
+                                name="provider_environment",
+                            ),
                         )
                     )
                     authoritative_available.update(effective_cash)
@@ -5326,6 +5503,34 @@ class AuthorityService:
                     raise AuthorityConflict(
                         "durable financial admission lacks availability evidence"
                     )
+                authoritative_snapshot = risk_payload.get(
+                    "authoritative_risk_snapshot"
+                )
+                if authoritative_snapshot is not None:
+                    (
+                        current_provider_id,
+                        current_provider_environment,
+                    ) = _require_provider_scope_matches_authoritative_risk_snapshot(
+                        authoritative_snapshot,
+                        availability_evidence,
+                        evidence_name="dispatch availability evidence",
+                    )
+                else:
+                    current_provider_id = _text(
+                        availability_evidence.get("provider_id"),
+                        name="provider_id",
+                    ).upper()
+                    current_provider_environment = _text(
+                        availability_evidence.get(
+                            "provider_environment",
+                            availability_evidence.get("environment"),
+                        ),
+                        name="provider_environment",
+                    ).upper()
+                    if current_provider_id == "BYBIT":
+                        raise AuthorityConflict(
+                            "BYBIT dispatch lacks authoritative risk provider domain"
+                        )
                 # Historical evidence above is intentionally regenerated at the
                 # admission instant so restart/replay remains deterministic.
                 # Sending is a distinct authority boundary: freeze one global
@@ -5346,12 +5551,10 @@ class AuthorityService:
                             availability_evidence.get("checkpoint_event_id"),
                             name="checkpoint_event_id",
                         ),
-                        provider_id=_text(
-                            availability_evidence.get("provider_id"),
-                            name="provider_id",
-                        ),
+                        provider_id=current_provider_id,
                         account_id=record.account_id,
                         environment=record.environment,
+                        provider_environment=current_provider_environment,
                         resources=tuple(sorted(risk_requirements)),
                         now=now,
                         max_age_seconds=availability_evidence.get(
@@ -5374,12 +5577,10 @@ class AuthorityService:
                             raw_capital_adjustment,
                             provider_available=current_provider_available,
                             required_resources=tuple(sorted(risk_requirements)),
-                            provider_id=_text(
-                                availability_evidence.get("provider_id"),
-                                name="provider_id",
-                            ),
+                            provider_id=current_provider_id,
                             account_id=record.account_id,
                             environment=record.environment,
+                            provider_environment=current_provider_environment,
                         )
                     )
                     current_capital = _resolve_authority_service_capital(
@@ -5395,12 +5596,10 @@ class AuthorityService:
                             current_capital,
                             provider_available=current_provider_available,
                             required_resources=tuple(sorted(risk_requirements)),
-                            provider_id=_text(
-                                availability_evidence.get("provider_id"),
-                                name="provider_id",
-                            ),
+                            provider_id=current_provider_id,
                             account_id=record.account_id,
                             environment=record.environment,
+                            provider_environment=current_provider_environment,
                         )
                     )
                     for identity_field in (

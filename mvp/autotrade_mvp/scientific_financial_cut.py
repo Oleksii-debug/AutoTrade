@@ -18,7 +18,10 @@ from .persistence import (
     payload_digest,
     require_exact_journal_store_authority,
 )
-from .reconciliation_journal import require_current_reconciliation_checkpoint
+from .reconciliation_journal import (
+    load_latest_reconciliation_checkpoint_for_scope,
+    require_current_reconciliation_checkpoint,
+)
 
 
 class FinancialCutUnavailable(LookupError):
@@ -55,6 +58,22 @@ def _exact_snapshot(value: object, *, name: str) -> dict[str, Any]:
     if any(type(key) is not str for key in value):
         raise FinancialCutConflict(f"{name} keys must be exact text")
     return dict(value)
+
+
+def _frozen_journal_snapshot(value: object, *, name: str) -> Mapping[str, Any]:
+    state = _exact_snapshot(value, name=name)
+    counts = state.get("counts")
+    if type(counts) is not dict:
+        raise FinancialCutConflict(f"{name}.counts must be an exact dictionary")
+    if any(
+        type(key) is not str or type(count) is not int or count < 0
+        for key, count in counts.items()
+    ):
+        raise FinancialCutConflict(
+            f"{name}.counts must contain exact text and non-negative integers"
+        )
+    state["counts"] = MappingProxyType(dict(counts))
+    return MappingProxyType(state)
 
 
 @dataclass(frozen=True)
@@ -111,8 +130,8 @@ class ScientificFinancialCut:
         )
         if type(self.journal_sequence) is not int or self.journal_sequence < 0:
             raise ValueError("journal_sequence must be a non-negative integer")
-        state = _exact_snapshot(self.journal_state, name="journal_state")
-        object.__setattr__(self, "journal_state", MappingProxyType(state))
+        state = _frozen_journal_snapshot(self.journal_state, name="journal_state")
+        object.__setattr__(self, "journal_state", state)
 
 
 def capture_current_scientific_financial_cut(
@@ -140,9 +159,9 @@ def capture_current_scientific_financial_cut(
 
     protocol_id = _text(scientific_protocol_id, name="scientific_protocol_id")
     profile_digest = _sha256(gate_profile_digest, name="gate_profile_digest")
-    provider = _text(provider_id, name="provider_id")
+    provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")
-    env = _text(environment, name="environment")
+    env = _text(environment, name="environment").upper()
     checkpoint_id = _text(
         reconciliation_event_id,
         name="reconciliation_event_id",
@@ -158,17 +177,23 @@ def capture_current_scientific_financial_cut(
             name="journal_state_before",
         )
         try:
-            checkpoint = require_current_reconciliation_checkpoint(
+            latest = load_latest_reconciliation_checkpoint_for_scope(
                 store,
-                checkpoint_event_id=checkpoint_id,
                 provider_id=provider,
                 account_id=account,
                 environment=env,
             )
-        except KeyError as error:
-            raise FinancialCutUnavailable(
-                "current reconciliation checkpoint is unavailable"
-            ) from error
+            checkpoint = (
+                None
+                if latest is None
+                else require_current_reconciliation_checkpoint(
+                    store,
+                    checkpoint_event_id=checkpoint_id,
+                    provider_id=provider,
+                    account_id=account,
+                    environment=env,
+                )
+            )
         except (TypeError, ValueError) as error:
             raise FinancialCutConflict(
                 "reconciliation checkpoint is not authoritative for the requested scope"
@@ -181,6 +206,10 @@ def capture_current_scientific_financial_cut(
     if before != after:
         raise FinancialCutConflict(
             "financial journal changed while the scientific financial cut was captured"
+        )
+    if checkpoint is None:
+        raise FinancialCutUnavailable(
+            "current reconciliation checkpoint is unavailable"
         )
     if type(checkpoint) is not dict:
         raise FinancialCutConflict(

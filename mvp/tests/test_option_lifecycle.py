@@ -1077,6 +1077,91 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             before_lifecycle,
         )
 
+    def test_simulation_resolver_captured_guard_rejects_mutated_sealed_payload(self):
+        self.seed_option_position("1")
+        reference = self.evidence(
+            external_event_id="resolver-provider-response-payload-mutation-life",
+        )
+        source = self._evidence[reference]
+        original_payload = object.__getattribute__(source, "payload")
+
+        def mutate_payload_then_resolve(evidence_ref):
+            forged_payload = dict(original_payload)
+            forged_payload["external_event_id"] = "forged-with-original-guard"
+            object.__setattr__(source, "payload", forged_payload)
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=mutate_payload_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", authority.aggregate_id)
+        )
+        try:
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "provider lifecycle evidence construction authority is invalid",
+            ):
+                authority.apply(reference)
+        finally:
+            object.__setattr__(source, "payload", original_payload)
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            before_lifecycle,
+        )
+
+    def test_simulation_resolver_captured_guard_rejects_mutated_query_binding(self):
+        self.seed_option_position("1")
+        reference = self.evidence(
+            external_event_id="resolver-provider-query-mutation-life",
+        )
+        source = self._evidence[reference]
+        binding = object.__getattribute__(source, "query_binding")
+        original_permission_scope = object.__getattribute__(
+            binding, "permission_scope"
+        )
+
+        def mutate_query_then_resolve(evidence_ref):
+            object.__setattr__(binding, "permission_scope", "FORGED.SCOPE")
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=mutate_query_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", authority.aggregate_id)
+        )
+        try:
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "provider lifecycle evidence construction authority is invalid",
+            ):
+                authority.apply(reference)
+        finally:
+            object.__setattr__(
+                binding, "permission_scope", original_permission_scope
+            )
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            before_lifecycle,
+        )
+
     def test_simulation_resolver_cannot_forge_sealed_response_after_guard_rebind(self):
         reference = self.evidence(
             external_event_id="resolver-provider-response-forge-life",

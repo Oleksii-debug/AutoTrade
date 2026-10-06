@@ -174,7 +174,7 @@ def _require_canonical_durable_text(value: object, *, name: str) -> str:
 def _sequence(value: object, *, name: str, positive: bool = False) -> int:
     """Validate canonical Sequence text before integer persistence/arithmetic."""
 
-    if not isinstance(value, str) or _SEQUENCE_RE.fullmatch(value) is None:
+    if type(value) is not str or _SEQUENCE_RE.fullmatch(value) is None:
         qualifier = "positive " if positive else ""
         raise ValueError(
             f"{name} must be a {qualifier}canonical integer sequence string"
@@ -1554,11 +1554,7 @@ class JournalStore:
             aggregate_type, "aggregate_type"
         )
         aggregate_id = self._require_text(aggregate_id, "aggregate_id")
-        if (
-            not isinstance(aggregate_version, int)
-            or isinstance(aggregate_version, bool)
-            or aggregate_version < 0
-        ):
+        if type(aggregate_version) is not int or aggregate_version < 0:
             raise ValueError("aggregate_version must be a non-negative integer")
         state = _detach_json_value(state)
         state_json = canonical_json(state)
@@ -1928,7 +1924,7 @@ class JournalStore:
         return int(row["pending_count"])
 
     def pending_outbox(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        if not isinstance(limit, int) or limit < 1 or limit > 1000:
+        if type(limit) is not int or limit < 1 or limit > 1000:
             raise ValueError("limit must be between 1 and 1000")
         with self._connect() as connection:
             rows = connection.execute(
@@ -2434,11 +2430,7 @@ class JournalStore:
             environment=environment,
             idempotency_key=idempotency_key,
         )
-        if (
-            not isinstance(state_version, int)
-            or isinstance(state_version, bool)
-            or state_version < 0
-        ):
+        if type(state_version) is not int or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
         request_snapshot = _detach_json_value(request)
         result_snapshot = _detach_json_value(result)
@@ -2508,7 +2500,7 @@ class JournalStore:
             environment=environment,
             idempotency_key=idempotency_key,
         )
-        if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
+        if type(state_version) is not int or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
         if type(events) is not list:
             raise TypeError("events must be an exact list")

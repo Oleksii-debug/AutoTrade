@@ -62,6 +62,20 @@ class _HostileText(str):
         raise AssertionError("hostile text upper dispatched")
 
 
+class _HostileInt(int):
+    def __int__(self):
+        raise AssertionError("hostile int conversion dispatched")
+
+    def __index__(self):
+        raise AssertionError("hostile int index dispatched")
+
+    def __lt__(self, other):
+        raise AssertionError("hostile int less-than dispatched")
+
+    def __gt__(self, other):
+        raise AssertionError("hostile int greater-than dispatched")
+
+
 class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
     def test_outer_event_subclass_is_rejected_before_virtual_get(self):
         with TemporaryDirectory() as directory:
@@ -205,6 +219,74 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "circular reference"):
                 store.append_event(candidate)
             self.assertEqual(store.current_journal_sequence(), 0)
+
+    def test_record_command_rejects_executable_state_version_before_write(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(
+                ValueError,
+                "state_version must be a non-negative integer",
+            ):
+                store.record_command(
+                    command_id="cmd-hostile-state-version",
+                    actor="operator",
+                    environment="PAPER",
+                    idempotency_key="key-hostile-state-version",
+                    request={"action": "TEST"},
+                    result={"status": "ACCEPTED"},
+                    state_version=_HostileInt(0),
+                )
+            self.assertEqual(store.whole_store_state_counts()["command_dedupe"], 0)
+
+    def test_commit_command_rejects_executable_state_version_before_write(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(
+                ValueError,
+                "state_version must be a non-negative integer",
+            ):
+                store.commit_command(
+                    command_id="cmd-hostile-commit-state-version",
+                    actor="operator",
+                    environment="PAPER",
+                    idempotency_key="key-hostile-commit-state-version",
+                    request={"action": "ORDER.SUBMIT"},
+                    result={"status": "ACCEPTED"},
+                    state_version=_HostileInt(0),
+                    events=[(_event("evt-hostile-commit-state-version"), None)],
+                )
+            self.assertEqual(
+                store.whole_store_state_counts(),
+                {
+                    "events": 0,
+                    "outbox": 0,
+                    "command_dedupe": 0,
+                    "projection_checkpoints": 0,
+                    "global_projection_checkpoints": 0,
+                },
+            )
+
+    def test_projection_rejects_executable_aggregate_version_before_write(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(
+                ValueError,
+                "aggregate_version must be a non-negative integer",
+            ):
+                store.save_projection_checkpoint(
+                    projection_name="hostile-version-projection",
+                    aggregate_type="account",
+                    aggregate_id="paper-json-ingress",
+                    aggregate_version=_HostileInt(0),
+                    state={"cash": "100"},
+                )
+            self.assertEqual(store.whole_store_state_counts()["projection_checkpoints"], 0)
+
+    def test_pending_outbox_rejects_executable_limit_before_query(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(ValueError, "limit must be between 1 and 1000"):
+                store.pending_outbox(limit=_HostileInt(1))
 
     def test_command_text_subclasses_cannot_dispatch_strip_or_upper(self):
         with TemporaryDirectory() as directory:

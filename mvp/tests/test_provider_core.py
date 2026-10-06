@@ -147,39 +147,22 @@ class ProviderCoreTests(unittest.TestCase):
             self.assertIs(type(observation.payload["sequence"]), int)
             self.assertEqual(observation.response_sha256, binding.response_sha256)
 
-    def test_invalid_response_cannot_become_authenticated_submission_observation(self):
+    def test_invalid_response_cannot_bypass_sealed_dispatch_decoder(self):
         with TemporaryDirectory() as directory:
-            # Simulate a previously accepted response created by the
-            # historical transport-only JSON preview (stdlib floats). New
-            # dispatch hardening (#1137) intentionally stops such records
-            # *before* they can be newly persisted. The provider observation
-            # must still reject a legacy SHA-bound raw response on replay.
+            # A historical weak decoder can no longer be injected to mint a
+            # durable response binding. The loader issuer pins the exact shared
+            # decoder/resource authorities before any provider observation.
             legacy_raw = b'{"orderId":"provider-1","price":1e256}'
             with patch.object(
                 legacy_dispatch,
                 "_decode_exact_json_bytes",
                 side_effect=lambda raw: json.loads(raw.decode("utf-8")),
             ):
-                binding, request_sha = self._durable_submission_binding(
-                    directory, raw=legacy_raw
-                )
-            self.assertEqual(binding.response_bytes, legacy_raw)
-            with patch.object(
-                neutral_numeric,
-                "Decimal",
-                side_effect=AssertionError("premature Decimal construction"),
-            ):
                 with self.assertRaisesRegex(
-                    ProviderCoreError, "invalid or oversized exact JSON number"
+                    ValueError,
+                    "submission response binding authority is unavailable",
                 ):
-                    observe_submission_json_response(
-                        response_binding=binding,
-                        provider_id="BYBIT",
-                        endpoint="/v5/order/create",
-                        prepared_request_sha256=request_sha,
-                        capability_snapshot_ids=("cap-1",),
-                        instrument_versions=("BTCUSD:v1",),
-                    )
+                    self._durable_submission_binding(directory, raw=legacy_raw)
 
     def test_oversized_raw_bytes_fail_before_utf8_decode_or_json_materialization(self):
         # A leading invalid UTF-8 byte distinguishes resource-first rejection
@@ -387,6 +370,27 @@ class ProviderCoreTests(unittest.TestCase):
                 environment="SIMULATION",
                 client_order_id=binding.client_order_id,
             )
+
+    def test_submission_observation_rejects_runtime_binding_projection_rebinding(self):
+        with TemporaryDirectory() as directory:
+            binding, request_sha = self._durable_submission_binding(directory)
+            with patch.object(
+                provider_core_module,
+                "submission_response_binding_projection",
+                side_effect=lambda _binding: {},
+            ):
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "provider submission observation authority is unavailable",
+                ):
+                    observe_submission_json_response(
+                        response_binding=binding,
+                        provider_id="BYBIT",
+                        endpoint="/v5/order/create",
+                        prepared_request_sha256=request_sha,
+                        capability_snapshot_ids=("cap-1",),
+                        instrument_versions=("BTCUSD:v1",),
+                    )
 
     def test_submission_observation_rejects_scope_relabelling(self):
         with TemporaryDirectory() as directory:

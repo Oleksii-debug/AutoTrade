@@ -218,6 +218,60 @@ class AuthenticatedBybitSubmissionProjectionTests(unittest.TestCase):
                 3,
             )
 
+    def test_prepublished_artifact_cannot_upgrade_bybit_ack_authority(self):
+        with TemporaryDirectory() as directory:
+            store, artifacts, book, prepared, attempt, client_order_id = self._sent(
+                directory,
+                {
+                    "retCode": 0,
+                    "retMsg": "OK",
+                    "result": {
+                        "orderId": "provider-prepublished",
+                        "orderLinkId": "__CLIENT__",
+                    },
+                },
+                intent_id="prepublished-artifact-no-authority",
+            )
+            # A caller can publish internally consistent bytes/metadata into the
+            # generic ArtifactStore.  That storage integrity is deliberately
+            # not a provider-origin issuer and must not widen PAPER OMS state.
+            artifacts.publish_bytes(
+                artifact_id="caller-prepublished-provider-response",
+                data=b'{"retCode":0,"retMsg":"OK"}',
+                media_type="application/json",
+                rights={"storage": True, "export": False},
+                source_refs=["provider-write:caller-authored"],
+                metadata={
+                    "provider_id": "BYBIT",
+                    "account_id": "bybit-account",
+                    "environment": "PAPER",
+                    "order_operation": "ACKNOWLEDGE",
+                    "request_hash": "sha256:" + "0" * 64,
+                    "observed_at": READ_AT.isoformat().replace("+00:00", "Z"),
+                    "rights_id": "caller-authored",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                projection_module.BybitSubmissionProjectionError,
+                "requires sealed PROVIDER_ORIGIN authority",
+            ):
+                project_authenticated_bybit_submission(
+                    book,
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                )
+
+            snapshot = book.order(client_order_id).snapshot()
+            self.assertEqual(snapshot.state, "UNKNOWN")
+            self.assertIsNone(snapshot.provider_order_id)
+            events = store.load_events("order_projection_book", book.aggregate_id)
+            self.assertEqual(
+                [event["payload"]["operation"] for event in events],
+                ["CREATE", "MARK_SEND_STARTED", "ACKNOWLEDGE"],
+            )
+            self.assertEqual(events[-1]["payload"]["request"]["status"], "UNKNOWN")
+
     def test_paper_rejection_requires_sealed_provider_origin_and_stays_unknown(self):
         with TemporaryDirectory() as directory:
             store, _artifacts, book, prepared, attempt, client_order_id = self._sent(

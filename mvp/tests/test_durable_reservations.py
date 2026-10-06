@@ -1,6 +1,7 @@
 from contextlib import closing
 from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
+from types import MappingProxyType
 import sqlite3
 import tempfile
 import unittest
@@ -35,6 +36,25 @@ from mvp.autotrade_mvp.reservations import (
 
 
 ARTIFACT_ID = "11111111-1111-4111-8111-111111111111"
+
+
+class _HostileText(str):
+    def strip(self, *_args, **_kwargs):
+        raise AssertionError("hostile strip dispatched")
+
+
+class _HostileMapping(dict):
+    def __bool__(self):
+        raise AssertionError("hostile mapping truth dispatched")
+
+    def __len__(self):
+        raise AssertionError("hostile mapping length dispatched")
+
+    def __iter__(self):
+        raise AssertionError("hostile mapping iteration dispatched")
+
+    def items(self):
+        raise AssertionError("hostile mapping items dispatched")
 
 
 class DurableReservationBookTests(unittest.TestCase):
@@ -246,6 +266,101 @@ class DurableReservationBookTests(unittest.TestCase):
             requirements={"CASH:USD": amount},
             available={"CASH:USD": "100"},
         )
+
+    def test_durable_text_subclass_callbacks_do_not_execute(self):
+        book = self.book()
+        snapshot = book.reserve(
+            command_id=_HostileText(" cmd-hostile-text "),
+            idempotency_key=_HostileText(" idem-hostile-text "),
+            reservation_id=_HostileText(" r-hostile-text "),
+            intent_id=_HostileText(" i-hostile-text "),
+            requirements={_HostileText(" CASH:USD "): "10"},
+            available={"CASH:USD": "100"},
+        )
+
+        self.assertEqual(snapshot.reservation_id, "r-hostile-text")
+        self.assertEqual(snapshot.intent_id, "i-hostile-text")
+        self.assertEqual(tuple(snapshot.original), ("CASH:USD",))
+        self.assertEqual(book.version, 1)
+        restarted = self.book()
+        self.assertEqual(restarted.get("r-hostile-text"), snapshot)
+
+    def test_durable_reserve_rejects_hostile_mapping_before_journal_mutation(self):
+        for mapping_kind in ("requirements", "available"):
+            hostile = _HostileMapping()
+            dict.__setitem__(
+                hostile,
+                "CASH:USD",
+                "10" if mapping_kind == "requirements" else "100",
+            )
+            for candidate in (hostile, MappingProxyType(hostile)):
+                with self.subTest(
+                    mapping_kind=mapping_kind,
+                    mapping_type=type(candidate).__name__,
+                ):
+                    book = self.book()
+                    before = book.version
+                    kwargs = {
+                        "requirements": {"CASH:USD": "10"},
+                        "available": {"CASH:USD": "100"},
+                    }
+                    kwargs[mapping_kind] = candidate
+                    with self.assertRaisesRegex(
+                        TypeError,
+                        "resource amounts must use an exact dict",
+                    ):
+                        book.reserve(
+                            command_id=f"cmd-hostile-{mapping_kind}",
+                            idempotency_key=f"idem-hostile-{mapping_kind}",
+                            reservation_id=f"r-hostile-{mapping_kind}",
+                            intent_id=f"i-hostile-{mapping_kind}",
+                            **kwargs,
+                        )
+                    self.assertEqual(book.version, before)
+                    self.assertEqual(book.active(), ())
+                    self.assertEqual(self.book().version, before)
+
+    def test_durable_consume_rejects_hostile_mapping_before_journal_mutation(self):
+        for candidate_factory in (
+            lambda hostile: hostile,
+            MappingProxyType,
+        ):
+            with self.subTest(factory=getattr(candidate_factory, "__name__", "proxy")):
+                book = self.book()
+                reservation_id = "r-hostile-consume-" + (
+                    "proxy" if candidate_factory is MappingProxyType else "dict"
+                )
+                intent_id = "i-hostile-consume-" + (
+                    "proxy" if candidate_factory is MappingProxyType else "dict"
+                )
+                book.reserve(
+                    command_id="cmd-" + reservation_id,
+                    idempotency_key="idem-" + reservation_id,
+                    reservation_id=reservation_id,
+                    intent_id=intent_id,
+                    requirements={"CASH:USD": "10"},
+                    available={"CASH:USD": "100"},
+                )
+                before = book.get(reservation_id)
+                before_version = book.version
+                hostile = _HostileMapping()
+                dict.__setitem__(hostile, "CASH:USD", "1")
+                candidate = candidate_factory(hostile)
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "resource amounts must use an exact dict",
+                ):
+                    book.consume(
+                        command_id="cmd-consume-" + reservation_id,
+                        idempotency_key="idem-consume-" + reservation_id,
+                        reservation_id=reservation_id,
+                        usage=candidate,
+                    )
+                self.assertEqual(book.version, before_version)
+                self.assertEqual(book.get(reservation_id), before)
+                restarted = self.book()
+                self.assertEqual(restarted.version, before_version)
+                self.assertEqual(restarted.get(reservation_id), before)
 
     def test_exact_consumption_replays_identically_across_decimal_contexts(self):
         with localcontext() as context:

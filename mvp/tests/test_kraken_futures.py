@@ -705,6 +705,32 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             with self.subTest(helper=helper.__name__):
                 self.assertIsNone(helper.__kwdefaults__)
 
+    def test_preparation_rejects_in_place_provider_domain_map_mutation(self):
+        mutations = (
+            (
+                kraken_futures_module.KRAKEN_FUTURES_BASE_URLS,
+                {"LIVE": "https://attacker.invalid"},
+            ),
+            (
+                kraken_futures_module._RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT,
+                {"LIVE": "PAPER"},
+            ),
+            (
+                kraken_futures_module.KRAKEN_FUTURES_ENDPOINTS,
+                {"PLACE_ORDER": "/attacker/sendorder"},
+            ),
+        )
+        for mapping, mutation in mutations:
+            with self.subTest(mutation=mutation), patch.dict(mapping, mutation):
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "prepared request authority changed",
+                ):
+                    prepared_futures_request(
+                        "kraken-futures-mutated-provider-domain-map",
+                        provider_environment="LIVE",
+                    )
+
     def test_submission_consumer_rejects_post_mint_prepared_digest_retarget(self):
         prepared = prepared_futures_request(
             "kraken-futures-post-mint-digest-retarget",

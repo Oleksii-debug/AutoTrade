@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Automation.Peers;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using System.IO;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
@@ -13,11 +14,26 @@ public partial class MainWindow : Window
     private readonly IEmergencyHostClient _hostClient;
     private readonly IEmergencyHostSessionProvider? _sessionProvider;
     private readonly CancellationTokenSource _lifetime = new();
+    private readonly DispatcherTimer _hostRefreshTimer = new()
+    {
+        Interval = TimeSpan.FromSeconds(10),
+    };
+    private bool _hostRefreshInProgress;
+    private bool _announceHostRefreshCompletion;
+    private HostDisplayFreshness? _lastDisplayedFreshness;
     private EmergencyHostStatus? _lastKnownConnectedStatus;
     private EmergencyHostStatus? _lastKnownCurrentStatus;
     private WebView2? _productWebView;
     private long _webGeneration;
     private bool _trustedWebDocumentActive;
+
+    private enum HostDisplayFreshness
+    {
+        Current,
+        Stale,
+        Busy,
+        Disconnected,
+    }
 
     public MainWindow()
         : this(DesktopHostClientFactory.CreateConnection())
@@ -38,6 +54,7 @@ public partial class MainWindow : Window
         _hostClient = hostClient ?? throw new ArgumentNullException(nameof(hostClient));
         _sessionProvider = sessionProvider;
         InitializeComponent();
+        _hostRefreshTimer.Tick += HostRefreshTimer_Tick;
         ConnectionStatus.Text = "Host unavailable; new exposure cannot be confirmed blocked from this window.";
     }
 
@@ -62,6 +79,7 @@ public partial class MainWindow : Window
         await RefreshHostStatusAsync(announce: true, returnFocus: false);
         if (!_lifetime.IsCancellationRequested)
         {
+            _hostRefreshTimer.Start();
             await ConnectWebExperienceAsync();
         }
     }
@@ -344,8 +362,14 @@ public partial class MainWindow : Window
 
     private void MainWindow_Closed(object? sender, EventArgs e)
     {
+        _hostRefreshTimer.Stop();
         _lifetime.Cancel();
         DisposeWebExperience();
+    }
+
+    private async void HostRefreshTimer_Tick(object? sender, EventArgs e)
+    {
+        await RefreshHostStatusAsync(announce: false, returnFocus: false);
     }
 
     private async void RefreshHostStatus_Click(object sender, RoutedEventArgs e)
@@ -355,27 +379,63 @@ public partial class MainWindow : Window
 
     private async Task RefreshHostStatusAsync(bool announce, bool returnFocus)
     {
-        RefreshStatusButton.IsEnabled = false;
+        if (_lifetime.IsCancellationRequested)
+        {
+            return;
+        }
+
+        if (_hostRefreshInProgress)
+        {
+            if (announce)
+            {
+                _announceHostRefreshCompletion = true;
+                SetLiveRegionText(
+                    HostStatusAnnouncement,
+                    "Host status refresh is already in progress. The current request will update this status when it finishes.");
+            }
+            return;
+        }
+
+        _hostRefreshInProgress = true;
+        _announceHostRefreshCompletion = false;
+        bool manageRefreshButton = returnFocus;
+        if (manageRefreshButton)
+        {
+            RefreshStatusButton.IsEnabled = false;
+        }
 
         try
         {
             EmergencyHostStatus status = await _hostClient.GetStatusAsync(_lifetime.Token);
-            ApplyHostStatus(status, announce);
+            ApplyHostStatus(
+                status,
+                announce || _announceHostRefreshCompletion);
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
             return;
+        }
+        catch (EmergencySnapshotBusyException)
+        {
+            ApplySnapshotBusyStatus(
+                announce || _announceHostRefreshCompletion);
         }
         catch (Exception)
         {
             ApplyHostStatus(
                 EmergencyHostStatus.Disconnected(
                     "Host refresh failed. No new host evidence was accepted."),
-                announce);
+                announce || _announceHostRefreshCompletion);
         }
         finally
         {
-            RefreshStatusButton.IsEnabled = true;
+            if (manageRefreshButton)
+            {
+                RefreshStatusButton.IsEnabled = true;
+            }
+
+            _announceHostRefreshCompletion = false;
+            _hostRefreshInProgress = false;
             if (returnFocus && IsLoaded)
             {
                 RefreshStatusButton.Focus();
@@ -383,10 +443,59 @@ public partial class MainWindow : Window
         }
     }
 
+    private void ApplySnapshotBusyStatus(bool announce)
+    {
+        const string message =
+            "Host snapshot is temporarily busy while durable state changes. "
+            + "No new host evidence was accepted. Retry is safe.";
+        bool announceTransition =
+            _lastDisplayedFreshness is { } previousFreshness
+            && previousFreshness != HostDisplayFreshness.Busy;
+        _lastDisplayedFreshness = HostDisplayFreshness.Busy;
+
+        if (_lastKnownConnectedStatus is { } lastConnected)
+        {
+            HostValue.Text = $"{lastConnected.HostId} (stale)";
+            AccountValue.Text = $"{lastConnected.AccountId} (stale)";
+            EnvironmentValue.Text = $"{lastConnected.Environment} (stale)";
+            StateVersionValue.Text = $"{lastConnected.StateVersion} (stale)";
+            LastEvidenceValue.Text = $"{lastConnected.ObservedAtUtc:O} (stale)";
+            ConnectionStatus.Text =
+                message
+                + " Last known host values are stale and are not current evidence.";
+        }
+        else
+        {
+            HostValue.Text = "Unavailable";
+            AccountValue.Text = "Unavailable";
+            EnvironmentValue.Text = "Unavailable";
+            StateVersionValue.Text = "Unavailable";
+            LastEvidenceValue.Text = "Unavailable";
+            ConnectionStatus.Text =
+                message + " No verified host snapshot is currently available.";
+        }
+
+        if (announce || announceTransition)
+        {
+            SetLiveRegionText(
+                HostStatusAnnouncement,
+                $"{ConnectionStatus.Text} No cancellation, flattening, provider outcome, or command acceptance is implied.");
+        }
+    }
+
     private void ApplyHostStatus(EmergencyHostStatus status, bool announce)
     {
         status = (status ?? throw new InvalidOperationException(
             "Host status response was null.")).Validated();
+
+        HostDisplayFreshness freshness = !status.Connected
+            ? HostDisplayFreshness.Disconnected
+            : status.IsCurrent
+                ? HostDisplayFreshness.Current
+                : HostDisplayFreshness.Stale;
+        bool announceTransition =
+            _lastDisplayedFreshness is { } previousFreshness
+            && previousFreshness != freshness;
 
         if (status.Connected)
         {
@@ -435,7 +544,9 @@ public partial class MainWindow : Window
                     $"{status.Message} Snapshot values are stale and are not current evidence.";
             }
 
-            if (announce)
+            _lastDisplayedFreshness = freshness;
+
+            if (announce || announceTransition)
             {
                 string prefix = status.IsCurrent
                     ? "Host status refreshed."
@@ -447,6 +558,8 @@ public partial class MainWindow : Window
 
             return;
         }
+
+        _lastDisplayedFreshness = freshness;
 
         if (_lastKnownConnectedStatus is { } lastConnected)
         {
@@ -468,7 +581,7 @@ public partial class MainWindow : Window
             ConnectionStatus.Text = status.Message;
         }
 
-        if (announce)
+        if (announce || announceTransition)
         {
             SetLiveRegionText(
                 HostStatusAnnouncement,

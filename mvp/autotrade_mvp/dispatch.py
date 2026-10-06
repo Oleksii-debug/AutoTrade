@@ -2680,10 +2680,17 @@ class GuardedDispatcher:
 
         exact_response_authority_changed = False
         try:
-            response = transport_send(client_order_id, request_frozen, final_guard)
-            exact_response_authority_changed = (
-                restore_exact_response_authority()
-            )
+            try:
+                response = transport_send(
+                    client_order_id,
+                    request_frozen,
+                    final_guard,
+                )
+            finally:
+                exact_response_authority_changed = (
+                    restore_exact_response_authority()
+                    or exact_response_authority_changed
+                )
             try:
                 require_dispatch_call_authority()
             except _DispatchAuthorityChanged:

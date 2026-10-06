@@ -1287,5 +1287,120 @@ class IbkrWebAdapterTests(unittest.TestCase):
 
 
 
+    def test_execution_evidence_direct_constructor_enforces_canonical_invariants(self):
+        _HostileText.strip_called = False
+        with self.assertRaisesRegex(IbkrWebAdapterError, "required|exact"):
+            IbkrExecutionEvidence(
+                execution_id=_HostileText("exec-direct"),
+                permanent_order_id="778899",
+                account_id="U1234567",
+                quantity=Decimal("1"),
+                price=Decimal("100"),
+            )
+        self.assertFalse(_HostileText.strip_called)
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError, "canonical positive integer text"
+        ):
+            IbkrExecutionEvidence(
+                execution_id="exec-direct",
+                permanent_order_id="0778899",
+                account_id="U1234567",
+                quantity=Decimal("1"),
+                price=Decimal("100"),
+            )
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError, "bounded exact decimal input"
+        ):
+            IbkrExecutionEvidence(
+                execution_id="exec-direct",
+                permanent_order_id="778899",
+                account_id="U1234567",
+                quantity=_HostileDecimal("1"),
+                price=Decimal("100"),
+            )
+
+        direct = IbkrExecutionEvidence(
+            execution_id="exec-direct",
+            permanent_order_id="778899",
+            account_id="U1234567",
+            quantity=Decimal("1"),
+            price=Decimal("100"),
+        )
+        created = IbkrExecutionEvidence.create(
+            execution_id="exec-direct",
+            permanent_order_id=778899,
+            account_id="U1234567",
+            quantity="1",
+            price="100",
+        )
+        self.assertEqual(direct, created)
+
+    def test_reconciliation_revalidates_mutated_execution_snapshot(self):
+        execution = IbkrExecutionEvidence.create(
+            execution_id="exec-mutated",
+            permanent_order_id=778899,
+            account_id="U1234567",
+            quantity="1",
+            price="100",
+        )
+        object.__setattr__(execution, "quantity", _HostileDecimal("1"))
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError, "bounded exact decimal input"
+        ):
+            execution_to_reconciliation_fill(
+                execution,
+                client_order_id="at-exec-mutated",
+                expected_account_id="U1234567",
+                instrument="AAPL-CONID-265598:v1",
+                fee_amount="0",
+                fee_currency="USD",
+                trade_time="2026-09-24T20:00:01Z",
+            )
+
+        execution = IbkrExecutionEvidence.create(
+            execution_id="exec-mutated-id",
+            permanent_order_id=778899,
+            account_id="U1234567",
+            quantity="1",
+            price="100",
+        )
+        object.__setattr__(execution, "permanent_order_id", "0778899")
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError, "canonical positive integer text"
+        ):
+            execution_to_reconciliation_fill(
+                execution,
+                client_order_id="at-exec-mutated-id",
+                expected_account_id="U1234567",
+                instrument="AAPL-CONID-265598:v1",
+                fee_amount="0",
+                fee_currency="USD",
+                trade_time="2026-09-24T20:00:01Z",
+            )
+
+        _HostileText.strip_called = False
+        execution = IbkrExecutionEvidence.create(
+            execution_id="exec-mutated-account",
+            permanent_order_id=778899,
+            account_id="U1234567",
+            quantity="1",
+            price="100",
+        )
+        object.__setattr__(execution, "account_id", _HostileText("U1234567"))
+        with self.assertRaisesRegex(IbkrWebAdapterError, "required|exact"):
+            execution_to_reconciliation_fill(
+                execution,
+                client_order_id="at-exec-mutated-account",
+                expected_account_id="U1234567",
+                instrument="AAPL-CONID-265598:v1",
+                fee_amount="0",
+                fee_currency="USD",
+                trade_time="2026-09-24T20:00:01Z",
+            )
+        self.assertFalse(_HostileText.strip_called)
+
+
 if __name__ == "__main__":
     unittest.main()

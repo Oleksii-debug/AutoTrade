@@ -346,6 +346,12 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             ("SubmissionSending", "client_order_id", "retargeted-client", False),
             ("SubmissionSending", "environment", "PAPER", True),
             ("SubmissionPrepared", "provider", "retargeted-provider", False),
+            ("SubmissionPrepared", "owner_token", "retargeted-owner", False),
+            ("SubmissionPrepared", "owner_epoch", 77, False),
+            ("SubmissionPrepared", "owner_epoch", "77", True),
+            ("SubmissionSending", "owner_token", "retargeted-owner", False),
+            ("SubmissionSending", "owner_epoch", 77, False),
+            ("SubmissionSending", "owner_epoch", "77", True),
         ):
             with self.subTest(event_type=event_type, field=field), TemporaryDirectory() as directory:
                 path = f"{directory}/journal.sqlite3"
@@ -386,6 +392,53 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                     [event["event_type"] for event in events],
                     ["SubmissionPrepared", "SubmissionSending"],
                 )
+
+    def test_restart_rejects_prepared_sending_owner_discontinuity(self):
+        for event_type, field, value, envelope_field in (
+            ("SubmissionPrepared", "owner_token", "", False),
+            ("SubmissionPrepared", "owner_epoch", 0, False),
+            ("SubmissionPrepared", "owner_epoch", "2", True),
+            ("SubmissionSending", "owner_token", "other-owner", False),
+            ("SubmissionSending", "owner_epoch", 2, False),
+            ("SubmissionSending", "owner_epoch", "2", True),
+        ):
+            with self.subTest(event_type=event_type, field=field), TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                self._make_exact_response_attempt(path)
+                self._tamper_event_field(
+                    path,
+                    event_type,
+                    field,
+                    value,
+                    envelope_field=envelope_field,
+                )
+                store = JournalStore(path)
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="restart-owner",
+                )
+
+                def unexpected_authority(_intent_hash, _now):
+                    raise AssertionError("corrupt durable attempt must not rerun authority")
+
+                def unexpected_transport(_client_order_id, _request, _guard):
+                    raise AssertionError("corrupt durable attempt must not rerun transport")
+
+                result = dispatcher.dispatch(
+                    attempt_id="binding-type-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T14:00:02Z",
+                    authority_check=unexpected_authority,
+                    transport_send=unexpected_transport,
+                    submission_scope={"endpoint": "/orders"},
+                )
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertEqual(result.reason, "durable_submission_history_invalid")
 
     def test_post_barrier_recovery_terminal_race_converges_without_sent_overwrite(self):
         with TemporaryDirectory() as directory:

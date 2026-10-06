@@ -941,6 +941,28 @@ class GuardedDispatcher:
             != prepared_scope_hash
         ):
             return False
+
+        prepared_owner_token = prepared_payload.get("owner_token")
+        prepared_owner_epoch = prepared_payload.get("owner_epoch")
+        if (
+            type(prepared_owner_token) is not str
+            or not prepared_owner_token
+            or type(prepared_owner_epoch) is not int
+            or prepared_owner_epoch < 1
+            or events[0].get("owner_epoch") != str(prepared_owner_epoch)
+        ):
+            return False
+        if len(events) >= 2 and event_types[1] == "SubmissionSending":
+            sending_payload = events[1].get("payload")
+            if (
+                type(sending_payload) is not dict
+                or type(sending_payload.get("owner_token")) is not str
+                or sending_payload.get("owner_token") != prepared_owner_token
+                or type(sending_payload.get("owner_epoch")) is not int
+                or sending_payload.get("owner_epoch") != prepared_owner_epoch
+                or events[1].get("owner_epoch") != str(prepared_owner_epoch)
+            ):
+                return False
         return tuple(event_types) in {
             ("SubmissionPrepared",),
             ("SubmissionPrepared", "SubmissionBlocked"),

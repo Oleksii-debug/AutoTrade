@@ -22,6 +22,7 @@ from mvp.autotrade_mvp.execution_realism import (
     ExecutionPriceProjectionPolicy,
     LiquidityObservation,
     SimulatedOrder,
+    simulate_execution,
 )
 
 
@@ -671,6 +672,41 @@ class ExecutionQualificationTests(unittest.TestCase):
             "evidence_artifact_id must be a UUID",
         ):
             qualification(exec_model, evidence_artifact_id="not-a-uuid")
+
+    def test_qualified_path_rejects_forged_limit_fill_without_liquidity(self):
+        exec_model = model()
+        simulated_order = order(order_type="LIMIT", limit_price="100")
+        liquidity = observation(ask="101")
+        no_fill = simulate_execution(simulated_order, liquidity, exec_model)
+        self.assertEqual(no_fill.status, "NO_FILL")
+        forged = replace(
+            no_fill,
+            status="FILLED",
+            filled_quantity=Decimal("10"),
+            fill_price=Decimal("100"),
+            fee=Decimal("1"),
+            trade_time=liquidity.market_time,
+        )
+        with patch(
+            "mvp.autotrade_mvp.execution_qualification.simulate_execution",
+            return_value=forged,
+        ):
+            with self.assertRaisesRegex(
+                ExecutionOracleError,
+                "independently executable price evidence",
+            ):
+                simulate_qualified_execution(
+                    order=simulated_order,
+                    observation=liquidity,
+                    model=exec_model,
+                    qualification=qualification(exec_model),
+                    instrument=instrument(),
+                    asset_class="CASH_EQUITY",
+                    protocol_sha256=PROTOCOL,
+                    artifact_store=self.store,
+                    evidence_artifact_id=ARTIFACT_ID,
+                    purpose="REPLAY",
+                )
 
     def test_qualified_path_requires_independent_oracle(self):
         exec_model = model()

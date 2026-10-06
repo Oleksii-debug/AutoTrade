@@ -566,6 +566,10 @@ def evaluate_perpetual_margin(
         raise PerpetualMarginError("risk tier revision does not match margin evidence")
     if capability.status != "VERIFIED":
         raise PerpetualMarginError("verified capability snapshot is required")
+    if capability.environment in {"PAPER", "LIVE"}:
+        raise PerpetualMarginError(
+            "PAPER/LIVE perpetual margin requires canonical provider-origin evidence"
+        )
 
     PerpetualMarginEvidence.verify_immutable_artifacts(evidence, artifact_store)
 

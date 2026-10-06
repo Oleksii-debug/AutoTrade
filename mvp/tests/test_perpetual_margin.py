@@ -55,7 +55,7 @@ def capability(**overrides):
         provider_id="TEST_PROVIDER",
         account_id="account-A",
         entity_id="perpetual-account",
-        environment="PAPER",
+        environment="SIMULATION",
         instrument_version="BTC-PERP@v4",
         observed_at=datetime(2026, 9, 24, tzinfo=timezone.utc),
         expires_at=datetime(2026, 9, 26, tzinfo=timezone.utc),
@@ -102,7 +102,7 @@ def evidence(*, cls=PerpetualMarginEvidence, **overrides):
         provider_id="TEST_PROVIDER",
         account_id="account-A",
         entity_id="perpetual-account",
-        environment="PAPER",
+        environment="SIMULATION",
         instrument_version="BTC-PERP@v4",
         capability_snapshot_id=SNAPSHOT_ID,
         position_mode="ONE_WAY",
@@ -436,6 +436,32 @@ class PerpetualMarginTests(unittest.TestCase):
     def test_paper_evidence_cannot_be_reused_for_live_scope(self):
         with self.assertRaisesRegex(PerpetualMarginError, "capability scope mismatch"):
             evaluate(capability=capability(environment="LIVE"))
+
+    def test_paper_and_live_caller_authored_margin_evidence_fail_closed(self):
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment):
+                scoped_capability = capability(environment=environment)
+                scoped_evidence = evidence(environment=environment)
+                with TemporaryDirectory() as directory:
+                    store = ArtifactStore(directory)
+                    publish_margin_artifacts(store, scoped_evidence)
+                    with patch.object(
+                        ArtifactStore,
+                        "read_authenticated_snapshot",
+                        autospec=True,
+                        side_effect=AssertionError(
+                            "artifact evidence must not be read before provider-origin authority"
+                        ),
+                    ):
+                        with self.assertRaisesRegex(
+                            PerpetualMarginError,
+                            "requires canonical provider-origin evidence",
+                        ):
+                            evaluate(
+                                capability=scoped_capability,
+                                evidence=scoped_evidence,
+                                artifact_store=store,
+                            )
 
     def test_provider_environment_is_exact_capability_scope(self):
         testnet_capability = capability(

@@ -35,6 +35,7 @@ from mvp.autotrade_mvp.provider_core import (
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
 )
+from mvp.autotrade_mvp.provider_route_reads import QualifiedProviderResponseObservation
 
 
 OPTION_ID = "11111111-1111-1111-1111-111111111111"
@@ -281,6 +282,78 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         self._evidence[source.evidence_ref] = source
         return source.evidence_ref
+
+    def test_unissued_qualified_provider_response_cannot_cross_lifecycle_boundary(self):
+        forged = object.__new__(QualifiedProviderResponseObservation)
+        self._evidence["forged-qualified"] = forged
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "qualified provider lifecycle evidence authority is unavailable",
+        ):
+            self.authority._observation_from_evidence("forged-qualified")
+        self.assertEqual(self.authority._events(), [])
+        self.assertEqual(self.book.transactions, ())
+
+    def test_delivery_parser_identity_is_not_accepted_as_lifecycle_authority(self):
+        neutral_ref = self.evidence(external_event_id="delivery-parser-refusal")
+        neutral_source = self._evidence[neutral_ref]
+        forged = object.__new__(QualifiedProviderResponseObservation)
+        object.__setattr__(forged, "observation", neutral_source)
+        object.__setattr__(forged, "query_binding", neutral_source.query_binding)
+        self._evidence["qualified-delivery"] = forged
+
+        with (
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "evidence_ref",
+                new_callable=property,
+                return_value="qualified-delivery",
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "parser_identity",
+                new_callable=property,
+                return_value="BYBIT_OPTION_DELIVERY_V5_JSON_V1",
+            ),
+        ):
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "qualified provider lifecycle evidence parser identity is unsupported",
+            ):
+                self.authority._observation_from_evidence("qualified-delivery")
+        self.assertEqual(self.authority._events(), [])
+        self.assertEqual(self.book.transactions, ())
+
+    def test_qualified_lifecycle_parser_identity_is_admitted_only_as_the_canonical_lifecycle_contract(self):
+        neutral_ref = self.evidence(external_event_id="qualified-lifecycle-ref")
+        neutral_source = self._evidence[neutral_ref]
+        forged = object.__new__(QualifiedProviderResponseObservation)
+        object.__setattr__(forged, "observation", neutral_source)
+        object.__setattr__(forged, "query_binding", neutral_source.query_binding)
+        self._evidence["qualified-lifecycle"] = forged
+
+        with (
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "evidence_ref",
+                new_callable=property,
+                return_value="qualified-lifecycle",
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "parser_identity",
+                new_callable=property,
+                return_value="autotrade.option-lifecycle.sealed-json",
+            ),
+        ):
+            observation, provider_evidence, qualified = (
+                self.authority._observation_from_evidence("qualified-lifecycle")
+            )
+
+        self.assertIs(observation.provider_id, "BYBIT")
+        self.assertIs(provider_evidence, neutral_source)
+        self.assertIs(qualified, forged)
+        self.assertEqual(observation.raw_evidence_digest, neutral_source.response_sha256)
 
     def test_lifecycle_financial_decimals_reject_subclasses_before_virtual_dispatch(self):
         class HostileDecimal(Decimal):

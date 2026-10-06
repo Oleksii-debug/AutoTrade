@@ -4,6 +4,11 @@ namespace AutoTrade.Desktop;
 
 public partial class App : Application
 {
+    private static bool ExternalHostConfigurationRequested(
+        string? hostUri,
+        string? credentialTarget) =>
+        hostUri is not null || credentialTarget is not null;
+
     [STAThread]
     private static void Main(string[] args)
     {
@@ -22,8 +27,7 @@ public partial class App : Application
             string? credentialTarget =
                 Environment.GetEnvironmentVariable("AUTOTRADE_HOST_CREDENTIAL_TARGET");
             bool externalConfigurationRequested =
-                !string.IsNullOrWhiteSpace(hostUri)
-                || !string.IsNullOrWhiteSpace(credentialTarget);
+                ExternalHostConfigurationRequested(hostUri, credentialTarget);
 
             if (externalConfigurationRequested)
             {

@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 import weakref
 
+import mvp.autotrade_mvp.corporate_action_evidence as corporate_action_evidence_module
 from mvp.autotrade_mvp.corporate_action_evidence import (
     AuthoritativeCorporateAction,
     CorporateActionEvidenceConflict,
@@ -673,6 +674,44 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
             environment="SIMULATION",
         )
         return journal, durable
+
+    def test_module_global_decoys_cannot_mint_or_verify_corporate_action_authority(self):
+        decoy_calls = []
+        corporate_action_evidence_module._register_authoritative_corporate_action = (
+            lambda _value: decoy_calls.append("register")
+        )
+        corporate_action_evidence_module._require_authoritative_corporate_action = (
+            lambda _value: decoy_calls.append("require")
+        )
+        corporate_action_evidence_module._resolve_authoritative_corporate_action_impl = (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("decoy resolver implementation must not execute")
+            )
+        )
+        try:
+            issued = self._accepted()
+            self.assertEqual(decoy_calls, [])
+            forged = AuthoritativeCorporateAction(**issued.__dict__)
+            with TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                journal, durable = self._store(path)
+                with self.assertRaisesRegex(
+                    CorporateActionEvidenceError,
+                    "lacks canonical resolver issuance authority",
+                ):
+                    durable.record(forged)
+                self.assertEqual(decoy_calls, [])
+                self.assertEqual(
+                    journal.load_events(
+                        "corporate_action_evidence",
+                        durable.aggregate_id,
+                    ),
+                    [],
+                )
+        finally:
+            del corporate_action_evidence_module._register_authoritative_corporate_action
+            del corporate_action_evidence_module._require_authoritative_corporate_action
+            del corporate_action_evidence_module._resolve_authoritative_corporate_action_impl
 
     def test_manually_constructed_authoritative_action_cannot_reach_durable_store(self):
         issued = self._accepted()

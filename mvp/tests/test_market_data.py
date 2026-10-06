@@ -467,6 +467,26 @@ class MarketNormalizationTests(unittest.TestCase):
         exact_user_dict["price"] = "999.99"
         self.assertEqual(admitted.payload["price"], "100.01")
 
+    def test_exact_userdict_snapshot_bypasses_rebound_attribute_dispatch(self):
+        payload = UserDict(
+            {"price": "100.01", "quantity": "1", "side": "buy"}
+        )
+        original_getattribute = UserDict.__getattribute__
+        calls = []
+
+        def hostile_getattribute(value, name):
+            calls.append(name)
+            raise AssertionError("UserDict attribute dispatch executed")
+
+        UserDict.__getattribute__ = hostile_getattribute
+        try:
+            admitted = raw("TRADE", payload)
+        finally:
+            UserDict.__getattribute__ = original_getattribute
+
+        self.assertEqual(calls, [])
+        self.assertEqual(admitted.payload["price"], "100.01")
+
     def test_raw_evidence_rejects_executable_mapping_before_callbacks(self):
         CallbackDict.calls = 0
         hostile = CallbackDict(EVIDENCE)

@@ -22,6 +22,8 @@ from .persistence import (
 from .provider_core import (
     AuthenticatedReadQueryBinding,
     _require_authenticated_read_query_binding_authority,
+    ProviderResponseObservation,
+    provider_response_observation_projection,
 )
 from .provider_host_attestation import (
     HostProviderAttestationError,
@@ -50,8 +52,11 @@ from .provider_origin import (
 )
 from .provider_transport import (
     AuthenticatedReadEndpointRule,
+    ProviderTransportError,
     ProviderTransportScopeError,
     _bybit_authenticated_read_rule,
+    direct_authenticated_read_execution_receipt_snapshot,
+    direct_authenticated_read_observation_receipt,
 )
 
 
@@ -244,6 +249,69 @@ def _require_host_subject_matches(
             "Host authenticated-read query differs from canonical binding"
         )
     return snapshot, rule
+
+
+def verify_bybit_direct_wire_observation_against_host_pins(
+    observation: ProviderResponseObservation,
+    *,
+    query_binding: AuthenticatedReadQueryBinding,
+    pins: HostProviderOriginPins,
+    _observation_type=ProviderResponseObservation,
+    _projection=provider_response_observation_projection,
+    _receipt_reader=direct_authenticated_read_observation_receipt,
+    _receipt_snapshot=direct_authenticated_read_execution_receipt_snapshot,
+    _snapshot=_exact_query_snapshot,
+) -> Mapping[str, object]:
+    """Verify direct-wire provenance against the same Host/provider pins.
+
+    This is a non-authorizing prerequisite only. It cannot mint PROVIDER_ORIGIN
+    and does not replace Host Prepared/Observed signature + durable-journal
+    verification.
+    """
+
+    if type(observation) is not _observation_type:
+        raise TypeError("observation must be exact ProviderResponseObservation")
+    if type(pins) is not HostProviderOriginPins:
+        raise TypeError("pins must be exact HostProviderOriginPins")
+    expected_query = _snapshot(query_binding)
+    try:
+        projection = _projection(observation)
+        receipt = _receipt_reader(observation)
+        receipt_values = _receipt_snapshot(receipt)
+    except (ProviderTransportError, TypeError, ValueError) as error:
+        raise ProviderOriginHostBridgeError(
+            "authenticated read lacks canonical direct-wire provenance"
+        ) from error
+
+    if observation.query_binding is not query_binding:
+        raise ProviderOriginHostBridgeError(
+            "direct-wire observation query binding differs from Host query authority"
+        )
+    if projection.get("query_digest") != expected_query["query_digest"]:
+        raise ProviderOriginHostBridgeError(
+            "direct-wire observation query digest differs from Host query authority"
+        )
+    if receipt_values.get("query_digest") != expected_query["query_digest"]:
+        raise ProviderOriginHostBridgeError(
+            "direct-wire receipt query digest differs from Host query authority"
+        )
+    if receipt_values.get("network_policy_identity") != pins.network_policy_identity:
+        raise ProviderOriginHostBridgeError(
+            "direct-wire network policy identity differs from Host pin"
+        )
+    if receipt_values.get("transport_identity") != pins.transport_identity:
+        raise ProviderOriginHostBridgeError(
+            "direct-wire transport identity differs from Host pin"
+        )
+    if projection.get("http_status") != receipt_values.get("http_status"):
+        raise ProviderOriginHostBridgeError(
+            "direct-wire HTTP status differs from parsed observation"
+        )
+    if projection.get("response_sha256") != receipt_values.get("response_sha256"):
+        raise ProviderOriginHostBridgeError(
+            "direct-wire response digest differs from parsed observation"
+        )
+    return MappingProxyType(dict(receipt_values))
 
 
 def _verify_bybit_host_prepared_against_binding_impl(

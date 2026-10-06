@@ -20,7 +20,11 @@ from autotrade_numeric.exact_decimal import (
 )
 
 from .persistence import JournalStore, canonical_json, payload_digest
-from .provider_response_limits import require_provider_json_depth
+from .provider_response_limits import (
+    HARD_MAX_PROVIDER_RESPONSE_BYTES,
+    require_provider_json_depth,
+    require_provider_response_bytes,
+)
 from .sender_authority import sender_authority_window
 
 
@@ -130,8 +134,15 @@ class ExactJsonTransportResponse:
 
     def __post_init__(self) -> None:
         raw = self.response_bytes
-        if type(raw) is not bytes or not raw:
-            raise ValueError("provider response bytes must be non-empty bytes")
+        try:
+            require_provider_response_bytes(
+                raw,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "provider response bytes violate shared byte budget"
+            ) from error
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -218,8 +229,15 @@ class SubmissionResponseBinding:
             )
         if re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None:
             raise ValueError("response_sha256 must be a canonical SHA-256 digest")
-        if type(self.response_bytes) is not bytes or not self.response_bytes:
-            raise ValueError("response_bytes must be non-empty bytes")
+        try:
+            require_provider_response_bytes(
+                self.response_bytes,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "durable provider response bytes violate shared byte budget"
+            ) from error
         if (
             "sha256:" + sha256(self.response_bytes).hexdigest()
             != self.response_sha256

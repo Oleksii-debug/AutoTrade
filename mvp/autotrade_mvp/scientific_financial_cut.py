@@ -129,14 +129,26 @@ class ScientificFinancialCut:
     def __post_init__(self) -> None:
         if type(self) is not ScientificFinancialCut:
             raise TypeError("financial cut must be exact ScientificFinancialCut")
-        for field in (
+        for field_name in (
             "scientific_protocol_id",
-            "provider_id",
             "account_id",
-            "environment",
             "reconciliation_event_id",
         ):
-            object.__setattr__(self, field, _text(getattr(self, field), name=field))
+            object.__setattr__(
+                self,
+                field_name,
+                _text(getattr(self, field_name), name=field_name),
+            )
+        object.__setattr__(
+            self,
+            "provider_id",
+            _text(self.provider_id, name="provider_id").upper(),
+        )
+        object.__setattr__(
+            self,
+            "environment",
+            _text(self.environment, name="environment").upper(),
+        )
         for field_name in (
             "gate_profile_digest",
             "journal_population_digest",

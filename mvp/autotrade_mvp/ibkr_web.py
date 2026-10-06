@@ -402,6 +402,33 @@ class IbkrExecutionEvidence:
     quantity: Decimal
     price: Decimal
 
+    def __post_init__(self) -> None:
+        execution_id = _text(self.execution_id, name="execution_id")
+        permanent_order_id = _text(
+            self.permanent_order_id, name="permanent_order_id"
+        )
+        if re.fullmatch(r"[1-9][0-9]*", permanent_order_id) is None:
+            raise IbkrWebAdapterError(
+                "permanent_order_id must be canonical positive integer text"
+            )
+        object.__setattr__(self, "execution_id", execution_id)
+        object.__setattr__(self, "permanent_order_id", permanent_order_id)
+        object.__setattr__(
+            self,
+            "account_id",
+            _text(self.account_id, name="account_id"),
+        )
+        object.__setattr__(
+            self,
+            "quantity",
+            _decimal(self.quantity, name="quantity", positive=True),
+        )
+        object.__setattr__(
+            self,
+            "price",
+            _decimal(self.price, name="price", positive=True),
+        )
+
     @classmethod
     def create(
         cls,
@@ -417,9 +444,9 @@ class IbkrExecutionEvidence:
                 "permanent_order_id must be a positive exact integer"
             )
         return cls(
-            execution_id=_text(execution_id, name="execution_id"),
+            execution_id=execution_id,
             permanent_order_id=str(permanent_order_id),
-            account_id=_text(account_id, name="account_id"),
+            account_id=account_id,
             quantity=_decimal(quantity, name="quantity", positive=True),
             price=_decimal(price, name="price", positive=True),
         )
@@ -1106,19 +1133,45 @@ def execution_to_reconciliation_fill(
 
     if type(execution) is not IbkrExecutionEvidence:
         raise TypeError("execution must be exact IbkrExecutionEvidence")
+    execution_id = _text(
+        execution.execution_id,
+        name="execution.execution_id",
+    )
+    permanent_order_id = _text(
+        execution.permanent_order_id,
+        name="execution.permanent_order_id",
+    )
+    if re.fullmatch(r"[1-9][0-9]*", permanent_order_id) is None:
+        raise IbkrWebAdapterError(
+            "execution permanent_order_id must be canonical positive integer text"
+        )
+    execution_account = _text(
+        execution.account_id,
+        name="execution.account_id",
+    )
+    execution_quantity = _decimal(
+        execution.quantity,
+        name="execution.quantity",
+        positive=True,
+    )
+    execution_price = _decimal(
+        execution.price,
+        name="execution.price",
+        positive=True,
+    )
     account = _text(expected_account_id, name="expected_account_id")
-    if execution.account_id != account:
+    if execution_account != account:
         raise IbkrWebAdapterError("execution account does not match reconciliation account")
     client_id = None if client_order_id is None else validate_coid(client_order_id)
     return ProviderFillEvidence.create(
         provider_id="IBKR",
         account_id=account,
         environment=environment,
-        provider_execution_id=execution.execution_id,
+        provider_execution_id=execution_id,
         client_order_id=client_id,
         instrument=_text(instrument, name="instrument"),
-        quantity=execution.quantity,
-        price=execution.price,
+        quantity=execution_quantity,
+        price=execution_price,
         fee_amount=_decimal(fee_amount, name="fee_amount"),
         fee_currency=_text(fee_currency, name="fee_currency"),
         trade_time=_text(trade_time, name="trade_time"),

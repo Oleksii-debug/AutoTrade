@@ -16,6 +16,44 @@ from mvp.autotrade_mvp.provider_transport import (
 
 
 class EmptyWriteResidualCurrentTests(unittest.TestCase):
+    def test_response_resource_helper_rebinding_fails_before_callback(self):
+        import mvp.autotrade_mvp.provider_transport as transport_module
+        from unittest.mock import patch
+
+        original = transport_module.require_provider_response_bytes
+        calls = []
+
+        def hostile(*_args, **_kwargs):
+            calls.append("called")
+            raise AssertionError("hostile response resource helper executed")
+
+        with patch.object(transport_module, "require_provider_response_bytes", hostile):
+            with self.assertRaisesRegex(
+                transport_module.ProviderTransportScopeError,
+                "provider response resource authority changed",
+            ):
+                TradingWireResponse(http_status=200, body=b"{}")
+        self.assertEqual(calls, [])
+        self.assertIs(
+            transport_module.require_provider_response_bytes,
+            original,
+        )
+
+    def test_response_resource_ceiling_rebinding_fails_closed(self):
+        import mvp.autotrade_mvp.provider_transport as transport_module
+        from unittest.mock import patch
+
+        with patch.object(
+            transport_module,
+            "HARD_MAX_PROVIDER_RESPONSE_BYTES",
+            1,
+        ):
+            with self.assertRaisesRegex(
+                transport_module.ProviderTransportScopeError,
+                "provider response resource authority changed",
+            ):
+                TradingWireResponse(http_status=200, body=b"{}")
+
     def test_empty_http_200_is_reconciliation_first_for_every_current_write_classifier(self):
         cases = (
             (_bybit_exact_trading_response, "bybit_empty_response_execution_unknown"),

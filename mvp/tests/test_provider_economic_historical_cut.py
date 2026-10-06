@@ -81,6 +81,63 @@ class ProviderEconomicHistoricalCutTests(unittest.TestCase):
             self.assertNotEqual(second.cut_digest, first.cut_digest)
             self.assertEqual(len(second.transaction_digests), 2)
 
+    def test_read_historical_cut_reconstructs_exact_frozen_prefix(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            book_cash(store, activity_id="cash-1", amount="100")
+            owner = DurableProviderEconomicBook(
+                store,
+                provider_id="ALPACA",
+                account_id="cut-account",
+                environment="PAPER",
+            )
+            first = owner.resolve_historical_cut(1)
+            book_cash(store, activity_id="cash-2", amount="25")
+            owner.resolve_historical_cut(2)
+
+            historical = owner.read_historical_cut(
+                first,
+                expected_visibility_journal_sequence=(
+                    first.visibility_journal_sequence
+                ),
+            )
+
+            self.assertEqual(historical.provider_id, first.provider_id)
+            self.assertEqual(historical.account_id, first.account_id)
+            self.assertEqual(historical.environment, first.environment)
+            self.assertEqual(historical.aggregate_version, first.aggregate_version)
+            self.assertEqual(historical.book_digest, first.resulting_book_digest)
+            self.assertEqual(len(historical.transactions), 1)
+            self.assertEqual(
+                tuple(transaction.transaction_id for transaction in historical.transactions),
+                tuple(item[0] for item in first.transaction_digests),
+            )
+
+    def test_read_historical_cut_rejects_caller_selected_visibility(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            book_cash(store, activity_id="cash-1", amount="100")
+            owner = DurableProviderEconomicBook(
+                store,
+                provider_id="ALPACA",
+                account_id="cut-account",
+                environment="PAPER",
+            )
+            first = owner.resolve_historical_cut(1)
+            book_cash(store, activity_id="cash-2", amount="25")
+            second = owner.resolve_historical_cut(2)
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "visibility does not match expected authority",
+            ):
+                owner.read_historical_cut(
+                    first,
+                    expected_visibility_journal_sequence=(
+                        second.visibility_journal_sequence
+                    ),
+                )
+
     def test_frozen_pre_correction_cut_reverifies_after_later_append(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

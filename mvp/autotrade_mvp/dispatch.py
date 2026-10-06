@@ -3878,20 +3878,19 @@ class GuardedDispatcher:
 
         def restore_postsend_builtin_namespace() -> bool:
             changed = False
-            # Restore namespace shape as well as the values of names that
-            # existed at the invocation cut. Without removing transport-added
-            # exact-string keys, a hostile callback can leave process-global
-            # builtin state behind and the next dispatch would capture that
-            # polluted namespace as its trusted baseline.
+            # Restore namespace shape as well as values that existed at the
+            # invocation cut. Otherwise a provider callback can leave a new
+            # exact-string builtin behind and the next dispatch would trust the
+            # polluted namespace as its fresh baseline.
             current_names = snapshot_tuple(
                 snapshot_dict.keys(snapshot_builtin_namespace)
             )
             for name in current_names:
                 if snapshot_type(name) is not snapshot_str:
-                    # Avoid invoking attacker-controlled hashing while cleaning
-                    # an exotic key. Mark the authority cut changed so this
-                    # dispatch fails closed; the next dispatch will reject a
-                    # non-string builtin namespace during snapshot preflight.
+                    # Do not hash attacker-controlled exotic keys while
+                    # recovering. Mark the cut changed; snapshot preflight on a
+                    # subsequent dispatch will remain fail-closed until such an
+                    # externally injected non-string key is removed.
                     changed = True
                     continue
                 if name not in snapshot_postsend_builtin_names:

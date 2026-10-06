@@ -1268,7 +1268,8 @@ class HostAuthenticatedReadJournalBridge:
             or subject.transport_identity != pins.transport_identity
         ):
             raise ProviderOriginError(
-                "signed Host authenticated-read subject conflicts with independently selected scope"
+                "signed Host authenticated-read subject conflicts with "
+                "independently selected scope"
             )
         prepared = _parse_utc_text(
             expected["prepared_at"],
@@ -1691,7 +1692,8 @@ class HostAuthenticatedReadJournalBridge:
         events = _load_origin_events(store, identity, attempt_id)
         if len(events) != 2:
             raise ProviderOriginError(
-                "Host Observed commit did not produce exact Prepared/Observed chronology"
+                "Host Observed commit did not produce exact "
+                "Prepared/Observed chronology"
             )
         _require_host_event(
             events[1],

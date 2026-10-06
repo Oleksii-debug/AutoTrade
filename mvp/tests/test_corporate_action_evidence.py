@@ -1208,8 +1208,11 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
     def test_late_binding_retarget_cannot_move_existing_store_authority(self):
         accepted = self._accepted()
         calls = []
-        original_binding = (
-            corporate_action_evidence_module._durable_corporate_action_store_binding
+        self.assertFalse(
+            hasattr(
+                corporate_action_evidence_module,
+                "_durable_corporate_action_store_binding",
+            )
         )
 
         with TemporaryDirectory() as first, TemporaryDirectory() as second:
@@ -1217,6 +1220,9 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
             second_path = f"{second}/journal.sqlite3"
             first_journal, durable = self._store(first_path)
             second_journal, alternate = self._store(second_path)
+            first_aggregate = DurableCorporateActionEvidenceStore._composition(
+                durable
+            )[5]
             (
                 alternate_store,
                 alternate_identity,
@@ -1256,20 +1262,11 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
                         accepted,
                     )
             finally:
-                corporate_action_evidence_module._durable_corporate_action_store_binding = (
-                    original_binding
-                )
+                del corporate_action_evidence_module._durable_corporate_action_store_binding
 
             first_events = first_journal.load_events(
                 "corporate_action_evidence",
-                DurableCorporateActionEvidenceStore._composition(
-                    DurableCorporateActionEvidenceStore(
-                        first_journal,
-                        provider_id="BINANCE",
-                        account_id="acct-1",
-                        environment="SIMULATION",
-                    )
-                )[5],
+                first_aggregate,
             )
             second_events = second_journal.load_events(
                 "corporate_action_evidence",
@@ -1279,6 +1276,52 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(first_events, [])
         self.assertEqual(second_events, [])
+
+    def test_raw_construction_helpers_are_private_and_object_new_cannot_mint_store(self):
+        accepted = self._accepted()
+        for name in (
+            "_require_unbound_durable_corporate_action_store",
+            "_register_durable_corporate_action_store",
+            "_durable_corporate_action_store_binding",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(corporate_action_evidence_module, name))
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, legitimate = self._store(path)
+            (
+                store,
+                store_identity,
+                provider_id,
+                account_id,
+                environment,
+                aggregate_id,
+            ) = DurableCorporateActionEvidenceStore._composition(legitimate)
+
+            forged = object.__new__(DurableCorporateActionEvidenceStore)
+            forged.store = store
+            forged._store_identity = store_identity
+            forged.provider_id = provider_id
+            forged.account_id = account_id
+            forged.environment = environment
+            forged.aggregate_id = aggregate_id
+
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict,
+                "process binding is unavailable",
+            ):
+                DurableCorporateActionEvidenceStore.record(
+                    forged,
+                    accepted,
+                )
+
+            events = journal.load_events(
+                "corporate_action_evidence",
+                aggregate_id,
+            )
+
+        self.assertEqual(events, [])
 
     def test_manually_constructed_authoritative_action_cannot_reach_durable_store(self):
         issued = self._accepted()

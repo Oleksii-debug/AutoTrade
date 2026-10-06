@@ -316,6 +316,88 @@ internal static class Program
             "credential target was reusable across a different host origin");
     }
 
+    static async Task OwnedRuntimeBrokenControlPipeTerminatesChildTest()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        System.Diagnostics.Process process = new()
+        {
+            StartInfo = new System.Diagnostics.ProcessStartInfo(
+                "cmd.exe",
+                "/d /c ping -n 60 127.0.0.1 > nul")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            },
+        };
+        Check.True(process.Start(), "owned-runtime shutdown probe child could not start");
+        int pid = process.Id;
+        Task stdoutDrain = process.StandardOutput.ReadToEndAsync();
+        Task stderrDrain = process.StandardError.ReadToEndAsync();
+
+        // Keep the child alive but make the graceful STOP pipe unusable.
+        process.StandardInput.Dispose();
+        await Task.Delay(100);
+        Check.True(!process.HasExited, "owned-runtime shutdown probe child exited before disposal");
+
+        Type runtimeType =
+            typeof(MainWindow).Assembly.GetType(
+                "AutoTrade.Desktop.OwnedProviderFreeRuntime",
+                throwOnError: true)!
+            ?? throw new InvalidOperationException("owned runtime type is unavailable");
+        System.Reflection.ConstructorInfo constructor =
+            runtimeType.GetConstructors(
+                System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.NonPublic)
+            .Single(candidate => candidate.GetParameters().Length == 6);
+        HttpClient http = new();
+        object runtime = constructor.Invoke(new object[]
+        {
+            process,
+            http,
+            PairedSession(
+                "session-token-owned-shutdown",
+                actor: "local-owner"),
+            "test-data",
+            stdoutDrain,
+            stderrDrain,
+        });
+        System.Reflection.MethodInfo disposeMethod =
+            runtimeType.GetMethod(
+                "DisposeAsync",
+                System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.Public)
+            ?? throw new InvalidOperationException("owned runtime disposal method is unavailable");
+        ValueTask disposal =
+            (ValueTask)(disposeMethod.Invoke(runtime, null)
+                ?? throw new InvalidOperationException("owned runtime disposal did not return a ValueTask"));
+
+        await Check.ThrowsAsync<InvalidOperationException>(
+            () => disposal.AsTask(),
+            "broken owned-runtime control pipe did not report fail-closed shutdown");
+
+        bool childStillAlive;
+        try
+        {
+            using System.Diagnostics.Process reopened =
+                System.Diagnostics.Process.GetProcessById(pid);
+            childStillAlive = !reopened.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            childStillAlive = false;
+        }
+        Check.True(
+            !childStillAlive,
+            "broken STOP pipe stranded the owned provider-free host child");
+    }
+
     static async Task PairedOriginMismatchFailsBeforeTransportTest()
     {
         const string token = "origin-bound-session-token";
@@ -1992,6 +2074,7 @@ internal static class Program
     public static async Task Main()
     {
         ExplicitExternalHostConfigurationNeverFallsBackTest();
+        await OwnedRuntimeBrokenControlPipeTerminatesChildTest();
         WebExperienceSecurityPolicyOriginAndNavigationTest();
         WebExperienceSecurityPolicyCredentialForwardingTest();
         WebExperienceSecurityPolicyDisablesPrivilegedBrowserSurfacesTest();

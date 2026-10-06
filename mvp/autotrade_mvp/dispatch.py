@@ -2641,46 +2641,6 @@ class GuardedDispatcher:
         snapshot_module_globals_set = snapshot_module_globals.__setitem__
         snapshot_module_globals_pop = snapshot_module_globals.pop
         snapshot_builtin_missing = object()
-        snapshot_postsend_global_names = (
-            "_builtins",
-            "type",
-            "id",
-            "tuple",
-            "frozenset",
-            "dict",
-            "set",
-            "len",
-            "any",
-            "all",
-            "vars",
-            "getattr",
-            "setattr",
-            "delattr",
-            "isinstance",
-            "str",
-            "int",
-            "bool",
-            "max",
-            "range",
-            "enumerate",
-            "Exception",
-            "ValueError",
-            "TypeError",
-            "RuntimeError",
-            "PermissionError",
-            "DispatchBlocked",
-            "_DispatchAuthorityChanged",
-        )
-        snapshot_postsend_global_state = snapshot_tuple(
-            (
-                name,
-                snapshot_module_globals_get(
-                    name,
-                    snapshot_builtin_missing,
-                ),
-            )
-            for name in snapshot_postsend_global_names
-        )
         snapshot_builtin_namespace = snapshot_getattr(
             _builtins,
             "__dict__",
@@ -2700,6 +2660,23 @@ class GuardedDispatcher:
             raise RuntimeError(
                 "post-send builtin namespace keys are unavailable"
             )
+        snapshot_postsend_global_names = (
+            "_builtins",
+            "DispatchBlocked",
+            "_DispatchAuthorityChanged",
+        ) + snapshot_tuple(
+            name for name, _value in snapshot_postsend_builtin_state
+        )
+        snapshot_postsend_global_state = snapshot_tuple(
+            (
+                name,
+                snapshot_module_globals_get(
+                    name,
+                    snapshot_builtin_missing,
+                ),
+            )
+            for name in snapshot_postsend_global_names
+        )
         snapshot_postsend_helper_names = (
             "_canonical_journal_authority_snapshot",
             "_journal_store_call",
@@ -3656,8 +3633,8 @@ class GuardedDispatcher:
 
         def require_transport_module_authority() -> None:
             builtin_namespace_changed = restore_postsend_builtin_namespace()
-            helper_changed = restore_postsend_helper_authority()
             restore_postsend_builtin_globals()
+            helper_changed = restore_postsend_helper_authority()
             if builtin_namespace_changed or helper_changed:
                 raise snapshot_dispatch_authority_changed(
                     "dispatcher module authority changed before final send barrier"
@@ -3678,6 +3655,11 @@ class GuardedDispatcher:
                     restore_postsend_builtin_namespace()
                     or postsend_builtin_authority_changed
                 )
+                # Remove module-global shadows of builtins before any
+                # restoration helper runs. The exact-response restorer itself
+                # uses builtin names such as zip, so a transport-installed
+                # module global must never execute inside the firebreak.
+                restore_postsend_builtin_globals()
                 postsend_helper_authority_changed = (
                     restore_postsend_helper_authority()
                     or postsend_helper_authority_changed
@@ -3686,7 +3668,6 @@ class GuardedDispatcher:
                     restore_exact_response_authority()
                     or exact_response_authority_changed
                 )
-                restore_postsend_builtin_globals()
             if (
                 postsend_builtin_authority_changed
                 or postsend_helper_authority_changed

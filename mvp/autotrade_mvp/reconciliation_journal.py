@@ -989,17 +989,6 @@ def load_account_resource_availability_evidence(
                 settlement_provider_environment = settlement_scope.get("environment")
             if settlement_provider_environment != provider_scope:
                 continue
-            settlement_provider_environment = settlement_scope.get(
-                "provider_environment"
-            )
-            if settlement_provider_environment is None:
-                if provider == "BYBIT":
-                    raise ValueError(
-                        "BYBIT settlement financial truth lacks provider_environment"
-                    )
-                settlement_provider_environment = settlement_scope.get("environment")
-            if settlement_provider_environment != provider_scope:
-                continue
             if settlement_sequence >= checkpoint_sequence:
                 raise ValueError(
                     "availability checkpoint predates settlement financial truth"

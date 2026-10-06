@@ -1513,5 +1513,161 @@ class DeterministicStrategyTests(unittest.TestCase):
             )
 
 
+    def test_registered_authority_text_rejects_subclass_without_callback(self):
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("caller-controlled strip executed")
+
+        descriptor = self.descriptor()
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        economics = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@7",
+            registered_run_receipt=receipt,
+        )
+
+        with self.assertRaisesRegex(TypeError, "exact built-in str"):
+            bind_strategy_economics(
+                proposal,
+                economics,
+                instrument_version=HostileText("instrument:aaa@7"),
+                registered_run_receipt=receipt,
+            )
+        with self.assertRaisesRegex(TypeError, "exact built-in str"):
+            RegisteredStrategyRunReceipt(
+                strategy_snapshot=receipt.strategy_snapshot,
+                instrument_version=HostileText(receipt.instrument_version),
+                symbol=receipt.symbol,
+                decision_time=receipt.decision_time,
+                observations=receipt.observations,
+                proposal=proposal,
+            )
+        with self.assertRaisesRegex(TypeError, "exact built-in str"):
+            StrategyEconomicsBinding(
+                strategy_fingerprint=economics.strategy_fingerprint,
+                strategy_configuration_fingerprint=(
+                    economics.strategy_configuration_fingerprint
+                ),
+                instrument_version=economics.instrument_version,
+                information_cutoff=economics.information_cutoff,
+                decision_time=economics.decision_time,
+                horizon_seconds=economics.horizon_seconds,
+                expiry=economics.expiry,
+                available_at=economics.available_at,
+                input_manifest_refs=economics.input_manifest_refs,
+                gross_return_distribution_sha256=(
+                    economics.gross_return_distribution_sha256
+                ),
+                after_cost_return_distribution_sha256=(
+                    economics.after_cost_return_distribution_sha256
+                ),
+                after_cost_lower_bound=economics.after_cost_lower_bound,
+                execution_model_fingerprint=economics.execution_model_fingerprint,
+                execution_calibration_sha256=economics.execution_calibration_sha256,
+                execution_fidelity=economics.execution_fidelity,
+                capacity_assessment_sha256=economics.capacity_assessment_sha256,
+                max_feasible_quantity=economics.max_feasible_quantity,
+                lot_size=economics.lot_size,
+                registered_run_receipt_sha256=HostileText(receipt.fingerprint),
+                required_evidence_dimensions=economics.required_evidence_dimensions,
+                dimension_evidence=economics.dimension_evidence,
+                status=economics.status,
+            )
+
+    def test_registered_receipt_rejects_executable_tuple_subclass_before_iteration(self):
+        class HostileTuple(tuple):
+            def __iter__(self):
+                raise AssertionError("caller-controlled tuple iteration executed")
+
+        descriptor = self.descriptor()
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        hostile = HostileTuple(receipt.observations)
+        with self.assertRaisesRegex(TypeError, "exact built-in tuple"):
+            RegisteredStrategyRunReceipt(
+                strategy_snapshot=receipt.strategy_snapshot,
+                instrument_version=receipt.instrument_version,
+                symbol=receipt.symbol,
+                decision_time=receipt.decision_time,
+                observations=hostile,
+                proposal=proposal,
+            )
+
+    def test_registered_authorities_reject_subclass_impersonation(self):
+        class HostileStrategy(ReturnThresholdBaseline):
+            def snapshot(self):
+                raise AssertionError("subclass snapshot executed")
+
+        class ProposalSubclass(DeterministicProposal):
+            pass
+
+        class ReceiptSubclass(RegisteredStrategyRunReceipt):
+            pass
+
+        descriptor = self.descriptor()
+        hostile_strategy = HostileStrategy(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        with self.assertRaisesRegex(TypeError, "exact ReturnThresholdBaseline"):
+            run_registered_baseline(
+                hostile_strategy,
+                [obs(0, "100"), obs(1, "102")],
+                decision_time=BASE + timedelta(minutes=1),
+                symbol="AAA",
+                instrument_version="instrument:aaa@7",
+            )
+
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        forged_proposal = ProposalSubclass(**proposal.__dict__)
+        with self.assertRaisesRegex(TypeError, "exact DeterministicProposal"):
+            verify_registered_strategy_run(forged_proposal, receipt)
+
+        forged_receipt = ReceiptSubclass(
+            strategy_snapshot=receipt.strategy_snapshot,
+            instrument_version=receipt.instrument_version,
+            symbol=receipt.symbol,
+            decision_time=receipt.decision_time,
+            observations=receipt.observations,
+            proposal=proposal,
+        )
+        with self.assertRaisesRegex(TypeError, "exact RegisteredStrategyRunReceipt"):
+            verify_registered_strategy_run(proposal, forged_receipt)
+
+
 if __name__ == "__main__":
     unittest.main()

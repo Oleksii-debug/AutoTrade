@@ -1,7 +1,15 @@
 from datetime import datetime, timezone
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
+from mvp.autotrade_mvp import durable_provider_qualification as durable_q_module
+from mvp.autotrade_mvp import provider_account_absence_semantics as absence_module
+from mvp.autotrade_mvp.durable_provider_qualification import (
+    DurableProviderQualificationRegistry,
+)
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_account_absence_semantics import (
     ProviderAccountAbsenceSemanticsError,
     QualifiedProviderAccountAbsenceSemantics,
@@ -155,6 +163,144 @@ class ProviderAccountAbsenceSemanticsTests(unittest.TestCase):
                 "lacks source-owned absence rules for: ACTIVITIES",
             ):
                 self.resolve(qualifications, reconciliation)
+
+    def test_public_q_registry_method_rebinding_does_not_redirect_absence_authority(self):
+        with TemporaryDirectory() as directory:
+            qualifications, record, reconciliation = self.authorities(directory)
+            touched = []
+
+            def bomb(*_args, **_kwargs):
+                touched.append("qualification")
+                raise AssertionError("rebound provider-Q registry method executed")
+
+            with patch.object(
+                DurableProviderQualificationRegistry,
+                "qualification",
+                bomb,
+            ):
+                value = self.resolve(qualifications, reconciliation)
+                rule = require_provider_account_absence_rule(
+                    value,
+                    surface="EXECUTIONS",
+                    endpoint="/v5/execution/list",
+                    data_entitlement="EXECUTIONS",
+                    qualification_registry=qualifications,
+                    at=NOW,
+                )
+
+            self.assertEqual(touched, [])
+            self.assertEqual(value.qualification_id, record.qualification_id)
+            self.assertEqual(rule["surface"], "EXECUTIONS")
+
+    def test_public_module_alias_and_helper_rebinding_do_not_redirect_absence_identity(self):
+        touched = []
+
+        class ForeignRegistry:
+            pass
+
+        class ForeignReconciliation:
+            pass
+
+        class ForeignAbsence:
+            pass
+
+        class ForeignJson:
+            @staticmethod
+            def loads(*_args, **_kwargs):
+                touched.append("json")
+                raise AssertionError("rebound json.loads executed")
+
+        def bomb(*_args, **_kwargs):
+            touched.append("helper")
+            raise AssertionError("rebound absence helper executed")
+
+        with TemporaryDirectory() as directory:
+            qualifications, record, reconciliation = self.authorities(directory)
+            with (
+                patch.object(
+                    absence_module,
+                    "DurableProviderQualificationRegistry",
+                    ForeignRegistry,
+                ),
+                patch.object(
+                    absence_module,
+                    "QualifiedProviderAccountReconciliationSemantics",
+                    ForeignReconciliation,
+                ),
+                patch.object(
+                    absence_module,
+                    "QualifiedProviderAccountAbsenceSemantics",
+                    ForeignAbsence,
+                ),
+                patch.object(
+                    absence_module,
+                    "require_provider_account_reconciliation_semantics_authority",
+                    bomb,
+                ),
+                patch.object(
+                    absence_module,
+                    "resolve_current_provider_account_reconciliation_semantics",
+                    bomb,
+                ),
+                patch.object(
+                    absence_module,
+                    "_register_provider_account_absence_semantics_authority",
+                    bomb,
+                ),
+                patch.object(
+                    absence_module,
+                    "require_provider_account_absence_semantics_authority",
+                    bomb,
+                ),
+                patch.object(absence_module, "canonical_json", bomb),
+                patch.object(absence_module, "sha256", bomb),
+                patch.object(absence_module, "json", ForeignJson),
+            ):
+                value = self.resolve(qualifications, reconciliation)
+                digest = value.content_digest
+                rule = require_provider_account_absence_rule(
+                    value,
+                    surface="ORDER_HISTORY",
+                    endpoint="/v5/order/history",
+                    data_entitlement="ORDERS",
+                    qualification_registry=qualifications,
+                    at=NOW,
+                )
+
+            self.assertEqual(touched, [])
+            self.assertRegex(
+                digest,
+                r"^provider-account-absence-semantics:sha256:[0-9a-f]{64}$",
+            )
+            self.assertEqual(value.qualification_id, record.qualification_id)
+            self.assertEqual(rule["surface"], "ORDER_HISTORY")
+
+    def test_registry_store_retarget_during_q_replay_fails_closed(self):
+        with TemporaryDirectory() as directory, TemporaryDirectory() as other:
+            qualifications, _record, reconciliation = self.authorities(directory)
+            foreign_store = JournalStore(Path(other) / "foreign.sqlite3")
+            original_verify = durable_q_module.verify_provider_qualification_campaign
+            mutation_count = 0
+
+            def verify_then_retarget(*args, **kwargs):
+                nonlocal mutation_count
+                result = original_verify(*args, **kwargs)
+                mutation_count += 1
+                qualifications.store = foreign_store
+                return result
+
+            with (
+                patch.object(
+                    durable_q_module,
+                    "verify_provider_qualification_campaign",
+                    side_effect=verify_then_retarget,
+                ),
+                self.assertRaises(ProviderAccountAbsenceSemanticsError),
+            ):
+                self.resolve(qualifications, reconciliation)
+
+            self.assertGreaterEqual(mutation_count, 1)
+            self.assertEqual(foreign_store.current_journal_sequence(), 0)
 
     def test_constructor_cannot_forge_absence_semantics(self):
         with self.assertRaisesRegex(

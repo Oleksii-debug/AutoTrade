@@ -377,8 +377,8 @@ def guarded_order_projection(
     retarget or rewrite an adapter decision before the final send guard.
     """
 
-    if not isinstance(prepared_request, AlpacaPreparedRequest):
-        raise TypeError("prepared_request must be AlpacaPreparedRequest")
+    if type(prepared_request) is not AlpacaPreparedRequest:
+        raise TypeError("prepared_request must be exact AlpacaPreparedRequest")
     return MappingProxyType(
         {
             "endpoint": prepared_request.endpoint,
@@ -526,8 +526,8 @@ def _submission_projection(
         raise TypeError(
             "observation must be durable ProviderSubmissionObservation"
         )
-    if not isinstance(prepared_request, AlpacaPreparedRequest):
-        raise TypeError("prepared_request must be AlpacaPreparedRequest")
+    if type(prepared_request) is not AlpacaPreparedRequest:
+        raise TypeError("prepared_request must be exact AlpacaPreparedRequest")
     cid = validate_client_order_id(
         _text(
             prepared_request.body.get("client_order_id"),
@@ -603,8 +603,8 @@ def parse_submission_response(
     """
 
     aid = _uuid_text(attempt_id, name="attempt_id")
-    if not isinstance(prepared_request, AlpacaPreparedRequest):
-        raise TypeError("prepared_request must be AlpacaPreparedRequest")
+    if type(prepared_request) is not AlpacaPreparedRequest:
+        raise TypeError("prepared_request must be exact AlpacaPreparedRequest")
     cid = validate_client_order_id(
         _text(
             prepared_request.body.get("client_order_id"),

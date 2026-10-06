@@ -6,7 +6,7 @@ profitability, economic edge, financial invariants, or research metrics.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .persistence import (
@@ -110,7 +110,7 @@ def _load_exact_journal_population(
     return events
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ScientificFinancialCut:
     """Content identity for one scientific subject and one financial truth cut."""
 
@@ -123,9 +123,11 @@ class ScientificFinancialCut:
     journal_sequence: int
     journal_population_digest: str
     reconciliation_checkpoint_digest: str
-    cut_digest: str
+    cut_digest: str = field(init=False)
 
     def __post_init__(self) -> None:
+        if type(self) is not ScientificFinancialCut:
+            raise TypeError("financial cut must be exact ScientificFinancialCut")
         for field in (
             "scientific_protocol_id",
             "provider_id",
@@ -134,19 +136,31 @@ class ScientificFinancialCut:
             "reconciliation_event_id",
         ):
             object.__setattr__(self, field, _text(getattr(self, field), name=field))
-        for field in (
+        for field_name in (
             "gate_profile_digest",
             "journal_population_digest",
             "reconciliation_checkpoint_digest",
-            "cut_digest",
         ):
             object.__setattr__(
                 self,
-                field,
-                _sha256(getattr(self, field), name=field),
+                field_name,
+                _sha256(getattr(self, field_name), name=field_name),
             )
         if type(self.journal_sequence) is not int or self.journal_sequence < 0:
             raise ValueError("journal_sequence must be a non-negative integer")
+        subject = {
+            "schema": "autotrade.scientific-financial-cut.v2",
+            "scientific_protocol_id": self.scientific_protocol_id,
+            "gate_profile_digest": self.gate_profile_digest,
+            "provider_id": self.provider_id,
+            "account_id": self.account_id,
+            "environment": self.environment,
+            "reconciliation_event_id": self.reconciliation_event_id,
+            "journal_sequence": self.journal_sequence,
+            "journal_population_digest": self.journal_population_digest,
+            "reconciliation_checkpoint_digest": self.reconciliation_checkpoint_digest,
+        }
+        object.__setattr__(self, "cut_digest", payload_digest(subject))
 
 
 def capture_current_scientific_financial_cut(
@@ -228,18 +242,6 @@ def capture_current_scientific_financial_cut(
 
     population_digest = payload_digest(journal_population)
     reconciliation_digest = payload_digest(checkpoint)
-    cut_payload = {
-        "schema": "autotrade.scientific-financial-cut.v2",
-        "scientific_protocol_id": protocol_id,
-        "gate_profile_digest": profile_digest,
-        "provider_id": provider,
-        "account_id": account,
-        "environment": env,
-        "reconciliation_event_id": checkpoint_id,
-        "journal_sequence": frozen_sequence,
-        "journal_population_digest": population_digest,
-        "reconciliation_checkpoint_digest": reconciliation_digest,
-    }
     return ScientificFinancialCut(
         scientific_protocol_id=protocol_id,
         gate_profile_digest=profile_digest,
@@ -250,5 +252,4 @@ def capture_current_scientific_financial_cut(
         journal_sequence=frozen_sequence,
         journal_population_digest=population_digest,
         reconciliation_checkpoint_digest=reconciliation_digest,
-        cut_digest=payload_digest(cut_payload),
     )

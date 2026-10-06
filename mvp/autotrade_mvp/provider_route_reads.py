@@ -18,6 +18,7 @@ from types import MappingProxyType
 import weakref
 from typing import Mapping
 
+from .bybit_v5 import BYBIT_OPTION_DELIVERY_PARSER_IDENTITY
 from .capabilities import CapabilityError
 from .durable_capabilities import DurableCapabilityRegistry
 from .durable_provider_qualification import DurableProviderQualificationRegistry
@@ -83,6 +84,14 @@ _READ_ENDPOINTS = MappingProxyType(
         "BINANCE": BINANCE_SPOT_AUTHENTICATED_READ_ENDPOINTS,
         "BYBIT": BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS,
         "KRAKEN": KRAKEN_SPOT_AUTHENTICATED_READ_ENDPOINTS,
+    }
+)
+
+
+_READ_ENDPOINT_PARSER_IDENTITIES = MappingProxyType(
+    {
+        ("BYBIT", "/v5/asset/delivery-record"):
+            BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
     }
 )
 
@@ -164,6 +173,33 @@ def qualified_read_route_semantic_claim(
     return key, digest
 
 
+def qualified_read_parser_semantic_claim(
+    *,
+    provider_id: str,
+    endpoint: str,
+    surface: Surface,
+    permission_scope: str,
+) -> tuple[str, str]:
+    """Return the source-owned endpoint parser claim required from provider Q."""
+    _claim_key, _rule_digest, _rule = _qualified_read_endpoint_rule(
+        provider_id=provider_id,
+        endpoint=endpoint,
+        surface=surface,
+        permission_scope=permission_scope,
+    )
+    provider = provider_id.upper()
+    parser_identity = _READ_ENDPOINT_PARSER_IDENTITIES.get((provider, endpoint))
+    if parser_identity is None:
+        raise ProviderRouteReadError(
+            "authenticated-read endpoint has no source-owned endpoint parser identity"
+        )
+    locator = {"provider_id": provider, "endpoint": endpoint}
+    parser_claim_key = "READ_PARSER:" + sha256(
+        canonical_json(locator).encode("utf-8")
+    ).hexdigest()
+    return parser_claim_key, parser_identity
+
+
 def _route_semantics(qualification: object) -> tuple[dict[str, str], str]:
     raw = getattr(qualification, "route_semantics_json", None)
     if type(raw) is not str or not raw:
@@ -216,15 +252,30 @@ def _qualified_read_rule(
         raise ProviderRouteReadError(
             "provider qualification does not cover exact authenticated-read endpoint rule"
         )
-    parser_identity = semantics.get("PARSER_IDENTITY")
-    if (
-        type(parser_identity) is not str
-        or not parser_identity
-        or parser_identity != parser_identity.strip()
-    ):
-        raise ProviderRouteReadError(
-            "provider qualification lacks canonical parser identity for provider read"
+    source_parser_identity = _READ_ENDPOINT_PARSER_IDENTITIES.get(
+        (provider_id.upper(), endpoint)
+    )
+    if source_parser_identity is None:
+        parser_identity = semantics.get("PARSER_IDENTITY")
+        if (
+            type(parser_identity) is not str
+            or not parser_identity
+            or parser_identity != parser_identity.strip()
+        ):
+            raise ProviderRouteReadError(
+                "provider qualification lacks canonical parser identity for provider read"
+            )
+    else:
+        parser_claim_key, parser_identity = qualified_read_parser_semantic_claim(
+            provider_id=provider_id,
+            endpoint=endpoint,
+            surface=surface,
+            permission_scope=permission_scope,
         )
+        if semantics.get(parser_claim_key) != parser_identity:
+            raise ProviderRouteReadError(
+                "provider qualification does not cover exact authenticated-read parser identity"
+            )
     qualified_rule_digest = "sha256:" + sha256(
         canonical_json(
             {

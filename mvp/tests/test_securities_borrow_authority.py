@@ -4,6 +4,7 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localc
 from hashlib import sha256
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 import weakref
 
 from mvp.autotrade_mvp.authority import (

@@ -84,6 +84,54 @@ class PostSendBuiltinNamespaceAuthorityTests(unittest.TestCase):
                 ["SubmissionPrepared", "SubmissionSending"],
             )
 
+    def test_unlisted_standard_builtin_binding_is_restored_for_next_dispatch(self):
+        original_object = builtins.object
+
+        class PoisonObject:
+            def __new__(cls, *_args, **_kwargs):
+                raise AssertionError("poisoned builtins.object executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+
+            def first_transport(_client_order_id, _request, final_guard):
+                final_guard()
+                builtins.object = PoisonObject
+                return ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+
+            try:
+                first = self._dispatch(
+                    dispatcher,
+                    "builtin-object-binding-a1",
+                    first_transport,
+                )
+                self.assertEqual(first.status, "UNKNOWN")
+                self.assertEqual(
+                    first.reason,
+                    "dispatcher_authority_changed_after_send_barrier",
+                )
+                self.assertIs(builtins.object, original_object)
+
+                second = self._dispatch(
+                    dispatcher,
+                    "builtin-object-binding-a2",
+                    lambda _client_order_id, _request, final_guard: (
+                        final_guard(),
+                        ExactJsonTransportResponse(
+                            b'{"accepted":true}',
+                            http_status=200,
+                        ),
+                    )[1],
+                )
+                self.assertEqual(second.status, "SENT")
+                self.assertEqual(second.reason, "sent_confirmed")
+            finally:
+                builtins.object = original_object
+
     def test_postsend_builtin_module_binding_is_clean_before_next_dispatch(self):
         original_module = dispatch_module._builtins
 

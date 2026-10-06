@@ -2588,16 +2588,15 @@ class GuardedDispatcher:
                 "post-send builtin namespace authority is unavailable"
             )
         snapshot_postsend_builtin_state = snapshot_tuple(
-            (
-                name,
-                snapshot_dict.get(
-                    snapshot_builtin_namespace,
-                    name,
-                    snapshot_builtin_missing,
-                ),
-            )
-            for name in snapshot_postsend_global_names
+            snapshot_dict.items(snapshot_builtin_namespace)
         )
+        if any(
+            snapshot_type(name) is not snapshot_str
+            for name, _value in snapshot_postsend_builtin_state
+        ):
+            raise RuntimeError(
+                "post-send builtin namespace keys are unavailable"
+            )
         snapshot_postsend_helper_names = (
             "_canonical_journal_authority_snapshot",
             "_journal_store_call",
@@ -3527,14 +3526,7 @@ class GuardedDispatcher:
                     name,
                     snapshot_builtin_missing,
                 )
-                if expected is snapshot_builtin_missing:
-                    if current is not snapshot_builtin_missing:
-                        snapshot_dict.__delitem__(
-                            snapshot_builtin_namespace,
-                            name,
-                        )
-                        changed = True
-                elif current is not expected:
+                if current is not expected:
                     snapshot_dict.__setitem__(
                         snapshot_builtin_namespace,
                         name,

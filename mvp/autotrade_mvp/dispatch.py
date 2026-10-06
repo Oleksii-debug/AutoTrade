@@ -793,6 +793,13 @@ def _install_submission_response_binding_authority(loader):
     canonical_sha256 = sha256
     canonical_json_module = json
     canonical_re_module = re
+    canonical_base64_module = base64
+    canonical_binascii_module = binascii
+    canonical_b64decode = base64.b64decode
+    canonical_b64encode = base64.b64encode
+    canonical_binascii_error = binascii.Error
+    canonical_require_provider_response_bytes = require_provider_response_bytes
+    canonical_hard_max_provider_response_bytes = HARD_MAX_PROVIDER_RESPONSE_BYTES
     canonical_journal_type = JournalStore
     canonical_vars = vars
     canonical_len = len
@@ -870,6 +877,15 @@ def _install_submission_response_binding_authority(loader):
             or JournalStore.SCHEMA_VERSION != canonical_journal_schema_version
             or json is not canonical_json_module
             or re is not canonical_re_module
+            or base64 is not canonical_base64_module
+            or binascii is not canonical_binascii_module
+            or base64.b64decode is not canonical_b64decode
+            or base64.b64encode is not canonical_b64encode
+            or binascii.Error is not canonical_binascii_error
+            or require_provider_response_bytes
+            is not canonical_require_provider_response_bytes
+            or HARD_MAX_PROVIDER_RESPONSE_BYTES
+            != canonical_hard_max_provider_response_bytes
             or sha256 is not canonical_sha256
             or canonical_json is not canonical_json_function
             or _canonical_journal_authority_snapshot is not canonical_journal_snapshot

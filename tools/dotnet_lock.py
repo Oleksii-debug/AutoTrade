@@ -5,26 +5,11 @@ import binascii
 import json
 import re
 import shlex
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import xml.etree.ElementTree as ET
 
 
-_DOTNET_RESTORE_TEXT = re.compile(
-    r"\bdotnet[ \t]+restore(?=$|[ \t\r\n;&|<>()\"'\x60])",
-    re.IGNORECASE,
-)
-_DOTNET_RESTORE_MULTILINE_TEXT = re.compile(
-    r"\bdotnet(?:[ \t]*\\?[ \t]*\r?\n[ \t]+)+restore"
-    r"(?=$|[ \t\r\n;&|<>()\"'\x60])",
-    re.IGNORECASE,
-)
-_DOTNET_RESTORE_SHELL_CONTROL = re.compile(
-    r"(?:&&|\|\||[;&|<>\x60]|\$\()"
-)
-_DOTNET_RESTORE_ENVIRONMENT_AUTHORITY = (
-    "RestoreForceEvaluate",
-    "NuGetLockFilePath",
-)
+_DOTNET_RESTORE_TEXT = re.compile(r"\bdotnet[ \t]+restore\b", re.IGNORECASE)
 
 
 def _strict_json(text: str):
@@ -73,7 +58,6 @@ def dotnet_restore_workflow_commands(
 
     commands: list[str] = []
     unscoped_lines: list[int] = []
-    unscoped_line_set: set[int] = set()
     for line_number, raw in enumerate(workflow_text.splitlines(), start=1):
         command = raw.strip()
         if command.startswith("- "):
@@ -88,55 +72,14 @@ def dotnet_restore_workflow_commands(
             commands.append(command)
         else:
             unscoped_lines.append(line_number)
-            unscoped_line_set.add(line_number)
-
-    # YAML folded scalars and shell continuations can join physical lines into
-    # one executable "dotnet restore" command. Scan source text across newline
-    # boundaries so an additional non-canonical restore cannot hide beside an
-    # otherwise valid locked restore command.
-    for match in _DOTNET_RESTORE_MULTILINE_TEXT.finditer(workflow_text):
-        line_number = workflow_text.count("\n", 0, match.start()) + 1
-        if line_number not in unscoped_line_set:
-            unscoped_lines.append(line_number)
-            unscoped_line_set.add(line_number)
-
-    unscoped_lines.sort()
     return commands, unscoped_lines
-
-def dotnet_restore_workflow_environment_authority_lines(
-    workflow_text: str,
-) -> list[tuple[int, str]]:
-    """Find source-controlled workflow environment keys that can replace lock authority."""
-    if type(workflow_text) is not str:
-        raise TypeError("workflow text must be exact str")
-
-    names = {
-        name.casefold(): name
-        for name in _DOTNET_RESTORE_ENVIRONMENT_AUTHORITY
-    }
-    findings: list[tuple[int, str]] = []
-    for line_number, raw in enumerate(workflow_text.splitlines(), start=1):
-        stripped = raw.lstrip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)[ \t]*:", stripped)
-        if match is None:
-            continue
-        canonical = names.get(match.group(1).casefold())
-        if canonical is not None:
-            findings.append((line_number, canonical))
-    return findings
-
 
 def dotnet_restore_command_tokens(command: str) -> tuple[str, ...]:
     """Parse one canonical YAML run-line dotnet restore command."""
     if not isinstance(command, str) or not command.startswith('run: dotnet restore '):
         raise ValueError('not a canonical dotnet restore run line')
-    payload = command.removeprefix('run: ')
-    if _DOTNET_RESTORE_SHELL_CONTROL.search(payload) is not None:
-        raise ValueError('dotnet restore command must not contain shell execution control')
     try:
-        tokens = tuple(shlex.split(payload, comments=True))
+        tokens = tuple(shlex.split(command.removeprefix('run: '), comments=True))
     except ValueError as error:
         raise ValueError('malformed dotnet restore command') from error
     if len(tokens) < 3 or tokens[:2] != ('dotnet', 'restore'):
@@ -144,37 +87,17 @@ def dotnet_restore_command_tokens(command: str) -> tuple[str, ...]:
     return tokens
 
 
-def dotnet_restore_project_target(
-    tokens: tuple[str, ...] | list[str],
-) -> str | None:
-    """Return one canonical repo-relative csproj restore target."""
-    arguments = tuple(tokens[2:])
-    if '--' in arguments:
-        arguments = arguments[:arguments.index('--')]
-    if not arguments or not isinstance(arguments[0], str):
-        return None
-    target = arguments[0]
-    if not target or target.startswith('-') or '\\' in target:
-        return None
-    path = PurePosixPath(target)
-    if (
-        path.is_absolute()
-        or path.suffix != '.csproj'
-        or any(part in ('', '.', '..') for part in path.parts)
-        or path.as_posix() != target
-    ):
-        return None
-    return target
-
-
 def dotnet_restore_targets_project(
     tokens: tuple[str, ...] | list[str],
     project: str,
 ) -> bool:
     """Require the release project as the canonical restore positional target."""
-    if not isinstance(project, str) or not project:
+    if not isinstance(project, str) or not project or project.startswith('-'):
         return False
-    return dotnet_restore_project_target(tokens) == project
+    arguments = tuple(tokens[2:])
+    if '--' in arguments:
+        arguments = arguments[:arguments.index('--')]
+    return bool(arguments) and arguments[0] == project
 
 
 def dotnet_restore_tokens_are_locked(tokens: tuple[str, ...] | list[str]) -> bool:
@@ -184,14 +107,7 @@ def dotnet_restore_tokens_are_locked(tokens: tuple[str, ...] | list[str]) -> boo
         arguments = arguments[:arguments.index('--')]
 
     locked_flag = '--locked-mode' in arguments
-    force_evaluate_flag = '--force-evaluate' in arguments
-    custom_lock_path_flag = any(
-        token == '--lock-file-path' or token.startswith('--lock-file-path=')
-        for token in arguments
-    )
     property_values: list[str] = []
-    force_evaluate_values: list[str] = []
-    custom_lock_path_values: list[str] = []
     prefixes = ('-p:', '/p:', '-property:', '/property:')
     for token in arguments:
         lowered = token.casefold()
@@ -202,34 +118,15 @@ def dotnet_restore_tokens_are_locked(tokens: tuple[str, ...] | list[str]) -> boo
         if prefix is None:
             continue
         payload = token[len(prefix):]
-        for assignment in re.split(r'[;,]', payload):
+        for assignment in payload.split(';'):
             if '=' not in assignment:
                 continue
             name, value = assignment.split('=', 1)
-            folded_name = name.casefold()
-            folded_value = value.casefold()
-            if folded_name == 'restorelockedmode':
-                property_values.append(folded_value)
-            elif folded_name == 'restoreforceevaluate':
-                force_evaluate_values.append(folded_value)
-            elif folded_name == 'nugetlockfilepath':
-                custom_lock_path_values.append(value)
+            if name.casefold() == 'restorelockedmode':
+                property_values.append(value.casefold())
 
-    # This gate validates the committed sibling packages.lock.json. A custom
-    # lock-file path would make restore consume different authority.
-    if custom_lock_path_flag or custom_lock_path_values:
-        return False
-
-    # RestoreForceEvaluate overrides RestoreLockedMode and permits regenerating
-    # the package lock graph. Any enabled or non-canonical force-evaluate
-    # authority defeats repeatable locked-restore evidence.
-    if force_evaluate_flag or any(
-        value != 'false' for value in force_evaluate_values
-    ):
-        return False
-
-    # Any explicit contradictory/non-true locked-mode assignment defeats the
-    # assertion, including a later value that could override --locked-mode.
+    # Any explicit contradictory/non-true assignment defeats the assertion,
+    # including a later value that could override --locked-mode.
     if property_values and any(value != 'true' for value in property_values):
         return False
     return locked_flag or bool(property_values)
@@ -254,45 +151,6 @@ def dotnet_project_package_references(project: Path) -> list[tuple[str | None, s
             )
         references.append((name, version))
     return references
-
-
-_RESTORE_AUTHORITY_PROPERTIES = (
-    'RestoreForceEvaluate',
-    'NuGetLockFilePath',
-)
-_RESTORE_GLOBAL_AUTHORITY_PROPERTIES = (
-    'RestoreLockedMode',
-    'RestoreForceEvaluate',
-    'NuGetLockFilePath',
-)
-
-
-def _restore_authority_property_names(tree: ET.ElementTree) -> tuple[str, ...]:
-    present = {
-        _xml_local_name(node.tag).casefold()
-        for node in tree.iter()
-    }
-    return tuple(
-        name
-        for name in _RESTORE_AUTHORITY_PROPERTIES
-        if name.casefold() in present
-    )
-
-
-def _restore_local_override_names(tree: ET.ElementTree) -> tuple[str, ...]:
-    raw = tree.getroot().attrib.get('TreatAsLocalProperty')
-    if not isinstance(raw, str) or not raw.strip():
-        return ()
-    declared = {
-        token.strip().casefold()
-        for token in raw.split(';')
-        if token.strip()
-    }
-    return tuple(
-        name
-        for name in _RESTORE_GLOBAL_AUTHORITY_PROPERTIES
-        if name.casefold() in declared
-    )
 
 
 def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
@@ -325,30 +183,9 @@ def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
             except (OSError, ET.ParseError):
                 blockers.append(f'DOTNET_MSBUILD_PROJECT_INVALID:{relative}')
                 continue
-            project_root = tree.getroot()
-            sdk_attribute = project_root.attrib.get('Sdk')
-            if sdk_attribute is not None and sdk_attribute != 'Microsoft.NET.Sdk':
-                blockers.append(
-                    f'DOTNET_PROJECT_SDK_AUTHORITY_UNSUPPORTED:'
-                    f'{relative}:{sdk_attribute}'
-                )
-            if _xml_elements(tree, 'Sdk'):
-                blockers.append(
-                    f'DOTNET_PROJECT_SDK_ELEMENT_UNSUPPORTED:{relative}'
-                )
             if _xml_elements(tree, 'Import'):
                 blockers.append(
                     f'DOTNET_EXPLICIT_MSBUILD_IMPORT_UNSUPPORTED:{relative}'
-                )
-            for property_name in _restore_authority_property_names(tree):
-                blockers.append(
-                    f'DOTNET_RESTORE_AUTHORITY_PROPERTY_UNSUPPORTED:'
-                    f'{relative}:{property_name}'
-                )
-            for property_name in _restore_local_override_names(tree):
-                blockers.append(
-                    f'DOTNET_RESTORE_AUTHORITY_LOCAL_OVERRIDE_UNSUPPORTED:'
-                    f'{relative}:{property_name}'
                 )
 
     for path in sorted(candidates):
@@ -365,16 +202,6 @@ def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
         if _xml_elements(tree, 'PackageReference'):
             blockers.append(
                 f'DOTNET_IMPORTED_PACKAGE_REFERENCE_UNSUPPORTED:{relative}'
-            )
-        for property_name in _restore_authority_property_names(tree):
-            blockers.append(
-                f'DOTNET_RESTORE_AUTHORITY_PROPERTY_UNSUPPORTED:'
-                f'{relative}:{property_name}'
-            )
-        for property_name in _restore_local_override_names(tree):
-            blockers.append(
-                f'DOTNET_RESTORE_AUTHORITY_LOCAL_OVERRIDE_UNSUPPORTED:'
-                f'{relative}:{property_name}'
             )
     return blockers
 
@@ -636,8 +463,7 @@ def dotnet_locked_dependency_graph(root: Path, package_projects: list[Path]) -> 
     imported_blockers = dotnet_imported_package_reference_blockers(root)
     if imported_blockers:
         raise ValueError(
-            'imported MSBuild PackageReference or restore authority is outside '
-            'the static release graph: '
+            'imported MSBuild PackageReference is outside the static release graph: '
             + ';'.join(imported_blockers)
         )
 

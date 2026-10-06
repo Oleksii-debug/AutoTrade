@@ -187,6 +187,172 @@ def verify(receipt, store, trust_policy, *, evidence_root=None, **overrides):
 
 
 class QualificationAttestationTests(unittest.TestCase):
+    def test_verifier_rejects_mutated_scalar_without_executable_str_coercion(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        receipt = SignedQualificationAttestation(original, sign(original))
+
+        class ExecutableString:
+            def __init__(self):
+                self.called = False
+
+            def __str__(self):
+                self.called = True
+                return "qualification-runner-1"
+
+        executable = ExecutableString()
+        object.__setattr__(original, "runner_id", executable)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with self.assertRaises(QualificationTrustError):
+                verify(receipt, store, policy(trust_root))
+
+        self.assertFalse(executable.called)
+
+    def test_verifier_snapshots_attestation_before_reader_construction_callback(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        mutated = attestation(
+            trust_root,
+            runner_id="qualification-runner-2",
+        )
+        receipt = SignedQualificationAttestation(original, sign(mutated))
+        trust_policy = policy(trust_root)
+        original_reader = qualification_attestation_module.trusted_authenticated_reader
+        callback_calls = 0
+
+        def mutate_attestation_during_reader_construction(*args, **kwargs):
+            nonlocal callback_calls
+            callback_calls += 1
+            object.__setattr__(original, "runner_id", mutated.runner_id)
+            return original_reader(*args, **kwargs)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with (
+                patch.object(
+                    qualification_attestation_module,
+                    "trusted_authenticated_reader",
+                    side_effect=mutate_attestation_during_reader_construction,
+                ),
+                self.assertRaisesRegex(
+                    QualificationTrustError,
+                    "signature",
+                ),
+            ):
+                verify(receipt, store, trust_policy)
+
+        self.assertEqual(callback_calls, 0)
+        self.assertNotEqual(original.runner_id, mutated.runner_id)
+
+    def test_verified_snapshot_is_prebuilt_before_evidence_callback_rebinds_constructor(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        receipt = SignedQualificationAttestation(original, sign(original))
+        original_resolve = qualification_attestation_module._resolve_evidence
+        original_accepted_type = (
+            qualification_attestation_module.AcceptedQualificationAttestation
+        )
+        forged = object()
+
+        def rebind_constructor_after_evidence_read(read_snapshot, ref):
+            original_resolve(read_snapshot, ref)
+            qualification_attestation_module.AcceptedQualificationAttestation = (
+                lambda **_kwargs: forged
+            )
+
+        try:
+            with TemporaryDirectory() as directory:
+                store = ArtifactStore(directory)
+                publish(store)
+                with patch.object(
+                    qualification_attestation_module,
+                    "_resolve_evidence",
+                    side_effect=rebind_constructor_after_evidence_read,
+                ):
+                    accepted = verify(receipt, store, policy(trust_root))
+        finally:
+            qualification_attestation_module.AcceptedQualificationAttestation = (
+                original_accepted_type
+            )
+
+        self.assertIs(type(accepted), original_accepted_type)
+        self.assertEqual(accepted.attestation_id, original.attestation_id)
+        self.assertEqual(accepted.evidence_refs, original.evidence_refs)
+
+    def test_verifier_rejects_evidence_resolver_rebind_during_reader_construction(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        receipt = SignedQualificationAttestation(original, sign(original))
+        original_factory = qualification_attestation_module.trusted_authenticated_reader
+        original_resolver = qualification_attestation_module._resolve_evidence
+
+        def rebind_resolver_during_reader_construction(*args, **kwargs):
+            qualification_attestation_module._resolve_evidence = (
+                lambda *_args, **_kwargs: None
+            )
+            return original_factory(*args, **kwargs)
+
+        try:
+            with TemporaryDirectory() as directory:
+                store = ArtifactStore(directory)
+                publish(store)
+                with (
+                    patch.object(
+                        qualification_attestation_module,
+                        "trusted_authenticated_reader",
+                        side_effect=rebind_resolver_during_reader_construction,
+                    ),
+                    self.assertRaisesRegex(
+                        QualificationTrustError,
+                        "evidence resolver changed during verification",
+                    ),
+                ):
+                    verify(receipt, store, policy(trust_root))
+        finally:
+            qualification_attestation_module._resolve_evidence = original_resolver
+
+    def test_verifier_rejects_evidence_resolver_rebind_during_evidence_read(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        receipt = SignedQualificationAttestation(original, sign(original))
+        original_factory = qualification_attestation_module.trusted_authenticated_reader
+        original_resolver = qualification_attestation_module._resolve_evidence
+
+        def mutating_reader_factory(*args, **kwargs):
+            reader = original_factory(*args, **kwargs)
+
+            def mutating_reader(artifact_id):
+                result = reader(artifact_id)
+                qualification_attestation_module._resolve_evidence = (
+                    lambda *_args, **_kwargs: None
+                )
+                return result
+
+            return mutating_reader
+
+        try:
+            with TemporaryDirectory() as directory:
+                store = ArtifactStore(directory)
+                publish(store)
+                with (
+                    patch.object(
+                        qualification_attestation_module,
+                        "trusted_authenticated_reader",
+                        side_effect=mutating_reader_factory,
+                    ),
+                    self.assertRaisesRegex(
+                        QualificationTrustError,
+                        "evidence resolver changed during verification",
+                    ),
+                ):
+                    verify(receipt, store, policy(trust_root))
+        finally:
+            qualification_attestation_module._resolve_evidence = original_resolver
+
     def test_evidence_resolution_uses_one_canonical_authenticated_snapshot_only(self):
         ref = evidence_ref()
         with TemporaryDirectory() as directory:
@@ -1565,6 +1731,47 @@ class QualificationAttestationTests(unittest.TestCase):
                 requirement_ids=("same", "same"),
             )
 
+    def test_polymorphic_attestation_graph_is_rejected_before_signature_dispatch(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        signature = sign(original)
+
+        class ForgedQualificationAttestation(QualificationAttestation):
+            def canonical_bytes(self):
+                raise AssertionError("forged virtual canonical_bytes executed")
+
+        forged = ForgedQualificationAttestation(**{
+            field: getattr(original, field)
+            for field in (
+                "attestation_id",
+                "source_sha",
+                "domain",
+                "gate",
+                "package_id",
+                "protocol_id",
+                "protocol_version",
+                "requirement_ids",
+                "evidence_refs",
+                "producer_id",
+                "verifier_id",
+                "trust_root_id",
+                "runner_id",
+                "harness_version",
+                "started_at",
+                "completed_at",
+                "signed_at",
+                "result",
+                "unresolved_limits",
+                "release_artifact_id",
+                "release_artifact_sha256",
+            )
+        })
+        with self.assertRaisesRegex(
+            TypeError,
+            "attestation must be QualificationAttestation",
+        ):
+            SignedQualificationAttestation(forged, signature)
+
     def test_altered_signed_payload_fails_signature(self):
         trust_root = root()
         original = attestation(trust_root)
@@ -1642,6 +1849,164 @@ class QualificationAttestationTests(unittest.TestCase):
                     store,
                     policy(trust_root),
                 )
+
+    def test_verified_snapshot_is_detached_from_post_verify_receipt_mutation(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        receipt = SignedQualificationAttestation(original, sign(original))
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            accepted = verify(receipt, store, policy(trust_root))
+
+        expected_requirement_ids = original.requirement_ids
+        expected_evidence_refs = original.evidence_refs
+        expected_completed_at = original.completed_at
+        expected_signed_at = original.signed_at
+        expected_attestation_json = original.canonical_bytes().decode("utf-8")
+        expected_signature = receipt.signature_b64
+
+        object.__setattr__(original, "requirement_ids", ("forged-requirement",))
+        object.__setattr__(original, "evidence_refs", ())
+        object.__setattr__(original, "completed_at", "2026-09-25T03:10:00Z")
+        object.__setattr__(original, "signed_at", "2026-09-25T03:11:00Z")
+
+        self.assertEqual(accepted.requirement_ids, expected_requirement_ids)
+        self.assertEqual(accepted.evidence_refs, expected_evidence_refs)
+        self.assertEqual(accepted.completed_at, expected_completed_at)
+        self.assertEqual(accepted.signed_at, expected_signed_at)
+        self.assertEqual(accepted.attestation_json, expected_attestation_json)
+        self.assertEqual(accepted.signature_b64, expected_signature)
+
+    def test_reader_construction_cannot_retarget_verified_policy_or_attestation(self):
+        trust_root = root()
+        trust_policy = policy(trust_root)
+        original = attestation(trust_root)
+        receipt = SignedQualificationAttestation(original, sign(original))
+        expected_policy_id = trust_policy.policy_id
+        expected_policy_version = trust_policy.policy_version
+        expected_root_id = trust_root.root_id
+        expected_source_sha = original.source_sha
+        callbacks = []
+        original_reader = qualification_attestation_module.trusted_authenticated_reader
+
+        def mutate_during_reader_binding(*args, **kwargs):
+            callbacks.append("reader")
+            object.__setattr__(trust_policy, "policy_version", "forged-policy")
+            object.__setattr__(trust_root, "producer_id", "forged.producer")
+            object.__setattr__(original, "source_sha", OTHER_SOURCE)
+            return original_reader(*args, **kwargs)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with patch.object(
+                qualification_attestation_module,
+                "trusted_authenticated_reader",
+                side_effect=mutate_during_reader_binding,
+            ):
+                accepted = verify(receipt, store, trust_policy)
+
+        self.assertEqual(callbacks, ["reader"])
+        self.assertEqual(trust_policy.policy_version, "forged-policy")
+        self.assertEqual(trust_root.producer_id, "forged.producer")
+        self.assertEqual(original.source_sha, OTHER_SOURCE)
+        self.assertEqual(accepted.policy_id, expected_policy_id)
+        self.assertEqual(accepted.policy_version, expected_policy_version)
+        self.assertEqual(accepted.trust_root_id, expected_root_id)
+        self.assertEqual(accepted.source_sha, expected_source_sha)
+
+
+    def test_verified_snapshot_freezes_signature_before_evidence_callback(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        receipt = SignedQualificationAttestation(original, sign(original))
+        expected_signature = receipt.signature_b64
+        forged_signature = base64.b64encode(b"forged-after-verification").decode("ascii")
+        original_resolve = qualification_attestation_module._resolve_evidence
+
+        def mutate_receipt_after_evidence_read(read_snapshot, ref):
+            original_resolve(read_snapshot, ref)
+            object.__setattr__(receipt, "signature_b64", forged_signature)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with patch.object(
+                qualification_attestation_module,
+                "_resolve_evidence",
+                side_effect=mutate_receipt_after_evidence_read,
+            ):
+                accepted = verify(receipt, store, policy(trust_root))
+
+        self.assertEqual(receipt.signature_b64, forged_signature)
+        self.assertEqual(accepted.signature_b64, expected_signature)
+
+
+    def test_verified_snapshot_freezes_policy_and_root_before_evidence_callback(self):
+        trust_root = root()
+        trust_policy = policy(trust_root)
+        original = attestation(trust_root)
+        receipt = SignedQualificationAttestation(original, sign(original))
+        expected_policy_id = trust_policy.policy_id
+        expected_policy_version = trust_policy.policy_version
+        expected_root_id = trust_root.root_id
+        original_resolve = qualification_attestation_module._resolve_evidence
+
+        def mutate_policy_after_evidence_read(read_snapshot, ref):
+            original_resolve(read_snapshot, ref)
+            object.__setattr__(trust_policy, "policy_version", "forged-policy")
+            object.__setattr__(trust_root, "producer_id", "forged.producer")
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with patch.object(
+                qualification_attestation_module,
+                "_resolve_evidence",
+                side_effect=mutate_policy_after_evidence_read,
+            ):
+                accepted = verify(receipt, store, trust_policy)
+
+        self.assertEqual(trust_policy.policy_version, "forged-policy")
+        self.assertEqual(trust_root.producer_id, "forged.producer")
+        self.assertEqual(accepted.policy_id, expected_policy_id)
+        self.assertEqual(accepted.policy_version, expected_policy_version)
+        self.assertEqual(accepted.trust_root_id, expected_root_id)
+
+
+    def test_verified_snapshot_freezes_exact_attestation_bytes_before_evidence_callback(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        receipt = SignedQualificationAttestation(original, sign(original))
+        expected_json = original.canonical_bytes().decode("utf-8")
+        expected_digest = original.content_digest
+        original_resolve = qualification_attestation_module._resolve_evidence
+        original_canonical_bytes = QualificationAttestation.canonical_bytes
+
+        def mutate_serializer_after_evidence_read(read_snapshot, ref):
+            original_resolve(read_snapshot, ref)
+            QualificationAttestation.canonical_bytes = (
+                lambda _self: b'{"forged":"post-verification"}'
+            )
+
+        try:
+            with TemporaryDirectory() as directory:
+                store = ArtifactStore(directory)
+                publish(store)
+                with patch.object(
+                    qualification_attestation_module,
+                    "_resolve_evidence",
+                    side_effect=mutate_serializer_after_evidence_read,
+                ):
+                    accepted = verify(receipt, store, policy(trust_root))
+        finally:
+            QualificationAttestation.canonical_bytes = original_canonical_bytes
+
+        self.assertEqual(accepted.attestation_json, expected_json)
+        self.assertEqual(accepted.attestation_digest, expected_digest)
+
+
 
 
 if __name__ == "__main__":

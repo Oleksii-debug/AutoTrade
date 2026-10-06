@@ -491,7 +491,7 @@ def qualify_supply_chain(
                     ref.media_type,
                     ref.evidence_kind,
                 )
-                for ref in trust_receipt.attestation.evidence_refs
+                for ref in accepted_trust.evidence_refs
             }
             if attested_refs != expected_refs:
                 record(
@@ -638,7 +638,7 @@ def qualify_supply_chain(
             "trust": None
             if trust_receipt is None
             else {
-                "attestation_digest": trust_receipt.attestation.content_digest,
+                "attestation_digest": accepted_trust.attestation_digest,
                 "signature_sha256": "sha256:"
                 + sha256(trust_receipt.signature_b64.encode("ascii")).hexdigest(),
                 "policy_id": (

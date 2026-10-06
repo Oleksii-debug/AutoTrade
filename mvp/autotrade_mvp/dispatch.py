@@ -1389,7 +1389,36 @@ class GuardedDispatcher:
         sender_check: SenderCheck | None = None,
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
-        self._require_dispatch_authority_state()
+        require_dispatch_call_authority()
+        dispatch_call_authority = (
+            self.environment,
+            self.account_id,
+            self.scope_key,
+            self.owner_token,
+            self.owner_epoch,
+            self.prepared_lease_seconds,
+        )
+
+        def require_dispatch_call_authority() -> None:
+            current = (
+                self.environment,
+                self.account_id,
+                self.scope_key,
+                self.owner_token,
+                self.owner_epoch,
+                self.prepared_lease_seconds,
+            )
+            if (
+                type(self.environment) is not str
+                or type(self.account_id) is not str
+                or type(self.scope_key) is not str
+                or type(self.owner_token) is not str
+                or type(self.owner_epoch) is not int
+                or type(self.prepared_lease_seconds) is not int
+                or current != dispatch_call_authority
+            ):
+                raise PermissionError("dispatcher authority changed during dispatch")
+
         for value, name in (
             (attempt_id, "attempt_id"),
             (intent_id, "intent_id"),
@@ -1525,7 +1554,7 @@ class GuardedDispatcher:
             if guard_called:
                 raise RuntimeError("final send guard may be consumed only once")
             guard_called = True
-            self._require_dispatch_authority_state()
+            require_dispatch_call_authority()
             # request_frozen is a recursively immutable canonical JSON snapshot.
             # Transport cannot pass the barrier for one payload and then mutate
             # the same object before its actual provider call.
@@ -1550,7 +1579,7 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked(reason) from error
-                self._require_dispatch_authority_state()
+                require_dispatch_call_authority()
                 if parsed_barrier_now < _instant(now):
                     barrier_now = now
                     self._append(
@@ -1582,7 +1611,7 @@ class GuardedDispatcher:
             if sender_check is not None:
                 try:
                     sender_check(self.owner_token, self.owner_epoch)
-                    self._require_dispatch_authority_state()
+                    require_dispatch_call_authority()
                 except Exception as error:
                     barrier_reason = f"sender_fence_rejected:{type(error).__name__}"
                     self._append(
@@ -1613,7 +1642,7 @@ class GuardedDispatcher:
                     now=barrier_now,
                 )
                 raise DispatchBlocked(barrier_reason) from error
-            self._require_dispatch_authority_state()
+            require_dispatch_call_authority()
             allowed_now, barrier_reason = _validated_authority_result(authority_result)
             if not allowed_now:
                 self._append(

@@ -43,6 +43,19 @@ class _NoOffsetTZ(tzinfo):
         return None
 
 
+class _HostileStr(str):
+    def strip(self, *args, **kwargs):
+        raise AssertionError("hostile str.strip must not execute")
+
+
+class _HostileDateTime(datetime):
+    def utcoffset(self):
+        raise AssertionError("hostile datetime.utcoffset must not execute")
+
+    def astimezone(self, tz=None):
+        raise AssertionError("hostile datetime.astimezone must not execute")
+
+
 def causal_evidence(
     *,
     evidence_id="base-input",
@@ -299,6 +312,44 @@ class AblationTests(unittest.TestCase):
                 cost=1,
                 elapsed=10,
                 components=("wire-story-group-7", "wire-story-group-7"),
+            )
+
+    def test_causal_timestamp_subclass_is_rejected_before_virtual_methods(self):
+        hostile = _HostileDateTime(
+            2026, 9, 25, 0, 0, tzinfo=timezone.utc
+        )
+        with self.assertRaisesRegex(TypeError, "exact built-in datetime"):
+            causal_evidence(available=hostile)
+
+    def test_causal_text_subclasses_are_rejected_before_strip_or_digest_use(self):
+        with self.assertRaisesRegex(ValueError, "evidence_id"):
+            causal_evidence(evidence_id=_HostileStr("hostile-evidence"))
+        with self.assertRaisesRegex(ValueError, "component_id"):
+            causal_evidence(component=_HostileStr("hostile-component"))
+        with self.assertRaisesRegex(ValueError, "content_digest"):
+            causal_evidence(digest=_HostileStr(FINGERPRINT_C))
+        with self.assertRaisesRegex(ValueError, "syndication_group"):
+            causal_evidence(
+                syndication_group=_HostileStr("hostile-syndication")
+            )
+
+    def test_outcome_identity_text_subclasses_are_rejected_before_strip(self):
+        with self.assertRaisesRegex(ValueError, "case_id"):
+            outcome(
+                case_id=_HostileStr("hostile-case"),
+                variant="FULL",
+                utility=1,
+                cost=0,
+                elapsed=10,
+                components=("base",),
+            )
+        with self.assertRaisesRegex(ValueError, "component identities"):
+            outcome(
+                variant="FULL",
+                utility=1,
+                cost=0,
+                elapsed=10,
+                components=(_HostileStr("base"),),
             )
 
     def test_causal_input_after_cutoff_is_rejected(self):

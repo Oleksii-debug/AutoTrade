@@ -106,6 +106,32 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             )
         )
 
+    def test_force_evaluate_defeats_locked_restore_authority(self):
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    "run: dotnet restore src/App/App.csproj "
+                    "--locked-mode --force-evaluate"
+                )
+            )
+        )
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    "run: dotnet restore src/App/App.csproj "
+                    "-p:RestoreLockedMode=true;RestoreForceEvaluate=true"
+                )
+            )
+        )
+        self.assertTrue(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    "run: dotnet restore src/App/App.csproj "
+                    "-p:RestoreLockedMode=true;RestoreForceEvaluate=false"
+                )
+            )
+        )
+
     def test_yaml_comment_cannot_mint_locked_restore_authority(self):
         tokens = dotnet_restore_command_tokens(
             'run: dotnet restore src/App/App.csproj # --locked-mode'

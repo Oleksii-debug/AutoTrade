@@ -135,7 +135,9 @@ def dotnet_restore_tokens_are_locked(tokens: tuple[str, ...] | list[str]) -> boo
         arguments = arguments[:arguments.index('--')]
 
     locked_flag = '--locked-mode' in arguments
+    force_evaluate_flag = '--force-evaluate' in arguments
     property_values: list[str] = []
+    force_evaluate_values: list[str] = []
     prefixes = ('-p:', '/p:', '-property:', '/property:')
     for token in arguments:
         lowered = token.casefold()
@@ -150,11 +152,23 @@ def dotnet_restore_tokens_are_locked(tokens: tuple[str, ...] | list[str]) -> boo
             if '=' not in assignment:
                 continue
             name, value = assignment.split('=', 1)
-            if name.casefold() == 'restorelockedmode':
-                property_values.append(value.casefold())
+            folded_name = name.casefold()
+            folded_value = value.casefold()
+            if folded_name == 'restorelockedmode':
+                property_values.append(folded_value)
+            elif folded_name == 'restoreforceevaluate':
+                force_evaluate_values.append(folded_value)
 
-    # Any explicit contradictory/non-true assignment defeats the assertion,
-    # including a later value that could override --locked-mode.
+    # RestoreForceEvaluate overrides RestoreLockedMode and permits regenerating
+    # the package lock graph. Any enabled or non-canonical force-evaluate
+    # authority defeats repeatable locked-restore evidence.
+    if force_evaluate_flag or any(
+        value != 'false' for value in force_evaluate_values
+    ):
+        return False
+
+    # Any explicit contradictory/non-true locked-mode assignment defeats the
+    # assertion, including a later value that could override --locked-mode.
     if property_values and any(value != 'true' for value in property_values):
         return False
     return locked_flag or bool(property_values)

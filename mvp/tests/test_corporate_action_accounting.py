@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import mvp.autotrade_mvp.corporate_action_accounting as corporate_action_accounting_module
 from mvp.autotrade_mvp.accounting import AccountingConflict, book_equity_fill
 from mvp.autotrade_mvp.corporate_action_accounting import (
     commit_authoritative_corporate_action,
@@ -949,6 +950,138 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                     durable_evidence,
                     provider_actions=(forged,),
                 )
+
+    def test_reconciliation_composition_ignores_late_authority_global_decoys(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            durable_evidence = evidence_store(store)
+            accepted = resolve_action(sealed_action())
+            durable_evidence.record(accepted)
+            forged = type(accepted)(**accepted.__dict__)
+            calls = []
+
+            originals = {
+                "projection": corporate_action_accounting_module.authoritative_corporate_action_projection,
+                "activity_type": corporate_action_accounting_module.ProviderActivityEvidence,
+                "store_type": corporate_action_accounting_module.DurableCorporateActionEvidenceStore,
+                "identity": corporate_action_accounting_module._corporate_action_reconciliation_id,
+            }
+
+            def decoy_projection(_value):
+                calls.append("projection")
+                return {
+                    "provider_id": "BINANCE",
+                    "account_id": "acct-1",
+                    "environment": "SIMULATION",
+                    "external_event_id": "forged",
+                    "provider_revision": "forged",
+                    "provenance_digest": "sha256:" + "f" * 64,
+                    "corrects_external_event_id": None,
+                    "payload": {},
+                    "kind": "CASH_DIVIDEND",
+                    "observed_at": READ_NOW.isoformat().replace("+00:00", "Z"),
+                    "instrument_id": INSTRUMENT_ID,
+                }
+
+            def decoy_identity(_payload):
+                calls.append("identity")
+                return "forged-id"
+
+            corporate_action_accounting_module.authoritative_corporate_action_projection = decoy_projection
+            corporate_action_accounting_module.ProviderActivityEvidence = object
+            corporate_action_accounting_module.DurableCorporateActionEvidenceStore = object
+            corporate_action_accounting_module._corporate_action_reconciliation_id = decoy_identity
+            try:
+                local_ids, provider_activities = (
+                    corporate_action_reconciliation_inputs(
+                        durable_evidence,
+                        provider_actions=(accepted,),
+                    )
+                )
+                self.assertEqual(
+                    local_ids,
+                    tuple(
+                        activity.activity_id
+                        for activity in provider_activities
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    CorporateActionEvidenceError,
+                    "lacks canonical resolver issuance authority",
+                ):
+                    corporate_action_reconciliation_inputs(
+                        durable_evidence,
+                        provider_actions=(forged,),
+                    )
+            finally:
+                corporate_action_accounting_module.authoritative_corporate_action_projection = originals[
+                    "projection"
+                ]
+                corporate_action_accounting_module.ProviderActivityEvidence = originals[
+                    "activity_type"
+                ]
+                corporate_action_accounting_module.DurableCorporateActionEvidenceStore = originals[
+                    "store_type"
+                ]
+                corporate_action_accounting_module._corporate_action_reconciliation_id = originals[
+                    "identity"
+                ]
+
+            self.assertEqual(calls, [])
+
+    def test_correction_lineage_is_part_of_reconciliation_identity(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            durable_evidence = evidence_store(store)
+            original = resolve_action(sealed_action(external_event_id="corp-1"))
+            durable_evidence.record(original)
+            correction = resolve_action(
+                sealed_action(
+                    external_event_id="corp-2",
+                    revision="2",
+                    per_share="2.00",
+                    observed_offset=4,
+                    corrects="corp-1",
+                ),
+                corrects="corp-1",
+            )
+            durable_evidence.record(correction)
+
+            local_ids, provider_activities = corporate_action_reconciliation_inputs(
+                durable_evidence,
+                provider_actions=(original, correction),
+            )
+            self.assertEqual(
+                set(local_ids),
+                {activity.activity_id for activity in provider_activities},
+            )
+
+            wrong_lineage = resolve_action(
+                sealed_action(
+                    external_event_id="corp-2",
+                    revision="2",
+                    per_share="2.00",
+                    observed_offset=4,
+                    corrects="different-original",
+                ),
+                corrects="different-original",
+            )
+            _, wrong_provider = corporate_action_reconciliation_inputs(
+                durable_evidence,
+                provider_actions=(original, wrong_lineage),
+            )
+            self.assertNotEqual(
+                {
+                    activity.activity_id
+                    for activity in provider_activities
+                    if activity.activity_type == "CORPORATE_ACTION:CASH_DIVIDEND"
+                },
+                {
+                    activity.activity_id
+                    for activity in wrong_provider
+                    if activity.activity_type == "CORPORATE_ACTION:CASH_DIVIDEND"
+                },
+            )
 
 
 

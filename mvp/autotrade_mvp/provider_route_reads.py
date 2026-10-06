@@ -19,6 +19,8 @@ import weakref
 from typing import Callable, Mapping
 
 from .bybit_v5 import (
+    BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST,
+    BYBIT_EXECUTION_PARSER_IDENTITY,
     BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
     BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
 )
@@ -102,6 +104,10 @@ _READ_ENDPOINTS = MappingProxyType(
 
 _READ_ENDPOINT_PARSER_CONTRACTS = MappingProxyType(
     {
+        ("BYBIT", "/v5/execution/list"): (
+            BYBIT_EXECUTION_PARSER_IDENTITY,
+            BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST,
+        ),
         ("BYBIT", "/v5/asset/delivery-record"): (
             BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
             BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,

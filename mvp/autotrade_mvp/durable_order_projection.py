@@ -612,12 +612,18 @@ class DurableOrderBookProjection:
         committed_at: str,
         _read_authenticated_snapshot=_read_authenticated_provider_evidence,
     ) -> tuple[dict[str, str], ...]:
-        refs = _canonical_evidence_refs(evidence_refs)
         requires = self._requires_provider_evidence(operation, request)
-        if self.environment in {"PAPER", "LIVE"} and requires and not refs:
+        if self.environment in {"PAPER", "LIVE"} and requires:
+            # Generic ArtifactStore integrity proves retained bytes only. It
+            # cannot prove provider origin or adapter/route semantics, and a
+            # caller can publish self-consistent bytes plus matching metadata.
+            # Until a sealed provider-origin/normalizer issuer is composed into
+            # this projection, production-like lifecycle mutations must remain
+            # fail-closed rather than accepting injectable storage evidence.
             raise OrderProjectionConflict(
-                "provider-observed lifecycle mutation requires immutable evidence"
+                "PAPER/LIVE provider lifecycle mutation requires sealed provider-origin authority"
             )
+        refs = _canonical_evidence_refs(evidence_refs)
         if not refs:
             return ()
         if not requires:

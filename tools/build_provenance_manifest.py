@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
+import tomllib
 import xml.etree.ElementTree as ET
 
 if __package__:
@@ -398,6 +399,7 @@ def _dependency_graph_component_identities(
     identities: list[str] = []
     sections = (
         ("python_development_dependencies", "python", "==", ("name", "version")),
+        ("python_runtime_dependencies", "python-runtime", "==", ("name", "version")),
         ("dotnet_package_dependencies", "nuget", "@", ("name", "version")),
         ("inspected_components", "source", "@", ("repository", "revision")),
     )
@@ -914,6 +916,43 @@ def python_dev_dependencies() -> list[dict[str, object]]:
     return sorted(result, key=lambda item: str(item["name"]).lower())
 
 
+def python_runtime_dependencies() -> list[dict[str, str]]:
+    """Bind research runtime dependency metadata to the exact local root package."""
+
+    def project_identity(path: Path) -> tuple[str, str, dict[str, object]]:
+        try:
+            document = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
+            raise ValueError(f"Python project metadata is unreadable: {path}") from error
+        project = document.get("project")
+        if not isinstance(project, dict):
+            raise ValueError(f"Python project metadata is malformed: {path}")
+        name = project.get("name")
+        version = project.get("version")
+        if (
+            not isinstance(name, str)
+            or PIN.fullmatch(f"{name}=={version}") is None
+        ):
+            raise ValueError(f"Python project identity is not exact: {path}")
+        return name, str(version), project
+
+    root_name, root_version, _ = project_identity(ROOT / "pyproject.toml")
+    _, _, research_project = project_identity(ROOT / "research" / "pyproject.toml")
+    dependencies = research_project.get("dependencies")
+    expected = f"{root_name}=={root_version}"
+    if dependencies != [expected]:
+        raise ValueError(
+            "research runtime dependency must bind exactly to the repository-root package"
+        )
+    return [
+        {
+            "name": root_name,
+            "version": root_version,
+            "source": "repository-root",
+        }
+    ]
+
+
 def dotnet_package_dependencies() -> list[dict[str, str]]:
     packages: set[tuple[str, str]] = set()
     for project in sorted((ROOT / "src").rglob("*.csproj")):
@@ -945,6 +984,7 @@ def build_manifest() -> dict[str, object]:
     components_path = ROOT / "provenance" / "components.json"
     requirements_path = ROOT / "requirements-dev.txt"
     research_pyproject_path = ROOT / "research" / "pyproject.toml"
+    root_pyproject_path = ROOT / "pyproject.toml"
     global_path = ROOT / "global.json"
     dotnet_package_rights_path = ROOT / "provenance" / "dotnet-package-rights.json"
     components_doc = _require_provenance_schema_1(
@@ -1068,6 +1108,7 @@ def build_manifest() -> dict[str, object]:
         )
 
     python_dependencies = python_dev_dependencies()
+    python_runtime = python_runtime_dependencies()
     dotnet_projects = dotnet_package_projects()
     try:
         dotnet_packages = dotnet_locked_dependency_graph(ROOT, dotnet_projects)
@@ -1097,6 +1138,7 @@ def build_manifest() -> dict[str, object]:
 
     dependency_graph = {
         "python_development_dependencies": python_dependencies,
+        "python_runtime_dependencies": python_runtime,
         "dotnet_package_dependencies": dotnet_packages,
         "inspected_components": components,
     }
@@ -1300,6 +1342,7 @@ def build_manifest() -> dict[str, object]:
         "components_blob_sha": git_blob_sha(components_path),
         "requirements_dev_blob_sha": git_blob_sha(requirements_path),
         "research_pyproject_blob_sha": git_blob_sha(research_pyproject_path),
+        "root_pyproject_blob_sha": git_blob_sha(root_pyproject_path),
         "global_json_blob_sha": git_blob_sha(global_path),
         "dotnet_package_rights_blob_sha": git_blob_sha(dotnet_package_rights_path),
     }
@@ -1320,6 +1363,7 @@ def build_manifest() -> dict[str, object]:
         "source_inventory": source_inventory,
         "dotnet_sdk": str(global_doc["sdk"]["version"]),
         "python_development_dependencies": python_dependencies,
+        "python_runtime_dependencies": python_runtime,
         "dotnet_package_dependencies": dotnet_packages,
         "dotnet_package_rights": dotnet_rights,
         "inspected_components": components,

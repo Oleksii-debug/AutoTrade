@@ -28,6 +28,7 @@ from mvp.autotrade_mvp.dispatch import (
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
+    ProviderSubmissionObservation,
     Surface,
     observe_authenticated_json_response,
     observe_submission_json_response,
@@ -773,6 +774,45 @@ class BybitV5AdapterTests(unittest.TestCase):
                     prepared_request=prepared,
                     observation=invalid,
                 )
+
+    def test_submission_observation_subclass_is_rejected_without_virtual_access(self):
+        calls = 0
+
+        class TrapObservation(ProviderSubmissionObservation):
+            def __getattribute__(self, name):
+                nonlocal calls
+                calls += 1
+                raise AssertionError(f"virtual observation access executed: {name}")
+
+        client_id = stable_client_order_id(
+            "BYBIT",
+            "bybit-subclass",
+            environment="LIVE",
+            account_id="bybit-account",
+        )
+        prepared = prepare_order_submission(
+            capability=submission_write_capability(),
+            at=READ_AT,
+            provider_environment="MAINNET",
+            product_family="SPOT",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="0.01",
+            client_order_id=client_id,
+            time_in_force="IOC",
+        )
+        forged = object.__new__(TrapObservation)
+        with self.assertRaisesRegex(
+            TypeError,
+            "durable ProviderSubmissionObservation",
+        ):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=prepared,
+                observation=forged,
+            )
+        self.assertEqual(calls, 0)
 
     def test_ambiguous_bybit_codes_require_reconciliation(self):
         for code in (429, 10000, 10014, 10016):

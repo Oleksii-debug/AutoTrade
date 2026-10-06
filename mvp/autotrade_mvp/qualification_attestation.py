@@ -659,6 +659,66 @@ class QualificationAttestation:
         return "sha256:" + sha256(self.canonical_bytes()).hexdigest()
 
 
+def _qualification_attestation_bytes_exact(
+    attestation: QualificationAttestation,
+) -> bytes:
+    """Serialize one exact detached attestation without executable class methods."""
+
+    if type(attestation) is not QualificationAttestation:
+        raise TypeError(
+            "attestation must be the exact canonical QualificationAttestation"
+        )
+    if (
+        type(attestation.requirement_ids) is not tuple
+        or not all(type(item) is str for item in attestation.requirement_ids)
+        or type(attestation.evidence_refs) is not tuple
+        or not all(
+            type(item) is EvidenceArtifactRef
+            for item in attestation.evidence_refs
+        )
+        or type(attestation.unresolved_limits) is not tuple
+        or not all(type(item) is str for item in attestation.unresolved_limits)
+    ):
+        raise TypeError(
+            "attestation graph must use exact canonical tuple/ref types"
+        )
+    payload = {
+        "attestation_id": attestation.attestation_id,
+        "completed_at": attestation.completed_at,
+        "domain": attestation.domain,
+        "evidence_refs": [
+            {
+                "artifact_id": item.artifact_id,
+                "evidence_kind": item.evidence_kind,
+                "media_type": item.media_type,
+                "sha256": item.sha256,
+                "source_sha": item.source_sha,
+            }
+            for item in attestation.evidence_refs
+        ],
+        "gate": attestation.gate,
+        "harness_version": attestation.harness_version,
+        "package_id": attestation.package_id,
+        "producer_id": attestation.producer_id,
+        "protocol_id": attestation.protocol_id,
+        "protocol_version": attestation.protocol_version,
+        "release_artifact_id": attestation.release_artifact_id,
+        "release_artifact_sha256": attestation.release_artifact_sha256,
+        "requirement_ids": list(attestation.requirement_ids),
+        "result": attestation.result,
+        "runner_id": attestation.runner_id,
+        "schema_version": attestation.schema_version,
+        "signed_at": attestation.signed_at,
+        "source_sha": attestation.source_sha,
+        "started_at": attestation.started_at,
+        "trust_root_id": attestation.trust_root_id,
+        "unresolved_limits": list(attestation.unresolved_limits),
+        "verification_method": attestation.verification_method,
+        "verifier_id": attestation.verifier_id,
+    }
+    return _canonical_json(payload)
+
+
 @dataclass(frozen=True)
 class SignedQualificationAttestation:
     attestation: QualificationAttestation
@@ -1062,6 +1122,12 @@ def parse_signed_qualification_attestation(
 
 @dataclass(frozen=True)
 class AcceptedQualificationAttestation:
+    """Immutable canonical signed-attestation snapshot returned by the verifier.
+
+    Downstream terminal consumers must use this snapshot, never the original
+    caller-owned receipt/attestation graph after verification.
+    """
+
     attestation_id: str
     attestation_digest: str
     policy_id: str
@@ -1077,6 +1143,19 @@ class AcceptedQualificationAttestation:
     requirement_id: str
     release_artifact_id: str | None
     release_artifact_sha256: str | None
+    requirement_ids: tuple[str, ...] = ()
+    evidence_refs: tuple[EvidenceArtifactRef, ...] = ()
+    producer_id: str = ""
+    verifier_id: str = ""
+    runner_id: str = ""
+    harness_version: str = ""
+    started_at: str = ""
+    completed_at: str = ""
+    signed_at: str = ""
+    unresolved_limits: tuple[str, ...] = ()
+    verification_method: str = _RSA_METHOD
+    attestation_json: str = ""
+    signature_b64: str = ""
 
 
 def _verify_rsa_pkcs1v15_sha256(
@@ -1186,19 +1265,94 @@ def verify_qualification_attestation(
         raise TypeError(
             "policy must be QualificationTrustPolicy"
         )
+    attestation_input = receipt.attestation
+    if type(attestation_input) is not QualificationAttestation:
+        raise TypeError(
+            "receipt must carry the exact canonical QualificationAttestation"
+        )
+    if (
+        type(attestation_input.requirement_ids) is not tuple
+        or not all(type(item) is str for item in attestation_input.requirement_ids)
+        or type(attestation_input.evidence_refs) is not tuple
+        or not all(
+            type(item) is EvidenceArtifactRef
+            for item in attestation_input.evidence_refs
+        )
+        or type(attestation_input.unresolved_limits) is not tuple
+        or not all(type(item) is str for item in attestation_input.unresolved_limits)
+    ):
+        raise TypeError(
+            "receipt attestation graph must use exact canonical tuple/ref types"
+        )
     if type(evidence_store) is not ArtifactStore:
         raise TypeError(
             "evidence_store must be the canonical ArtifactStore"
         )
+
+    # SignedQualificationAttestation is frozen, but caller-retained instances can
+    # still be mutated via object.__setattr__(). Capture and revalidate the exact
+    # signature text before any evidence I/O callback so the accepted snapshot
+    # cannot report a different signature from the bytes actually verified.
+    signature_b64 = receipt.signature_b64
+    if type(signature_b64) is not str:
+        raise TypeError("receipt signature_b64 must be exact str")
+    signature_b64 = _text(signature_b64, name="signature_b64")
     try:
-        evidence_reader = trusted_authenticated_reader(
-            evidence_root,
-            publication_store=evidence_store,
-        )
-    except (ArtifactIntegrityError, OSError, TypeError, ValueError) as error:
+        signature = base64.b64decode(signature_b64, validate=True)
+    except (binascii.Error, ValueError) as error:
         raise QualificationTrustError(
-            "evidence artifact authority cannot be bound"
+            "signature_b64 is not canonical base64"
         ) from error
+    if (
+        not signature
+        or base64.b64encode(signature).decode("ascii") != signature_b64
+    ):
+        raise QualificationTrustError(
+            "signature_b64 is not canonical base64"
+        )
+
+    # Reconstruct a fresh exact canonical signed graph from scalar/ref fields.
+    # The RSA signature is verified over this detached graph, never over a
+    # caller-overridable canonical_bytes() method.
+    attestation = QualificationAttestation(
+        attestation_id=attestation_input.attestation_id,
+        source_sha=attestation_input.source_sha,
+        domain=attestation_input.domain,
+        gate=attestation_input.gate,
+        package_id=attestation_input.package_id,
+        protocol_id=attestation_input.protocol_id,
+        protocol_version=attestation_input.protocol_version,
+        requirement_ids=tuple(attestation_input.requirement_ids),
+        evidence_refs=tuple(
+            EvidenceArtifactRef(
+                artifact_id=item.artifact_id,
+                sha256=item.sha256,
+                media_type=item.media_type,
+                evidence_kind=item.evidence_kind,
+                source_sha=item.source_sha,
+            )
+            for item in attestation_input.evidence_refs
+        ),
+        producer_id=attestation_input.producer_id,
+        verifier_id=attestation_input.verifier_id,
+        trust_root_id=attestation_input.trust_root_id,
+        runner_id=attestation_input.runner_id,
+        harness_version=attestation_input.harness_version,
+        started_at=attestation_input.started_at,
+        completed_at=attestation_input.completed_at,
+        signed_at=attestation_input.signed_at,
+        result=attestation_input.result,
+        unresolved_limits=tuple(attestation_input.unresolved_limits),
+        release_artifact_id=attestation_input.release_artifact_id,
+        release_artifact_sha256=attestation_input.release_artifact_sha256,
+        schema_version=attestation_input.schema_version,
+        verification_method=attestation_input.verification_method,
+    )
+    verified_attestation_bytes = _qualification_attestation_bytes_exact(attestation)
+    verified_attestation_digest = (
+        "sha256:" + sha256(verified_attestation_bytes).hexdigest()
+    )
+    verified_attestation_json = verified_attestation_bytes.decode("utf-8")
 
     expected_policy_id = _digest(
         expected_policy_id, name="expected_policy_id"
@@ -1255,7 +1409,6 @@ def verify_qualification_attestation(
             name="expected_release_artifact_sha256",
         )
 
-    attestation = receipt.attestation
     if attestation.source_sha != expected_source_sha:
         raise QualificationTrustError(
             "attestation source SHA does not match candidate"
@@ -1329,34 +1482,116 @@ def verify_qualification_attestation(
         raise QualificationTrustError(
             "attestation is outside trust root validity"
         )
-    signature = base64.b64decode(
-        receipt.signature_b64, validate=True
-    )
+
+    # Freeze the exact policy/root identities that authorized the signature
+    # before evidence I/O callbacks can mutate caller-retained frozen objects.
+    verified_policy_id = expected_policy_id
+    verified_policy_version = expected_policy_version
+    verified_root_id = root.root_id
+    if verified_root_id != attestation.trust_root_id:
+        raise QualificationTrustError(
+            "attestation trust root identity changed during verification"
+        )
+
     _verify_rsa_pkcs1v15_sha256(
-        payload=attestation.canonical_bytes(),
+        payload=verified_attestation_bytes,
         signature=signature,
         root=root,
     )
-    for ref in attestation.evidence_refs:
-        _resolve_evidence(evidence_reader, ref)
 
-    return AcceptedQualificationAttestation(
-        attestation_id=attestation.attestation_id,
-        attestation_digest=attestation.content_digest,
-        policy_id=policy.policy_id,
-        policy_version=policy.policy_version,
-        trust_root_id=root.root_id,
-        result=attestation.result,
-        source_sha=attestation.source_sha,
-        domain=attestation.domain,
-        gate=attestation.gate,
-        package_id=attestation.package_id,
-        protocol_id=attestation.protocol_id,
-        protocol_version=attestation.protocol_version,
-        requirement_id=expected_requirement_id,
-        release_artifact_id=attestation.release_artifact_id,
-        release_artifact_sha256=attestation.release_artifact_sha256,
+    # Materialize the complete accepted snapshot before any external evidence
+    # callback can rebind constructors or post-init hooks used to represent the
+    # verified signed graph. Evidence still has to resolve successfully before
+    # this snapshot is returned.
+    accepted = AcceptedQualificationAttestation(
+        attestation_id=str(attestation.attestation_id),
+        attestation_digest=verified_attestation_digest,
+        policy_id=verified_policy_id,
+        policy_version=verified_policy_version,
+        trust_root_id=verified_root_id,
+        result=str(attestation.result),
+        source_sha=str(attestation.source_sha),
+        domain=str(attestation.domain),
+        gate=str(attestation.gate),
+        package_id=str(attestation.package_id),
+        protocol_id=str(attestation.protocol_id),
+        protocol_version=str(attestation.protocol_version),
+        requirement_id=str(expected_requirement_id),
+        release_artifact_id=(
+            None
+            if attestation.release_artifact_id is None
+            else str(attestation.release_artifact_id)
+        ),
+        release_artifact_sha256=(
+            None
+            if attestation.release_artifact_sha256 is None
+            else str(attestation.release_artifact_sha256)
+        ),
+        requirement_ids=tuple(str(item) for item in attestation.requirement_ids),
+        evidence_refs=tuple(
+            EvidenceArtifactRef(
+                artifact_id=str(item.artifact_id),
+                sha256=str(item.sha256),
+                media_type=str(item.media_type),
+                evidence_kind=str(item.evidence_kind),
+                source_sha=str(item.source_sha),
+            )
+            for item in attestation.evidence_refs
+        ),
+        producer_id=str(attestation.producer_id),
+        verifier_id=str(attestation.verifier_id),
+        runner_id=str(attestation.runner_id),
+        harness_version=str(attestation.harness_version),
+        started_at=str(attestation.started_at),
+        completed_at=str(attestation.completed_at),
+        signed_at=str(attestation.signed_at),
+        unresolved_limits=tuple(str(item) for item in attestation.unresolved_limits),
+        verification_method=str(attestation.verification_method),
+        attestation_json=verified_attestation_json,
+        signature_b64=signature_b64,
     )
+
+    # Pin the exact internal evidence resolver across the external reader
+    # construction/read callback boundary. A callback may mutate module globals
+    # or a function object's code; neither may silently replace evidence checks.
+    evidence_resolver = _resolve_evidence
+    evidence_resolver_code = getattr(evidence_resolver, "__code__", None)
+
+    # Only now may external evidence-reader construction execute callbacks.
+    # The complete signed graph, expected scope, policy/root authorization and
+    # RSA signature are already detached and verified, so reader construction
+    # cannot retarget the trust decision that selected this attestation.
+    try:
+        evidence_reader = trusted_authenticated_reader(
+            evidence_root,
+            publication_store=evidence_store,
+        )
+    except (ArtifactIntegrityError, OSError, TypeError, ValueError) as error:
+        raise QualificationTrustError(
+            "evidence artifact authority cannot be bound"
+        ) from error
+
+    if _resolve_evidence is not evidence_resolver or (
+        evidence_resolver_code is not None
+        and getattr(evidence_resolver, "__code__", None)
+        is not evidence_resolver_code
+    ):
+        raise QualificationTrustError(
+            "evidence resolver changed during verification"
+        )
+
+    for ref in attestation.evidence_refs:
+        evidence_resolver(evidence_reader, ref)
+        if _resolve_evidence is not evidence_resolver or (
+            evidence_resolver_code is not None
+            and getattr(evidence_resolver, "__code__", None)
+            is not evidence_resolver_code
+        ):
+            raise QualificationTrustError(
+                "evidence resolver changed during verification"
+            )
+
+    return accepted
 
 
 def verify_canonical_qualification_attestation(

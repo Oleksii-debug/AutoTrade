@@ -921,3 +921,945 @@ def observe_test_injected_json_response(
             "provider core returned non-canonical response observation"
         )
     return observation
+
+
+# Host-attested durability bridge.
+#
+# This intentionally shares the canonical authenticated_provider_read aggregate
+# and the selected JournalStore backing object. It does not mint PROVIDER_ORIGIN:
+# a Host signature authenticates the Host issuer, not the provider wire path.
+# Positive financial promotion remains fail-closed until the qualified direct
+# provider transport is cryptographically/compositionally bound to this issuer.
+_HOST_ATTESTED_PENDING_KIND = "HOST_ATTESTED_PENDING"
+_HOST_ATTESTED_OBSERVED_KIND = "HOST_ATTESTED_OBSERVED"
+_HOST_JOURNAL_IDENTITY_SCHEMA = "autotrade-provider-origin-journal-identity:v1"
+_HOST_PREPARED_DURABILITY_SCHEMA = "autotrade-provider-read-durable-prepared:v1"
+_HOST_OBSERVED_DURABILITY_SCHEMA = "autotrade-provider-read-durable-observed:v1"
+_HOST_PREPARED_PAYLOAD_KEYS = frozenset(
+    {
+        "origin_kind",
+        "query",
+        "transport_identity",
+        "network_policy_identity",
+        "host_prepared_attestation",
+    }
+)
+_HOST_OBSERVED_PAYLOAD_KEYS = frozenset(
+    {
+        "origin_kind",
+        "prepared_event_id",
+        "query_digest",
+        "transport_identity",
+        "network_policy_identity",
+        "http_status",
+        "response_sha256",
+        "response_base64",
+        "observed_at",
+        "host_provider_receipt",
+        "prepared_receipt_identity",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class HostAuthenticatedReadExpectedScope:
+    """Independent exact pins not carried by AuthenticatedReadQueryBinding.
+
+    Construction of this DTO is not authority. The bridge only cross-binds these
+    caller-supplied expectations to cryptographically verified Host material and
+    never promotes them to PROVIDER_ORIGIN on their own.
+    """
+
+    data_entitlement: str
+    endpoint_rule_identity: str
+    credential_handle_id: str
+    credential_generation: int
+    qualification_id: str
+    qualification_build_id: str
+    adapter_build_identity: str
+    network_policy_identity: str
+    transport_identity: str
+
+
+def _require_host_expected_scope(
+    value: object,
+) -> HostAuthenticatedReadExpectedScope:
+    if type(value) is not HostAuthenticatedReadExpectedScope:
+        raise ProviderOriginError(
+            "Host expected scope must be exact HostAuthenticatedReadExpectedScope"
+        )
+    for name in (
+        "data_entitlement",
+        "credential_handle_id",
+        "qualification_id",
+        "qualification_build_id",
+        "adapter_build_identity",
+        "transport_identity",
+    ):
+        _exact_text(object.__getattribute__(value, name), name=name)
+    endpoint_rule = _exact_text(
+        object.__getattribute__(value, "endpoint_rule_identity"),
+        name="endpoint_rule_identity",
+    )
+    network_policy = _exact_text(
+        object.__getattribute__(value, "network_policy_identity"),
+        name="network_policy_identity",
+    )
+    if _SHA256_RE.fullmatch(endpoint_rule) is None:
+        raise ProviderOriginError(
+            "endpoint_rule_identity must be canonical SHA-256"
+        )
+    if _SHA256_RE.fullmatch(network_policy) is None:
+        raise ProviderOriginError(
+            "network_policy_identity must be canonical SHA-256"
+        )
+    generation = object.__getattribute__(value, "credential_generation")
+    if type(generation) is not int or generation <= 0:
+        raise ProviderOriginError(
+            "credential_generation must be an exact positive integer"
+        )
+    return value
+
+
+def _host_canonical_utc(value: object, *, name: str) -> str:
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise ProviderOriginError(
+            f"{name} must use exact datetime with exact datetime.timezone tzinfo"
+        )
+    if value.utcoffset() is None:
+        raise ProviderOriginError(f"{name} must be timezone-aware")
+    point = value.astimezone(timezone.utc)
+    return (
+        f"{point.year:04d}-{point.month:02d}-{point.day:02d}"
+        f"T{point.hour:02d}:{point.minute:02d}:{point.second:02d}."
+        f"{point.microsecond:06d}0Z"
+    )
+
+
+def _host_journal_identity(
+    identity: object,
+) -> str:
+    from .provider_host_attestation import canonical_host_material
+    from .store_identity import require_exact_journal_store_identity
+
+    exact = require_exact_journal_store_identity(
+        identity,
+        subject="Host bridge journal identity",
+    )
+
+    def number(value: int | None) -> str:
+        if value is None:
+            return ""
+        if type(value) is not int:
+            raise ProviderOriginError(
+                "Host bridge journal identity contains non-integer identity material"
+            )
+        return str(value)
+
+    material = canonical_host_material(
+        _HOST_JOURNAL_IDENTITY_SCHEMA,
+        exact.identity_source,
+        exact.canonical_path,
+        number(exact.filesystem_device),
+        number(exact.filesystem_inode),
+        number(exact.windows_volume_serial),
+        number(exact.windows_file_index_high),
+        number(exact.windows_file_index_low),
+    )
+    return "sha256:" + sha256(material).hexdigest()
+
+
+def _host_event(
+    *,
+    event_id: str,
+    event_type: str,
+    attempt_id: str,
+    aggregate_version: int,
+    payload: dict[str, object],
+    committed_at: str,
+    _payload_digest=payload_digest,
+) -> dict[str, object]:
+    return {
+        "event_id": event_id,
+        "event_type": event_type,
+        "aggregate_type": _AGGREGATE_TYPE,
+        "aggregate_id": attempt_id,
+        "aggregate_version": str(aggregate_version),
+        "payload": payload,
+        "payload_hash": _payload_digest(payload),
+        "committed_at": committed_at,
+    }
+
+
+def _require_host_event(
+    event: object,
+    *,
+    attempt_id: str,
+    event_type: str,
+    aggregate_version: int,
+    payload_keys: frozenset[str],
+) -> dict[str, object]:
+    from .provider_host_attestation import _host_utc_key
+
+    if type(event) is not dict or set(event) != _EVENT_KEYS:
+        raise ProviderOriginError(
+            "Host-attested provider journal event schema is not exact"
+        )
+    expected_event_id = (
+        attempt_id
+        + (":prepared" if event_type == _PREPARED_EVENT else ":observed")
+    )
+    if (
+        event.get("event_id") != expected_event_id
+        or event.get("event_type") != event_type
+        or event.get("aggregate_type") != _AGGREGATE_TYPE
+        or event.get("aggregate_id") != attempt_id
+        or event.get("aggregate_version") != aggregate_version
+    ):
+        raise ProviderOriginError(
+            "Host-attested provider journal event identity or chronology is invalid"
+        )
+    payload = event.get("payload")
+    if type(payload) is not dict or set(payload) != payload_keys:
+        raise ProviderOriginError(
+            "Host-attested provider journal payload schema is not exact"
+        )
+    if event.get("payload_hash") != payload_digest(payload):
+        raise ProviderOriginError(
+            "Host-attested provider payload digest conflicts with durable payload"
+        )
+    committed = event.get("committed_at")
+    _host_utc_key(committed, name="Host-attested committed_at")
+    sequence = event.get("journal_sequence")
+    if type(sequence) is not int or sequence <= 0:
+        raise ProviderOriginError(
+            "Host-attested journal sequence must be an exact positive integer"
+        )
+    return payload
+
+
+def _host_prepared_receipt_payload(receipt: object) -> dict[str, object]:
+    from .provider_host_attestation import HostPreparedDurabilityReceipt
+
+    if type(receipt) is not HostPreparedDurabilityReceipt:
+        raise ProviderOriginError(
+            "prepared durability receipt must be exact HostPreparedDurabilityReceipt"
+        )
+    return {
+        "schema": _HOST_PREPARED_DURABILITY_SCHEMA,
+        "issuer_session_identity": receipt.issuer_session_identity,
+        "read_attempt_id": receipt.read_attempt_id,
+        "read_attempt_binding_sha256": receipt.read_attempt_binding_sha256,
+        "query_digest": receipt.query_digest,
+        "journal_identity": receipt.journal_identity,
+        "prepared_event_id": receipt.prepared_event_id,
+        "journal_sequence": receipt.journal_sequence,
+        "committed_at_utc": receipt.committed_at_utc,
+        "receipt_identity": receipt.receipt_identity,
+    }
+
+
+def _host_observed_receipt_payload(receipt: object) -> dict[str, object]:
+    from .provider_host_attestation import HostObservedDurabilityReceipt
+
+    if type(receipt) is not HostObservedDurabilityReceipt:
+        raise ProviderOriginError(
+            "observed durability receipt must be exact HostObservedDurabilityReceipt"
+        )
+    return {
+        "schema": _HOST_OBSERVED_DURABILITY_SCHEMA,
+        "issuer_session_identity": receipt.issuer_session_identity,
+        "read_attempt_id": receipt.read_attempt_id,
+        "read_attempt_binding_sha256": receipt.read_attempt_binding_sha256,
+        "provider_receipt_sha256": receipt.provider_receipt_sha256,
+        "response_sha256": receipt.response_sha256,
+        "http_status": receipt.http_status,
+        "observed_at_utc": receipt.observed_at_utc,
+        "journal_identity": receipt.journal_identity,
+        "prepared_receipt_identity": receipt.prepared_receipt_identity,
+        "prepared_event_id": receipt.prepared_event_id,
+        "prepared_journal_sequence": receipt.prepared_journal_sequence,
+        "observed_event_id": receipt.observed_event_id,
+        "observed_journal_sequence": receipt.observed_journal_sequence,
+        "committed_at_utc": receipt.committed_at_utc,
+        "receipt_identity": receipt.receipt_identity,
+    }
+
+
+class HostAuthenticatedReadJournalBridge:
+    """Durability callbacks for signed Host authenticated-read evidence.
+
+    The bridge writes only to the already-selected canonical JournalStore. It
+    returns the exact durability receipt material expected by AutoTrade.Host and
+    can reconstruct/verify the full Observed envelope after process restart.
+
+    This is deliberately not the provider-origin promotion boundary. A Host
+    signature proves which Host issuer produced the read evidence; real provider
+    wire provenance still has to be composed and qualified separately.
+    """
+
+    def __init__(self, store: JournalStore) -> None:
+        self._store = store
+        self._store_identity = _require_origin_journal_authority(store)
+        self._journal_identity = _host_journal_identity(self._store_identity)
+
+    @property
+    def journal_identity(self) -> str:
+        store, identity = self._require_store()
+        current = _host_journal_identity(identity)
+        if current != self._journal_identity:
+            raise ProviderOriginError(
+                "Host bridge canonical journal identity changed"
+            )
+        return current
+
+    def _require_store(self) -> tuple[JournalStore, object]:
+        store = self._store
+        current = _require_origin_journal_authority(store)
+        if current != self._store_identity:
+            raise ProviderOriginError(
+                "Host bridge JournalStore generation changed"
+            )
+        return store, current
+
+    @staticmethod
+    def _require_subject_scope(
+        verified: object,
+        query_binding: AuthenticatedReadQueryBinding,
+        expected_scope: HostAuthenticatedReadExpectedScope,
+    ) -> dict[str, object]:
+        from .provider_host_attestation import (
+            VerifiedHostPreparedAttestation,
+            _host_utc_key,
+        )
+
+        if type(verified) is not VerifiedHostPreparedAttestation:
+            raise ProviderOriginError(
+                "Host Prepared verifier returned non-canonical evidence"
+            )
+        expected = _query_snapshot(query_binding)
+        pins = _require_host_expected_scope(expected_scope)
+        subject = verified.attempt.subject
+        surface = expected["surface"]
+        if type(surface) is not Surface:
+            raise ProviderOriginError(
+                "authenticated-read surface lost canonical authority"
+            )
+        if (
+            subject.provider_id != expected["provider_id"]
+            or subject.account_id != expected["account_id"]
+            or subject.entity_id != expected["entity_id"]
+            or subject.runtime_environment != expected["environment"]
+            or subject.provider_environment != expected["provider_environment"]
+            or subject.endpoint != expected["endpoint"]
+            or subject.surface != surface.value
+            or subject.permission_scope != expected["permission_scope"]
+            or subject.instrument_version != expected["instrument_version"]
+            or subject.query_digest != expected["query_digest"]
+            or subject.capability_id != expected["capability_snapshot_id"]
+            or subject.data_entitlement != pins.data_entitlement
+            or subject.endpoint_rule_identity != pins.endpoint_rule_identity
+            or subject.credential_handle_id != pins.credential_handle_id
+            or subject.credential_generation != pins.credential_generation
+            or subject.qualification_id != pins.qualification_id
+            or subject.qualification_build_id != pins.qualification_build_id
+            or subject.adapter_build_identity != pins.adapter_build_identity
+            or subject.network_policy_identity != pins.network_policy_identity
+            or subject.transport_identity != pins.transport_identity
+        ):
+            raise ProviderOriginError(
+                "signed Host authenticated-read subject conflicts with independently selected scope"
+            )
+        prepared = _parse_utc_text(
+            expected["prepared_at"],
+            name="query prepared_at",
+        )
+        query_prepared_key = (
+            prepared.year,
+            prepared.month,
+            prepared.day,
+            prepared.hour,
+            prepared.minute,
+            prepared.second,
+            prepared.microsecond * 10,
+        )
+        host_prepared_key = _host_utc_key(
+            verified.attempt.prepared_at_utc,
+            name="Host prepared_at_utc",
+        )
+        if host_prepared_key < query_prepared_key:
+            raise ProviderOriginError(
+                "signed Host read attempt predates canonical query preparation"
+            )
+        return expected
+
+    @staticmethod
+    def _prepared_receipt(
+        *,
+        verified: object,
+        journal_identity: str,
+        prepared_event: dict[str, object],
+    ):
+        from .provider_host_attestation import (
+            HostPreparedDurabilityReceipt,
+            VerifiedHostPreparedAttestation,
+            canonical_host_material,
+        )
+
+        if type(verified) is not VerifiedHostPreparedAttestation:
+            raise ProviderOriginError(
+                "Host Prepared verifier returned non-canonical evidence"
+            )
+        attempt = verified.attempt
+        sequence = prepared_event.get("journal_sequence")
+        committed = prepared_event.get("committed_at")
+        if type(sequence) is not int or sequence <= 0 or type(committed) is not str:
+            raise ProviderOriginError(
+                "durable Host Prepared event lacks canonical journal cut"
+            )
+        material = canonical_host_material(
+            _HOST_PREPARED_DURABILITY_SCHEMA,
+            verified.issuer_session.session_identity,
+            attempt.read_attempt_id,
+            attempt.binding_sha256,
+            attempt.subject.query_digest,
+            journal_identity,
+            attempt.read_attempt_id + ":prepared",
+            str(sequence),
+            committed,
+        )
+        return HostPreparedDurabilityReceipt(
+            issuer_session_identity=verified.issuer_session.session_identity,
+            read_attempt_id=attempt.read_attempt_id,
+            read_attempt_binding_sha256=attempt.binding_sha256,
+            query_digest=attempt.subject.query_digest,
+            journal_identity=journal_identity,
+            prepared_event_id=attempt.read_attempt_id + ":prepared",
+            journal_sequence=sequence,
+            committed_at_utc=committed,
+            receipt_identity=(
+                "provider-read-durable-prepared:sha256:"
+                + sha256(material).hexdigest()
+            ),
+        )
+
+    def commit_prepared(
+        self,
+        prepared_envelope: object,
+        *,
+        query_binding: AuthenticatedReadQueryBinding,
+        expected_session_identity: str,
+        expected_public_key_sha256: str,
+        expected_scope: HostAuthenticatedReadExpectedScope,
+        committed_at: datetime,
+    ):
+        from .provider_host_attestation import (
+            HostProviderAttestationError,
+            HostProviderAttestationUnavailable,
+            _host_utc_key,
+            verify_host_prepared_attestation,
+        )
+
+        expected = _query_snapshot(query_binding)
+        _require_host_expected_scope(expected_scope)
+        try:
+            verified = verify_host_prepared_attestation(
+                prepared_envelope,
+                expected_session_identity=expected_session_identity,
+                expected_public_key_sha256=expected_public_key_sha256,
+                expected_query=expected["query"],
+            )
+        except (
+            HostProviderAttestationError,
+            HostProviderAttestationUnavailable,
+        ) as error:
+            raise ProviderOriginError(
+                "Host Prepared attestation verification failed"
+            ) from error
+        expected = self._require_subject_scope(
+            verified,
+            query_binding,
+            expected_scope,
+        )
+        committed = _host_canonical_utc(
+            committed_at,
+            name="Host Prepared committed_at",
+        )
+        if _host_utc_key(
+            committed,
+            name="Host Prepared committed_at",
+        ) < _host_utc_key(
+            verified.attempt.prepared_at_utc,
+            name="Host prepared_at_utc",
+        ):
+            raise ProviderOriginError(
+                "durable Host Prepared commit cannot predate signed attempt"
+            )
+
+        attempt_id = verified.attempt.read_attempt_id
+        store, identity = self._require_store()
+        events = _load_origin_events(store, identity, attempt_id)
+        if len(events) > 1:
+            raise ProviderOriginError(
+                "Host Prepared replay found an already Observed read attempt"
+            )
+        if events:
+            payload = _require_host_event(
+                events[0],
+                attempt_id=attempt_id,
+                event_type=_PREPARED_EVENT,
+                aggregate_version=1,
+                payload_keys=_HOST_PREPARED_PAYLOAD_KEYS,
+            )
+            if (
+                payload.get("origin_kind") != _HOST_ATTESTED_PENDING_KIND
+                or payload.get("query") != expected
+                or payload.get("transport_identity")
+                != verified.attempt.subject.transport_identity
+                or payload.get("network_policy_identity")
+                != verified.attempt.subject.network_policy_identity
+                or payload.get("host_prepared_attestation")
+                != prepared_envelope
+            ):
+                raise ProviderOriginError(
+                    "Host Prepared replay conflicts with durable signed scope"
+                )
+            return self._prepared_receipt(
+                verified=verified,
+                journal_identity=self.journal_identity,
+                prepared_event=events[0],
+            )
+
+        payload = {
+            "origin_kind": _HOST_ATTESTED_PENDING_KIND,
+            "query": expected,
+            "transport_identity": verified.attempt.subject.transport_identity,
+            "network_policy_identity": verified.attempt.subject.network_policy_identity,
+            "host_prepared_attestation": prepared_envelope,
+        }
+        _append_origin_event(
+            store,
+            identity,
+            _host_event(
+                event_id=attempt_id + ":prepared",
+                event_type=_PREPARED_EVENT,
+                attempt_id=attempt_id,
+                aggregate_version=1,
+                payload=payload,
+                committed_at=committed,
+            ),
+        )
+        events = _load_origin_events(store, identity, attempt_id)
+        if len(events) != 1:
+            raise ProviderOriginError(
+                "Host Prepared commit did not produce one exact durable event"
+            )
+        _require_host_event(
+            events[0],
+            attempt_id=attempt_id,
+            event_type=_PREPARED_EVENT,
+            aggregate_version=1,
+            payload_keys=_HOST_PREPARED_PAYLOAD_KEYS,
+        )
+        return self._prepared_receipt(
+            verified=verified,
+            journal_identity=self.journal_identity,
+            prepared_event=events[0],
+        )
+
+    @staticmethod
+    def _observed_receipt(
+        *,
+        verified_prepared: object,
+        provider_receipt: object,
+        prepared_receipt: object,
+        journal_identity: str,
+        observed_event: dict[str, object],
+    ):
+        from .provider_host_attestation import (
+            HostAuthenticatedReadReceipt,
+            HostObservedDurabilityReceipt,
+            HostPreparedDurabilityReceipt,
+            VerifiedHostPreparedAttestation,
+            canonical_host_material,
+        )
+
+        if (
+            type(verified_prepared) is not VerifiedHostPreparedAttestation
+            or type(provider_receipt) is not HostAuthenticatedReadReceipt
+            or type(prepared_receipt) is not HostPreparedDurabilityReceipt
+        ):
+            raise ProviderOriginError(
+                "Host Observed durability inputs are non-canonical"
+            )
+        sequence = observed_event.get("journal_sequence")
+        committed = observed_event.get("committed_at")
+        if type(sequence) is not int or sequence <= 0 or type(committed) is not str:
+            raise ProviderOriginError(
+                "durable Host Observed event lacks canonical journal cut"
+            )
+        attempt = verified_prepared.attempt
+        material = canonical_host_material(
+            _HOST_OBSERVED_DURABILITY_SCHEMA,
+            verified_prepared.issuer_session.session_identity,
+            attempt.read_attempt_id,
+            attempt.binding_sha256,
+            provider_receipt.receipt_sha256,
+            provider_receipt.response_sha256,
+            str(provider_receipt.http_status),
+            provider_receipt.observed_at_utc,
+            journal_identity,
+            prepared_receipt.receipt_identity,
+            prepared_receipt.prepared_event_id,
+            str(prepared_receipt.journal_sequence),
+            attempt.read_attempt_id + ":observed",
+            str(sequence),
+            committed,
+        )
+        return HostObservedDurabilityReceipt(
+            issuer_session_identity=verified_prepared.issuer_session.session_identity,
+            read_attempt_id=attempt.read_attempt_id,
+            read_attempt_binding_sha256=attempt.binding_sha256,
+            provider_receipt_sha256=provider_receipt.receipt_sha256,
+            response_sha256=provider_receipt.response_sha256,
+            http_status=provider_receipt.http_status,
+            observed_at_utc=provider_receipt.observed_at_utc,
+            journal_identity=journal_identity,
+            prepared_receipt_identity=prepared_receipt.receipt_identity,
+            prepared_event_id=prepared_receipt.prepared_event_id,
+            prepared_journal_sequence=prepared_receipt.journal_sequence,
+            observed_event_id=attempt.read_attempt_id + ":observed",
+            observed_journal_sequence=sequence,
+            committed_at_utc=committed,
+            receipt_identity=(
+                "provider-read-durable-observed:sha256:"
+                + sha256(material).hexdigest()
+            ),
+        )
+
+    def commit_observed(
+        self,
+        prepared_envelope: object,
+        provider_receipt_payload: object,
+        prepared_durability_payload: object,
+        response_bytes: bytes,
+        *,
+        query_binding: AuthenticatedReadQueryBinding,
+        expected_session_identity: str,
+        expected_public_key_sha256: str,
+        expected_scope: HostAuthenticatedReadExpectedScope,
+        committed_at: datetime,
+    ):
+        from .provider_host_attestation import (
+            HostProviderAttestationError,
+            HostProviderAttestationUnavailable,
+            _host_utc_key,
+            _parse_prepared_durability,
+            _parse_receipt,
+            verify_host_prepared_attestation,
+        )
+
+        expected = _query_snapshot(query_binding)
+        _require_host_expected_scope(expected_scope)
+        try:
+            verified = verify_host_prepared_attestation(
+                prepared_envelope,
+                expected_session_identity=expected_session_identity,
+                expected_public_key_sha256=expected_public_key_sha256,
+                expected_query=expected["query"],
+            )
+            provider_receipt = _parse_receipt(
+                provider_receipt_payload,
+                prepared=verified,
+                response_bytes=response_bytes,
+            )
+            prepared_receipt = _parse_prepared_durability(
+                prepared_durability_payload,
+                prepared=verified,
+                expected_journal_identity=self.journal_identity,
+            )
+        except (
+            HostProviderAttestationError,
+            HostProviderAttestationUnavailable,
+        ) as error:
+            raise ProviderOriginError(
+                "Host Observed attestation component verification failed"
+            ) from error
+        expected = self._require_subject_scope(
+            verified,
+            query_binding,
+            expected_scope,
+        )
+
+        attempt_id = verified.attempt.read_attempt_id
+        store, identity = self._require_store()
+        events = _load_origin_events(store, identity, attempt_id)
+        if len(events) not in {1, 2}:
+            raise ProviderOriginError(
+                "Host Observed commit requires one durable Prepared event"
+            )
+        prepared_event = events[0]
+        prepared_payload = _require_host_event(
+            prepared_event,
+            attempt_id=attempt_id,
+            event_type=_PREPARED_EVENT,
+            aggregate_version=1,
+            payload_keys=_HOST_PREPARED_PAYLOAD_KEYS,
+        )
+        if (
+            prepared_payload.get("origin_kind") != _HOST_ATTESTED_PENDING_KIND
+            or prepared_payload.get("query") != expected
+            or prepared_payload.get("host_prepared_attestation")
+            != prepared_envelope
+            or prepared_payload.get("transport_identity")
+            != verified.attempt.subject.transport_identity
+            or prepared_payload.get("network_policy_identity")
+            != verified.attempt.subject.network_policy_identity
+            or prepared_receipt.prepared_event_id
+            != prepared_event.get("event_id")
+            or prepared_receipt.journal_sequence
+            != prepared_event.get("journal_sequence")
+            or prepared_receipt.committed_at_utc
+            != prepared_event.get("committed_at")
+        ):
+            raise ProviderOriginError(
+                "Host Observed commit conflicts with durable Prepared cut"
+            )
+
+        committed = _host_canonical_utc(
+            committed_at,
+            name="Host Observed committed_at",
+        )
+        if _host_utc_key(
+            committed,
+            name="Host Observed committed_at",
+        ) < _host_utc_key(
+            provider_receipt.observed_at_utc,
+            name="provider observed_at_utc",
+        ):
+            raise ProviderOriginError(
+                "durable Host Observed commit cannot predate signed response"
+            )
+
+        encoded = base64.b64encode(response_bytes).decode("ascii")
+        payload = {
+            "origin_kind": _HOST_ATTESTED_OBSERVED_KIND,
+            "prepared_event_id": prepared_event["event_id"],
+            "query_digest": expected["query_digest"],
+            "transport_identity": verified.attempt.subject.transport_identity,
+            "network_policy_identity": verified.attempt.subject.network_policy_identity,
+            "http_status": provider_receipt.http_status,
+            "response_sha256": provider_receipt.response_sha256,
+            "response_base64": encoded,
+            "observed_at": provider_receipt.observed_at_utc,
+            "host_provider_receipt": provider_receipt_payload,
+            "prepared_receipt_identity": prepared_receipt.receipt_identity,
+        }
+
+        if len(events) == 2:
+            existing_payload = _require_host_event(
+                events[1],
+                attempt_id=attempt_id,
+                event_type=_OBSERVED_EVENT,
+                aggregate_version=2,
+                payload_keys=_HOST_OBSERVED_PAYLOAD_KEYS,
+            )
+            if existing_payload != payload:
+                raise ProviderOriginError(
+                    "Host Observed replay conflicts with durable signed response"
+                )
+            return self._observed_receipt(
+                verified_prepared=verified,
+                provider_receipt=provider_receipt,
+                prepared_receipt=prepared_receipt,
+                journal_identity=self.journal_identity,
+                observed_event=events[1],
+            )
+
+        _append_origin_event(
+            store,
+            identity,
+            _host_event(
+                event_id=attempt_id + ":observed",
+                event_type=_OBSERVED_EVENT,
+                attempt_id=attempt_id,
+                aggregate_version=2,
+                payload=payload,
+                committed_at=committed,
+            ),
+        )
+        events = _load_origin_events(store, identity, attempt_id)
+        if len(events) != 2:
+            raise ProviderOriginError(
+                "Host Observed commit did not produce exact Prepared/Observed chronology"
+            )
+        _require_host_event(
+            events[1],
+            attempt_id=attempt_id,
+            event_type=_OBSERVED_EVENT,
+            aggregate_version=2,
+            payload_keys=_HOST_OBSERVED_PAYLOAD_KEYS,
+        )
+        return self._observed_receipt(
+            verified_prepared=verified,
+            provider_receipt=provider_receipt,
+            prepared_receipt=prepared_receipt,
+            journal_identity=self.journal_identity,
+            observed_event=events[1],
+        )
+
+    def load_verified_observed(
+        self,
+        attempt_id: str,
+        *,
+        query_binding: AuthenticatedReadQueryBinding,
+        expected_session_identity: str,
+        expected_public_key_sha256: str,
+        expected_scope: HostAuthenticatedReadExpectedScope,
+    ):
+        from .provider_host_attestation import (
+            HostProviderAttestationError,
+            HostProviderAttestationUnavailable,
+            _parse_prepared_durability,
+            _parse_receipt,
+            verify_host_observed_attestation,
+            verify_host_prepared_attestation,
+        )
+
+        attempt = _exact_text(attempt_id, name="attempt_id")
+        expected = _query_snapshot(query_binding)
+        _require_host_expected_scope(expected_scope)
+        store, identity = self._require_store()
+        events = _load_origin_events(store, identity, attempt)
+        if len(events) != 2:
+            raise ProviderOriginError(
+                "Host replay requires exact durable Prepared/Observed chronology"
+            )
+        prepared_event, observed_event = events
+        prepared_payload = _require_host_event(
+            prepared_event,
+            attempt_id=attempt,
+            event_type=_PREPARED_EVENT,
+            aggregate_version=1,
+            payload_keys=_HOST_PREPARED_PAYLOAD_KEYS,
+        )
+        observed_payload = _require_host_event(
+            observed_event,
+            attempt_id=attempt,
+            event_type=_OBSERVED_EVENT,
+            aggregate_version=2,
+            payload_keys=_HOST_OBSERVED_PAYLOAD_KEYS,
+        )
+        if (
+            prepared_payload.get("origin_kind") != _HOST_ATTESTED_PENDING_KIND
+            or observed_payload.get("origin_kind") != _HOST_ATTESTED_OBSERVED_KIND
+            or prepared_payload.get("query") != expected
+            or observed_payload.get("prepared_event_id")
+            != prepared_event.get("event_id")
+            or observed_payload.get("query_digest") != expected["query_digest"]
+            or observed_payload.get("transport_identity")
+            != prepared_payload.get("transport_identity")
+            or observed_payload.get("network_policy_identity")
+            != prepared_payload.get("network_policy_identity")
+        ):
+            raise ProviderOriginError(
+                "durable Host replay scope or chronology is inconsistent"
+            )
+
+        prepared_envelope = prepared_payload.get("host_prepared_attestation")
+        provider_receipt_payload = observed_payload.get("host_provider_receipt")
+        encoded = observed_payload.get("response_base64")
+        if type(encoded) is not str or not encoded:
+            raise ProviderOriginError(
+                "durable Host response bytes are missing"
+            )
+        try:
+            response_bytes = base64.b64decode(encoded, validate=True)
+        except (TypeError, ValueError) as error:
+            raise ProviderOriginError(
+                "durable Host response bytes are not canonical base64"
+            ) from error
+        if (
+            not response_bytes
+            or base64.b64encode(response_bytes).decode("ascii") != encoded
+        ):
+            raise ProviderOriginError(
+                "durable Host response bytes are not canonical"
+            )
+
+        try:
+            verified_prepared = verify_host_prepared_attestation(
+                prepared_envelope,
+                expected_session_identity=expected_session_identity,
+                expected_public_key_sha256=expected_public_key_sha256,
+                expected_query=expected["query"],
+            )
+            self._require_subject_scope(
+                verified_prepared,
+                query_binding,
+                expected_scope,
+            )
+            provider_receipt = _parse_receipt(
+                provider_receipt_payload,
+                prepared=verified_prepared,
+                response_bytes=response_bytes,
+            )
+        except (
+            HostProviderAttestationError,
+            HostProviderAttestationUnavailable,
+        ) as error:
+            raise ProviderOriginError(
+                "durable Host replay attestation verification failed"
+            ) from error
+
+        prepared_receipt = self._prepared_receipt(
+            verified=verified_prepared,
+            journal_identity=self.journal_identity,
+            prepared_event=prepared_event,
+        )
+        observed_receipt = self._observed_receipt(
+            verified_prepared=verified_prepared,
+            provider_receipt=provider_receipt,
+            prepared_receipt=prepared_receipt,
+            journal_identity=self.journal_identity,
+            observed_event=observed_event,
+        )
+
+        if (
+            observed_payload.get("prepared_receipt_identity")
+            != prepared_receipt.receipt_identity
+            or observed_payload.get("http_status") != provider_receipt.http_status
+            or observed_payload.get("response_sha256")
+            != provider_receipt.response_sha256
+            or observed_payload.get("observed_at")
+            != provider_receipt.observed_at_utc
+        ):
+            raise ProviderOriginError(
+                "durable Host replay response metadata conflicts with signed receipt"
+            )
+
+        observed_envelope = {
+            "schema": "autotrade-host-authenticated-read-observed:v2",
+            "issuer_session": prepared_envelope["issuer_session"],
+            "attempt": prepared_envelope["attempt"],
+            "receipt": provider_receipt_payload,
+            "query": prepared_envelope["query"],
+            "response_base64": encoded,
+            "durable_prepared": _host_prepared_receipt_payload(prepared_receipt),
+            "durable_observed": _host_observed_receipt_payload(observed_receipt),
+        }
+        try:
+            return verify_host_observed_attestation(
+                observed_envelope,
+                expected_session_identity=expected_session_identity,
+                expected_public_key_sha256=expected_public_key_sha256,
+                expected_query=expected["query"],
+                expected_journal_identity=self.journal_identity,
+            )
+        except (
+            HostProviderAttestationError,
+            HostProviderAttestationUnavailable,
+        ) as error:
+            raise ProviderOriginError(
+                "durable Host Observed replay failed complete attestation verification"
+            ) from error

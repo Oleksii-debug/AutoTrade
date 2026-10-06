@@ -369,29 +369,47 @@ def prepare_order_request(
 
 def guarded_order_projection(
     prepared_request: AlpacaPreparedRequest,
+    *,
+    _prepared_type=AlpacaPreparedRequest,
+    _canonical_type=type,
+    _object_getattribute=object.__getattribute__,
+    _mapping_proxy_type=MappingProxyType,
+    _canonical_dict=dict,
+    _canonical_list=list,
+    _type_error=TypeError,
+    _error_type=AlpacaAdapterError,
 ) -> Mapping[str, object]:
-    """Project one canonical prepared order into the shared guarded transport seam.
+    """Project one canonical prepared order without virtual prepared callbacks.
 
-    The projection preserves the exact account/environment/capability/instrument
-    binding and canonical body digest so the network layer cannot silently
-    retarget or rewrite an adapter decision before the final send guard.
+    The final transport projection must not execute caller-rebindable
+    __getattribute__ behavior while reading financial scope. Read the exact
+    dataclass through captured base-object access and retain the canonical body
+    container requirement before handing the request to the shared send guard.
     """
 
-    if type(prepared_request) is not AlpacaPreparedRequest:
-        raise TypeError("prepared_request must be exact AlpacaPreparedRequest")
-    return MappingProxyType(
+    if _canonical_type(prepared_request) is not _prepared_type:
+        raise _type_error("prepared_request must be exact AlpacaPreparedRequest")
+    body = _object_getattribute(prepared_request, "body")
+    if _canonical_type(body) is not _mapping_proxy_type:
+        raise _error_type("Alpaca prepared request body authority changed")
+    return _mapping_proxy_type(
         {
-            "endpoint": prepared_request.endpoint,
-            "body": dict(prepared_request.body),
-            "account_id": prepared_request.account_id,
-            "environment": prepared_request.environment,
-            "capability_snapshot_id": prepared_request.capability_snapshot_id,
-            "capability_snapshot_ids": list(prepared_request.capability_snapshot_ids),
-            "instrument_versions": list(prepared_request.instrument_versions),
-            "body_sha256": prepared_request.body_sha256,
+            "endpoint": _object_getattribute(prepared_request, "endpoint"),
+            "body": _canonical_dict(body),
+            "account_id": _object_getattribute(prepared_request, "account_id"),
+            "environment": _object_getattribute(prepared_request, "environment"),
+            "capability_snapshot_id": _object_getattribute(
+                prepared_request, "capability_snapshot_id"
+            ),
+            "capability_snapshot_ids": _canonical_list(
+                _object_getattribute(prepared_request, "capability_snapshot_ids")
+            ),
+            "instrument_versions": _canonical_list(
+                _object_getattribute(prepared_request, "instrument_versions")
+            ),
+            "body_sha256": _object_getattribute(prepared_request, "body_sha256"),
         }
     )
-
 
 @dataclass(frozen=True)
 class AlpacaOrderObservation:

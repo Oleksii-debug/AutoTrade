@@ -21,6 +21,11 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from weakref import ref as weakref_ref
 
 from .capabilities import CapabilityError, CapabilitySnapshot
+from .instruments import (
+    InstrumentRegistry,
+    InstrumentRegistryError,
+    InstrumentVersion,
+)
 from .provider_core import (
     ProviderCoreError,
     ProviderResponseObservation,
@@ -1354,6 +1359,8 @@ class BybitOptionDeliveryPage:
 
 def parse_option_delivery_page(
     observation: ProviderResponseObservation,
+    *,
+    instrument_registry: InstrumentRegistry,
 ) -> BybitOptionDeliveryPage:
     """Parse exact Bybit option delivery rows without minting lifecycle economics.
 
@@ -1401,7 +1408,30 @@ def parse_option_delivery_page(
         raise ProviderCoreError(
             "Bybit option delivery query symbol is non-canonical"
         )
-    instrument_version = binding.instrument_version
+    if type(instrument_registry) is not InstrumentRegistry:
+        raise TypeError("instrument_registry must be exact InstrumentRegistry")
+    try:
+        instrument = InstrumentRegistry.exact(
+            instrument_registry,
+            binding.instrument_version,
+        )
+    except InstrumentRegistryError as error:
+        raise ProviderCoreError(
+            "Bybit option delivery instrument_version is not present in canonical registry"
+        ) from error
+    if type(instrument) is not InstrumentVersion:
+        raise ProviderCoreError(
+            "Bybit option delivery registry returned non-canonical instrument"
+        )
+    if (
+        instrument.provider_id != "BYBIT"
+        or instrument.venue_id != "OPTIONS"
+        or instrument.asset_class != "OPTION"
+        or instrument.provider_symbol != requested_symbol
+    ):
+        raise ProviderCoreError(
+            "Bybit option delivery symbol does not match canonical instrument_version"
+        )
 
     start_ms = (
         _bybit_option_delivery_query_integer(query["startTime"], name="startTime")

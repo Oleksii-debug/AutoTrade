@@ -299,6 +299,100 @@ class PreparedZeroWireSection6Tests(unittest.TestCase):
                 [event["event_type"] for event in events],
             )
 
+    def test_concurrent_sending_recoveries_converge_on_one_unknown_terminal(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original = self._dispatcher(store, owner="original-owner")
+            recovery_a = self._dispatcher(store, owner="recovery-a")
+            recovery_b = self._dispatcher(store, owner="recovery-b")
+
+            def crash_after_guard(_client_order_id, _request, final_guard):
+                final_guard()
+                raise _ProcessDeath("crash-after-final-send-guard")
+
+            with self.assertRaisesRegex(
+                _ProcessDeath,
+                "crash-after-final-send-guard",
+            ):
+                original.dispatch(
+                    attempt_id="section6-sending-recovery",
+                    intent_id="section6-sending-recovery-intent",
+                    intent_hash="section6-sending-recovery-hash",
+                    provider="simulated",
+                    request={"quantity": "1"},
+                    now="2026-10-06T10:00:00Z",
+                    authority_check=self.authority,
+                    transport_send=crash_after_guard,
+                )
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in original._events("section6-sending-recovery")
+                ],
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
+            recovery_b_results = []
+            recovery_a_append = recovery_a._append
+
+            def racing_unknown_append(*, attempt_id, event_type, version, payload, now):
+                if event_type == "SubmissionUnknown":
+                    recovery_b_results.append(
+                        recovery_b.dispatch(
+                            attempt_id="section6-sending-recovery",
+                            intent_id="section6-sending-recovery-intent",
+                            intent_hash="section6-sending-recovery-hash",
+                            provider="simulated",
+                            request={"quantity": "1"},
+                            now="2026-10-06T10:00:02Z",
+                            authority_check=lambda *_args: self.fail(
+                                "Sending recovery B repeated authority"
+                            ),
+                            transport_send=lambda *_args: self.fail(
+                                "Sending recovery B reached provider transport"
+                            ),
+                        )
+                    )
+                return recovery_a_append(
+                    attempt_id=attempt_id,
+                    event_type=event_type,
+                    version=version,
+                    payload=payload,
+                    now=now,
+                )
+
+            with patch.object(
+                recovery_a,
+                "_append",
+                side_effect=racing_unknown_append,
+            ):
+                recovered_a = recovery_a.dispatch(
+                    attempt_id="section6-sending-recovery",
+                    intent_id="section6-sending-recovery-intent",
+                    intent_hash="section6-sending-recovery-hash",
+                    provider="simulated",
+                    request={"quantity": "1"},
+                    now="2026-10-06T10:00:02Z",
+                    authority_check=lambda *_args: self.fail(
+                        "Sending recovery A repeated authority"
+                    ),
+                    transport_send=lambda *_args: self.fail(
+                        "Sending recovery A reached provider transport"
+                    ),
+                )
+
+            self.assertEqual(len(recovery_b_results), 1)
+            self.assertEqual(recovery_b_results[0].status, "UNKNOWN")
+            self.assertEqual(recovered_a.status, "UNKNOWN")
+            self.assertEqual(recovered_a.reason, recovery_b_results[0].reason)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in original._events("section6-sending-recovery")
+                ],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+
     def test_recovery_fence_blocks_late_original_final_guard_before_wire(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

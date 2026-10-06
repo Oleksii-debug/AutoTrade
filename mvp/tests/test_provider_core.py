@@ -407,6 +407,34 @@ class ProviderCoreTests(unittest.TestCase):
             ):
                 _ = observation.payload
 
+            # Also cover the real adapter sequence: scope succeeds first, then
+            # a post-check payload retarget happens before the parser consumes
+            # the response. The payload read must revalidate the registry.
+            post_scope = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+            )
+            post_scope.require_scope(
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+                account_id="acct",
+                environment="SIMULATION",
+                client_order_id=binding.client_order_id,
+            )
+            object.__setattr__(post_scope, "payload", {"orderId": "forged"})
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "provider submission observation authority is unavailable",
+            ):
+                _ = post_scope.payload
+
     def test_submission_observation_rejects_runtime_binding_projection_rebinding(self):
         with TemporaryDirectory() as directory:
             binding, request_sha = self._durable_submission_binding(directory)

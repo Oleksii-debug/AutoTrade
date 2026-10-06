@@ -344,6 +344,7 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
             (
                 {
                     "category": "option",
+                    "symbol": "BTC-29DEC22-16000-P",
                     "startTime": str(delivery_time + 1),
                 },
                 "violates requested time range",
@@ -351,6 +352,7 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
             (
                 {
                     "category": "option",
+                    "symbol": "BTC-29DEC22-16000-P",
                     "endTime": str(delivery_time - 1),
                 },
                 "violates requested time range",
@@ -358,6 +360,7 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
             (
                 {
                     "category": "option",
+                    "symbol": "BTC-29DEC22-16000-P",
                     "startTime": str(delivery_time - 1),
                     "endTime": str(delivery_time + 1),
                 },
@@ -388,14 +391,22 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
             parse_option_delivery_page(
                 observation(
                     response(),
-                    query={"category": "option", "expDate": "28DEC22"},
+                    query={
+                        "category": "option",
+                        "symbol": "BTC-29DEC22-16000-P",
+                        "expDate": "28DEC22",
+                    },
                 )
             )
 
         parsed = parse_option_delivery_page(
             observation(
                 response(),
-                query={"category": "option", "expDate": "29DEC22"},
+                query={
+                    "category": "option",
+                    "symbol": "BTC-29DEC22-16000-P",
+                    "expDate": "29DEC22",
+                },
             )
         )
         self.assertEqual(parsed.records[0].symbol, "BTC-29DEC22-16000-P")

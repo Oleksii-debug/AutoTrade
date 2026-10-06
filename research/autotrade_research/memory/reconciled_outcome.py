@@ -371,24 +371,37 @@ def resolve_reconciled_outcome_fact(
     return result
 
 
-def reverify_reconciled_outcome_fact(
-    memory: ExperienceMemory,
-    evidence: ReconciledOutcomeFactEvidence,
-) -> ReconciledOutcomeFactEvidence:
-    """Re-resolve a fact from durable memory and require exact historical identity."""
+def _build_reconciled_outcome_reverifier(
+    canonical_resolver,
+):
+    """Capture the canonical resolver outside mutable module-global lookup."""
 
-    _assert_memory_authority(memory)
-    _verify_fact_integrity(evidence)
-    resolved = resolve_reconciled_outcome_fact(
-        memory,
-        episode_id=evidence.episode_id,
-        causal_cutoff=_cutoff(evidence.causal_cutoff),
-        granted_permissions=set(evidence.permission_classes),
-        task=evidence.task,
-        instrument_family=evidence.instrument_family,
-    )
-    if resolved != evidence:
-        raise MemoryIntegrityError(
-            "reconciled outcome evidence does not match canonical ExperienceMemory"
+    def reverify_reconciled_outcome_fact(
+        memory: ExperienceMemory,
+        evidence: ReconciledOutcomeFactEvidence,
+    ) -> ReconciledOutcomeFactEvidence:
+        """Re-resolve a fact and require exact historical identity."""
+
+        _assert_memory_authority(memory)
+        _verify_fact_integrity(evidence)
+        resolved = canonical_resolver(
+            memory,
+            episode_id=evidence.episode_id,
+            causal_cutoff=_cutoff(evidence.causal_cutoff),
+            granted_permissions=set(evidence.permission_classes),
+            task=evidence.task,
+            instrument_family=evidence.instrument_family,
         )
-    return resolved
+        if resolved != evidence:
+            raise MemoryIntegrityError(
+                "reconciled outcome evidence does not match canonical ExperienceMemory"
+            )
+        return resolved
+
+    return reverify_reconciled_outcome_fact
+
+
+reverify_reconciled_outcome_fact = _build_reconciled_outcome_reverifier(
+    resolve_reconciled_outcome_fact
+)
+del _build_reconciled_outcome_reverifier

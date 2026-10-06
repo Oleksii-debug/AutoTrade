@@ -137,7 +137,9 @@ class ExecutionOracleTests(unittest.TestCase):
     def test_oracle_rejects_market_price_grid_bound_to_other_instrument(self):
         o, q, m = order(), observation(), model()
         result = simulate_execution(o, q, m)
-        changed = model(price_grid_instrument_version="OTHER@v1")
+        changed = model()
+        assert changed.price_grid is not None
+        object.__setattr__(changed.price_grid, "instrument_version", OTHER_INSTRUMENT_REF)
         forged = replace(result, model_fingerprint=changed.fingerprint)
         with self.assertRaisesRegex(
             ExecutionOracleError,

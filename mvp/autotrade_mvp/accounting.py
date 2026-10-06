@@ -46,10 +46,21 @@ def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
         raise ValueError(f"{name} exceeds exact decimal resource envelope") from error
 
 
-def _name(value: str, *, field: str) -> str:
-    if type(value) is not str or not value.strip():
-        raise ValueError(f"{field} is required")
-    return value.strip()
+def _name(
+    value: str,
+    *,
+    field: str,
+    _exact_type=type,
+    _text_type=str,
+    _strip=str.strip,
+    _value_error=ValueError,
+) -> str:
+    if _exact_type(value) is not _text_type:
+        raise _value_error(f"{field} is required")
+    stripped = _strip(value)
+    if not stripped:
+        raise _value_error(f"{field} is required")
+    return stripped
 
 
 def _instant(value: str | None, *, field: str) -> str | None:
@@ -223,8 +234,6 @@ class JournalTransaction:
 
 
 _TRANSACTION_DIGEST_CACHE_LIMIT = 2048
-_transaction_digest_cache: dict[tuple[object, ...], str] = {}
-_transaction_digest_cache_lock = RLock()
 
 
 def _require_exact_transaction_graph(transaction: JournalTransaction) -> None:
@@ -309,12 +318,33 @@ def canonical_transaction(transaction: JournalTransaction) -> dict[str, object]:
     }
 
 
-def transaction_digest(transaction: JournalTransaction) -> str:
-    return payload_digest(canonical_transaction(transaction))
+def _make_transaction_digest(
+    critical_bindings: tuple[tuple[str, object], ...],
+    *,
+    _canonicalize=canonical_transaction,
+    _digest_payload=payload_digest,
+    _module_globals=globals(),
+    _conflict_type=AccountingConflict,
+):
+    """Bind digest primitives and fail closed if canonicalizer dependencies move."""
+
+    def digest(transaction: JournalTransaction) -> str:
+        for name, expected in critical_bindings:
+            if _module_globals.get(name) is not expected:
+                raise _conflict_type(
+                    "transaction digest authority dependency was rebound"
+                )
+        return _digest_payload(_canonicalize(transaction))
+
+    return digest
 
 
 def _transaction_digest_fingerprint(
     transaction: JournalTransaction,
+    *,
+    _transaction_type=JournalTransaction,
+    _posting_type=Posting,
+    _decimal_type=Decimal,
 ) -> tuple[object, ...] | None:
     """Return a callback-free cache key for one exact transaction graph.
 
@@ -325,7 +355,14 @@ def _transaction_digest_fingerprint(
     retains its fail-closed behaviour.
     """
 
-    _require_exact_transaction_graph(transaction)
+    if type(transaction) is not _transaction_type:
+        raise TypeError("transaction must be an exact JournalTransaction")
+    postings = transaction.postings
+    if type(postings) is not tuple:
+        raise TypeError("transaction postings must be an exact tuple")
+    if any(type(item) is not _posting_type for item in postings):
+        raise TypeError("transaction postings must contain exact Posting values")
+
     text_values = (
         transaction.transaction_id,
         transaction.cause_event_id,
@@ -338,11 +375,11 @@ def _transaction_digest_fingerprint(
     if any(value is not None and type(value) is not str for value in text_values):
         return None
     posting_values: list[tuple[str, str, Decimal]] = []
-    for item in transaction.postings:
+    for item in postings:
         if (
             type(item.ledger_account) is not str
             or type(item.asset_or_currency) is not str
-            or type(item.signed_amount) is not Decimal
+            or type(item.signed_amount) is not _decimal_type
         ):
             return None
         posting_values.append(
@@ -351,22 +388,43 @@ def _transaction_digest_fingerprint(
     return (*text_values, tuple(posting_values))
 
 
-def _cached_transaction_digest(transaction: JournalTransaction) -> str:
-    fingerprint = _transaction_digest_fingerprint(transaction)
-    if fingerprint is None:
-        return transaction_digest(transaction)
-    with _transaction_digest_cache_lock:
-        cached = _transaction_digest_cache.get(fingerprint)
-    if cached is not None:
-        return cached
+def _make_cached_transaction_digest(
+    digest_transaction,
+    *,
+    _fingerprint=_transaction_digest_fingerprint,
+    _limit=_TRANSACTION_DIGEST_CACHE_LIMIT,
+    _lock_factory=RLock,
+    _conflict_type=AccountingConflict,
+):
+    """Bind digest memoization state outside mutable module-global authority."""
 
-    digest = transaction_digest(transaction)
-    if _transaction_digest_fingerprint(transaction) != fingerprint:
-        return digest
-    with _transaction_digest_cache_lock:
-        if len(_transaction_digest_cache) >= _TRANSACTION_DIGEST_CACHE_LIMIT:
-            _transaction_digest_cache.clear()
-        return _transaction_digest_cache.setdefault(fingerprint, digest)
+    cache: dict[tuple[object, ...], str] = {}
+    lock = _lock_factory()
+
+    def cached(transaction: JournalTransaction) -> str:
+        fingerprint = _fingerprint(transaction)
+        if fingerprint is None:
+            return digest_transaction(transaction)
+        with lock:
+            value = cache.get(fingerprint)
+        if value is not None:
+            return value
+
+        digest = digest_transaction(transaction)
+        # Direct frozen-dataclass tampering remains possible through
+        # object.__setattr__. Never publish a digest if the graph changed
+        # while canonical validation/digesting was in progress.
+        if _fingerprint(transaction) != fingerprint:
+            raise _conflict_type(
+                "transaction changed during digest computation"
+            )
+        with lock:
+            if len(cache) >= _limit:
+                cache.clear()
+            return cache.setdefault(fingerprint, digest)
+
+    return cached
+
 
 
 def validate_transaction(transaction: JournalTransaction) -> None:
@@ -423,6 +481,78 @@ def validate_transaction(transaction: JournalTransaction) -> None:
             unbalanced[asset] = total
     if unbalanced:
         raise ValueError(f"Transaction is not balanced by asset/currency: {unbalanced}")
+
+
+def _initialize_transaction_digest_authority():
+    critical_bindings = (
+        ("JournalTransaction", JournalTransaction),
+        ("Posting", Posting),
+        ("Decimal", Decimal),
+        ("ExactDecimalError", ExactDecimalError),
+        ("parse_bounded_exact_decimal", parse_bounded_exact_decimal),
+        ("canonical_decimal_text", canonical_decimal_text),
+        ("exact_sum", exact_sum),
+        ("datetime", datetime),
+        ("timezone", timezone),
+        ("_require_exact_transaction_graph", _require_exact_transaction_graph),
+        ("_name", _name),
+        ("_decimal", _decimal),
+        ("_instant", _instant),
+        ("_instant_value", _instant_value),
+        ("_canonical_decimal", _canonical_decimal),
+        ("_exact_total", _exact_total),
+        ("_normalized_transaction", _normalized_transaction),
+        ("validate_transaction", validate_transaction),
+    )
+    digest = _make_transaction_digest(critical_bindings)
+    return digest, _make_cached_transaction_digest(digest)
+
+
+transaction_digest, _cached_transaction_digest = (
+    _initialize_transaction_digest_authority()
+)
+del _initialize_transaction_digest_authority
+del _make_transaction_digest
+del _make_cached_transaction_digest
+
+
+def _make_economic_book_audit_digest(
+    digest_transaction,
+    *,
+    _digest_payload=payload_digest,
+    _normalize_name=_name,
+    _transaction_type=JournalTransaction,
+):
+    """Bind audit-digest dependencies outside mutable module-global authority."""
+
+    def audit_digest(self) -> str:
+        if type(self._transactions) is not list:
+            raise TypeError("economic transactions must use an exact list")
+        transactions = tuple(self._transactions)
+        if any(
+            type(transaction) is not _transaction_type
+            for transaction in transactions
+        ):
+            raise TypeError(
+                "economic transactions must contain exact JournalTransaction values"
+            )
+        return _digest_payload(
+            {
+                "schema_version": "1.0.0",
+                "transactions": [
+                    {
+                        "transaction_id": _normalize_name(
+                            transaction.transaction_id,
+                            field="transaction_id",
+                        ),
+                        "digest": digest_transaction(transaction),
+                    }
+                    for transaction in transactions
+                ],
+            }
+        )
+
+    return audit_digest
 
 
 class EconomicBook:
@@ -578,61 +708,79 @@ class EconomicBook:
         value = _name(currency, field="currency")
         return self.balance(f"FEE_EXPENSE:{value}", value)
 
-    def audit_digest(self) -> str:
-        if type(self._transactions) is not list:
-            raise TypeError("economic transactions must use an exact list")
-        transactions = tuple(self._transactions)
-        return payload_digest(
-            {
-                "schema_version": "1.0.0",
-                "transactions": [
-                    {
-                        "transaction_id": _name(
-                            transaction.transaction_id,
-                            field="transaction_id",
-                        ),
-                        "digest": _cached_transaction_digest(transaction),
-                    }
-                    for transaction in transactions
-                ],
-            }
-        )
+    audit_digest = _make_economic_book_audit_digest(
+        _cached_transaction_digest
+    )
 
 
-def _scoped_economic_owner_operations():
+# EconomicBook.audit_digest owns the selected memoizer through its function
+# closure. Same-named module bindings created after import are not audit
+# authority.
+del _make_economic_book_audit_digest
+del _cached_transaction_digest
+
+
+def _scoped_economic_owner_operations(
+    *,
+    _weakref_ref=weakref.ref,
+    _exact_type=type,
+    _identity=id,
+    _getattribute=object.__getattribute__,
+    _tuple_factory=tuple,
+    _text_type=str,
+    _type_error=TypeError,
+    _conflict_type=AccountingConflict,
+):
     owners = {}
     lock = RLock()
 
     def bind(value, environment, account_id, book):
         with lock:
-            for key, (reference, *_rest) in tuple(owners.items()):
+            for key, (reference, *_rest) in _tuple_factory(owners.items()):
                 if reference() is None:
                     owners.pop(key)
-            current = owners.get(id(value))
+            current = owners.get(_identity(value))
             if current is not None and current[0]() is value:
-                raise AccountingConflict("immutable scoped-book owner is already initialized")
-            owners[id(value)] = (weakref.ref(value), environment, account_id, book)
+                raise _conflict_type("immutable scoped-book owner is already initialized")
+            owners[_identity(value)] = (
+                _weakref_ref(value),
+                _exact_type(value),
+                environment,
+                account_id,
+                _weakref_ref(book),
+                _exact_type(book),
+            )
 
     def require(value):
-        if type(value) is not ScopedEconomicBook:
-            raise TypeError("scoped economic authority requires exact ScopedEconomicBook")
         with lock:
-            owner = owners.get(id(value))
+            owner = owners.get(_identity(value))
             if owner is None or owner[0]() is not value:
-                raise AccountingConflict("immutable scoped-book owner is unavailable")
-            _reference, environment, account_id, book = owner
-        state = object.__getattribute__(value, "__dict__")
+                raise _conflict_type("immutable scoped-book owner is unavailable")
+            (
+                _reference,
+                owner_type,
+                environment,
+                account_id,
+                book_ref,
+                book_type,
+            ) = owner
+            book = book_ref()
+        if _exact_type(value) is not owner_type:
+            raise _type_error("scoped economic authority owner type changed")
+        if book is None:
+            raise _conflict_type("immutable scoped-book owner was lost")
+        state = _getattribute(value, "__dict__")
         current_book = state.get("_book")
-        if type(current_book) is not EconomicBook:
-            raise TypeError("ScopedEconomicBook must own an exact EconomicBook")
+        if _exact_type(current_book) is not book_type:
+            raise _type_error("ScopedEconomicBook canonical book type changed")
         if (
-            type(state.get("environment")) is not str
-            or type(state.get("account_id")) is not str
+            _exact_type(state.get("environment")) is not _text_type
+            or _exact_type(state.get("account_id")) is not _text_type
             or state["environment"] != environment
             or state["account_id"] != account_id
             or current_book is not book
         ):
-            raise AccountingConflict("immutable scoped-book owner changed")
+            raise _conflict_type("immutable scoped-book owner changed")
         return environment, account_id, book
 
     return bind, require
@@ -642,10 +790,90 @@ _bind_scoped_economic_book_owner, _require_scoped_economic_book_owner = _scoped_
 del _scoped_economic_owner_operations
 
 
-class ScopedEconomicBook:
-    """Account/environment-bound facade over the canonical EconomicBook."""
+def _make_scoped_economic_facade(
+    require_owner,
+    *,
+    _digest_payload=payload_digest,
+):
+    """Bind every scoped-book operation to the immutable owner selected at import."""
 
-    _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
+    def transactions(self):
+        _environment, _account_id, book = require_owner(self)
+        return book.transactions
+
+    def append(self, transaction: JournalTransaction) -> bool:
+        _environment, _account_id, book = require_owner(self)
+        return book.append(transaction)
+
+    def append_batch(self, transactions: Iterable[JournalTransaction]) -> bool:
+        _environment, _account_id, book = require_owner(self)
+        return book.append_batch(transactions)
+
+    def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
+        _environment, _account_id, book = require_owner(self)
+        return book.balance(ledger_account, asset_or_currency)
+
+    def cash(self, currency: str) -> Decimal:
+        _environment, _account_id, book = require_owner(self)
+        return book.cash(currency)
+
+    def position(self, instrument: str) -> Decimal:
+        _environment, _account_id, book = require_owner(self)
+        return book.position(instrument)
+
+    def fee_expense(self, currency: str) -> Decimal:
+        _environment, _account_id, book = require_owner(self)
+        return book.fee_expense(currency)
+
+    def audit_digest(self) -> str:
+        environment, account_id, book = require_owner(self)
+        return _digest_payload(
+            {
+                "schema_version": "1.0.0",
+                "environment": environment,
+                "account_id": account_id,
+                "economic_book_digest": book.audit_digest(),
+            }
+        )
+
+    return (
+        property(transactions),
+        append,
+        append_batch,
+        balance,
+        cash,
+        position,
+        fee_expense,
+        audit_digest,
+    )
+
+
+(
+    _scoped_transactions,
+    _scoped_append,
+    _scoped_append_batch,
+    _scoped_balance,
+    _scoped_cash,
+    _scoped_position,
+    _scoped_fee_expense,
+    _scoped_audit_digest,
+) = _make_scoped_economic_facade(_require_scoped_economic_book_owner)
+del _make_scoped_economic_facade
+
+
+def _make_scoped_economic_init(
+    expected_type,
+    bind_owner,
+    economic_book_type,
+    normalize_name,
+    environments,
+    *,
+    _exact_type=type,
+    _setattr=object.__setattr__,
+    _type_error=TypeError,
+    _value_error=ValueError,
+):
+    """Seal scoped-book construction dependencies against later rebinding."""
 
     def __init__(
         self,
@@ -654,48 +882,63 @@ class ScopedEconomicBook:
         account_id: str,
         transactions: Iterable[JournalTransaction] = (),
     ):
-        normalized_environment = _name(environment, field="environment").upper()
-        if normalized_environment not in self._ENVIRONMENTS:
-            raise ValueError("unsupported environment")
-        normalized_account = _name(account_id, field="account_id")
-        book = EconomicBook(transactions)
-        if type(self) is ScopedEconomicBook:
-            _bind_scoped_economic_book_owner(self, normalized_environment, normalized_account, book)
-        self.environment = normalized_environment
-        self.account_id = normalized_account
-        self._book = book
+        if _exact_type(self) is not expected_type:
+            raise _type_error("scoped economic authority requires exact ScopedEconomicBook")
+        normalized_environment = normalize_name(
+            environment,
+            field="environment",
+        ).upper()
+        if normalized_environment not in environments:
+            raise _value_error("unsupported environment")
+        normalized_account = normalize_name(account_id, field="account_id")
+        book = economic_book_type(transactions)
+        bind_owner(self, normalized_environment, normalized_account, book)
+        _setattr(self, "environment", normalized_environment)
+        _setattr(self, "account_id", normalized_account)
+        _setattr(self, "_book", book)
 
-    @property
-    def transactions(self) -> tuple[JournalTransaction, ...]:
-        return self._book.transactions
+    return __init__
 
-    def append(self, transaction: JournalTransaction) -> bool:
-        return self._book.append(transaction)
 
-    def append_batch(self, transactions: Iterable[JournalTransaction]) -> bool:
-        return self._book.append_batch(transactions)
+class ScopedEconomicBook:
+    """Account/environment-bound facade over the canonical EconomicBook."""
 
-    def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
-        return self._book.balance(ledger_account, asset_or_currency)
+    _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 
-    def cash(self, currency: str) -> Decimal:
-        return self._book.cash(currency)
+    transactions = _scoped_transactions
+    append = _scoped_append
+    append_batch = _scoped_append_batch
+    balance = _scoped_balance
+    cash = _scoped_cash
+    position = _scoped_position
+    fee_expense = _scoped_fee_expense
+    audit_digest = _scoped_audit_digest
 
-    def position(self, instrument: str) -> Decimal:
-        return self._book.position(instrument)
 
-    def fee_expense(self, currency: str) -> Decimal:
-        return self._book.fee_expense(currency)
+del _scoped_transactions
+del _scoped_append
+del _scoped_append_batch
+del _scoped_balance
+del _scoped_cash
+del _scoped_position
+del _scoped_fee_expense
+del _scoped_audit_digest
 
-    def audit_digest(self) -> str:
-        return payload_digest(
-            {
-                "schema_version": "1.0.0",
-                "environment": self.environment,
-                "account_id": self.account_id,
-                "economic_book_digest": self._book.audit_digest(),
-            }
-        )
+
+ScopedEconomicBook.__init__ = _make_scoped_economic_init(
+    ScopedEconomicBook,
+    _bind_scoped_economic_book_owner,
+    EconomicBook,
+    _name,
+    ScopedEconomicBook._ENVIRONMENTS,
+)
+del _make_scoped_economic_init
+
+# The constructor and facade now own the only writer/reader closures. Leaving
+# same-named module globals would let a caller mint registry entries for an
+# object created with object.__new__ or substitute later owner reads.
+del _bind_scoped_economic_book_owner
+del _require_scoped_economic_book_owner
 
 
 def book_external_cash_flow(

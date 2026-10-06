@@ -2,9 +2,13 @@ import ast
 from pathlib import Path
 import unittest
 
+from autotrade_runtime.artifacts import _root_authority
+from autotrade_runtime.resource_lock import ResourceLockError
+
 from autotrade_research.artifacts import (
     ArtifactStore as PackageArtifactStore,
     CANONICAL_ARTIFACT_STORE_MODULE,
+    trusted_authenticated_reader,
 )
 from autotrade_research.artifacts.store import ArtifactStore as CanonicalArtifactStore
 
@@ -44,8 +48,53 @@ class ArtifactAuthorityTests(unittest.TestCase):
         self.assertIs(PackageArtifactStore, CanonicalArtifactStore)
         self.assertEqual(
             CANONICAL_ARTIFACT_STORE_MODULE,
-            "autotrade_research.artifacts.store",
+            "autotrade_runtime.artifacts.store",
         )
+
+    def test_trusted_root_rejects_text_subclass_before_virtual_dispatch(self):
+        touched: list[str] = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile trusted-root normalization")
+
+            def __fspath__(self):
+                touched.append("fspath")
+                raise AssertionError("hostile trusted-root path conversion")
+
+        with self.assertRaisesRegex(TypeError, "exact string or Path"):
+            trusted_authenticated_reader(HostileText("/not-authoritative"))
+        self.assertEqual(touched, [])
+
+    def test_trusted_root_rejects_path_subclass_before_fspath_dispatch(self):
+        touched: list[str] = []
+
+        class HostilePath(type(Path())):
+            def __fspath__(self):
+                touched.append("fspath")
+                raise AssertionError("hostile trusted-root path conversion")
+
+        with self.assertRaisesRegex(TypeError, "exact string or Path"):
+            trusted_authenticated_reader(HostilePath("/not-authoritative"))
+        self.assertEqual(touched, [])
+
+    def test_configured_root_key_rejects_text_subclass_before_virtual_dispatch(self):
+        touched: list[str] = []
+
+        class HostileText(str):
+            def encode(self, *args, **kwargs):
+                touched.append("encode")
+                raise AssertionError("hostile configured-root hashing")
+
+        class StoreLike:
+            pass
+
+        store = StoreLike()
+        store._configured_artifact_root_key = HostileText("/not-authoritative")
+        with self.assertRaisesRegex(ResourceLockError, "path key is unavailable"):
+            _root_authority._windows_path_mutex_name(store)
+        self.assertEqual(touched, [])
 
     def test_production_code_cannot_reintroduce_legacy_content_store_authority(self):
         offenders = []

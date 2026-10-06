@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import InitVar, dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from hashlib import sha256
 import json
 import re
@@ -26,10 +26,17 @@ from .market_data import (
     _issue_book_stream_policy_binding,
     _issue_qualified_book_range_admission,
 )
+from .exact_decimal import (
+    ExactDecimalError,
+    exact_multiply,
+    is_exact_decimal_multiple,
+    parse_bounded_exact_decimal,
+)
 from .provider_core import (
     ProviderCoreError,
     ProviderResponseObservation,
     Surface,
+    provider_response_observation_require_scope,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
@@ -48,7 +55,10 @@ BINANCE_SPOT_ENDPOINTS: Mapping[str, str] = MappingProxyType(
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,36}$")
 _EXCHANGE_INFO_RULES_TOKEN = object()
 _REFERENCE_PRICE_TOKEN = object()
+_PREPARED_REQUEST_TOKEN = object()
 _ALLOWED_TIF = frozenset({"GTC", "IOC", "FOK"})
+_MAX_UNIX_MILLIS = 253_402_300_799_999
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 BINANCE_SPOT_DEPTH_POLICY_ID = "BINANCE_SPOT_DIFF_DEPTH_V1"
 
 
@@ -56,21 +66,88 @@ class BinanceSpotAdapterError(ProviderCoreError):
     pass
 
 
+def _exact_json_object(value: object, *, name: str) -> dict[str, object]:
+    """Admit one raw decoded JSON object without caller mapping/key callbacks."""
+
+    if type(value) is not dict:
+        raise BinanceSpotAdapterError(f"{name} must be an exact decoded object")
+    # Exact dict iteration is non-polymorphic. Reject key subclasses before any
+    # string lookup/equality or canonical JSON hashing can consult them.
+    for key in value:
+        if type(key) is not str:
+            raise BinanceSpotAdapterError(
+                f"{name} keys must be exact decoded strings"
+            )
+    return value
+
+
+def _exact_decoded_json_tree(value: object, *, name: str) -> object:
+    """Reject executable/aliased Python objects before provider evidence hashing."""
+
+    stack = [value]
+    seen_containers: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if current is None or type(current) in (str, bool, int, float):
+            continue
+        if type(current) is dict:
+            identity = id(current)
+            if identity in seen_containers:
+                raise BinanceSpotAdapterError(
+                    f"{name} must be a decoded JSON tree without aliases or cycles"
+                )
+            seen_containers.add(identity)
+            for key, item in current.items():
+                if type(key) is not str:
+                    raise BinanceSpotAdapterError(
+                        f"{name} keys must be exact decoded strings"
+                    )
+                stack.append(item)
+            continue
+        if type(current) is list:
+            identity = id(current)
+            if identity in seen_containers:
+                raise BinanceSpotAdapterError(
+                    f"{name} must be a decoded JSON tree without aliases or cycles"
+                )
+            seen_containers.add(identity)
+            stack.extend(current)
+            continue
+        raise BinanceSpotAdapterError(
+            f"{name} must contain only exact decoded JSON values"
+        )
+    return value
+
+
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
         raise BinanceSpotAdapterError(f"{name} is required")
-    return value.strip()
+    stripped = value.strip()
+    if not stripped:
+        raise BinanceSpotAdapterError(f"{name} is required")
+    return stripped
+
+
+def _freeze_request_body(value: object, *, name: str) -> Mapping[str, str]:
+    """Freeze an internally-shaped provider request without mapping callbacks."""
+
+    if type(value) is not dict:
+        raise BinanceSpotAdapterError(f"{name} must be an exact request mapping")
+    frozen: dict[str, str] = {}
+    for key, item in value.items():
+        if type(key) is not str or type(item) is not str:
+            raise BinanceSpotAdapterError(
+                f"{name} keys and values must be exact strings"
+            )
+        frozen[key] = item
+    return MappingProxyType(frozen)
 
 
 def _decimal(value: object, *, name: str, positive: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise BinanceSpotAdapterError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise BinanceSpotAdapterError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise BinanceSpotAdapterError(f"{name} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise BinanceSpotAdapterError(f"{name} must be a bounded exact decimal") from error
     if positive and result <= 0:
         raise BinanceSpotAdapterError(f"{name} must be positive")
     return result
@@ -83,27 +160,48 @@ def _decimal_text(value: Decimal) -> str:
 
 
 def _utc(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise BinanceSpotAdapterError(f"{name} must be timezone-aware")
+    # Provider admission must not execute caller-controlled datetime/tzinfo
+    # callbacks before the instant becomes canonical authority.  Exact stdlib
+    # datetime + datetime.timezone keeps UTC/fixed-offset inputs supported while
+    # rejecting polymorphic datetime and custom tzinfo objects fail-closed.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise BinanceSpotAdapterError(
+            f"{name} must be an exact timezone-aware datetime"
+        )
     return value.astimezone(timezone.utc)
 
 
 def _millis(value: object, *, name: str) -> str:
-    if isinstance(value, bool):
-        raise BinanceSpotAdapterError(f"{name} must be an integer millisecond timestamp")
-    try:
+    if type(value) is int:
+        raw = value
+    elif type(value) is str and value.isdigit():
+        # Bound provider text before integer materialization.  Python's
+        # arbitrary-size integer parser and datetime conversion are not a
+        # financial ingress resource policy.
+        if len(value) > len(str(_MAX_UNIX_MILLIS)):
+            raise BinanceSpotAdapterError(
+                f"{name} exceeds the supported UTC millisecond range"
+            )
         raw = int(value)
-    except (TypeError, ValueError) as error:
-        raise BinanceSpotAdapterError(f"{name} must be an integer millisecond timestamp") from error
-    if raw < 0 or str(raw) != str(value).strip():
-        raise BinanceSpotAdapterError(f"{name} must be a non-negative integer millisecond timestamp")
+        if str(raw) != value:
+            raise BinanceSpotAdapterError(
+                f"{name} must be a non-negative integer millisecond timestamp"
+            )
+    else:
+        raise BinanceSpotAdapterError(
+            f"{name} must be an integer millisecond timestamp"
+        )
+    if raw < 0 or raw > _MAX_UNIX_MILLIS:
+        raise BinanceSpotAdapterError(
+            f"{name} exceeds the supported UTC millisecond range"
+        )
     seconds, remainder = divmod(raw, 1000)
-    instant = datetime.fromtimestamp(seconds, tz=timezone.utc) + timedelta(milliseconds=remainder)
+    instant = _UNIX_EPOCH + timedelta(seconds=seconds, milliseconds=remainder)
     return instant.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _nonnegative_int(value: object, *, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if type(value) is not int or value < 0:
         raise BinanceSpotAdapterError(f"{name} must be a non-negative integer")
     return value
 
@@ -156,8 +254,7 @@ class BinanceSpotDepthRange:
         cls,
         payload: Mapping[str, object],
     ) -> "BinanceSpotDepthRange":
-        if not isinstance(payload, Mapping):
-            raise TypeError("diff-depth payload must be a mapping")
+        payload = _exact_json_object(payload, name="diff-depth payload")
         event_type = payload.get("e")
         if type(event_type) is not str or event_type != "depthUpdate":
             raise BinanceSpotAdapterError(
@@ -205,8 +302,7 @@ class BinanceSpotDepthCursor:
         symbol: str,
         payload: Mapping[str, object],
     ) -> "BinanceSpotDepthCursor":
-        if not isinstance(payload, Mapping):
-            raise TypeError("depth snapshot payload must be a mapping")
+        payload = _exact_json_object(payload, name="depth snapshot payload")
         return cls(
             symbol=_depth_symbol(symbol),
             update_id=_depth_update_id(
@@ -833,8 +929,7 @@ class BinanceSpotReferencePrice:
     ) -> "BinanceSpotReferencePrice":
         """Parse GET /api/v3/referencePrice without inventing null fallback."""
 
-        if not isinstance(payload, Mapping):
-            raise TypeError("reference-price payload must be a mapping")
+        payload = _exact_json_object(payload, name="reference-price payload")
         if set(payload) != {"symbol", "referencePrice", "timestamp"}:
             raise BinanceSpotAdapterError(
                 "reference-price payload fields are not canonical"
@@ -897,8 +992,7 @@ class BinanceSpotReferencePrice:
     ) -> "BinanceSpotReferencePrice":
         """Parse the documented GET /api/v3/avgPrice response."""
 
-        if not isinstance(payload, Mapping):
-            raise TypeError("average-price payload must be a mapping")
+        payload = _exact_json_object(payload, name="average-price payload")
         provider_symbol = _text(symbol, name="average-price symbol")
         if provider_symbol != provider_symbol.upper():
             raise BinanceSpotAdapterError("average-price symbol must be uppercase")
@@ -943,8 +1037,7 @@ class BinanceSpotReferencePrice:
     ) -> "BinanceSpotReferencePrice":
         """Parse one documented recent-trade row as last-price evidence."""
 
-        if not isinstance(payload, Mapping):
-            raise TypeError("last-trade payload must be a mapping")
+        payload = _exact_json_object(payload, name="last-trade payload")
         provider_symbol = _text(symbol, name="last-price symbol")
         if provider_symbol != provider_symbol.upper():
             raise BinanceSpotAdapterError("last-price symbol must be uppercase")
@@ -1071,19 +1164,25 @@ class BinanceSpotSymbolRules:
         instrument_version: str,
         symbol_payload: Mapping[str, object],
     ) -> "BinanceSpotSymbolRules":
-        if not isinstance(symbol_payload, Mapping):
-            raise TypeError("symbol_payload must be a mapping")
+        symbol_payload = _exact_json_object(
+            symbol_payload,
+            name="exchangeInfo symbol payload",
+        )
         instrument = _text(instrument_version, name="instrument_version")
         symbol = _text(symbol_payload.get("symbol"), name="symbol")
         if symbol != symbol.upper():
             raise BinanceSpotAdapterError("exchangeInfo symbol must be uppercase")
         filters = symbol_payload.get("filters")
-        if isinstance(filters, (str, bytes)) or not isinstance(filters, list):
-            raise BinanceSpotAdapterError("exchangeInfo filters must be an array")
-        by_type: dict[str, Mapping[str, object]] = {}
-        for item in filters:
-            if not isinstance(item, Mapping):
-                raise BinanceSpotAdapterError("exchangeInfo filter must be an object")
+        if type(filters) is not list:
+            raise BinanceSpotAdapterError(
+                "exchangeInfo filters must be an exact decoded array"
+            )
+        by_type: dict[str, dict[str, object]] = {}
+        for index, item in enumerate(filters):
+            item = _exact_json_object(
+                item,
+                name=f"exchangeInfo filter[{index}]",
+            )
             kind = _text(item.get("filterType"), name="filterType")
             if kind in by_type:
                 raise BinanceSpotAdapterError(f"duplicate exchangeInfo filter: {kind}")
@@ -1208,7 +1307,13 @@ class BinanceSpotSymbolRules:
     def _require_step(value: Decimal, step: Decimal, *, name: str) -> None:
         if step == 0:
             return
-        if value % step != 0:
+        try:
+            is_multiple = is_exact_decimal_multiple(value, step)
+        except ExactDecimalError as error:
+            raise BinanceSpotAdapterError(
+                f"{name} exact grid arithmetic exceeds the numeric resource envelope"
+            ) from error
+        if not is_multiple:
             raise BinanceSpotAdapterError(
                 f"{name} is not an exact multiple of exchangeInfo step"
             )
@@ -1261,17 +1366,13 @@ class BinanceSpotSymbolRules:
             self.min_notional_applies_to_market
             or self.max_notional_applies_to_market
         ):
-            if not isinstance(
-                reference_price_observation,
-                BinanceSpotReferencePrice,
-            ):
+            if type(reference_price_observation) is not BinanceSpotReferencePrice:
                 raise BinanceSpotAdapterError(
                     "market notional filter requires provider "
                     "reference-price observation evidence"
                 )
             if (
-                isinstance(maximum_market_reference_age_seconds, bool)
-                or not isinstance(maximum_market_reference_age_seconds, int)
+                type(maximum_market_reference_age_seconds) is not int
                 or maximum_market_reference_age_seconds < 0
             ):
                 raise BinanceSpotAdapterError(
@@ -1284,7 +1385,7 @@ class BinanceSpotSymbolRules:
                 *,
                 role: str,
             ) -> BinanceSpotReferencePrice:
-                if not isinstance(reference, BinanceSpotReferencePrice):
+                if type(reference) is not BinanceSpotReferencePrice:
                     raise BinanceSpotAdapterError(
                         f"{role} requires canonical provider reference-price evidence"
                     )
@@ -1350,7 +1451,12 @@ class BinanceSpotSymbolRules:
                 effective_price = fallback.price
 
         if effective_price is not None:
-            notional = intent.quantity * effective_price
+            try:
+                notional = exact_multiply(intent.quantity, effective_price)
+            except ExactDecimalError as error:
+                raise BinanceSpotAdapterError(
+                    "notional exact arithmetic exceeds the numeric resource envelope"
+                ) from error
             if self.min_notional is not None and (
                 intent.order_type == "LIMIT" or self.min_notional_applies_to_market
             ) and notional < self.min_notional:
@@ -1373,8 +1479,13 @@ class BinanceSpotPreparedRequest:
     market_reference_source_sha256: str | None = None
     market_reference_kind: str | None = None
     market_reference_window_minutes: int | None = None
+    _preparation_token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _preparation_token: object | None) -> None:
+        if _preparation_token is not _PREPARED_REQUEST_TOKEN:
+            raise BinanceSpotAdapterError(
+                "prepared request must come from canonical order preparation"
+            )
         digest = _text(self.filter_source_sha256, name="filter_source_sha256")
         if (
             len(digest) != 71
@@ -1449,7 +1560,11 @@ class BinanceSpotPreparedRequest:
                     raise BinanceSpotAdapterError(
                         "market reference kind/window combination is invalid"
                     )
-        object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
+        object.__setattr__(
+            self,
+            "body",
+            _freeze_request_body(self.body, name="prepared request body"),
+        )
         object.__setattr__(self, "filter_source_sha256", digest)
         object.__setattr__(
             self,
@@ -1486,28 +1601,49 @@ def prepare_order_request(
     deliberately excluded from this foundation because its economic unit differs.
     """
 
-    if not isinstance(intent, BinanceSpotOrderIntent):
-        raise TypeError("intent must be BinanceSpotOrderIntent")
-    if not isinstance(capability, CapabilitySnapshot):
-        raise TypeError("capability must be CapabilitySnapshot")
-    if not isinstance(symbol_rules, BinanceSpotSymbolRules):
-        raise TypeError("symbol_rules must be BinanceSpotSymbolRules")
+    if type(intent) is not BinanceSpotOrderIntent:
+        raise TypeError("intent must be exact BinanceSpotOrderIntent")
+    if type(capability) is not CapabilitySnapshot:
+        raise TypeError("capability must be exact CapabilitySnapshot")
+    if type(symbol_rules) is not BinanceSpotSymbolRules:
+        raise TypeError("symbol_rules must be exact BinanceSpotSymbolRules")
+    if (
+        reference_price_observation is not None
+        and type(reference_price_observation) is not BinanceSpotReferencePrice
+    ):
+        raise BinanceSpotAdapterError(
+            "reference_price_observation must be exact BinanceSpotReferencePrice"
+        )
+    if market_reference is not None and type(market_reference) is not BinanceSpotReferencePrice:
+        raise BinanceSpotAdapterError(
+            "market_reference must be exact BinanceSpotReferencePrice"
+        )
+
+    canonical_intent = BinanceSpotOrderIntent.create(
+        instrument_version=intent.instrument_version,
+        symbol=intent.symbol,
+        side=intent.side,
+        order_type=intent.order_type,
+        quantity=intent.quantity,
+        price=intent.price,
+        time_in_force=intent.time_in_force,
+    )
     point = _utc(at, name="at")
     client_id = validate_client_order_id(client_order_id)
     if capability.provider_id.upper() != "BINANCE":
         raise BinanceSpotAdapterError("capability belongs to another provider")
-    if capability.instrument_version != intent.instrument_version:
+    if capability.instrument_version != canonical_intent.instrument_version:
         raise BinanceSpotAdapterError("capability instrument version does not match intent")
     if not capability.admits(
         at=point,
-        order_type=intent.order_type,
-        time_in_force=intent.time_in_force or "NONE",
+        order_type=canonical_intent.order_type,
+        time_in_force=canonical_intent.time_in_force or "NONE",
         permission_scope="ORDER_WRITE",
     ):
         raise BinanceSpotAdapterError("exact capability evidence does not admit this order")
 
     selected_market_reference = symbol_rules.validate(
-        intent,
+        canonical_intent,
         at=point,
         reference_price_observation=reference_price_observation,
         market_reference=market_reference,
@@ -1515,17 +1651,17 @@ def prepare_order_request(
     )
 
     body: dict[str, str] = {
-        "symbol": intent.symbol,
-        "side": intent.side,
-        "type": intent.order_type,
-        "quantity": _decimal_text(intent.quantity),
+        "symbol": canonical_intent.symbol,
+        "side": canonical_intent.side,
+        "type": canonical_intent.order_type,
+        "quantity": _decimal_text(canonical_intent.quantity),
         "newClientOrderId": client_id,
         "newOrderRespType": "ACK",
     }
-    if intent.price is not None:
-        body["price"] = _decimal_text(intent.price)
-    if intent.time_in_force is not None:
-        body["timeInForce"] = intent.time_in_force
+    if canonical_intent.price is not None:
+        body["price"] = _decimal_text(canonical_intent.price)
+    if canonical_intent.time_in_force is not None:
+        body["timeInForce"] = canonical_intent.time_in_force
 
     # timestamp, recvWindow, API key and signature belong to the qualified
     # transport wrapper after the dispatcher's final authority barrier.
@@ -1554,6 +1690,7 @@ def prepare_order_request(
             if selected_market_reference is None
             else selected_market_reference.averaging_window_minutes
         ),
+        _preparation_token=_PREPARED_REQUEST_TOKEN,
     )
 
 
@@ -1597,8 +1734,8 @@ def parse_order_ack(
     except ValueError as error:
         raise BinanceSpotAdapterError("attempt_id must be a UUID") from error
     cid = validate_client_order_id(client_order_id)
-    if not isinstance(response, Mapping):
-        raise BinanceSpotAdapterError("response must be an object")
+    response = _exact_json_object(response, name="order ACK response")
+    _exact_decoded_json_tree(response, name="order ACK response")
 
     echoed = validate_client_order_id(response.get("clientOrderId"))
     if echoed != cid:
@@ -1609,7 +1746,7 @@ def parse_order_ack(
             "response.symbol must be canonical uppercase"
         )
     order_id = response.get("orderId")
-    if isinstance(order_id, bool) or not isinstance(order_id, int) or order_id < 0:
+    if type(order_id) is not int or order_id < 0:
         raise BinanceSpotAdapterError("response.orderId must be a non-negative integer")
     when = _millis(response.get("transactTime"), name="response.transactTime")
 
@@ -1634,23 +1771,24 @@ def parse_account_trades(
 ) -> tuple[ProviderFillEvidence, ...]:
     """Map one authenticated exact-byte account-trade read to unique fills."""
 
-    if not isinstance(observation, ProviderResponseObservation):
-        raise TypeError("observation must be ProviderResponseObservation")
+    if type(observation) is not ProviderResponseObservation:
+        raise TypeError("observation must be exact ProviderResponseObservation")
     try:
-        observation.require_scope(
+        projection = provider_response_observation_require_scope(
+            observation,
             provider_id="BINANCE",
             surface=Surface.ACTIVITIES,
             endpoint=BINANCE_SPOT_ENDPOINTS["EXECUTIONS"],
         )
     except ProviderCoreError as error:
         raise BinanceSpotAdapterError("trade observation scope mismatch") from error
-    rows = observation.payload
-    account_id = observation.account_id
-    environment = observation.environment
-    if not isinstance(rows, (list, tuple)):
-        raise BinanceSpotAdapterError("trade rows must be an array")
-    if not isinstance(instrument_versions, Mapping):
-        raise BinanceSpotAdapterError("instrument_versions must be a mapping")
+    rows = projection["payload"]
+    account_id = projection["account_id"]
+    environment = projection["environment"]
+    if type(rows) is not tuple:
+        raise BinanceSpotAdapterError("trade rows must be an exact decoded array")
+    if type(instrument_versions) is not dict:
+        raise BinanceSpotAdapterError("instrument_versions must be an exact dict")
     normalized_instruments: dict[str, str] = {}
     for raw_symbol, raw_instrument_version in instrument_versions.items():
         provider_symbol = _text(
@@ -1672,14 +1810,13 @@ def parse_account_trades(
         normalized_instruments[provider_symbol] = instrument_version
 
     client_map = {} if client_ids_by_order_id is None else client_ids_by_order_id
-    if not isinstance(client_map, Mapping):
-        raise BinanceSpotAdapterError("client_ids_by_order_id must be a mapping")
+    if type(client_map) is not dict:
+        raise BinanceSpotAdapterError("client_ids_by_order_id must be an exact dict")
     normalized_client_map: dict[int, str] = {}
     seen_client_ids: set[str] = set()
     for raw_order_id, raw_client_id in client_map.items():
         if (
-            isinstance(raw_order_id, bool)
-            or not isinstance(raw_order_id, int)
+            type(raw_order_id) is not int
             or raw_order_id < 0
         ):
             raise BinanceSpotAdapterError(
@@ -1695,7 +1832,7 @@ def parse_account_trades(
 
     by_id: dict[str, ProviderFillEvidence] = {}
     for index, raw in enumerate(rows):
-        if not isinstance(raw, Mapping):
+        if type(raw) is not MappingProxyType:
             raise BinanceSpotAdapterError(f"trade row {index} must be an object")
         symbol = _text(raw.get("symbol"), name=f"trade[{index}].symbol")
         if symbol not in normalized_instruments:
@@ -1703,11 +1840,9 @@ def parse_account_trades(
         trade_id = raw.get("id")
         order_id = raw.get("orderId")
         if (
-            isinstance(trade_id, bool)
-            or not isinstance(trade_id, int)
+            type(trade_id) is not int
             or trade_id < 0
-            or isinstance(order_id, bool)
-            or not isinstance(order_id, int)
+            or type(order_id) is not int
             or order_id < 0
         ):
             raise BinanceSpotAdapterError("trade id and orderId must be non-negative integers")
@@ -1732,7 +1867,7 @@ def parse_account_trades(
             fee_amount=raw.get("commission", "0"),
             fee_currency=_text(raw.get("commissionAsset"), name="commissionAsset"),
             trade_time=_millis(raw.get("time"), name="trade.time"),
-            evidence_refs=(observation.evidence_ref,),
+            evidence_refs=(projection["evidence_ref"],),
         )
         previous = by_id.get(execution_id)
         if previous is not None and previous != fill:

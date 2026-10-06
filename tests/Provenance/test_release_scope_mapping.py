@@ -240,7 +240,7 @@ class ReleaseScopeMappingTests(unittest.TestCase):
 
     def test_unknown_external_sbom_package_fails(self):
         with self.assertRaisesRegex(
-            ReleaseScopeMappingError, "unmapped external"
+            ReleaseScopeMappingError, "do not exactly match SBOM runtime scope"
         ):
             self._build(extra=True)
 
@@ -512,7 +512,7 @@ class ReleaseScopeMappingTests(unittest.TestCase):
         ).encode("utf-8")
         with self.assertRaisesRegex(
             ReleaseScopeMappingError,
-            "unmapped external package",
+            "do not exactly match SBOM runtime scope",
         ):
             self._build(sbom_override=(document, raw))
 

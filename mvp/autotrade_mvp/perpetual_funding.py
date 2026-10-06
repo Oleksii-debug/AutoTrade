@@ -405,18 +405,23 @@ class DurablePerpetualFundingAuthority:
         )
         binding_key = id(self)
 
-        def cleanup(ref: weakref.ReferenceType[DurablePerpetualFundingAuthority]) -> None:
-            with _FUNDING_AUTHORITY_BINDING_LOCK:
-                current = _FUNDING_AUTHORITY_BINDINGS.get(binding_key)
-                if current is not None and current[0] is ref:
-                    _FUNDING_AUTHORITY_BINDINGS.pop(binding_key, None)
-
-        ref = weakref.ref(self, cleanup)
+        # Keep the owner weakref callback-free. Python exposes weakref callbacks
+        # through weakref.getweakrefs(), so an attached cleanup callback would
+        # be an invokable same-process trust-binding eraser. The live authority
+        # strongly owns its selected collaborators; the registry retains only
+        # weak references and lazily prunes dead owner entries.
+        ref = weakref.ref(self)
         with _FUNDING_AUTHORITY_BINDING_LOCK:
+            for key in [
+                key
+                for key, entry in _FUNDING_AUTHORITY_BINDINGS.items()
+                if entry[0]() is None
+            ]:
+                _FUNDING_AUTHORITY_BINDINGS.pop(key, None)
             _FUNDING_AUTHORITY_BINDINGS[binding_key] = (
                 ref,
-                store,
-                economic_book,
+                weakref.ref(store),
+                weakref.ref(economic_book),
                 bound_identity,
                 bound_scope,
             )
@@ -428,7 +433,13 @@ class DurablePerpetualFundingAuthority:
             raise PerpetualFundingConflict(
                 "funding authority durable binding is not canonically issued"
             )
-        _, bound_store, bound_book, bound_identity, bound_scope = binding
+        _, store_ref, book_ref, bound_identity, bound_scope = binding
+        bound_store = store_ref()
+        bound_book = book_ref()
+        if bound_store is None or bound_book is None:
+            raise PerpetualFundingConflict(
+                "funding authority selected durable state was released"
+            )
         if (
             self.store is not bound_store
             or self.economic_book is not bound_book

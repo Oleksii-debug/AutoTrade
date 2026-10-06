@@ -911,6 +911,90 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             before_lifecycle,
         )
 
+    def test_simulation_resolver_cannot_rebind_response_attribute_authority(self):
+        self.seed_option_position("1")
+        reference = self.evidence(
+            external_event_id="resolver-response-getattribute-rebind-life",
+        )
+        response_type = provider_core_module.ProviderResponseObservation
+        original_getattribute = response_type.__getattribute__
+
+        def delegated_getattribute(instance, name):
+            return object.__getattribute__(instance, name)
+
+        def rebind_getattribute_then_resolve(evidence_ref):
+            response_type.__getattribute__ = delegated_getattribute
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=rebind_getattribute_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", authority.aggregate_id)
+        )
+        try:
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "financial authority changed during evidence resolution",
+            ):
+                authority.apply(reference)
+        finally:
+            response_type.__getattribute__ = original_getattribute
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            before_lifecycle,
+        )
+
+    def test_simulation_resolver_cannot_rebind_query_attribute_authority(self):
+        self.seed_option_position("1")
+        reference = self.evidence(
+            external_event_id="resolver-query-getattribute-rebind-life",
+        )
+        query_type = provider_core_module.AuthenticatedReadQueryBinding
+        original_getattribute = query_type.__getattribute__
+
+        def delegated_getattribute(instance, name):
+            return object.__getattribute__(instance, name)
+
+        def rebind_getattribute_then_resolve(evidence_ref):
+            query_type.__getattribute__ = delegated_getattribute
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=rebind_getattribute_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", authority.aggregate_id)
+        )
+        try:
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "financial authority changed during evidence resolution",
+            ):
+                authority.apply(reference)
+        finally:
+            query_type.__getattribute__ = original_getattribute
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            before_lifecycle,
+        )
+
     def test_simulation_resolver_cannot_rebind_lifecycle_decimal_parser_dependency(self):
         reference = self.evidence(
             external_event_id="resolver-decimal-parser-rebind-life",

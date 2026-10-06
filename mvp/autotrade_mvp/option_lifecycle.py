@@ -736,6 +736,13 @@ def _callback_financial_authority_fingerprint() -> tuple[tuple[object, object], 
         DurableProviderEconomicBook.refresh,
         JournalStore.load_events,
         JournalStore.commit_command,
+        # Provider-read closure guards still perform exact-class attribute
+        # reads after the arbitrary resolver. Bind attribute-resolution
+        # authority itself so class monkeypatching cannot spoof retained state.
+        ProviderResponseObservation,
+        ProviderResponseObservation.__getattribute__,
+        provider_core_module.AuthenticatedReadQueryBinding,
+        provider_core_module.AuthenticatedReadQueryBinding.__getattribute__,
         canonical_option_lifecycle_observation,
         _canonical_observation_from_sealed_response,
         OptionLifecycleObservation,

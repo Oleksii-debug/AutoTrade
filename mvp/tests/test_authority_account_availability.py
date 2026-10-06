@@ -893,11 +893,25 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(
             AuthorityConflict,
-            "provider domain differs from authoritative risk snapshot",
+            "provider/account scope differs from authoritative risk snapshot",
         ):
             authority_module._require_provider_scope_matches_authoritative_risk_snapshot(
                 snapshot,
                 wrong_domain,
+                evidence_name="test availability",
+            )
+
+        wrong_account = {
+            **matching,
+            "account_id": "another-bybit-account",
+        }
+        with self.assertRaisesRegex(
+            AuthorityConflict,
+            "provider/account scope differs from authoritative risk snapshot",
+        ):
+            authority_module._require_provider_scope_matches_authoritative_risk_snapshot(
+                snapshot,
+                wrong_account,
                 evidence_name="test availability",
             )
 
@@ -908,7 +922,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(
             AuthorityConflict,
-            "provider domain differs from authoritative risk snapshot",
+            "provider/account scope differs from authoritative risk snapshot",
         ):
             authority_module._require_provider_scope_matches_authoritative_risk_snapshot(
                 snapshot,

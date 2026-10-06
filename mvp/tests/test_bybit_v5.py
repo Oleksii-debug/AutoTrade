@@ -507,7 +507,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         *,
         provider_environment="MAINNET",
         submission_scope_provider_environment=None,
-        http_status=None,
+        http_status=200,
         intent_id="bybit-write-intent",
         attempt_id=None,
     ):
@@ -681,6 +681,29 @@ class BybitV5AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(
             ProviderCoreError,
             "provider-write provenance scope mismatch",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+
+    def test_submission_response_rejects_missing_http_status_sent_binding(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "orderId": "missing-http-status",
+                    "orderLinkId": "__CLIENT__",
+                },
+            },
+            http_status=None,
+            intent_id="bybit-missing-http-status",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "requires successful HTTP status",
         ):
             parse_submission_response(
                 attempt_id=attempt,

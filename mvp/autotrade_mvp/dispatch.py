@@ -143,13 +143,6 @@ class ExactJsonTransportResponse:
             raise ValueError(
                 "provider response bytes violate shared byte budget"
             ) from error
-        if (
-            type(self.response_encoding) is not str
-            or self.response_encoding not in {"utf-8-json", "hex"}
-        ):
-            raise ValueError("durable provider response encoding is invalid")
-        if self.response_encoding == "utf-8-json":
-            _decode_exact_json_bytes(self.response_bytes)
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -251,6 +244,13 @@ class SubmissionResponseBinding:
             != self.response_sha256
         ):
             raise ValueError("durable provider response digest mismatch")
+        if (
+            type(self.response_encoding) is not str
+            or self.response_encoding not in {"utf-8-json", "hex"}
+        ):
+            raise ValueError("durable provider response encoding is invalid")
+        if self.response_encoding == "utf-8-json":
+            _decode_exact_json_bytes(self.response_bytes)
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100

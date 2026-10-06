@@ -1492,6 +1492,49 @@ def unknown_submissions_from_dispatch(
             name="client_order_id",
         )
 
+        # Provider financial domain is durable submission authority.  In
+        # particular, runtime PAPER cannot distinguish BYBIT TESTNET from DEMO.
+        # Recover that axis only from the prepared submission scope; never from
+        # a caller hint or today's route selection.
+        submission_scope = payload.get("submission_scope")
+        provider_environment: str | None = None
+        if submission_scope is not None:
+            if not isinstance(submission_scope, Mapping):
+                raise ValueError("SubmissionPrepared submission_scope must be an object")
+            provider_environment_values = []
+            for field_name in (
+                "provider_environment",
+                "provider_route_provider_environment",
+            ):
+                if field_name in submission_scope:
+                    provider_environment_values.append(
+                        _text(
+                            submission_scope.get(field_name),
+                            name=f"submission_scope.{field_name}",
+                        ).upper()
+                    )
+            if provider_environment_values:
+                if len(set(provider_environment_values)) != 1:
+                    raise ValueError(
+                        "SubmissionPrepared provider_environment authorities disagree"
+                    )
+                provider_environment = provider_environment_values[0]
+        if provider_id == "BYBIT" and provider_environment is None:
+            raise ValueError(
+                "BYBIT SubmissionPrepared lacks durable provider_environment"
+            )
+        (
+            _scoped_provider,
+            _scoped_account,
+            _scoped_environment,
+            provider_environment,
+        ) = _scope(
+            provider_id=provider_id,
+            account_id=durable_account_id,
+            environment=durable_environment,
+            provider_environment=provider_environment,
+        )
+
         # Every later possible-send event must remain on the same durable
         # aggregate/environment/client-order identity as SubmissionPrepared.
         # The last event alone is insufficient because an injected intermediate
@@ -1540,6 +1583,7 @@ def unknown_submissions_from_dispatch(
                     provider_id=provider_id,
                     account_id=durable_account_id,
                     environment=durable_environment,
+                    provider_environment=provider_environment,
                     started_at=started_at,
                 )
             )

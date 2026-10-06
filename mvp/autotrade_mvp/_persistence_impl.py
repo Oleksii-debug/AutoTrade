@@ -166,6 +166,9 @@ def _projection_checkpoint_digest(
 
 _SEQUENCE_RE = re.compile(r"^(0|[1-9][0-9]*)$")
 _SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+_UUID_TEXT_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+)
 _UTC_INSTANT_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
 )
@@ -208,7 +211,11 @@ _EVIDENCE_REF_OPTIONAL_FIELDS = frozenset(
 
 
 def _require_uuid_text(value: object, *, name: str) -> None:
-    if type(value) is not str:
+    # uuid.UUID() also accepts braces, URN prefixes and compact 32-hex text,
+    # while the canonical JSON Schema UUID format is hyphenated wire text.
+    # Reject alternate spellings before semantic parsing so persistence cannot
+    # admit an EventEnvelope that the canonical contract rejects.
+    if type(value) is not str or _UUID_TEXT_RE.fullmatch(value) is None:
         raise ValueError(f"{name} must be a UUID string")
     try:
         UUID(value)

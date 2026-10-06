@@ -773,6 +773,74 @@ class AlpacaAdapterTests(unittest.TestCase):
             object.__getattribute__(prepared, "body_sha256"),
         )
 
+    def test_guarded_projection_rejects_hostile_scope_tuple_before_iteration(self):
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="LIMIT",
+            time_in_force="DAY",
+            quantity="1",
+            limit_price="220.10",
+        )
+        prepared = prepare_order_request(
+            intent,
+            client_order_id="alpaca-projection-hostile-tuple",
+            account_id="paper-account",
+            environment="PAPER",
+            capability=capability(),
+            at=NOW,
+        )
+        callbacks = []
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                callbacks.append(True)
+                raise AssertionError("hostile prepared scope iterator executed")
+
+        object.__setattr__(
+            prepared,
+            "capability_snapshot_ids",
+            HostileTuple(object.__getattribute__(prepared, "capability_snapshot_ids")),
+        )
+        with self.assertRaisesRegex(
+            AlpacaAdapterError,
+            "prepared request authority changed",
+        ):
+            guarded_order_projection(prepared)
+        self.assertEqual(callbacks, [])
+
+    def test_guarded_projection_rejects_scalar_subclass_scope(self):
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="LIMIT",
+            time_in_force="DAY",
+            quantity="1",
+            limit_price="220.10",
+        )
+        prepared = prepare_order_request(
+            intent,
+            client_order_id="alpaca-projection-hostile-scalar",
+            account_id="paper-account",
+            environment="PAPER",
+            capability=capability(),
+            at=NOW,
+        )
+
+        class HostileStr(str):
+            pass
+
+        object.__setattr__(prepared, "environment", HostileStr("PAPER"))
+        with self.assertRaisesRegex(
+            AlpacaAdapterError,
+            "prepared request authority changed",
+        ):
+            guarded_order_projection(prepared)
+
     def test_submission_consumer_ignores_exact_prepared_getattribute_callback(self):
         intent_id = "alpaca-prepared-callback-fence"
         client_id = stable_client_order_id(

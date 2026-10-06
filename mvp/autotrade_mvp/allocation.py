@@ -6,7 +6,7 @@ treats simulated or expected returns as evidence of profitability.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, localcontext
 from fractions import Fraction
@@ -1660,31 +1660,36 @@ _ALLOWED_ALLOCATION_EVIDENCE_KINDS = frozenset(
 
 
 def _canonical_evidence_value(value):
-    if isinstance(value, Decimal):
+    """Detach caller evidence without executing polymorphic container/scalar code."""
+    value_type = type(value)
+    if value_type is Decimal:
         return str(value)
-    if isinstance(value, bool) or value is None or isinstance(value, (str, int)):
+    if value is None or value_type in (bool, str, int):
         return value
-    if isinstance(value, float):
+    if value_type is float:
         raise TypeError("allocation evidence cannot contain binary floating-point values")
-    if isinstance(value, Mapping):
+    if value_type is dict:
         normalized = {}
         for raw_key, raw_value in value.items():
+            if type(raw_key) is not str:
+                raise TypeError("allocation evidence payload keys must be exact strings")
             key = _text(raw_key, name="allocation evidence payload key")
             if key in normalized:
                 raise ValueError("allocation evidence payload keys must be unique")
             normalized[key] = _canonical_evidence_value(raw_value)
         return normalized
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+    if value_type in (list, tuple):
         return [_canonical_evidence_value(item) for item in value]
-    raise TypeError(f"unsupported allocation evidence value type: {type(value).__name__}")
+    raise TypeError(f"unsupported allocation evidence value type: {value_type.__name__}")
 
 
 def _freeze_evidence_value(value):
-    if isinstance(value, Mapping):
+    value_type = type(value)
+    if value_type is dict:
         return MappingProxyType(
             {key: _freeze_evidence_value(item) for key, item in value.items()}
         )
-    if isinstance(value, list):
+    if value_type is list:
         return tuple(_freeze_evidence_value(item) for item in value)
     return value
 
@@ -1738,6 +1743,7 @@ class ImmutableAllocationEvidence:
     valid_until: str
     payload: Mapping[str, object]
     digest: str
+    _sealed_payload_json: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         evidence_id = _text(self.evidence_id, name="allocation evidence_id")
@@ -1758,10 +1764,10 @@ class ImmutableAllocationEvidence:
         valid_until = _instant(self.valid_until, name="allocation evidence valid_until")
         if valid_until < observed:
             raise ValueError("allocation evidence valid_until must not precede observed_at")
-        if not isinstance(self.payload, Mapping) or not self.payload:
-            raise ValueError("allocation evidence payload must be a non-empty mapping")
+        if type(self.payload) is not dict or not self.payload:
+            raise ValueError("allocation evidence payload must be a non-empty exact dict")
         normalized_payload = _canonical_evidence_value(self.payload)
-        if not isinstance(normalized_payload, dict):
+        if type(normalized_payload) is not dict:
             raise TypeError("allocation evidence payload must normalize to an object")
         digest = _text(self.digest, name="allocation evidence digest")
         if (
@@ -1789,8 +1795,40 @@ class ImmutableAllocationEvidence:
         object.__setattr__(self, "schema_version", schema_version)
         object.__setattr__(self, "observed_at", normalized_observed)
         object.__setattr__(self, "valid_until", normalized_valid_until)
+        sealed_payload_json = json.dumps(
+            normalized_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
         object.__setattr__(self, "payload", _freeze_evidence_value(normalized_payload))
+        object.__setattr__(self, "_sealed_payload_json", sealed_payload_json)
         object.__setattr__(self, "digest", digest)
+
+    def canonical_payload_snapshot(self) -> dict[str, object]:
+        """Return one detached exact-builtins payload proven by this evidence digest."""
+        if type(self._sealed_payload_json) is not str:
+            raise TypeError("allocation evidence sealed payload must be exact text")
+        try:
+            parsed = json.loads(self._sealed_payload_json)
+        except (TypeError, ValueError) as error:
+            raise ValueError("allocation evidence sealed payload is invalid") from error
+        normalized_payload = _canonical_evidence_value(parsed)
+        if type(normalized_payload) is not dict or not normalized_payload:
+            raise ValueError("allocation evidence sealed payload must be a non-empty object")
+        expected = _allocation_evidence_digest(
+            evidence_id=self.evidence_id,
+            kind=self.kind,
+            environment=self.environment,
+            schema_version=self.schema_version,
+            observed_at=self.observed_at,
+            valid_until=self.valid_until,
+            payload=normalized_payload,
+        )
+        if expected != self.digest:
+            raise ValueError("allocation evidence sealed payload no longer matches digest")
+        return normalized_payload
 
     @classmethod
     def create(
@@ -1818,8 +1856,10 @@ class ImmutableAllocationEvidence:
         valid = _instant(valid_until, name="allocation evidence valid_until")
         if valid < observed:
             raise ValueError("allocation evidence valid_until must not precede observed_at")
+        if type(payload) is not dict or not payload:
+            raise ValueError("allocation evidence payload must be a non-empty exact dict")
         normalized_payload = _canonical_evidence_value(payload)
-        if not isinstance(normalized_payload, dict) or not normalized_payload:
+        if type(normalized_payload) is not dict or not normalized_payload:
             raise ValueError("allocation evidence payload must be a non-empty mapping")
         normalized_observed = observed.isoformat().replace("+00:00", "Z")
         normalized_valid = valid.isoformat().replace("+00:00", "Z")
@@ -2402,8 +2442,8 @@ def allocate_evidence_bound_objective_targets(
         try:
             normalized = normalize_allocation_valuation(
                 symbol=symbol,
-                market_payload=resolved_market[symbol].payload,
-                valuation_payload=valuation.payload,
+                market_payload=resolved_market[symbol].canonical_payload_snapshot(),
+                valuation_payload=valuation.canonical_payload_snapshot(),
                 source_price=item.candidate.price,
                 expected_cost_rate=item.candidate.cost_rate,
                 expected_capital_requirement_rate=item.candidate.capital_requirement_rate,

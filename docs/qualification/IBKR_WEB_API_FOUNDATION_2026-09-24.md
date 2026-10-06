@@ -65,6 +65,51 @@ documented POST status call, session expiry/re-auth/reconnect qualification,
 numeric wire serialization, pacing, restart recovery, or any PAPER/LIVE
 provider qualification.
 
+## Provider-origin brokerage account membership — 2026-10-06
+
+Order preparation now also requires an exact provider-neutral authenticated
+response observation for `GET /iserver/accounts`. The bounded parser requires
+a non-empty canonical `accounts` array, a selected account contained in that
+array, canonical `sessionId`, and exact boolean `isPaper`. The authenticated
+query's account and environment are bound to the issued in-process observation;
+`isPaper` must agree with PAPER/LIVE, and order preparation rejects locally
+constructed or post-mint-mutated account observations, cross-environment reuse,
+provider account sets that omit the order account, observations predating the
+current authenticated status observation, future observations, and stale
+observations.
+
+This follows the current provider contract that `/iserver/accounts` returns
+accounts the user can trade and must be called before modifying an order. It is
+still a source-binding gate rather than terminal provider qualification:
+`sessionId` is retained as observed evidence but is not treated as proof of
+the exact `/iserver/auth/ssodh/init` generation because current
+`/iserver/auth/status` does not expose the same session identifier. Exact
+qualified-read Q/C binding, HTTP method/build routing, init generation,
+credential lifetime, restart recovery and PAPER/LIVE provider qualification
+remain open.
+
+## Canonical authenticated-read Q/C binding — 2026-10-06
+
+The provider-read authority now recognizes `GET /iserver/accounts` as one
+canonical IBKR authenticated-read rule:
+
+- surface `AUTHENTICATED_READ`;
+- permission `ORDER.READ`;
+- data entitlement `ACCOUNT`;
+- successful HTTP status `200`;
+- empty query semantics are enforced by the existing IBKR source-bound parser;
+- source-owned parser identity is `IBKR_BROKERAGE_ACCOUNTS_V1_JSON_V1` with an exact contract digest.
+
+The route layer can therefore require both the exact endpoint rule claim and the
+exact parser contract claim before an IBKR account-membership read is considered
+qualified-read material. This composes with the existing capability/Q current-cut
+authority and does not create a second qualification registry.
+
+This remains only a Q/C semantic binding. The repository still does not claim a
+qualified IBKR provider, live network transport, `/iserver/auth/ssodh/init`
+generation binding, credential lifetime, restart/recovery qualification, or
+PAPER/LIVE provider qualification.
+
 ## What remains unqualified
 
 WP-26 remains incomplete. Required future evidence includes exact API/SDK

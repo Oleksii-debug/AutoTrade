@@ -256,8 +256,8 @@ class AblationOutcome:
             )
         if self.elapsed_ms < 0 or self.deadline_ms <= 0:
             raise ValueError("elapsed_ms must be non-negative and deadline_ms positive")
-        if not isinstance(self.components, tuple):
-            raise TypeError("components must be an immutable tuple")
+        if type(self.components) is not tuple:
+            raise TypeError("components must be an exact immutable tuple")
         if any(type(item) is not str or not item.strip() for item in self.components):
             raise ValueError(
                 "component identities must be non-empty exact built-in strings"
@@ -289,14 +289,11 @@ class AblationOutcome:
         object.__setattr__(self, "decision_utc", decision)
         object.__setattr__(self, "outcome_available_utc", outcome)
 
-        if not isinstance(self.input_evidence, tuple):
-            raise TypeError("input_evidence must be an immutable tuple")
-        if any(
-            not isinstance(item, CausalInputEvidence)
-            for item in self.input_evidence
-        ):
+        if type(self.input_evidence) is not tuple:
+            raise TypeError("input_evidence must be an exact immutable tuple")
+        if any(type(item) is not CausalInputEvidence for item in self.input_evidence):
             raise TypeError(
-                "input_evidence entries must be CausalInputEvidence"
+                "input_evidence entries must be exact CausalInputEvidence"
             )
         evidence_ids = [item.evidence_id for item in self.input_evidence]
         if len(evidence_ids) != len(set(evidence_ids)):
@@ -470,8 +467,8 @@ class ExactAblationDecision:
             "rhs",
         ):
             value = getattr(self, field_name)
-            if not isinstance(value, Fraction):
-                raise TypeError(f"{field_name} must be Fraction")
+            if type(value) is not Fraction:
+                raise TypeError(f"{field_name} must be exact Fraction")
             bounded_fraction(value)
         if self.sample_variance < 0:
             raise ValueError("sample_variance must be non-negative")
@@ -915,8 +912,8 @@ class AblationEvidenceBundle:
             raise ValueError(
                 "pair_count must be a non-negative exact built-in integer"
             )
-        if not isinstance(self.evaluation, AblationEvaluation):
-            raise TypeError("evaluation must be AblationEvaluation")
+        if type(self.evaluation) is not AblationEvaluation:
+            raise TypeError("evaluation must be exact AblationEvaluation")
         if self.evaluation.target_component != self.target_component:
             raise ValueError("evaluation target_component must match the bundle")
         if self.evaluation.required_lower_bound != required:
@@ -947,8 +944,10 @@ class AblationEvidenceBundle:
                 )
         elif decision is not None:
             raise ValueError("inconclusive evaluation cannot carry terminal exact decision")
-        if not isinstance(self.payload, str) or not self.payload:
-            raise ValueError("payload must be non-empty canonical JSON")
+        if type(self.payload) is not str or not self.payload:
+            raise ValueError(
+                "payload must be non-empty exact built-in canonical JSON"
+            )
         object.__setattr__(
             self,
             "content_digest",
@@ -1512,9 +1511,9 @@ def evaluate_qualified_incremental_value(
     else:
         if tuple(outcome_refs):
             raise ValueError("outcome_refs require AblationQualificationAuthority")
-        if not isinstance(population, RegisteredAblationPopulation):
+        if type(population) is not RegisteredAblationPopulation:
             raise TypeError(
-                "population must be RegisteredAblationPopulation for diagnostic evaluation"
+                "population must be exact RegisteredAblationPopulation for diagnostic evaluation"
             )
 
     required = _decimal(required_lower_bound, "required_lower_bound")
@@ -1669,8 +1668,8 @@ def verify_ablation_evidence_bundle(
 ) -> bool:
     """Rebuild a locked bundle and fail closed on any source/population/result drift."""
 
-    if not isinstance(bundle, AblationEvidenceBundle):
-        raise TypeError("bundle must be AblationEvidenceBundle")
+    if type(bundle) is not AblationEvidenceBundle:
+        raise TypeError("bundle must be exact AblationEvidenceBundle")
     rebuilt = build_ablation_evidence_bundle(
         bundle.target_component,
         pairs,

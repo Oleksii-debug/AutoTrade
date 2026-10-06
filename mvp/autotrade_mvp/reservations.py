@@ -33,8 +33,8 @@ class InsufficientAvailable(ValueError):
     """Raised when current availability cannot cover all outstanding reservations."""
 
 
-TERMINAL_STATES = {"FILLED", "CANCELED", "REJECTED", "PROVEN_ABSENT"}
-ACTIVE_STATES = {"WORKING", "UNKNOWN"}
+TERMINAL_STATES = frozenset({"FILLED", "CANCELED", "REJECTED", "PROVEN_ABSENT"})
+ACTIVE_STATES = frozenset({"WORKING", "UNKNOWN"})
 
 
 def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
@@ -282,7 +282,7 @@ class ReservationBook:
         resolution_evidence: str,
     ) -> ReservationSnapshot:
         current = self._get_record(reservation_id)
-        normalized = _text(outcome, name="outcome").upper()
+        normalized = str.upper(_text(outcome, name="outcome"))
         if normalized not in TERMINAL_STATES:
             raise ValueError(f"Unsupported terminal outcome: {normalized}")
         evidence = _text(resolution_evidence, name="resolution_evidence")

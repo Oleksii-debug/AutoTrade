@@ -464,6 +464,231 @@ class HardCrashPersistenceTests(unittest.TestCase):
             self.assertEqual(len(reopened.pending_outbox()), 1)
 
 
+    def test_projection_checkpoint_process_exit_before_commit_preserves_prior_checkpoint(self):
+        """A hard exit before COMMIT cannot replace an older valid aggregate checkpoint."""
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(_event())
+            second = _event()
+            second["event_id"] = "evt-hard-crash-2"
+            second["aggregate_version"] = "2"
+            second["payload"] = {"kind": "fill", "quantity": "2"}
+            second["payload_hash"] = payload_digest(second["payload"])
+            second["committed_at"] = "2026-10-04T15:20:01+00:00"
+            store.append_event(second)
+            self.assertTrue(
+                store.save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=1,
+                    state={"net_quantity": "1"},
+                )
+            )
+
+            child = textwrap.dedent(
+                """
+                import os
+                from contextlib import contextmanager
+                import sys
+
+                from mvp.autotrade_mvp.persistence import JournalStore
+
+                path = sys.argv[1]
+                store = JournalStore(path)
+                original_connect = store._connect
+
+                class CrashBeforeCommit:
+                    def __init__(self, connection):
+                        self._connection = connection
+
+                    def __getattr__(self, name):
+                        return getattr(self._connection, name)
+
+                    def commit(self):
+                        os._exit(92)
+
+                @contextmanager
+                def crashing_connect():
+                    with original_connect() as connection:
+                        yield CrashBeforeCommit(connection)
+
+                store._connect = crashing_connect
+                store.save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=2,
+                    state={"net_quantity": "3"},
+                )
+                raise SystemExit(91)
+                """
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", child, str(path)],
+                cwd=Path(__file__).resolve().parents[2],
+                env=os.environ.copy(),
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 92)
+
+            reopened = JournalStore(path)
+            checkpoint = reopened.load_projection_checkpoint(
+                projection_name="position",
+                aggregate_type="account",
+                aggregate_id="paper-1",
+            )
+            self.assertEqual(checkpoint["aggregate_version"], 1)
+            self.assertEqual(checkpoint["state"], {"net_quantity": "1"})
+            self.assertEqual(reopened.current_journal_sequence(), 2)
+
+    def test_global_checkpoint_process_exit_before_commit_preserves_prior_checkpoint(self):
+        """A hard exit before COMMIT cannot replace an older valid global checkpoint."""
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(_event())
+            second = _event()
+            second["event_id"] = "evt-hard-crash-global-2"
+            second["aggregate_version"] = "2"
+            second["payload"] = {"kind": "fill", "quantity": "2"}
+            second["payload_hash"] = payload_digest(second["payload"])
+            second["committed_at"] = "2026-10-04T15:20:01+00:00"
+            store.append_event(second)
+            self.assertTrue(
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=1,
+                    state={"paper-1": "1"},
+                )
+            )
+
+            child = textwrap.dedent(
+                """
+                import os
+                from contextlib import contextmanager
+                import sys
+
+                from mvp.autotrade_mvp.persistence import JournalStore
+
+                path = sys.argv[1]
+                store = JournalStore(path)
+                original_connect = store._connect
+
+                class CrashBeforeCommit:
+                    def __init__(self, connection):
+                        self._connection = connection
+
+                    def __getattr__(self, name):
+                        return getattr(self._connection, name)
+
+                    def commit(self):
+                        os._exit(93)
+
+                @contextmanager
+                def crashing_connect():
+                    with original_connect() as connection:
+                        yield CrashBeforeCommit(connection)
+
+                store._connect = crashing_connect
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=2,
+                    state={"paper-1": "3"},
+                )
+                raise SystemExit(91)
+                """
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", child, str(path)],
+                cwd=Path(__file__).resolve().parents[2],
+                env=os.environ.copy(),
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 93)
+
+            reopened = JournalStore(path)
+            checkpoint = reopened.load_global_projection_checkpoint(
+                projection_name="portfolio"
+            )
+            self.assertEqual(checkpoint["journal_sequence"], 1)
+            self.assertEqual(checkpoint["state"], {"paper-1": "1"})
+            self.assertEqual(reopened.current_journal_sequence(), 2)
+
+    def test_result_only_command_process_exit_before_commit_leaves_no_dedupe(self):
+        """A result-only command is absent after a hard exit before its COMMIT."""
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            JournalStore(path)
+            child = textwrap.dedent(
+                """
+                import os
+                from contextlib import contextmanager
+                import sys
+
+                from mvp.autotrade_mvp.persistence import JournalStore
+
+                path = sys.argv[1]
+                store = JournalStore(path)
+                original_connect = store._connect
+
+                class CrashBeforeCommit:
+                    def __init__(self, connection):
+                        self._connection = connection
+
+                    def __getattr__(self, name):
+                        return getattr(self._connection, name)
+
+                    def commit(self):
+                        os._exit(94)
+
+                @contextmanager
+                def crashing_connect():
+                    with original_connect() as connection:
+                        yield CrashBeforeCommit(connection)
+
+                store._connect = crashing_connect
+                store.record_command(
+                    actor="crash-test",
+                    environment="SIMULATION",
+                    command_id="cmd-result-before-commit",
+                    idempotency_key="key-result-before-commit",
+                    request={"action": "STATUS"},
+                    result={"status": "ACCEPTED"},
+                    state_version=1,
+                )
+                raise SystemExit(91)
+                """
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", child, str(path)],
+                cwd=Path(__file__).resolve().parents[2],
+                env=os.environ.copy(),
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 94)
+
+            reopened = JournalStore(path)
+            self.assertEqual(reopened.whole_store_state_cut()["counts"]["command_dedupe"], 0)
+            saved, inserted = reopened.record_command(
+                actor="crash-test",
+                environment="SIMULATION",
+                command_id="cmd-result-before-commit",
+                idempotency_key="key-result-before-commit",
+                request={"action": "STATUS"},
+                result={"status": "ACCEPTED"},
+                state_version=1,
+            )
+            self.assertTrue(inserted)
+            self.assertEqual(saved, {"status": "ACCEPTED"})
+
     def test_projection_checkpoint_process_exit_after_commit_is_recoverable(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

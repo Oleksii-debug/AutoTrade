@@ -46,6 +46,7 @@ _HOST_UTC_RE = re.compile(
     r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{7})Z"
 )
 _FINANCIAL_RUNTIMES = frozenset({"PAPER", "LIVE"})
+_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
 # SubjectPublicKeyInfo for id-ecPublicKey + prime256v1 must be exactly:
 # SEQUENCE { SEQUENCE { OID 1.2.840.10045.2.1, OID 1.2.840.10045.3.1.7 },
@@ -169,10 +170,13 @@ def _exact_mapping(
     name: str,
     keys: frozenset[str],
 ) -> Mapping[str, object]:
-    if type(value) is not dict or set(value) != keys:
+    if type(value) is not dict:
         raise HostProviderAttestationError(f"{name} has non-canonical shape")
-    if any(type(key) is not str for key in value):
+    raw_keys = tuple(value.keys())
+    if any(type(key) is not str for key in raw_keys):
         raise HostProviderAttestationError(f"{name} keys must be exact str")
+    if frozenset(raw_keys) != keys:
+        raise HostProviderAttestationError(f"{name} has non-canonical shape")
     return value
 
 
@@ -1269,13 +1273,24 @@ def verify_host_observed_attestation(
         expected_public_key_sha256=expected_public_key_sha256,
         expected_query=expected_query,
     )
-    response_bytes = _canonical_base64(
+    response_text = _exact_text(
         raw["response_base64"],
         name="response_base64",
     )
-    if not response_bytes:
+    # A 16 MiB payload encodes to at most 22,369,624 padded base64 bytes.
+    # Bound text before decoding so hostile input cannot force unbounded
+    # allocation before provider evidence is authenticated.
+    if len(response_text) > ((_MAX_RESPONSE_BYTES + 2) // 3) * 4:
         raise HostProviderAttestationError(
-            "Host observed response bytes must be non-empty"
+            "Host observed response exceeds the maximum evidence size"
+        )
+    response_bytes = _canonical_base64(
+        response_text,
+        name="response_base64",
+    )
+    if not response_bytes or len(response_bytes) > _MAX_RESPONSE_BYTES:
+        raise HostProviderAttestationError(
+            "Host observed response bytes must be non-empty and bounded"
         )
     receipt = _parse_receipt(
         raw["receipt"],

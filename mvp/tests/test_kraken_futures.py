@@ -582,7 +582,7 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 observation=forged,
             )
 
-    def test_submission_consumer_does_not_call_rebindable_require_scope(self):
+    def test_submission_consumer_rejects_rebound_require_scope_without_callback(self):
         attempt, prepared, observation = self._durable_submission_observation(
             {
                 "result": "success",
@@ -600,17 +600,17 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             side_effect=AssertionError(
                 "rebindable require_scope callback must not execute"
             ),
-        ):
-            result = parse_submission_response(
-                attempt_id=attempt,
-                prepared_request=prepared,
-                observation=observation,
-            )
-        self.assertEqual(result["outcome"], "ACKNOWLEDGED")
-        self.assertEqual(
-            result["provider_order_id"],
-            "provider-no-virtual-scope",
-        )
+        ) as rebound:
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "provider submission observation authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
+                )
+        rebound.assert_not_called()
 
     def test_position_history_maps_only_trade_execution_facts(self):
         fills = parse_position_executions(

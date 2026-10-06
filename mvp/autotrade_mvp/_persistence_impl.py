@@ -937,6 +937,20 @@ class JournalStore:
 
     @staticmethod
     def _decode_event_row(row: sqlite3.Row) -> dict[str, Any]:
+        for field in (
+            "event_id",
+            "event_type",
+            "aggregate_type",
+            "aggregate_id",
+            "committed_at",
+        ):
+            _require_canonical_durable_text(row[field], name=field)
+        aggregate_version = row["aggregate_version"]
+        if type(aggregate_version) is not int or aggregate_version <= 0:
+            raise ValueError(
+                "aggregate_version must be a positive canonical integer"
+            )
+
         try:
             payload = json.loads(row["payload_json"])
         except (json.JSONDecodeError, TypeError) as error:

@@ -14,6 +14,7 @@ import os
 from pathlib import Path, PurePosixPath
 import stat
 import zipfile
+import xml.etree.ElementTree as ET
 
 from tools.stage_windows_foundation import (
     _SourceControlledComponent, _git, _stage_source_controlled_components,
@@ -21,6 +22,7 @@ from tools.stage_windows_foundation import (
 )
 from tools.build_windows_bundle import build_bundle, _collect, _windows_path_key
 from tools.release_scope_mapping import strict_json_bytes
+from tools.dotnet_package_rights import _locked_nupkg_root_evidence
 from research.autotrade_research.artifacts.durable_publish import atomic_write_json
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -486,6 +488,139 @@ def _require_staged_reviewed_license_evidence(product_root):
     return tuple(sorted(seen))
 
 
+def _normalized_rights_text(payload, *, label):
+    if type(payload) is not bytes:
+        raise TypeError('rights text payload must be exact bytes')
+    try:
+        text = payload.decode('utf-8-sig')
+    except UnicodeDecodeError as error:
+        raise ValueError(label + ' is not UTF-8') from error
+    return (
+        '\n'.join(
+            line.rstrip()
+            for line in text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+        ).strip()
+        + '\n'
+    )
+
+
+def _require_webview2_archive_rights(
+    product_root,
+    archive_path,
+    *,
+    version,
+    content_hash,
+):
+    if type(product_root) is not Path or type(archive_path) is not Path:
+        raise TypeError('WebView2 rights verification requires exact Path values')
+    if type(version) is not str or type(content_hash) is not str:
+        raise TypeError('WebView2 rights identity must be exact str values')
+    actual_hash = base64.b64encode(
+        sha512(archive_path.read_bytes()).digest()
+    ).decode('ascii')
+    if actual_hash != content_hash:
+        raise ValueError('WebView2 archive differs from locked rights identity')
+
+    policy = strict_json_bytes(
+        (product_root / 'provenance/dotnet-package-rights.json').read_bytes(),
+        label='staged NuGet package rights',
+    )
+    records = policy.get('packages') if type(policy) is dict else None
+    if (
+        type(policy) is not dict
+        or policy.get('schema_version') != '1.0.0'
+        or type(records) is not list
+    ):
+        raise ValueError('staged NuGet package-rights schema is unsupported')
+    matches = [
+        record
+        for record in records
+        if (
+            type(record) is dict
+            and record.get('name') == 'Microsoft.Web.WebView2'
+            and record.get('version') == version
+            and record.get('content_hash_sha512_base64') == content_hash
+        )
+    ]
+    if len(matches) != 1:
+        raise ValueError('WebView2 archive lacks one exact staged rights record')
+    record = matches[0]
+    license_file = record.get('license_file')
+    notice_file = record.get('notice_file')
+    expected_path = record.get('expected_license_text_path')
+    if (
+        type(license_file) is not str
+        or PurePosixPath(license_file).name != license_file
+        or type(notice_file) is not str
+        or PurePosixPath(notice_file).name != notice_file
+        or type(expected_path) is not str
+        or not expected_path.startswith(REVIEWED_LICENSE_PREFIX)
+    ):
+        raise ValueError('WebView2 staged rights record paths are invalid')
+
+    license_bytes, notice_bytes, nuspec_bytes = _locked_nupkg_root_evidence(
+        archive_path,
+        license_file=license_file,
+        notice_file=notice_file,
+    )
+    expected_license = product_root.joinpath(
+        *PurePosixPath(expected_path).parts
+    )
+    if (
+        not expected_license.is_file()
+        or _normalized_rights_text(
+            license_bytes,
+            label='WebView2 package license',
+        )
+        != _normalized_rights_text(
+            expected_license.read_bytes(),
+            label='reviewed WebView2 license',
+        )
+    ):
+        raise ValueError('WebView2 package license differs from reviewed evidence')
+    if not notice_bytes:
+        raise ValueError('WebView2 package notice is empty')
+
+    try:
+        root = ET.fromstring(nuspec_bytes)
+    except ET.ParseError as error:
+        raise ValueError('WebView2 package nuspec is invalid') from error
+    metadata = [
+        node for node in root.iter()
+        if isinstance(node.tag, str)
+        and node.tag.rsplit('}', 1)[-1] == 'metadata'
+    ]
+    if len(metadata) != 1:
+        raise ValueError('WebView2 package nuspec metadata is ambiguous')
+    children = {}
+    for child in list(metadata[0]):
+        if not isinstance(child.tag, str):
+            continue
+        local = child.tag.rsplit('}', 1)[-1]
+        if local in children:
+            raise ValueError('WebView2 package nuspec field is duplicated: ' + local)
+        children[local] = child
+    if (
+        (children.get('id').text or '').strip()
+        if children.get('id') is not None
+        else None
+    ) != 'Microsoft.Web.WebView2':
+        raise ValueError('WebView2 package nuspec id mismatch')
+    if (
+        (children.get('version').text or '').strip()
+        if children.get('version') is not None
+        else None
+    ) != version:
+        raise ValueError('WebView2 package nuspec version mismatch')
+    license_node = children.get('license')
+    if (
+        license_node is None
+        or license_node.attrib != {'type': 'file'}
+        or (license_node.text or '').strip() != license_file
+    ):
+        raise ValueError('WebView2 package nuspec license declaration mismatch')
+
+
 def _require_webview2_input_identity(product_root, inputs, nuget_lock):
     if type(inputs) is not dict or type(inputs.get('webview2_sdk')) is not dict:
         raise ValueError('provider-free WebView2 input is missing')
@@ -614,6 +749,12 @@ def build_candidate(*, source_root, source_sha, desktop, host, python_archive, w
         payload / 'product',
         inputs,
         nuget_lock,
+    )
+    _require_webview2_archive_rights(
+        payload / 'product',
+        webview_archive,
+        version=inputs['webview2_sdk']['version'],
+        content_hash=webview_content_hash,
     )
 
     desktop_publish_snapshot = _capture_publish(desktop)

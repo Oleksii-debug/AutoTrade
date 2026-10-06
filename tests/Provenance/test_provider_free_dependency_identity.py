@@ -88,6 +88,124 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
             ):
                 candidate._require_staged_reviewed_license_evidence(root)
 
+
+    def test_webview_archive_rights_bind_exact_policy_and_reviewed_license(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "provenance/licenses").mkdir(parents=True)
+            license_text = (
+                "Example license text.\n"
+                "Redistribution is permitted.\n"
+            )
+            (root / "provenance/licenses/WebView.LICENSE.txt").write_text(
+                license_text,
+                encoding="utf-8",
+            )
+            archive = root / "webview.nupkg"
+            with zipfile.ZipFile(archive, "w") as value:
+                value.writestr("LICENSE.txt", license_text.encode("utf-8"))
+                value.writestr("NOTICE.txt", b"Required notice\n")
+                value.writestr(
+                    "Microsoft.Web.WebView2.nuspec",
+                    (
+                        "<?xml version=\"1.0\"?>"
+                        "<package><metadata>"
+                        "<id>Microsoft.Web.WebView2</id>"
+                        "<version>1.2.3</version>"
+                        "<license type=\"file\">LICENSE.txt</license>"
+                        "</metadata></package>"
+                    ).encode("utf-8"),
+                )
+            content_hash = base64.b64encode(
+                sha512(archive.read_bytes()).digest()
+            ).decode("ascii")
+            (root / "provenance/dotnet-package-rights.json").write_text(
+                json.dumps({
+                    "schema_version": "1.0.0",
+                    "packages": [{
+                        "name": "Microsoft.Web.WebView2",
+                        "version": "1.2.3",
+                        "content_hash_sha512_base64": content_hash,
+                        "license_id": "BSD-3-Clause",
+                        "license_file": "LICENSE.txt",
+                        "notice_file": "NOTICE.txt",
+                        "expected_license_text_path":
+                            "provenance/licenses/WebView.LICENSE.txt",
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            candidate._require_webview2_archive_rights(
+                root,
+                archive,
+                version="1.2.3",
+                content_hash=content_hash,
+            )
+
+            (root / "provenance/licenses/WebView.LICENSE.txt").write_text(
+                license_text + "unexpected restriction\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ValueError, "differs from reviewed evidence"
+            ):
+                candidate._require_webview2_archive_rights(
+                    root,
+                    archive,
+                    version="1.2.3",
+                    content_hash=content_hash,
+                )
+
+    def test_webview_archive_rights_reject_wrong_nuspec_identity(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "provenance/licenses").mkdir(parents=True)
+            license_text = "Example license\n"
+            (root / "provenance/licenses/WebView.LICENSE.txt").write_text(
+                license_text,
+                encoding="utf-8",
+            )
+            archive = root / "webview.nupkg"
+            with zipfile.ZipFile(archive, "w") as value:
+                value.writestr("LICENSE.txt", license_text.encode("utf-8"))
+                value.writestr("NOTICE.txt", b"Required notice\n")
+                value.writestr(
+                    "wrong.nuspec",
+                    (
+                        "<package><metadata>"
+                        "<id>Wrong.Package</id>"
+                        "<version>1.2.3</version>"
+                        "<license type=\"file\">LICENSE.txt</license>"
+                        "</metadata></package>"
+                    ).encode("utf-8"),
+                )
+            content_hash = base64.b64encode(
+                sha512(archive.read_bytes()).digest()
+            ).decode("ascii")
+            (root / "provenance/dotnet-package-rights.json").write_text(
+                json.dumps({
+                    "schema_version": "1.0.0",
+                    "packages": [{
+                        "name": "Microsoft.Web.WebView2",
+                        "version": "1.2.3",
+                        "content_hash_sha512_base64": content_hash,
+                        "license_id": "BSD-3-Clause",
+                        "license_file": "LICENSE.txt",
+                        "notice_file": "NOTICE.txt",
+                        "expected_license_text_path":
+                            "provenance/licenses/WebView.LICENSE.txt",
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "nuspec id mismatch"):
+                candidate._require_webview2_archive_rights(
+                    root,
+                    archive,
+                    version="1.2.3",
+                    content_hash=content_hash,
+                )
+
     def test_sha512_archive_identity_is_verified_before_extraction(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

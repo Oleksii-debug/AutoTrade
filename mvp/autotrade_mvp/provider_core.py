@@ -29,7 +29,10 @@ from autotrade_numeric.exact_decimal import (
 )
 
 from .capabilities import CapabilitySnapshot
-from .dispatch import SubmissionResponseBinding
+from .dispatch import (
+    SubmissionResponseBinding,
+    submission_response_binding_projection,
+)
 from .provider_response_limits import require_provider_json_depth
 
 
@@ -679,8 +682,7 @@ class ProviderSubmissionObservation:
             raise ProviderCoreError(
                 "provider submission observations must come from durable exact response binding"
             )
-        if not isinstance(self.response_binding, SubmissionResponseBinding):
-            raise TypeError("response_binding must be SubmissionResponseBinding")
+        submission_response_binding_projection(self.response_binding)
         endpoint = _text(self.endpoint, "endpoint")
         if not endpoint.startswith("/") or "://" in endpoint:
             raise ProviderCoreError(
@@ -713,31 +715,31 @@ class ProviderSubmissionObservation:
 
     @property
     def provider_id(self) -> str:
-        return self.response_binding.provider.upper()
+        return submission_response_binding_projection(self.response_binding)["provider"].upper()
 
     @property
     def account_id(self) -> str:
-        return self.response_binding.account_id
+        return submission_response_binding_projection(self.response_binding)["account_id"]
 
     @property
     def environment(self) -> str:
-        return self.response_binding.environment
+        return submission_response_binding_projection(self.response_binding)["environment"]
 
     @property
     def client_order_id(self) -> str:
-        return self.response_binding.client_order_id
+        return submission_response_binding_projection(self.response_binding)["client_order_id"]
 
     @property
     def response_sha256(self) -> str:
-        return self.response_binding.response_sha256
+        return submission_response_binding_projection(self.response_binding)["response_sha256"]
 
     @property
     def observed_at(self) -> str:
-        return self.response_binding.sent_at
+        return submission_response_binding_projection(self.response_binding)["sent_at"]
 
     @property
     def request_sha256(self) -> str:
-        return self.response_binding.request_hash
+        return submission_response_binding_projection(self.response_binding)["request_hash"]
 
     def require_scope(
         self,
@@ -786,20 +788,19 @@ def observe_submission_json_response(
 ) -> ProviderSubmissionObservation:
     """Project one exact durable write response into provider-neutral evidence."""
 
-    if not isinstance(response_binding, SubmissionResponseBinding):
-        raise TypeError("response_binding must be SubmissionResponseBinding")
-    if response_binding.terminal_state != "SENT":
+    binding = submission_response_binding_projection(response_binding)
+    if binding["terminal_state"] != "SENT":
         raise ProviderCoreError(
             "provider submission observation requires definitive SENT response"
         )
-    if response_binding.response_encoding != "utf-8-json":
+    if binding["response_encoding"] != "utf-8-json":
         raise ProviderCoreError(
             "provider-write JSON observation requires durable utf-8-json response bytes"
         )
     provider = _text(provider_id, "provider_id").upper()
     if provider not in PROVIDERS:
         raise ProviderCoreError("unknown provider")
-    if response_binding.provider.upper() != provider:
+    if binding["provider"].upper() != provider:
         raise ProviderCoreError("durable submission provider mismatch")
     normalized_endpoint = _text(endpoint, "endpoint")
     if not normalized_endpoint.startswith("/") or "://" in normalized_endpoint:
@@ -810,7 +811,7 @@ def observe_submission_json_response(
         raise ProviderCoreError(
             "prepared_request_sha256 must be a canonical SHA-256 digest"
         )
-    if response_binding.request_hash != prepared_request_sha256:
+    if binding["request_hash"] != prepared_request_sha256:
         raise ProviderCoreError("durable submission request digest mismatch")
     capabilities = tuple(
         _text(value, "capability_snapshot_id")
@@ -833,7 +834,7 @@ def observe_submission_json_response(
         "capability_snapshot_ids": list(capabilities),
         "instrument_versions": list(instruments),
     }
-    actual_scope = _thaw_json(response_binding.submission_scope)
+    actual_scope = _thaw_json(binding["submission_scope"])
     if actual_scope != expected_scope:
         raise ProviderCoreError(
             "durable submission scope does not match prepared provider request"
@@ -841,12 +842,12 @@ def observe_submission_json_response(
 
     identity_material = json.dumps(
         {
-            "aggregate_id": response_binding.aggregate_id,
+            "aggregate_id": binding["aggregate_id"],
             "provider_id": provider,
-            "request_sha256": response_binding.request_hash,
-            "submission_scope_hash": response_binding.submission_scope_hash,
-            "response_sha256": response_binding.response_sha256,
-            "sent_at": response_binding.sent_at,
+            "request_sha256": binding["request_hash"],
+            "submission_scope_hash": binding["submission_scope"]_hash,
+            "response_sha256": binding["response_sha256"],
+            "sent_at": binding["sent_at"],
             "endpoint": normalized_endpoint,
         },
         sort_keys=True,
@@ -867,7 +868,7 @@ def observe_submission_json_response(
         # transport-only JSON preview is not the exact numeric authority.
         # Reparse the SHA-bound durable bytes through the neutral bounded
         # numeric callbacks before constructing an authenticated observation.
-        payload=_decode_exact_json(response_binding.response_bytes),
+        payload=_decode_exact_json(binding["response_bytes"]),
         _observation_token=_SUBMISSION_OBSERVED_RESPONSE_TOKEN,
     )
 

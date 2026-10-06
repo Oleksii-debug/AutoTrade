@@ -26,12 +26,12 @@ from .provider_host_attestation import (
     HostProviderAttestationError,
     VerifiedHostObservedAttestation,
     VerifiedHostPreparedAttestation,
+    _host_utc_key,
     verify_host_observed_attestation,
     verify_host_prepared_attestation,
 )
 from .provider_origin import (
     ProviderOriginError,
-    ProviderOriginJournal,
     _OBSERVED_EVENT,
     _OBSERVED_PAYLOAD_KEYS,
     _PENDING_KIND,
@@ -213,15 +213,16 @@ def _require_host_subject_matches(
     *,
     query_binding: AuthenticatedReadQueryBinding,
     pins: HostProviderOriginPins,
+    _rule_identity=canonical_bybit_authenticated_read_rule_identity,
 ) -> tuple[dict[str, object], AuthenticatedReadEndpointRule]:
     if type(verified) is not VerifiedHostPreparedAttestation:
         raise ProviderOriginHostBridgeError(
             "Host Prepared verification result is non-canonical"
         )
+    if type(pins) is not HostProviderOriginPins:
+        raise TypeError("pins must be exact HostProviderOriginPins")
     snapshot = _exact_query_snapshot(query_binding)
-    rule_identity, rule = canonical_bybit_authenticated_read_rule_identity(
-        query_binding
-    )
+    rule_identity, rule = _rule_identity(query_binding)
     subject = verified.attempt.subject
     expected = {
         "provider_id": snapshot["provider_id"],
@@ -279,20 +280,18 @@ def _require_host_subject_matches(
     return snapshot, rule
 
 
-def verify_bybit_host_prepared_against_binding(
+def _verify_bybit_host_prepared_against_binding_impl(
     envelope: object,
     *,
     query_binding: AuthenticatedReadQueryBinding,
     pins: HostProviderOriginPins,
     expected_session_identity: str,
     expected_public_key_sha256: str,
-    _verify=verify_host_prepared_attestation,
+    verifier,
 ) -> VerifiedHostPreparedAttestation:
-    """Verify Host signature and cross-bind it to current Bybit read authority."""
-
     snapshot = _exact_query_snapshot(query_binding)
     try:
-        verified = _verify(
+        verified = verifier(
             envelope,
             expected_session_identity=_require_pin_text(
                 expected_session_identity,
@@ -314,6 +313,33 @@ def verify_bybit_host_prepared_against_binding(
         pins=pins,
     )
     return verified
+
+
+def _install_prepared_bridge(verifier):
+    def verify_bybit_host_prepared_against_binding(
+        envelope: object,
+        *,
+        query_binding: AuthenticatedReadQueryBinding,
+        pins: HostProviderOriginPins,
+        expected_session_identity: str,
+        expected_public_key_sha256: str,
+    ) -> VerifiedHostPreparedAttestation:
+        return _verify_bybit_host_prepared_against_binding_impl(
+            envelope,
+            query_binding=query_binding,
+            pins=pins,
+            expected_session_identity=expected_session_identity,
+            expected_public_key_sha256=expected_public_key_sha256,
+            verifier=verifier,
+        )
+
+    return verify_bybit_host_prepared_against_binding
+
+
+verify_bybit_host_prepared_against_binding = _install_prepared_bridge(
+    verify_host_prepared_attestation
+)
+del _install_prepared_bridge
 
 
 def _host_key_from_journal_utc(value: object) -> tuple[int, ...]:
@@ -350,10 +376,11 @@ def _require_durable_events_match_verified_host(
     *,
     query_binding: AuthenticatedReadQueryBinding,
     store: JournalStore,
-    _journal_type=ProviderOriginJournal,
+    _require_store=require_exact_journal_store_authority,
     _load=_load_origin_events,
     _event_check=_require_origin_event,
     _snapshot_check=_require_snapshot,
+    _host_time_key=_host_utc_key,
 ) -> None:
     if type(verified) is not VerifiedHostObservedAttestation:
         raise ProviderOriginHostBridgeError(
@@ -363,9 +390,11 @@ def _require_durable_events_match_verified_host(
     prepared_receipt = verified.prepared_durability
     observed_receipt = verified.observed_durability
     try:
-        journal = _journal_type(store)
-        selected_store, identity = journal._require_store()
-        events = _load(selected_store, identity, attempt.read_attempt_id)
+        identity = _require_store(
+            store,
+            subject="provider-origin Host bridge JournalStore",
+        )
+        events = _load(store, identity, attempt.read_attempt_id)
     except (ProviderOriginError, TypeError, RuntimeError, ValueError) as error:
         raise ProviderOriginHostBridgeError(
             "canonical provider-origin journal cannot be read"
@@ -412,18 +441,12 @@ def _require_durable_events_match_verified_host(
 
     if (
         _host_key_from_journal_utc(prepared.get("committed_at"))
-        != __import__(
-            "mvp.autotrade_mvp.provider_host_attestation",
-            fromlist=["_host_utc_key"],
-        )._host_utc_key(
+        != _host_time_key(
             prepared_receipt.committed_at_utc,
             name="durable Prepared committed_at_utc",
         )
         or _host_key_from_journal_utc(observed.get("committed_at"))
-        != __import__(
-            "mvp.autotrade_mvp.provider_host_attestation",
-            fromlist=["_host_utc_key"],
-        )._host_utc_key(
+        != _host_time_key(
             observed_receipt.committed_at_utc,
             name="durable Observed committed_at_utc",
         )
@@ -444,8 +467,10 @@ def _require_durable_events_match_verified_host(
         or observed_payload.get("query_digest") != subject.query_digest
         or observed_payload.get("http_status") != verified.receipt.http_status
         or observed_payload.get("response_sha256") != verified.receipt.response_sha256
-        or observed_payload.get("observed_at") != verified.receipt.observed_at_utc.replace(
-            ".0000000Z", "Z"
+        or _host_key_from_journal_utc(observed_payload.get("observed_at"))
+        != _host_time_key(
+            verified.receipt.observed_at_utc,
+            name="provider observed_at_utc",
         )
     ):
         raise ProviderOriginHostBridgeError(

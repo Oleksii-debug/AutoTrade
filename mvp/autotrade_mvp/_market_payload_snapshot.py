@@ -82,14 +82,21 @@ def _mapping_items_without_callbacks(
         return tuple(value.items())
 
     if type(value) is UserDict:
-        data = value.data
+        # Exact UserDict compatibility must not re-open dynamic attribute
+        # dispatch. Read the instance dictionary through object directly so a
+        # same-process rebind of UserDict.__getattribute__ cannot execute inside
+        # market admission.
+        state = object.__getattribute__(value, "__dict__")
+        if type(state) is not dict:
+            raise PayloadSnapshotError(f"{path} UserDict state is invalid")
+        data = dict.get(state, "data")
         if type(data) is not dict:
             raise PayloadSnapshotError(f"{path} UserDict state is invalid")
         if len(data) > _MAX_PAYLOAD_CONTAINER_ITEMS:
             raise PayloadSnapshotError(
                 f"{path} exceeds the market payload container resource envelope"
             )
-        return tuple(data.items())
+        return tuple(dict.items(data))
 
     if type(value) is FrozenMarketPayload:
         items = value._items

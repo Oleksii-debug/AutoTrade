@@ -4839,6 +4839,7 @@ def _snapshot_external_cash_activity(
         "provider_id",
         "account_id",
         "environment",
+        "provider_environment",
         "activity_id",
         "activity_type",
         "origin",
@@ -4856,6 +4857,7 @@ def _snapshot_external_cash_activity(
         "provider_id",
         "account_id",
         "environment",
+        "provider_environment",
         "activity_id",
         "activity_type",
         "origin",
@@ -4881,6 +4883,7 @@ def _snapshot_external_cash_activity(
         provider_id=state["provider_id"],
         account_id=state["account_id"],
         environment=state["environment"],
+        provider_environment=state["provider_environment"],
         activity_id=state["activity_id"],
         activity_type=state["activity_type"],
         origin=state["origin"],
@@ -4898,6 +4901,7 @@ def _snapshot_external_cash_activity(
             "provider_id",
             "account_id",
             "environment",
+            "provider_environment",
             "activity_id",
             "activity_type",
             "origin",
@@ -4914,6 +4918,7 @@ def _snapshot_external_cash_activity(
         snapshot.provider_id,
         snapshot.account_id,
         snapshot.environment,
+        snapshot.provider_environment,
         snapshot.activity_id,
         snapshot.activity_type,
         snapshot.origin,
@@ -4986,6 +4991,22 @@ def book_external_provider_cash_activity(
         raise ValueError("provider activity evidence account_id mismatch")
     if activity.environment != scope:
         raise ValueError("provider activity evidence environment mismatch")
+    provider_scope = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=activity.provider_environment,
+    )
+    if activity.provider_environment != provider_scope:
+        raise ValueError("provider activity evidence provider_environment mismatch")
+    provider_environment_payload = _provider_environment_payload(
+        provider_environment=provider_scope,
+        environment=scope,
+    )
+    provider_scope_payload = (
+        {}
+        if provider_environment_payload is None
+        else {"provider_environment": provider_environment_payload}
+    )
     if activity.origin not in _ALLOWED_EXTERNAL_ORIGINS:
         raise ValueError(
             "only MANUAL or EXTERNAL provider activity may be booked as an external cash flow"
@@ -5033,12 +5054,14 @@ def book_external_provider_cash_activity(
         provider_id=provider,
         account_id=account,
         environment=scope,
+        provider_environment=provider_scope,
         activity_id=activity.activity_id,
     )
     book_id = _book_id(
         provider_id=provider,
         account_id=account,
         environment=scope,
+        provider_environment=provider_scope,
     )
     cause_event_id = f"provider-activity:{identity}"
     transaction_id = str(
@@ -5059,10 +5082,12 @@ def book_external_provider_cash_activity(
         "provider_id": provider,
         "account_id": account,
         "environment": scope,
+        **provider_scope_payload,
         "activity": {
             "provider_id": activity.provider_id,
             "account_id": activity.account_id,
             "environment": activity.environment,
+            **provider_scope_payload,
             "activity_id": activity.activity_id,
             "activity_type": activity.activity_type,
             "origin": activity.origin,
@@ -5076,6 +5101,7 @@ def book_external_provider_cash_activity(
         "provider_id": provider,
         "account_id": account,
         "environment": scope,
+        **provider_scope_payload,
         "activity_id": activity.activity_id,
         "transaction_id": transaction_id,
         "amount": amount_text,
@@ -5160,6 +5186,7 @@ def book_external_provider_cash_activity(
             or economic_payload.get("provider_id") != provider
             or economic_payload.get("account_id") != account
             or economic_payload.get("environment") != scope
+            or economic_payload.get("provider_environment", scope) != provider_scope
             or economic_payload.get("source_activity_identity") != identity
             or economic_payload.get("transaction")
             != _transaction_payload(transaction)
@@ -5234,6 +5261,7 @@ def book_external_provider_cash_activity(
         "provider_id": provider,
         "account_id": account,
         "environment": scope,
+        **provider_scope_payload,
         "source_activity_identity": identity,
         "observed_at": observed_text,
         "transaction": _transaction_payload(transaction),
@@ -5295,13 +5323,15 @@ def load_provider_account_economic_book(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> EconomicBook:
-    """Rebuild canonical economics from the one durable provider/account journal."""
+    """Rebuild canonical economics from one exact provider-domain journal."""
 
     durable = DurableProviderEconomicBook(
         store,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     return EconomicBook(durable.transactions)

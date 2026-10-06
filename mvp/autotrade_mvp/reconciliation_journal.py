@@ -1443,6 +1443,32 @@ def unknown_submissions_from_dispatch(
         if not isinstance(payload, Mapping):
             raise ValueError("SubmissionPrepared payload must be an object")
 
+        event_types = tuple(
+            _text(event.get("event_type"), name="event_type")
+            for event in events
+        )
+        aggregate_versions = tuple(
+            event.get("aggregate_version")
+            for event in events
+        )
+        if (
+            any(type(version) is not int for version in aggregate_versions)
+            or aggregate_versions != tuple(range(1, len(events) + 1))
+        ):
+            raise ValueError(
+                "submission recovery history has noncanonical aggregate versions"
+            )
+        if event_types not in {
+            ("SubmissionPrepared",),
+            ("SubmissionPrepared", "SubmissionBlocked"),
+            ("SubmissionPrepared", "SubmissionUnknown"),
+            ("SubmissionPrepared", "SubmissionSending"),
+            ("SubmissionPrepared", "SubmissionBlocked", "SubmissionUnknown"),
+            ("SubmissionPrepared", "SubmissionSending", "SubmissionSent"),
+            ("SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"),
+        }:
+            raise ValueError("submission recovery history has invalid causal shape")
+
         # The caller-supplied aggregate map is a locator only. Modern dispatch
         # rows carry the logical attempt identity in SubmissionPrepared and must
         # agree exactly with the requested identity. Historical rows without

@@ -256,6 +256,28 @@ def _stable_hash(payload: object) -> str:
     return sha256(encoded).hexdigest()
 
 
+def _simulation_intent_id(
+    *,
+    symbol: str,
+    side: str,
+    quantity: Decimal,
+    price: Decimal,
+    input_hash: str,
+    financial_configuration_hash: str,
+) -> str:
+    """Derive the durable simulated intent identity from exact causal inputs."""
+
+    payload = {
+        "symbol": symbol,
+        "side": side,
+        "quantity": str(quantity),
+        "price": str(price),
+        "input_hash": input_hash,
+        "financial_configuration_hash": financial_configuration_hash,
+    }
+    return "intent-" + _stable_hash(payload)[:20]
+
+
 def _best_effort_fsync_directory(directory: Path) -> None:
     """Best-effort metadata flush after rename without post-commit failure."""
 
@@ -695,6 +717,7 @@ def _require_replay_evidence_record(
 def _require_checkpoint_evidence_financial_state(
     state: dict,
     *,
+    symbol: str,
     financial_configuration_hash: str,
     restored_fills: dict[str, Fill],
     ledger: EconomicLedger,
@@ -730,6 +753,21 @@ def _require_checkpoint_evidence_financial_state(
             fill = restored_fills.get(order_id)
             if fill is None or fill.fill_id != record["fill_id"]:
                 raise ValueError("Checkpoint replay evidence conflicts with restored fill")
+            if (
+                record["decision"] != fill.side
+                or order_id
+                != _simulation_intent_id(
+                    symbol=symbol,
+                    side=fill.side,
+                    quantity=fill.quantity,
+                    price=fill.price,
+                    input_hash=record["input_hash"],
+                    financial_configuration_hash=financial_configuration_hash,
+                )
+            ):
+                raise ValueError(
+                    "Checkpoint replay intent identity is not causally bound"
+                )
             observed_order_ids.add(order_id)
         ordered.append((timestamp, evidence_id, record))
 
@@ -1249,6 +1287,27 @@ def verify_replay(state_dir: str | Path) -> bool:
             symbol=symbol,
             fee_rate=fee_rate,
         )
+        for row in rows:
+            order_id = row["order_id"]
+            if order_id is None:
+                continue
+            fill = restored_fills.get(order_id)
+            if (
+                fill is None
+                or row["fill_id"] != fill.fill_id
+                or row["decision"] != fill.side
+                or order_id
+                != _simulation_intent_id(
+                    symbol=symbol,
+                    side=fill.side,
+                    quantity=fill.quantity,
+                    price=fill.price,
+                    input_hash=row["input_hash"],
+                    financial_configuration_hash=configuration_hash,
+                )
+            ):
+                return False
+
         checkpoint_provider = SimulatedProvider(restored_fills)
         _reconcile(checkpoint_provider, checkpoint_ledger)
 
@@ -1423,6 +1482,7 @@ def run_vertical_slice(
         _reconcile(SimulatedProvider(preflight_fills), preflight_ledger)
         _require_checkpoint_evidence_financial_state(
             state,
+            symbol=symbol,
             financial_configuration_hash=financial_configuration_hash,
             restored_fills=preflight_fills,
             ledger=preflight_ledger,
@@ -1450,22 +1510,25 @@ def run_vertical_slice(
     provider = SimulatedProvider(restored_fills)
     _reconcile(provider, ledger)
     normalized = handle_market_data(prices)
+    input_hash = _stable_hash([str(item) for item in normalized])
     decision = handle_strategy(normalized, quantity)
     intent = None
     fill = None
     risk_reason = "hold"
     if decision.side != "HOLD":
-        intent_payload = {
-            "symbol": symbol,
-            "side": decision.side,
-            "quantity": str(decision.quantity),
-            "price": str(decision.price),
-            "input_hash": _stable_hash([str(item) for item in normalized]),
-            "financial_configuration_hash": financial_configuration_hash,
-        }
         intent = OrderIntent(
-            client_order_id="intent-" + _stable_hash(intent_payload)[:20], symbol=symbol, side=decision.side,
-            quantity=decision.quantity, price=decision.price,
+            client_order_id=_simulation_intent_id(
+                symbol=symbol,
+                side=decision.side,
+                quantity=decision.quantity,
+                price=decision.price,
+                input_hash=input_hash,
+                financial_configuration_hash=financial_configuration_hash,
+            ),
+            symbol=symbol,
+            side=decision.side,
+            quantity=decision.quantity,
+            price=decision.price,
         )
         if intent.client_order_id in provider.fills:
             admitted, risk_reason = True, "already_filled"
@@ -1497,7 +1560,7 @@ def run_vertical_slice(
     fresh_evidence = {
         "schema_version": 2,
         "evidence_id": evidence_id,
-        "input_hash": _stable_hash([str(item) for item in normalized]),
+        "input_hash": input_hash,
         "decision": decision.side,
         "decision_reason": decision.reason,
         "risk_outcome": risk_reason,

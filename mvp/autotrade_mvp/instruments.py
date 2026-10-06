@@ -214,7 +214,7 @@ class OffsetTransition:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "effective_from", _utc(self.effective_from, "effective_from"))
-        if isinstance(self.utc_offset_minutes, bool) or not isinstance(self.utc_offset_minutes, int):
+        if type(self.utc_offset_minutes) is not int:
             raise InstrumentRegistryError("utc_offset_minutes must be an integer")
         if not -14 * 60 <= self.utc_offset_minutes <= 14 * 60:
             raise InstrumentRegistryError("utc_offset_minutes is outside supported bounds")
@@ -227,11 +227,11 @@ class WeeklySession:
     close_minute: int
 
     def __post_init__(self) -> None:
-        if isinstance(self.weekday, bool) or self.weekday not in range(7):
+        if type(self.weekday) is not int or self.weekday not in range(7):
             raise InstrumentRegistryError("weekday must be between 0 and 6")
-        if not 0 <= self.open_minute < 24 * 60:
+        if type(self.open_minute) is not int or not 0 <= self.open_minute < 24 * 60:
             raise InstrumentRegistryError("open_minute is outside the day")
-        if not 0 < self.close_minute <= 24 * 60:
+        if type(self.close_minute) is not int or not 0 < self.close_minute <= 24 * 60:
             raise InstrumentRegistryError("close_minute is outside the day")
         if self.open_minute >= self.close_minute:
             raise InstrumentRegistryError("overnight or empty sessions require an explicit split")
@@ -248,6 +248,18 @@ class TradingCalendar:
     def __post_init__(self) -> None:
         object.__setattr__(self, "calendar_id", _text(self.calendar_id, "calendar_id"))
         object.__setattr__(self, "timezone_id", _text(self.timezone_id, "timezone_id"))
+        if type(self.continuous) is not bool:
+            raise InstrumentRegistryError("continuous must be a boolean")
+        if type(self.sessions) not in (tuple, list):
+            raise InstrumentRegistryError("sessions must be an exact built-in array")
+        if type(self.transitions) not in (tuple, list):
+            raise InstrumentRegistryError("transitions must be an exact built-in array")
+        if any(type(item) is not WeeklySession for item in self.sessions):
+            raise InstrumentRegistryError("sessions entries must be exact WeeklySession")
+        if any(type(item) is not OffsetTransition for item in self.transitions):
+            raise InstrumentRegistryError(
+                "transitions entries must be exact OffsetTransition"
+            )
         object.__setattr__(self, "sessions", tuple(self.sessions))
         ordered = tuple(sorted(tuple(self.transitions), key=lambda item: item.effective_from))
         if len({item.effective_from for item in ordered}) != len(ordered):
@@ -1080,7 +1092,7 @@ class InstrumentRegistry:
         known_at: list[datetime] = []
         for evidence in version.metadata_evidence:
             raw = evidence.get("observed_at")
-            if not isinstance(raw, str) or not raw.endswith("Z"):
+            if type(raw) is not str or not raw.endswith("Z"):
                 raise InstrumentRegistryError(
                     "instrument metadata evidence has invalid observed_at"
                 )
@@ -1095,7 +1107,7 @@ class InstrumentRegistry:
 
             artifact_id = evidence.get("artifact_id")
             expected_digest = evidence.get("sha256")
-            if not isinstance(artifact_id, str) or not isinstance(expected_digest, str):
+            if type(artifact_id) is not str or type(expected_digest) is not str:
                 raise InstrumentRegistryError(
                     "instrument metadata evidence identity is invalid"
                 )
@@ -1135,7 +1147,7 @@ class InstrumentRegistry:
             if "rights_id" in evidence and manifest.get("rights", {}).get("rights_id") != evidence["rights_id"]:
                 raise InstrumentRegistryError("instrument metadata evidence rights identity mismatch")
             committed_raw = manifest.get("created_at")
-            if not isinstance(committed_raw, str):
+            if type(committed_raw) is not str:
                 raise InstrumentRegistryError(
                     "instrument metadata evidence lacks trusted commit time"
                 )

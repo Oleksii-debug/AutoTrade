@@ -143,6 +143,13 @@ class ExactJsonTransportResponse:
             raise ValueError(
                 "provider response bytes violate shared byte budget"
             ) from error
+        if (
+            type(self.response_encoding) is not str
+            or self.response_encoding not in {"utf-8-json", "hex"}
+        ):
+            raise ValueError("durable provider response encoding is invalid")
+        if self.response_encoding == "utf-8-json":
+            _decode_exact_json_bytes(self.response_bytes)
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -204,6 +211,7 @@ class SubmissionResponseBinding:
     submission_scope_hash: str
     response_bytes: bytes
     response_sha256: str
+    response_encoding: str = "utf-8-json"
     http_status: int | None = None
     _factory_token: object = field(default=None, repr=False, compare=False)
 
@@ -278,6 +286,8 @@ class SubmissionResponseBinding:
 
     @property
     def payload(self) -> Any:
+        if self.response_encoding != "utf-8-json":
+            raise ValueError("opaque provider response has no JSON payload")
         return _freeze_json(_decode_exact_json_bytes(self.response_bytes))
 
 
@@ -613,6 +623,7 @@ def load_submission_response_binding(
         submission_scope_hash=scope_hash,
         response_bytes=response_bytes,
         response_sha256=response_sha256,
+        response_encoding=response_encoding,
         http_status=http_status,
         _factory_token=_SUBMISSION_RESPONSE_BINDING_TOKEN,
     )
@@ -690,6 +701,7 @@ def _install_submission_response_binding_authority(loader):
         "submission_scope_hash",
         "response_bytes",
         "response_sha256",
+        "response_encoding",
         "http_status",
         "_factory_token",
     )
@@ -785,6 +797,8 @@ def _install_submission_response_binding_authority(loader):
             authority_changed()
         if canonical_type(current[11]) is not canonical_bytes:
             authority_changed()
+        if canonical_type(current[13]) is not canonical_str:
+            authority_changed()
         prune()
         object_id = canonical_id(value)
         previous = states.get(object_id)
@@ -817,14 +831,16 @@ def _install_submission_response_binding_authority(loader):
             authority_changed()
         if canonical_type(current[12]) is not canonical_str or current[12] != expected[12]:
             authority_changed()
-        if current[13] is not None:
-            if canonical_type(current[13]) is not canonical_int:
-                authority_changed()
-            if current[13] != expected[13]:
-                authority_changed()
-        elif expected[13] is not None:
+        if canonical_type(current[13]) is not canonical_str or current[13] != expected[13]:
             authority_changed()
-        if current[14] is not binding_token:
+        if current[14] is not None:
+            if canonical_type(current[14]) is not canonical_int:
+                authority_changed()
+            if current[14] != expected[14]:
+                authority_changed()
+        elif expected[14] is not None:
+            authority_changed()
+        if current[15] is not binding_token:
             authority_changed()
         return value
 

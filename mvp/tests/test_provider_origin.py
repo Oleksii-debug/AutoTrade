@@ -363,6 +363,57 @@ class ProviderOriginJournalTests(unittest.TestCase):
         finally:
             provider_origin_module._require_authenticated_read_query_binding_authority = original
 
+    def test_provider_origin_journal_io_ignores_rebound_journalstore_alias(self):
+        query = authenticated_read_binding()
+        with TemporaryDirectory() as directory:
+            real_store = JournalStore(f"{directory}/journal.sqlite3")
+            journal = ProviderOriginJournal(real_store)
+
+            class FakeJournalStore:
+                calls = 0
+
+                @staticmethod
+                def append_event(*_args, **_kwargs):
+                    FakeJournalStore.calls += 1
+                    raise AssertionError("rebound append_event executed")
+
+                @staticmethod
+                def load_events(*_args, **_kwargs):
+                    FakeJournalStore.calls += 1
+                    raise AssertionError("rebound load_events executed")
+
+            original = provider_origin_module.JournalStore
+            provider_origin_module.JournalStore = FakeJournalStore
+            try:
+                attempt_id = journal.prepare(
+                    query,
+                    transport_identity="UrllibJsonWireClient:v1",
+                    network_policy_identity="sha256:" + "a" * 64,
+                    recorded_at=READ_NOW,
+                )
+                binding = journal._record_test_injected_response(
+                    attempt_id,
+                    query,
+                    http_status=200,
+                    response_bytes=b'{"ok":true}',
+                    observed_at=READ_NOW + timedelta(seconds=1),
+                )
+            finally:
+                provider_origin_module.JournalStore = original
+
+            self.assertEqual(FakeJournalStore.calls, 0)
+            self.assertEqual(binding.evidence_class, "TEST_INJECTED")
+            self.assertEqual(binding.response_bytes, b'{"ok":true}')
+            events = JournalStore.load_events(
+                real_store,
+                "authenticated_provider_read",
+                attempt_id,
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["AuthenticatedReadPrepared", "AuthenticatedReadObserved"],
+            )
+
     def test_prepared_only_attempt_cannot_become_response_binding(self):
         query = authenticated_read_binding()
         with TemporaryDirectory() as directory:

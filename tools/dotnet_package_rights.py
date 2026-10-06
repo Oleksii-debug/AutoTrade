@@ -350,18 +350,35 @@ def _workflow_rights_blockers(
     except (OSError, UnicodeError):
         return ["DOTNET_PACKAGE_RIGHTS_WORKFLOW_MISSING"]
 
+    workflow_lines = workflow_text.splitlines()
     authority_lines = [
         line_number
-        for line_number, raw in enumerate(workflow_text.splitlines(), start=1)
+        for line_number, raw in enumerate(workflow_lines, start=1)
         if raw.strip().startswith("NUGET_PACKAGES:")
     ]
     canonical_authority_lines = [
         line_number
-        for line_number, raw in enumerate(workflow_text.splitlines(), start=1)
+        for line_number, raw in enumerate(workflow_lines, start=1)
         if raw.strip() == _CANONICAL_NUGET_PACKAGES_AUTHORITY
     ]
+    unexpected_nuget_authority_lines = [
+        line_number
+        for line_number, raw in enumerate(workflow_lines, start=1)
+        if (
+            "NUGET_PACKAGES" in raw
+            and raw.strip() != _CANONICAL_NUGET_PACKAGES_AUTHORITY
+            and not (
+                "tools/dotnet_package_rights.py" in raw
+                and _CANONICAL_VERIFY_PACKAGES_ROOT in raw
+            )
+        )
+    ]
     blockers: list[str] = []
-    if len(authority_lines) != 1 or authority_lines != canonical_authority_lines:
+    if (
+        len(authority_lines) != 1
+        or authority_lines != canonical_authority_lines
+        or unexpected_nuget_authority_lines
+    ):
         blockers.append("DOTNET_PACKAGE_RIGHTS_NUGET_PACKAGES_AUTHORITY_INVALID")
 
     verified, invalid_lines = workflow_restored_rights_projects(workflow_text)
@@ -381,7 +398,6 @@ def _workflow_rights_blockers(
                 f"DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_NOT_FOUND:{project}"
             )
 
-    workflow_lines = workflow_text.splitlines()
     for project in sorted(set(package_projects)):
         relative = project.relative_to(root).as_posix()
         if relative not in seen:

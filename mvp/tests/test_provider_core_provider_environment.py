@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
+    CapabilityRegistry,
     EvidenceVerification,
     derive_capability_snapshot,
 )
@@ -14,6 +15,13 @@ from mvp.autotrade_mvp.provider_core import (
     provider_response_observation_projection,
     provider_response_observation_require_scope,
 )
+from mvp.autotrade_mvp.provider_transport import (
+    BYBIT_V5_ENDPOINT_POLICIES,
+    BybitV5AuthenticatedReadSigner,
+    BybitV5AuthenticatedReadTransport,
+    ProviderTransportScopeError,
+)
+from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 
 
 NOW = datetime(2026, 10, 6, 14, 45, tzinfo=timezone.utc)
@@ -143,6 +151,53 @@ class AuthenticatedReadProviderEnvironmentTests(unittest.TestCase):
                 surface=Surface.AUTHENTICATED_READ,
                 endpoint="/v5/account/wallet-balance",
             )
+
+    def test_bybit_signer_rejects_policy_from_another_provider_domain(self):
+        query = binding("TESTNET")
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "provider environment mismatch",
+        ):
+            BybitV5AuthenticatedReadSigner.sign(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["DEMO"],
+                query_binding=query,
+                credential_plaintext='{"api_key":"test-key","api_secret":"test-secret"}',
+                timestamp_ms=1_700_000_000_000,
+            )
+
+    def test_bybit_transport_rejects_wrong_domain_before_secret_or_network(self):
+        class NoSecret:
+            def lease_for_execution(self, *_args, **_kwargs):
+                raise AssertionError("secret resolver must not be reached")
+
+        transport = BybitV5AuthenticatedReadTransport(
+            policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+            provider_environment="TESTNET",
+            account_id="acct-1",
+            capability_snapshot_id=SNAPSHOT_ID,
+            capability_registry=CapabilityRegistry(),
+            secret_resolver=NoSecret(),
+            credential_handle=PersistentCredentialHandle(
+                handle_id="bybit-read-testnet",
+                account_id="acct-1",
+                provider="BYBIT",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                purpose="READ",
+                generation=1,
+            ),
+            session_token="session",
+            origin="https://localhost",
+            execution_identity="provider-domain-test",
+            clock_millis=lambda: 1_700_000_000_000,
+            clock_utc=lambda: NOW,
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "query scope mismatch",
+        ):
+            transport(binding("DEMO"))
+
 
     def test_provider_environment_mutation_after_mint_is_detected(self):
         query = binding("TESTNET")

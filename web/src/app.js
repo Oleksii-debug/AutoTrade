@@ -632,13 +632,58 @@
       body: JSON.stringify(payload)
     });
     if (response.status !== 200 && response.status !== 409) {
+      let errorBody = null;
+      try {
+        const contentType = response.headers.get("Content-Type") || "";
+        if (contentType.includes("application/json")) {
+          errorBody = await response.json();
+        }
+      } catch {
+        errorBody = null;
+      }
       const error = new Error("Host command failed with status " + response.status);
       error.status = response.status;
+      if (errorBody && typeof errorBody === "object" && !Array.isArray(errorBody) &&
+          typeof errorBody.error === "string") {
+        error.code = errorBody.error;
+      }
       throw error;
     }
     return parseCommandResult(await response.json(), payload.command_id);
   }
 
+  function text(id, value, fallback = "Unavailable") {
+    const element = byId(id);
+    if (!element) return;
+    const rendered = value === null || value === undefined || value === ""
+      ? fallback
+      : String(value);
+    if (element.textContent !== rendered) {
+      element.textContent = rendered;
+    }
+  }
+
+  function stableProjectionValue(value) {
+    if (Array.isArray(value)) {
+      return value.map((item) => stableProjectionValue(item));
+    }
+    if (value && typeof value === "object") {
+      const ordered = {};
+      for (const key of Object.keys(value).sort()) {
+        ordered[key] = stableProjectionValue(value[key]);
+      }
+      return ordered;
+    }
+    return value;
+  }
+
+  function projectionText(value) {
+    if (value === null) return "null";
+    if (value && typeof value === "object") {
+      return JSON.stringify(stableProjectionValue(value));
+    }
+    return String(value);
+  }
   function text(id, value, fallback = "Unavailable") {
     const element = byId(id);
     if (!element) return;
@@ -744,7 +789,136 @@
     return rows;
   }
 
-  function appendProjectionRow(body, label, value) {
+  function selectedCellEndpoint(body, node, offset) {
+    const element = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+    const cell = element && element.closest ? element.closest("th, td") : null;
+    const row = cell && cell.parentElement;
+    if (!cell || !row || !body.contains(row) || !row.dataset.selectionKey) return null;
+    const cellIndex = [...row.cells].indexOf(cell);
+    if (cellIndex < 0) return null;
+    const prefix = document.createRange();
+    prefix.selectNodeContents(cell);
+    try {
+      prefix.setEnd(node, offset);
+    } catch {
+      return null;
+    }
+    return Object.freeze({
+      rowKey: row.dataset.selectionKey,
+      rowText: row.dataset.selectionExact === "true" ? row.textContent : null,
+      cellIndex,
+      textOffset: prefix.toString().length
+    });
+  }
+
+  function captureTableSelection(body) {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
+    const anchor = selectedCellEndpoint(body, selection.anchorNode, selection.anchorOffset);
+    const focus = selectedCellEndpoint(body, selection.focusNode, selection.focusOffset);
+    return anchor !== null && focus !== null ? Object.freeze({anchor, focus}) : null;
+  }
+
+  function textPointAtOffset(cell, requestedOffset) {
+    let remaining = Math.max(0, requestedOffset);
+    const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    let last = null;
+    while (node !== null) {
+      last = node;
+      if (remaining <= node.data.length) {
+        return Object.freeze({node, offset: remaining});
+      }
+      remaining -= node.data.length;
+      node = walker.nextNode();
+    }
+    return last === null
+      ? null
+      : Object.freeze({node: last, offset: last.data.length});
+  }
+
+  function rowForSelectionEndpoint(body, endpoint) {
+    return [...body.rows].find(
+      (candidate) => candidate.dataset.selectionKey === endpoint.rowKey &&
+        (endpoint.rowText === null || candidate.textContent === endpoint.rowText)) || null;
+  }
+
+  function revealBookmarkedTablePage(body, bookmark) {
+    if (bookmark === null) return;
+    const tool = toolForBody(body.id);
+    const filter = tool === null ? null : byId(tool.filterId);
+    if (tool === null || !filter) return;
+
+    const rows = filterableRows(body);
+    const anchorRow = rowForSelectionEndpoint(body, bookmark.anchor);
+    const focusRow = rowForSelectionEndpoint(body, bookmark.focus);
+    if (anchorRow === null || focusRow === null) return;
+
+    ensureTableHostOrder(rows);
+    const query = normalizedTableQuery(filter.value);
+    const ordered = orderedTableRows(tool, rows, tableSortMode(tool));
+    const matching = ordered.filter(
+      (row) => query === "" || tableSearchText(row).includes(query));
+    const anchorIndex = matching.indexOf(anchorRow);
+    const focusIndex = matching.indexOf(focusRow);
+    if (anchorIndex < 0 || focusIndex < 0) return;
+
+    const anchorPage = Math.floor(anchorIndex / TABLE_PAGE_SIZE);
+    const focusPage = Math.floor(focusIndex / TABLE_PAGE_SIZE);
+    if (anchorPage !== focusPage) return;
+
+    const view = tableViewFor(tool);
+    if (view.page === anchorPage) return;
+    view.page = anchorPage;
+    applyTableFilter(tool, {announce: false});
+  }
+
+  function restoreTableSelection(body, bookmark) {
+    if (bookmark === null) return;
+    const findPoint = (endpoint) => {
+      const row = rowForSelectionEndpoint(body, endpoint);
+      if (!row || row.hidden) return null;
+      const cell = row.cells[endpoint.cellIndex];
+      return cell ? textPointAtOffset(cell, endpoint.textOffset) : null;
+    };
+    const anchor = findPoint(bookmark.anchor);
+    const focus = findPoint(bookmark.focus);
+    if (anchor === null || focus === null) return;
+    const selection = window.getSelection();
+    if (!selection) return;
+    selection.removeAllRanges();
+    if (typeof selection.setBaseAndExtent === "function") {
+      try {
+        selection.setBaseAndExtent(
+          anchor.node, anchor.offset, focus.node, focus.offset);
+      } catch {
+        return;
+      }
+      return;
+    }
+    const range = document.createRange();
+    try {
+      range.setStart(anchor.node, anchor.offset);
+      range.setEnd(focus.node, focus.offset);
+      if (range.collapsed) {
+        range.setStart(focus.node, focus.offset);
+        range.setEnd(anchor.node, anchor.offset);
+      }
+    } catch {
+      return;
+    }
+    selection.addRange(range);
+  }
+
+  function preserveTableSelection(body, enabled, render) {
+    const bookmark = enabled ? captureTableSelection(body) : null;
+    render();
+    revealBookmarkedTablePage(body, bookmark);
+    restoreTableSelection(body, bookmark);
+  }
+
+  
+function appendProjectionRow(body, label, value) {
     const row = document.createElement("tr");
     row.dataset.filterableRow = "true";
     const header = document.createElement("th");
@@ -756,75 +930,86 @@
     body.appendChild(row);
   }
 
-  function renderProjection(bodyId, record, emptyMessage) {
+  function renderProjection(bodyId, record, emptyMessage, {preserveSelection = true} = {}) {
     const body = byId(bodyId);
     if (!body) return;
-    body.replaceChildren();
-    const entries = flattenProjectionRows(record);
-    if (entries.length === 0) {
-      const row = document.createElement("tr");
-      const cell = document.createElement("td");
-      cell.colSpan = 2;
-      cell.textContent = emptyMessage;
-      row.appendChild(cell);
-      body.appendChild(row);
+    preserveTableSelection(body, preserveSelection, () => {
+      body.replaceChildren();
+      const entries = flattenProjectionRows(record);
+      if (entries.length === 0) {
+        const row = document.createElement("tr");
+        row.dataset.selectionKey = "empty";
+        const cell = document.createElement("td");
+        cell.colSpan = 2;
+        cell.textContent = emptyMessage;
+        row.appendChild(cell);
+        body.appendChild(row);
+      } else {
+        for (const [key, value] of entries) {
+          appendProjectionRow(body, key, value);
+        }
+      }
       reapplyTableFilter(bodyId);
-      return;
-    }
-    for (const [key, value] of entries) {
-      appendProjectionRow(body, key, value);
-    }
-    reapplyTableFilter(bodyId);
+    });
   }
-
-  function renderPermissionSummary(permissionSummary) {
+  function renderPermissionSummary(permissionSummary, {preserveSelection = true} = {}) {
     const body = byId("permissions-body");
     if (!body) return;
-    body.replaceChildren();
-    appendProjectionRow(body, "Actor", permissionSummary.actor);
-    appendProjectionRow(body, "Session", permissionSummary.session);
-    appendProjectionRow(body, "Role", permissionSummary.role);
-    if (permissionSummary.capabilities.length === 0) {
-      appendProjectionRow(
-        body, "Capabilities", "No capabilities reported by the host snapshot.");
+    preserveTableSelection(body, preserveSelection, () => {
+      body.replaceChildren();
+      appendProjectionRow(body, "Actor", permissionSummary.actor);
+      appendProjectionRow(body, "Session", permissionSummary.session);
+      appendProjectionRow(body, "Role", permissionSummary.role);
+      if (permissionSummary.capabilities.length === 0) {
+        appendProjectionRow(
+          body, "Capabilities", "No capabilities reported by the host snapshot.");
+      } else {
+        permissionSummary.capabilities.forEach((capability, index) => {
+          const row = appendProjectionRow(
+            body, "Capability " + String(index + 1), capability);
+          // Capability position is not durable identity; do not retarget a
+          // selection if different evidence later occupies the same position.
+          row.dataset.selectionExact = "true";
+        });
+      }
       reapplyTableFilter("permissions-body");
-      return;
-    }
-    permissionSummary.capabilities.forEach((capability, index) => {
-      appendProjectionRow(
-        body, "Capability " + String(index + 1), capability);
     });
-    reapplyTableFilter("permissions-body");
   }
-
-  function renderJobs(jobs) {
+  function renderJobs(jobs, {preserveSelection = true} = {}) {
     const body = byId("jobs-body");
     if (!body) return;
-    body.replaceChildren();
-    if (jobs.length === 0) {
-      const row = document.createElement("tr");
-      const cell = document.createElement("td");
-      cell.colSpan = 2;
-      cell.textContent = "No background jobs reported by the host snapshot.";
-      row.appendChild(cell);
-      body.appendChild(row);
+    preserveTableSelection(body, preserveSelection, () => {
+      body.replaceChildren();
+      if (jobs.length === 0) {
+        const row = document.createElement("tr");
+        row.dataset.selectionKey = "empty";
+        const cell = document.createElement("td");
+        cell.colSpan = 2;
+        cell.textContent = "No background jobs reported by the host snapshot.";
+        row.appendChild(cell);
+        body.appendChild(row);
+      } else {
+        jobs.forEach((job, index) => {
+          const row = document.createElement("tr");
+          row.dataset.filterableRow = "true";
+          row.dataset.tableHostOrder = String(index);
+          row.dataset.selectionKey = "job:" + String(index + 1);
+          // UiSnapshot.jobs has no required durable job identifier. Position
+          // alone is not identity, so preserve a selected row only while its
+          // complete rendered evidence remains unchanged.
+          row.dataset.selectionExact = "true";
+          const header = document.createElement("th");
+          header.scope = "row";
+          header.textContent = "Job " + String(index + 1);
+          const cell = document.createElement("td");
+          cell.textContent = projectionText(job);
+          row.append(header, cell);
+          body.appendChild(row);
+        });
+      }
       reapplyTableFilter("jobs-body");
-      return;
-    }
-    jobs.forEach((job, index) => {
-      const row = document.createElement("tr");
-      row.dataset.filterableRow = "true";
-      const header = document.createElement("th");
-      header.scope = "row";
-      header.textContent = "Job " + String(index + 1);
-      const cell = document.createElement("td");
-      cell.textContent = projectionText(job);
-      row.append(header, cell);
-      body.appendChild(row);
     });
-    reapplyTableFilter("jobs-body");
   }
-
   function normalizedTableQuery(value) {
     return String(value ?? "").trim().toLowerCase();
   }
@@ -1125,6 +1310,68 @@
     queuePoliteAnnouncement(message);
   }
 
+  async async function jsonFetch(url, options = {}) {
+    const response = await fetch(url, {
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: {
+        "Accept": "application/json",
+        ...(options.body ? {"Content-Type": "application/json"} : {}),
+        ...(options.headers || {})
+      },
+      ...options
+    });
+    if (!response.ok) {
+      let errorBody = null;
+      try {
+        const contentType = response.headers.get("Content-Type") || "";
+        if (contentType.includes("application/json")) {
+          errorBody = await response.json();
+        }
+      } catch {
+        errorBody = null;
+      }
+      const error = new Error(`Host request failed with status ${response.status}`);
+      error.status = response.status;
+      if (errorBody && typeof errorBody === "object" && !Array.isArray(errorBody)) {
+        if (typeof errorBody.error === "string") error.code = errorBody.error;
+        if (errorBody.retryable === true) error.retryable = true;
+      }
+      throw error;
+    }
+    return response.json();
+  }
+  function invalidateSnapshotAuthority() {
+    state.snapshotReady = false;
+    state.sessionIdentity = null;
+    state.accountId = null;
+    state.environment = null;
+    setCommandAvailability(false);
+  }
+
+  function isSnapshotBusy(error) {
+    return error !== null && typeof error === "object" &&
+      error.status === 503 &&
+      error.code === "SNAPSHOT_BUSY" &&
+      error.retryable === true;
+  }
+
+  function isCommandAuthRejection(error) {
+    return error !== null && typeof error === "object" &&
+      error.status === 403 &&
+      error.code === "AUTHENTICATION_OR_AUTHORIZATION_FAILED";
+  }
+
+
+  function reportSnapshotBusy() {
+    invalidateSnapshotAuthority();
+    const message =
+      "Host snapshot is temporarily busy while durable state changes; waiting for one coherent snapshot. " +
+      "Commands remain blocked and displayed values may be stale.";
+    text("freshness", message);
+    queuePoliteAnnouncement(message);
+  }
+
   async function jsonFetch(url, options = {}) {
     const response = await fetch(url, {
       credentials: "same-origin",
@@ -1137,14 +1384,28 @@
       ...options
     });
     if (!response.ok) {
+      let errorBody = null;
+      try {
+        const contentType = response.headers.get("Content-Type") || "";
+        if (contentType.includes("application/json")) {
+          errorBody = await response.json();
+        }
+      } catch {
+        errorBody = null;
+      }
       const error = new Error(`Host request failed with status ${response.status}`);
       error.status = response.status;
+      if (errorBody && typeof errorBody === "object" && !Array.isArray(errorBody)) {
+        if (typeof errorBody.error === "string") error.code = errorBody.error;
+        if (errorBody.retryable === true) error.retryable = true;
+      }
       throw error;
     }
     return response.json();
   }
 
-  function renderOperation(operation) {
+  
+function renderOperation(operation) {
     const body = byId("operations-body");
     if (!body) return;
 
@@ -1213,7 +1474,10 @@
   function renderHostEvent(event, cursor, stateVersion) {
     const body = byId("event-history-body");
     if (!body) return;
-    const kind = requiredText(event.kind ?? event.event_type, "event.kind");
+    const bookmark = captureTableSelection(body);
+    const kind = requiredText(
+      event.kind ?? event.event_type,
+      "event.kind");
     const payload = event.payload === undefined ? {} : event.payload;
     const cursorText = cursor.toString();
     const stateVersionText = stateVersion.toString();
@@ -1252,7 +1516,9 @@
       const rowHeader = document.createElement("th");
       rowHeader.scope = "row";
       row.appendChild(rowHeader);
-      for (let index = 1; index < 4; index += 1) row.appendChild(document.createElement("td"));
+      for (let index = 1; index < 4; index += 1) {
+        row.appendChild(document.createElement("td"));
+      }
       row.children[0].textContent = cursorText;
       row.children[1].textContent = stateVersionText;
       row.children[2].textContent = kind;
@@ -1269,8 +1535,23 @@
       });
     for (const expired of retained.slice(100)) expired.remove();
     reapplyTableFilter("event-history-body");
+    revealBookmarkedTablePage(body, bookmark);
+    restoreTableSelection(body, bookmark);
   }
 
+  function resetOperationsForScope(message =
+      "No host operations loaded for this account/environment session.") {
+    const body = byId("operations-body");
+    if (!body) return;
+    body.replaceChildren();
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 4;
+    cell.textContent = message;
+    row.appendChild(cell);
+    body.appendChild(row);
+    reapplyTableFilter("operations-body");
+  }
   function resetNotificationsForScope(
     emptyMessage = "No material notifications recorded in this account/environment session."
   ) {
@@ -1426,20 +1707,23 @@
         ". Environment: " + parsed.environment + ".");
     text("freshness", freshnessText(parsed));
     text("server-time", parsed.serverTime);
-    renderPermissionSummary(parsed.permissionSummary);
+    renderPermissionSummary(parsed.permissionSummary, {preserveSelection: !displayContextChanged});
     renderProjection(
       "portfolio-body",
       parsed.portfolio,
-      "No portfolio projection reported by the host snapshot.");
+      "No portfolio projection reported by the host snapshot.",
+      {preserveSelection: !displayContextChanged});
     renderProjection(
       "risk-body",
       parsed.risk,
-      "No risk projection reported by the host snapshot.");
+      "No risk projection reported by the host snapshot.",
+      {preserveSelection: !displayContextChanged});
     renderProjection(
       "strategy-body",
       parsed.strategy,
-      "No strategy or decision projection reported by the host snapshot.");
-    renderJobs(parsed.jobs);
+      "No strategy or decision projection reported by the host snapshot.",
+      {preserveSelection: !displayContextChanged});
+    renderJobs(parsed.jobs, {preserveSelection: !displayContextChanged});
     state.renderedHostId = parsed.hostId;
     state.renderedAccountId = parsed.accountId;
     state.renderedEnvironment = parsed.environment;
@@ -1613,27 +1897,21 @@
       if (error.status === 409 || error.status === 410) {
         try {
           await refreshSnapshot({announceRefresh: true});
-        } catch {
-          state.scopeEpoch += 1;
-          state.snapshotReady = false;
-          state.sessionIdentity = null;
-          state.accountId = null;
-          state.environment = null;
-          setCommandAvailability(false);
-          text(
-            "freshness",
-            "Host synchronization gap could not be recovered; displayed values may be stale.");
-          announce(
-            "Host synchronization gap recovery failed. Commands remain blocked until a fresh canonical snapshot is available.",
-            true);
+        } catch (recoveryError) {
+          if (isSnapshotBusy(recoveryError)) {
+            reportSnapshotBusy();
+          } else {
+            invalidateSnapshotAuthority();
+            text(
+              "freshness",
+              "Host synchronization gap could not be recovered; displayed values may be stale.");
+            announce(
+              "Host synchronization gap recovery failed. Commands remain blocked until a fresh canonical snapshot is available.",
+              true);
+          }
         }
       } else {
-        state.scopeEpoch += 1;
-        state.snapshotReady = false;
-        state.sessionIdentity = null;
-        state.accountId = null;
-        state.environment = null;
-        setCommandAvailability(false);
+        invalidateSnapshotAuthority();
         text("freshness", "Host synchronization unavailable; displayed values may be stale.");
         announce("Host synchronization failed. Displayed values may be stale.", true);
       }
@@ -1954,21 +2232,26 @@
           "Host state refresh failed after the command response. The confirmed command response remains unchanged.",
           true);
       }
-    } catch {
-      if (commandContextMatchesCurrentSnapshot(payload, submittedHostId)) {
-        state.scopeEpoch += 1;
-        state.snapshotReady = false;
-        state.sessionIdentity = null;
-        state.accountId = null;
-        state.environment = null;
-        setCommandAvailability(false);
-        text(
-          "command-result",
+    } catch (error) {
+      if (!recovering && isCommandAuthRejection(error)) {
+        clearConfirmedCommand(payload);
+        invalidateSnapshotAuthority();
+        text("command-result",
+          "Command " + commandId +
+            " was not accepted because the authenticated host session was rejected before command acceptance. Its fresh command identity was discarded; re-establish a valid session and canonical snapshot before trying again.");
+      } else if (isSnapshotBusy(error) && commandContextMatchesCurrentSnapshot(payload, submittedHostId)) {
+        invalidateSnapshotAuthority();
+        reportSnapshotBusy();
+        text("command-result",
+          "Command " + commandId +
+            " could not be confirmed while the host snapshot was temporarily busy. Its original command identity remains retained for exact retry.");
+      } else if (commandContextMatchesCurrentSnapshot(payload, submittedHostId)) {
+        invalidateSnapshotAuthority();
+        text("command-result",
           "Command " + commandId +
             " could not be confirmed. Its original command_id and idempotency_key are retained for exact retry after host state recovers. No durable financial or safety outcome is being claimed.");
       } else {
-        text(
-          "command-result",
+        text("command-result",
           "Command " + commandId + " from original scope " +
             payload.account_id + " / " + payload.environment +
             " could not be confirmed after the authenticated host scope changed. " +
@@ -1984,26 +2267,32 @@
 
   async function refreshStateFromUser() {
     const button = byId("refresh-state");
+    const restoreKeyboardFocus = button !== null && document.activeElement === button;
     if (button) button.disabled = true;
     try {
-      const refreshed = await refreshSnapshot();
-      if (refreshed) {
-        announce("Host state refreshed from the canonical snapshot.");
+      await refreshSnapshot();
+      announce("Host state refreshed from the canonical snapshot.");
+    } catch (error) {
+      if (isSnapshotBusy(error)) {
+        reportSnapshotBusy();
+      } else {
+        invalidateSnapshotAuthority();
+        text("freshness", "Host unavailable; displayed values may be stale.");
+        announce("Host state refresh failed. Displayed values may be stale.", true);
       }
-    } catch {
-      state.scopeEpoch += 1;
-      state.snapshotReady = false;
-      state.sessionIdentity = null;
-      state.accountId = null;
-      state.environment = null;
-      setCommandAvailability(false);
-      text("freshness", "Host unavailable; displayed values may be stale.");
-      announce("Host state refresh failed. Displayed values may be stale.", true);
     } finally {
-      if (button) button.disabled = false;
+      if (button) {
+        button.disabled = false;
+        const active = document.activeElement;
+        if (restoreKeyboardFocus && (
+            active === button ||
+            active === document.body ||
+            active === document.documentElement)) {
+          button.focus();
+        }
+      }
     }
   }
-
   async function start() {
     bindTableTools();
     bindAuthorityPolicyReviewInvalidation();
@@ -2016,15 +2305,14 @@
     setCommandAvailability(false);
     try {
       await refreshSnapshot();
-    } catch {
-      state.scopeEpoch += 1;
-      state.snapshotReady = false;
-      state.sessionIdentity = null;
-      state.accountId = null;
-      state.environment = null;
-      setCommandAvailability(false);
-      text("freshness", "Host unavailable; no current state has been confirmed.");
-      announce("Host unavailable. No current state has been confirmed.", true);
+    } catch (error) {
+      if (isSnapshotBusy(error)) {
+        reportSnapshotBusy();
+      } else {
+        invalidateSnapshotAuthority();
+        text("freshness", "Host unavailable; no current state has been confirmed.");
+        announce("Host unavailable. No current state has been confirmed.", true);
+      }
     }
     window.setInterval(pollEvents, 2000);
   }
@@ -2050,21 +2338,18 @@
     state.environment = null;
     setCommandAvailability(false);
     try {
-      const restored = await refreshSnapshot();
-      if (restored) {
-        announce("Host state refreshed after page restoration.");
+      await refreshSnapshot();
+      announce("Host state refreshed after page restoration.");
+    } catch (error) {
+      if (isSnapshotBusy(error)) {
+        reportSnapshotBusy();
+      } else {
+        invalidateSnapshotAuthority();
+        text("freshness", "Host unavailable after page restoration; displayed values may be stale.");
+        announce(
+          "Host synchronization failed after page restoration. Commands remain blocked.",
+          true);
       }
-    } catch {
-      state.scopeEpoch += 1;
-      state.snapshotReady = false;
-      state.sessionIdentity = null;
-      state.accountId = null;
-      state.environment = null;
-      setCommandAvailability(false);
-      text("freshness", "Host unavailable after page restoration; displayed values may be stale.");
-      announce(
-        "Host synchronization failed after page restoration. Commands remain blocked.",
-        true);
     } finally {
       restoreFocusAfterPageRestore();
     }

@@ -58,6 +58,7 @@ from mvp.autotrade_mvp.provider_transport import (
     _binance_exact_trading_response,
     _kraken_spot_exact_trading_response,
     _alpaca_exact_trading_response,
+    _whitebit_exact_trading_response,
     KRAKEN_FUTURES_ENDPOINT_POLICIES,
     KRAKEN_SPOT_ENDPOINT_POLICIES,
     KrakenFuturesSigner,
@@ -712,7 +713,7 @@ class AlpacaProviderTransportTests(unittest.TestCase):
             (
                 TradingWireResponse(
                     http_status=503,
-                    body=b'{"message":"service unavailable"}',
+                    body=b"<html>upstream unavailable</html>",
                 ),
                 503,
                 "alpaca_http_5xx_execution_unknown",
@@ -892,6 +893,19 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
             exact.ambiguity_reason,
             "whitebit_http_status_unavailable_execution_unknown",
         )
+
+    def test_whitebit_non_json_429_and_5xx_require_reconciliation(self):
+        for status in (429, 500, 503):
+            with self.subTest(status=status):
+                exact = _whitebit_exact_trading_response(
+                    TradingWireResponse(
+                        http_status=status,
+                        body=b"<html>upstream unavailable</html>",
+                    )
+                )
+                self.assertEqual(exact.http_status, status)
+                self.assertTrue(exact.requires_reconciliation)
+                self.assertEqual(exact.response_bytes, b"<html>upstream unavailable</html>")
 
     def test_whitebit_transport_has_one_guarded_send_after_durable_nonce(self):
         events = []
@@ -2077,7 +2091,7 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
             (
                 TradingWireResponse(
                     http_status=503,
-                    body=b'{"error":["EService:Unavailable"],"result":null}',
+                    body=b"<html>upstream unavailable</html>",
                 ),
                 503,
                 "kraken_spot_http_5xx_execution_unknown",
@@ -4946,9 +4960,10 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
 
         with TemporaryDirectory() as directory:
             events = []
+            raw = b"\xff\x00upstream unavailable"
             wire = RecordingWire(
                 events,
-                response=b"<html>upstream unavailable</html>",
+                response=raw,
                 http_status=503,
             )
             store = JournalStore(f"{directory}/journal.sqlite3")
@@ -5030,6 +5045,18 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
                 terminal["reason"],
                 "bybit_http_5xx_execution_unknown",
             )
+            self.assertEqual(terminal["response_encoding"], "hex")
+            self.assertEqual(bytes.fromhex(terminal["response_text"]), raw)
+            binding = load_submission_response_binding(
+                store,
+                environment="PAPER",
+                account_id="bybit-account",
+                attempt_id="attempt-bybit-http-503",
+            )
+            self.assertEqual(binding.response_bytes, raw)
+            self.assertEqual(binding.http_status, 503)
+            with self.assertRaises(ValueError):
+                binding.payload
 
 
     def test_bybit_additional_ambiguous_results_persist_unknown_and_never_resend(self):

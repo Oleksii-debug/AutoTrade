@@ -1153,14 +1153,17 @@ class UrllibJsonWireClient:
         )
 
 
-def _exact_trading_response(
+def _trading_response_evidence(
     value: object,
-) -> ExactJsonTransportResponse:
-    """Preserve HTTP status when the wire client can prove a definitive response.
+) -> tuple[bytes, int | None]:
+    """Validate exact post-SEND bytes/status without assuming a JSON body.
 
-    Raw bytes remain accepted for injected legacy/test wire clients. Production
-    UrllibJsonWireClient always returns TradingWireResponse for guarded writes.
+    Provider-specific classifiers must be able to preserve an already observed
+    ambiguous HTTP result even when a gateway or upstream proxy returned HTML
+    or arbitrary opaque bytes. Definitive responses still pass through the
+    strict ExactJsonTransportResponse JSON contract below.
     """
+
     if type(value) is TradingWireResponse:
         # Frozen dataclasses can still be built without __init__ or modified
         # through object.__setattr__. Revalidate the nested HTTP status at
@@ -1169,22 +1172,42 @@ def _exact_trading_response(
         if type(status) is not int or not 100 <= status <= 599:
             raise ProviderTransportError("invalid trading HTTP response status")
         try:
-            raw = require_provider_response_bytes(value.body, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+            raw = require_provider_response_bytes(
+                value.body,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+            )
         except (TypeError, ValueError) as error:
-            raise ProviderTransportError("invalid or oversized trading response") from error
-        return ExactJsonTransportResponse(
-            raw,
-            http_status=status,
-        )
+            raise ProviderTransportError(
+                "invalid or oversized trading response"
+            ) from error
+        return raw, status
     if type(value) is bytes:
         try:
-            raw = require_provider_response_bytes(value, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+            raw = require_provider_response_bytes(
+                value,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+            )
         except (TypeError, ValueError) as error:
-            raise ProviderTransportError("invalid or oversized trading response") from error
-        return ExactJsonTransportResponse(raw)
+            raise ProviderTransportError(
+                "invalid or oversized trading response"
+            ) from error
+        return raw, None
     raise ProviderTransportError(
         "trading wire client returned an unsupported response contract"
     )
+
+
+def _exact_trading_response(
+    value: object,
+) -> ExactJsonTransportResponse:
+    """Preserve HTTP status for a definitive exact JSON provider response.
+
+    Raw bytes remain accepted for injected legacy/test wire clients. Production
+    UrllibJsonWireClient always returns TradingWireResponse for guarded writes.
+    """
+
+    raw, status = _trading_response_evidence(value)
+    return ExactJsonTransportResponse(raw, http_status=status)
 
 
 def _bybit_exact_trading_response(
@@ -1197,31 +1220,28 @@ def _bybit_exact_trading_response(
     ambiguous business codes remain UNKNOWN even when the HTTP layer is 2xx.
     """
 
-    exact = _exact_trading_response(value)
-    status = exact.http_status
+    raw, status = _trading_response_evidence(value)
     if status is None:
         return ExactJsonTransportResponse(
-            exact.response_bytes,
+            raw,
             requires_reconciliation=True,
             ambiguity_reason="bybit_http_status_unavailable_execution_unknown",
         )
     if 500 <= status <= 599:
         return ExactJsonTransportResponse(
-            exact.response_bytes,
+            raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="bybit_http_5xx_execution_unknown",
         )
-    if status is not None and (status < 200 or status > 299):
+    if status < 200 or status > 299:
         return ExactJsonTransportResponse(
-            exact.response_bytes,
+            raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="bybit_http_non_2xx_execution_unknown",
         )
-    # Transport uncertainty is authoritative before response-body syntax.
-    # A gateway may emit HTML/text on 5xx; preserve exact post-SEND evidence
-    # without requiring provider JSON first.
+    exact = ExactJsonTransportResponse(raw, http_status=status)
     parsed = exact.payload
     if (
         type(parsed) is dict
@@ -1229,7 +1249,7 @@ def _bybit_exact_trading_response(
         and parsed["retCode"] in _BYBIT_AMBIGUOUS_RESPONSE_CODES
     ):
         return ExactJsonTransportResponse(
-            exact.response_bytes,
+            raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="bybit_ambiguous_ret_code_execution_unknown",
@@ -1242,24 +1262,24 @@ def _kraken_spot_exact_trading_response(
 ) -> ExactJsonTransportResponse:
     """Keep post-send Kraken Spot transport ambiguity reconciliation-first."""
 
-    exact = _exact_trading_response(value)
-    status = exact.http_status
+    raw, status = _trading_response_evidence(value)
     if status is None:
         return ExactJsonTransportResponse(
-            exact.response_bytes,
+            raw,
             requires_reconciliation=True,
             ambiguity_reason="kraken_spot_http_status_unavailable_execution_unknown",
         )
     if 500 <= status <= 599:
         return ExactJsonTransportResponse(
-            exact.response_bytes,
+            raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="kraken_spot_http_5xx_execution_unknown",
         )
+    exact = ExactJsonTransportResponse(raw, http_status=status)
     if spot_submission_requires_reconciliation(exact.payload):
         return ExactJsonTransportResponse(
-            exact.response_bytes,
+            raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="kraken_spot_deadline_elapsed",
@@ -1272,22 +1292,21 @@ def _alpaca_exact_trading_response(
 ) -> ExactJsonTransportResponse:
     """Keep post-send Alpaca transport ambiguity reconciliation-first."""
 
-    exact = _exact_trading_response(value)
-    status = exact.http_status
+    raw, status = _trading_response_evidence(value)
     if status is None:
         return ExactJsonTransportResponse(
-            exact.response_bytes,
+            raw,
             requires_reconciliation=True,
             ambiguity_reason="alpaca_http_status_unavailable_execution_unknown",
         )
     if 500 <= status <= 599:
         return ExactJsonTransportResponse(
-            exact.response_bytes,
+            raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="alpaca_http_5xx_execution_unknown",
         )
-    return exact
+    return ExactJsonTransportResponse(raw, http_status=status)
 
 
 def _binance_exact_trading_response(
@@ -1302,27 +1321,30 @@ def _binance_exact_trading_response(
     4xx denials and successful responses retain their existing semantics.
     This classification is no substitute for qualified provider-origin truth.
     """
-    exact = _exact_trading_response(value)
-    status = exact.http_status
+
+    raw, status = _trading_response_evidence(value)
     if status is None:
         return ExactJsonTransportResponse(
-            exact.response_bytes,
+            raw,
             requires_reconciliation=True,
             ambiguity_reason="binance_spot_http_status_unavailable_execution_unknown",
         )
     if 500 <= status <= 599:
         return ExactJsonTransportResponse(
-            exact.response_bytes,
+            raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="binance_spot_http_5xx_execution_unknown",
         )
-    # A post-SEND 5xx is execution-unknown even when an upstream proxy returns
-    # non-JSON bytes, so only decode payload after transport ambiguity is fenced.
+    exact = ExactJsonTransportResponse(raw, http_status=status)
     parsed = exact.payload
-    if type(parsed) is dict and type(parsed.get("code")) is int and parsed["code"] == -1007:
+    if (
+        type(parsed) is dict
+        and type(parsed.get("code")) is int
+        and parsed["code"] == -1007
+    ):
         return ExactJsonTransportResponse(
-            exact.response_bytes,
+            raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="binance_spot_backend_timeout_execution_unknown",
@@ -1340,26 +1362,26 @@ def _whitebit_exact_trading_response(
     reconciliation, rather than becoming a retry-safe SubmissionSent terminal.
     """
 
-    exact = _exact_trading_response(value)
-    if exact.http_status is None:
+    raw, status = _trading_response_evidence(value)
+    if status is None:
         return ExactJsonTransportResponse(
-            exact.response_bytes,
+            raw,
             requires_reconciliation=True,
             ambiguity_reason="whitebit_http_status_unavailable_execution_unknown",
         )
     decision = classify_whitebit_http_retry(
-        status_code=exact.http_status,
+        status_code=status,
         attempt=1,
         request_class="WRITE",
     )
-    if not decision.requires_reconciliation:
-        return exact
-    return ExactJsonTransportResponse(
-        exact.response_bytes,
-        http_status=exact.http_status,
-        requires_reconciliation=True,
-        ambiguity_reason="whitebit_" + decision.classification.lower(),
-    )
+    if decision.requires_reconciliation:
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="whitebit_" + decision.classification.lower(),
+        )
+    return ExactJsonTransportResponse(raw, http_status=status)
 
 
 @dataclass(frozen=True)

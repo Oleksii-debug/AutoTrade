@@ -130,7 +130,8 @@ class ExactJsonTransportResponse:
 
     def __post_init__(self) -> None:
         raw = self.response_bytes
-        _decode_exact_json_bytes(raw)
+        if type(raw) is not bytes or not raw:
+            raise ValueError("provider response bytes must be non-empty bytes")
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -152,10 +153,15 @@ class ExactJsonTransportResponse:
                 "ambiguity_reason",
                 self.ambiguity_reason.strip(),
             )
-        elif self.ambiguity_reason is not None:
-            raise ValueError(
-                "ambiguity_reason is only valid when reconciliation is required"
-            )
+        else:
+            # Definitive responses remain strict JSON. Opaque wire bytes are
+            # admissible only after the provider classifier has already made
+            # the irreversible post-SEND result reconciliation-required.
+            _decode_exact_json_bytes(raw)
+            if self.ambiguity_reason is not None:
+                raise ValueError(
+                    "ambiguity_reason is only valid when reconciliation is required"
+                )
 
     @property
     def response_text(self) -> str:
@@ -219,7 +225,6 @@ class SubmissionResponseBinding:
             != self.response_sha256
         ):
             raise ValueError("durable provider response digest mismatch")
-        _decode_exact_json_bytes(self.response_bytes)
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -509,16 +514,36 @@ def load_submission_response_binding(
         raise ValueError("durable terminal submission payload is invalid")
     response_text = sent_payload.get("response_text")
     response_sha256 = sent_payload.get("response_sha256")
+    response_encoding = sent_payload.get("response_encoding")
     if (
-        sent_payload.get("response_encoding") != "utf-8-json"
-        or not isinstance(response_text, str)
+        not isinstance(response_text, str)
         or not response_text
         or not isinstance(response_sha256, str)
     ):
         raise ValueError(
             "durable exact provider response bytes are unavailable"
         )
-    response_bytes = response_text.encode("utf-8")
+    if response_encoding == "utf-8-json":
+        response_bytes = response_text.encode("utf-8")
+        _decode_exact_json_bytes(response_bytes)
+    elif (
+        response_encoding == "hex"
+        and sent.get("event_type") == "SubmissionUnknown"
+    ):
+        try:
+            response_bytes = bytes.fromhex(response_text)
+        except ValueError as error:
+            raise ValueError(
+                "durable exact provider response bytes are unavailable"
+            ) from error
+        if not response_bytes or response_text != response_bytes.hex():
+            raise ValueError(
+                "durable exact provider response bytes are unavailable"
+            )
+    else:
+        raise ValueError(
+            "durable exact provider response bytes are unavailable"
+        )
     if "sha256:" + sha256(response_bytes).hexdigest() != response_sha256:
         raise ValueError("durable provider response digest mismatch")
     http_status = sent_payload.get("http_status")
@@ -1647,16 +1672,29 @@ class GuardedDispatcher:
         terminal_reason = "sent_confirmed"
         try:
             if type(response) is ExactJsonTransportResponse:
+                terminal_requires_reconciliation = response.requires_reconciliation
+                if terminal_requires_reconciliation:
+                    try:
+                        response.payload
+                    except (TypeError, ValueError):
+                        response_text = response.response_bytes.hex()
+                        response_encoding = "hex"
+                    else:
+                        response_text = response.response_text
+                        response_encoding = "utf-8-json"
+                    outcome_response = None
+                else:
+                    response_text = response.response_text
+                    response_encoding = "utf-8-json"
+                    outcome_response = response.payload
                 sent_payload = {
                     "client_order_id": client_order_id,
-                    "response_text": response.response_text,
+                    "response_text": response_text,
                     "response_sha256": response.response_sha256,
-                    "response_encoding": "utf-8-json",
+                    "response_encoding": response_encoding,
                 }
                 if response.http_status is not None:
                     sent_payload["http_status"] = response.http_status
-                outcome_response = response.payload
-                terminal_requires_reconciliation = response.requires_reconciliation
                 if terminal_requires_reconciliation:
                     terminal_reason = (
                         response.ambiguity_reason or "provider_response_ambiguous"

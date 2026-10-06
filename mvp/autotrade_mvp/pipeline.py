@@ -344,6 +344,28 @@ def _atomic_json(path: Path, payload: object) -> None:
     _best_effort_fsync_directory(path.parent)
 
 
+def _create_json_once(path: Path, payload: object) -> bool:
+    """Create one durable JSON authority without replacing a concurrent winner."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode(
+        "utf-8"
+    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        return False
+    try:
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        _best_effort_fsync_directory(path.parent)
+    return True
+
+
 @dataclass(frozen=True)
 class Decision:
     side: str
@@ -1794,6 +1816,22 @@ def run_vertical_slice(
     provider = SimulatedProvider(restored_fills)
     _reconcile(provider, ledger)
     normalized = handle_market_data(prices)
+    if not resumed:
+        initial_checkpoint = _initial_checkpoint(financial_configuration)
+        if not _create_json_once(checkpoint_path, initial_checkpoint):
+            concurrent_state, concurrent_resumed = _read_state(
+                checkpoint_path,
+                starting_cash,
+            )
+            if not concurrent_resumed:
+                raise ValueError("Concurrent durable run checkpoint is unavailable")
+            _require_checkpoint_configuration(
+                concurrent_state,
+                financial_configuration,
+            )
+            raise ValueError(
+                "Concurrent durable run already owns this state directory; retry recovery"
+            )
     input_hash = _stable_hash([str(item) for item in normalized])
     decision = handle_strategy(normalized, quantity)
     intent = None
@@ -1823,11 +1861,6 @@ def run_vertical_slice(
         else:
             admitted, risk_reason = handle_risk(decision, ledger.position, ledger.cash, rate, position_limit, notional_limit)
         if admitted:
-            if not resumed and not checkpoint_path.exists():
-                _atomic_json(
-                    checkpoint_path,
-                    _initial_checkpoint(financial_configuration),
-                )
             handle_durable_order_intent(intent, root)
             fill = handle_simulated_provider(intent, rate, provider)
             handle_economic_ledger(fill, ledger)

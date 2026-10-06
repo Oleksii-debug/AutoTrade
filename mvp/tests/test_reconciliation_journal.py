@@ -618,6 +618,91 @@ class ReconciliationJournalTests(unittest.TestCase):
                 [],
             )
 
+    def test_checkpoint_round_trip_retains_clean_settlement_authority(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            result = reconciliation(
+                local_settled_cash={"USD": "900"},
+                provider_settled_cash={"USD": "900"},
+                local_unsettled_receivable={"USD": "125.50"},
+                provider_unsettled_receivable={"USD": "125.50"},
+                local_unsettled_payable={"USD": "25"},
+                provider_unsettled_payable={"USD": "25"},
+                settlement_activity_complete=True,
+            )
+
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="settlement-clean-round-trip",
+                result=result,
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            self.assertTrue(checkpoint["payload"]["settlement_activity_complete"])
+            self.assertEqual(checkpoint["payload"]["settlement_differences"], {})
+
+            reopened = JournalStore(path)
+            recovered = load_latest_reconciliation_checkpoint(
+                reopened,
+                reconciliation_id="settlement-clean-round-trip",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            )
+            self.assertIsNotNone(recovered)
+            self.assertTrue(recovered["payload"]["settlement_activity_complete"])
+            self.assertEqual(recovered["payload"]["settlement_differences"], {})
+
+    def test_checkpoint_round_trip_retains_settlement_mismatch_and_block(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            result = reconciliation(
+                local_settled_cash={"USD": "900"},
+                provider_settled_cash={"USD": "899"},
+                local_unsettled_receivable={"USD": "125.50"},
+                provider_unsettled_receivable={"USD": "125.50"},
+                local_unsettled_payable={"USD": "25"},
+                provider_unsettled_payable={"USD": "25"},
+                settlement_activity_complete=True,
+            )
+            self.assertFalse(result.complete)
+            self.assertEqual(result.settlement_differences["SETTLED:USD"], Decimal("-1"))
+            self.assertIn("CASH:USD", result.blocking_resources)
+
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="settlement-mismatch-round-trip",
+                result=result,
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            self.assertEqual(
+                checkpoint["payload"]["settlement_differences"],
+                {"SETTLED:USD": "-1"},
+            )
+            self.assertIn("CASH:USD", checkpoint["payload"]["blocking_resources"])
+
+            reopened = JournalStore(path)
+            recovered = load_latest_reconciliation_checkpoint(
+                reopened,
+                reconciliation_id="settlement-mismatch-round-trip",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            )
+            self.assertIsNotNone(recovered)
+            self.assertFalse(recovered["payload"]["complete"])
+            self.assertTrue(recovered["payload"]["settlement_activity_complete"])
+            self.assertEqual(
+                recovered["payload"]["settlement_differences"],
+                {"SETTLED:USD": "-1"},
+            )
+            self.assertIn("CASH:USD", recovered["payload"]["blocking_resources"])
+
     def test_checkpoint_round_trip_is_exact_and_idempotent(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

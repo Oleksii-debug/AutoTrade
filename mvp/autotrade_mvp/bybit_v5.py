@@ -1459,18 +1459,32 @@ def parse_executions(
     rows = result.get("list")
     if not isinstance(rows, (list, tuple)):
         raise ProviderCoreError("result.list must be an array")
-    if type(instrument_versions) is not dict:
-        raise ProviderCoreError(
-            "instrument_versions must be an exact dict snapshot"
-        )
-    instrument_versions = MappingProxyType(dict.copy(instrument_versions))
-    if qualified_fee_currencies is not None:
-        if type(qualified_fee_currencies) is not dict:
+    def exact_text_mapping_snapshot(value, *, name):
+        if type(value) is dict:
+            items = tuple(dict.items(value))
+        elif type(value) is MappingProxyType:
+            items = tuple(value.items())
+        else:
             raise ProviderCoreError(
-                "qualified_fee_currencies must be an exact dict snapshot"
+                f"{name} must be an exact dict snapshot or exact mappingproxy snapshot"
             )
-        qualified_fee_currencies = MappingProxyType(
-            dict.copy(qualified_fee_currencies)
+        snapshot = {}
+        for key, item in items:
+            if type(key) is not str or type(item) is not str:
+                raise ProviderCoreError(
+                    f"{name} keys and values must be exact text"
+                )
+            dict.__setitem__(snapshot, key, item)
+        return MappingProxyType(snapshot)
+
+    instrument_versions = exact_text_mapping_snapshot(
+        instrument_versions,
+        name="instrument_versions",
+    )
+    if qualified_fee_currencies is not None:
+        qualified_fee_currencies = exact_text_mapping_snapshot(
+            qualified_fee_currencies,
+            name="qualified_fee_currencies",
         )
 
     by_execution: dict[str, ProviderFillEvidence] = {}

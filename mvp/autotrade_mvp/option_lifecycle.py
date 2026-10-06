@@ -1036,8 +1036,12 @@ class DurableOptionLifecycleAuthority:
             matches = [
                 event
                 for event in events
-                if self._payload(event).get("external_event_id")
-                == observation.corrects_external_event_id
+                if (
+                    self._payload(event).get("external_event_id")
+                    == observation.corrects_external_event_id
+                    and self._payload(event).get("provider_environment")
+                    == observation.provider_environment
+                )
             ]
             if len(matches) != 1:
                 raise OptionLifecycleConflict(
@@ -1204,6 +1208,7 @@ class DurableOptionLifecycleAuthority:
             "provider_id": observation.provider_id,
             "account_id": observation.account_id,
             "environment": observation.environment,
+            "provider_environment": observation.provider_environment,
             "venue_id": observation.venue_id,
             "instrument_version": observation.instrument_version,
             "instrument_digest": instrument_digest,

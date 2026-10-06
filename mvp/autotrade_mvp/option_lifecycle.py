@@ -792,6 +792,15 @@ class DurableOptionLifecycleAuthority:
         evidence_ref: str,
     ) -> tuple[OptionLifecycleObservation, ProviderResponseObservation]:
         reference = _text(evidence_ref, "evidence_ref")
+        # Neutral sealed response bytes are content evidence, not provider-origin
+        # authority. Until a canonical qualified option-lifecycle issuer exists,
+        # PAPER/LIVE economics must fail before a caller-supplied resolver can
+        # execute arbitrary code or mutate the shared financial store.
+        self._require_canonical_authorities()
+        if self.economic_book.environment in {"PAPER", "LIVE"}:
+            raise OptionLifecycleError(
+                "PAPER/LIVE option lifecycle economics require durable PROVIDER_ORIGIN evidence"
+            )
         try:
             source = self.evidence_resolver(reference)
         except Exception as error:
@@ -801,9 +810,9 @@ class DurableOptionLifecycleAuthority:
         # Validate captured financial scope immediately after the callback,
         # before the source is interpreted using any caller-retargeted owner.
         self._require_canonical_authorities()
-        if not isinstance(source, ProviderResponseObservation):
+        if type(source) is not ProviderResponseObservation:
             raise OptionLifecycleError(
-                "provider lifecycle evidence must be a sealed ProviderResponseObservation"
+                "provider lifecycle evidence must be an exact sealed ProviderResponseObservation"
             )
         if source.evidence_ref != reference:
             raise OptionLifecycleError(

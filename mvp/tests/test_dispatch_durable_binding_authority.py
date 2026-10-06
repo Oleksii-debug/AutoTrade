@@ -1784,6 +1784,80 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 ["SubmissionPrepared", "SubmissionSending"],
             )
 
+    def test_post_guard_dispatcher_class_rebind_terminalizes_on_canonical_surface(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            original_events = GuardedDispatcher._events
+            forged_calls = 0
+            wire_calls = 0
+
+            def forged_events(*_args, **_kwargs):
+                nonlocal forged_calls
+                forged_calls += 1
+                return [
+                    {
+                        "event_type": "SubmissionSent",
+                        "payload": {
+                            "client_order_id": "forged",
+                            "response": {"accepted": True},
+                        },
+                    }
+                ]
+
+            def transport(_client_order_id, _request, guard):
+                nonlocal wire_calls
+                guard()
+                wire_calls += 1
+                GuardedDispatcher._events = forged_events
+                return ExactJsonTransportResponse(b'{"accepted":true}')
+
+            try:
+                result = dispatcher.dispatch(
+                    attempt_id="post-guard-class-rebind-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T14:00:00Z",
+                    authority_check=lambda *_args: (True, "allowed"),
+                    transport_send=transport,
+                    submission_scope={"endpoint": "/orders"},
+                )
+            finally:
+                GuardedDispatcher._events = original_events
+
+            self.assertEqual(wire_calls, 1)
+            self.assertEqual(forged_calls, 0)
+            self.assertIs(GuardedDispatcher._events, original_events)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(
+                result.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("post-guard-class-rebind-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+
     def test_terminal_reread_rejects_post_append_tamper(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

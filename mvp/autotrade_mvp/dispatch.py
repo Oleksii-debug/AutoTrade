@@ -233,6 +233,15 @@ class SubmissionResponseBinding:
         if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("invalid durable submission environment")
         object.__setattr__(self, "environment", environment)
+        expected_aggregate_id = submission_attempt_aggregate_id(
+            environment=environment,
+            account_id=self.account_id,
+            attempt_id=self.attempt_id,
+        )
+        if self.aggregate_id != expected_aggregate_id:
+            raise ValueError(
+                "aggregate_id mismatches durable submission identity"
+            )
         if type(self.submission_scope) is not dict:
             raise TypeError("submission_scope must be an exact dict")
         canonical_scope = json.loads(canonical_json(dict.copy(self.submission_scope)))
@@ -247,6 +256,7 @@ class SubmissionResponseBinding:
             "submission_scope",
             _freeze_json(canonical_scope),
         )
+        durable_instants: dict[str, datetime] = {}
         for value, name in (
             (self.prepared_at, "prepared_at"),
             (self.sent_at, "sent_at"),
@@ -255,6 +265,9 @@ class SubmissionResponseBinding:
             canonical = point.isoformat().replace("+00:00", "Z")
             if canonical != value:
                 raise ValueError(f"{name} must be canonical UTC text")
+            durable_instants[name] = point
+        if durable_instants["sent_at"] < durable_instants["prepared_at"]:
+            raise ValueError("sent_at must not precede prepared_at")
 
     @property
     def payload(self) -> Any:

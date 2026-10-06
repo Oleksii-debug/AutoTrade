@@ -1539,7 +1539,11 @@ def run_vertical_slice(
             price=decision.price,
         )
         if intent.client_order_id in provider.fills:
-            admitted, risk_reason = True, "already_filled"
+            # A restored fill proves this exact durable intent was admitted in
+            # the original episode. Replaying the same deterministic episode
+            # must preserve that recorded admission fact rather than minting a
+            # new evidence outcome merely because the fill is already durable.
+            admitted, risk_reason = True, "admitted"
         else:
             admitted, risk_reason = handle_risk(decision, ledger.position, ledger.cash, rate, position_limit, notional_limit)
         if admitted:

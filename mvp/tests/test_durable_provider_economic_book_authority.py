@@ -2,6 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+import mvp.autotrade_mvp._provider_activity_accounting_impl as provider_accounting_impl
 from mvp.autotrade_mvp.accounting import (
     AccountingConflict,
     EconomicBook,
@@ -43,6 +44,78 @@ def cash_transaction(*, transaction_id: str = "cash-1", amount: str = "10"):
 
 
 class DurableProviderEconomicBookAuthorityTests(unittest.TestCase):
+    def test_sealed_scoped_authority_composes_with_durable_book(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            book = economic_book(JournalStore(path), environment="SIMULATION")
+
+            initial_digest = book.audit_digest()
+            self.assertEqual(book.transactions, ())
+            self.assertEqual(str(book.balance("CASH:USD", "USD")), "0")
+            self.assertEqual(str(book.cash("USD")), "0")
+            self.assertEqual(str(book.position("ASSET")), "0")
+            self.assertEqual(str(book.fee_expense("USD")), "0")
+
+            transaction = cash_transaction()
+            self.assertTrue(book.append(transaction))
+            self.assertEqual(book.transactions, (transaction,))
+            self.assertEqual(str(book.cash("USD")), "10")
+            self.assertNotEqual(book.audit_digest(), initial_digest)
+
+            reopened = economic_book(JournalStore(path), environment="SIMULATION")
+            self.assertEqual(reopened.transactions, (transaction,))
+            self.assertEqual(reopened.audit_digest(), book.audit_digest())
+
+    def test_durable_audit_digest_ignores_rebound_module_payload_digest(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            book = economic_book(JournalStore(path), environment="SIMULATION")
+            self.assertTrue(book.append(cash_transaction()))
+
+            expected = book.audit_digest()
+            forged = "sha256:" + "0" * 64
+            original_payload_digest = provider_accounting_impl.payload_digest
+            provider_accounting_impl.payload_digest = lambda _payload: forged
+            try:
+                self.assertEqual(book.audit_digest(), expected)
+                self.assertNotEqual(book.audit_digest(), forged)
+            finally:
+                provider_accounting_impl.payload_digest = original_payload_digest
+
+    def test_durable_read_facade_retains_original_authority_verifier(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            book = economic_book(JournalStore(path), environment="SIMULATION")
+            original_projection = vars(book)["_book"]
+            original_require = (
+                provider_accounting_impl._require_durable_provider_economic_book_authority
+            )
+            provider_accounting_impl._require_durable_provider_economic_book_authority = (
+                lambda _value: None
+            )
+            vars(book)["_book"] = EconomicBook(
+                (cash_transaction(transaction_id="forged"),)
+            )
+            try:
+                for read in (
+                    lambda: book.transactions,
+                    lambda: book.balance("CASH:USD", "USD"),
+                    lambda: book.cash("USD"),
+                    lambda: book.position("ASSET"),
+                    lambda: book.fee_expense("USD"),
+                    lambda: book.audit_digest(),
+                ):
+                    with self.assertRaisesRegex(
+                        AccountingConflict,
+                        "projection changed outside canonical reload",
+                    ):
+                        read()
+            finally:
+                vars(book)["_book"] = original_projection
+                provider_accounting_impl._require_durable_provider_economic_book_authority = (
+                    original_require
+                )
+
     def test_bybit_provider_environment_separates_durable_book_identity(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

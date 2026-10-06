@@ -2728,6 +2728,31 @@ class GuardedDispatcher:
             for name, dependency in decoder_json_init_global_bindings
             if name != "scanner"
         )
+        decoder_json_init_global_function_bindings = snapshot_tuple(
+            (
+                dependency,
+                snapshot_getattr(dependency, "__defaults__", None),
+                snapshot_getattr(dependency, "__kwdefaults__", None),
+            )
+            for name, dependency in decoder_json_init_global_bindings
+            if name != "scanner"
+        )
+        decoder_json_init_global_kwdefault_copies = snapshot_tuple(
+            (
+                dependency,
+                snapshot_dict(kwdefaults)
+                if snapshot_type(kwdefaults) is snapshot_dict
+                else None,
+                snapshot_tuple(
+                    (snapshot_id(key), snapshot_id(value))
+                    for key, value in snapshot_dict.items(kwdefaults)
+                )
+                if snapshot_type(kwdefaults) is snapshot_dict
+                else None,
+            )
+            for dependency, _defaults, kwdefaults
+            in decoder_json_init_global_function_bindings
+        )
         decoder_depth_guard = require_provider_json_depth
         decoder_depth_guard_code = snapshot_getattr(
             decoder_depth_guard,
@@ -2888,6 +2913,62 @@ class GuardedDispatcher:
                 ):
                     current_kwdefaults = snapshot_getattr(
                         member,
+                        "__kwdefaults__",
+                        None,
+                    )
+                    current_fingerprint = snapshot_tuple(
+                        (snapshot_id(key), snapshot_id(value))
+                        for key, value in snapshot_dict.items(
+                            current_kwdefaults
+                        )
+                    )
+                    if current_fingerprint != kwdefaults_fingerprint:
+                        snapshot_dict.clear(current_kwdefaults)
+                        snapshot_dict.update(
+                            current_kwdefaults,
+                            kwdefaults_copy,
+                        )
+                        changed = True
+
+            for dependency, expected_defaults, expected_kwdefaults in (
+                decoder_json_init_global_function_bindings
+            ):
+                if (
+                    snapshot_getattr(dependency, "__defaults__", None)
+                    is not expected_defaults
+                ):
+                    snapshot_setattr(
+                        dependency,
+                        "__defaults__",
+                        expected_defaults,
+                    )
+                    changed = True
+                if (
+                    snapshot_getattr(dependency, "__kwdefaults__", None)
+                    is not expected_kwdefaults
+                ):
+                    snapshot_setattr(
+                        dependency,
+                        "__kwdefaults__",
+                        expected_kwdefaults,
+                    )
+                    changed = True
+            for dependency, kwdefaults_copy, kwdefaults_fingerprint in (
+                decoder_json_init_global_kwdefault_copies
+            ):
+                if (
+                    kwdefaults_fingerprint is not None
+                    and snapshot_type(
+                        snapshot_getattr(
+                            dependency,
+                            "__kwdefaults__",
+                            None,
+                        )
+                    )
+                    is snapshot_dict
+                ):
+                    current_kwdefaults = snapshot_getattr(
+                        dependency,
                         "__kwdefaults__",
                         None,
                     )

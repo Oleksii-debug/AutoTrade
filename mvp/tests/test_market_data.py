@@ -1,3 +1,4 @@
+from collections import UserDict
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
@@ -121,6 +122,22 @@ class CallbackList(list):
 
     def __getitem__(self, key):
         return self._fail()
+
+
+class CallbackUserDict(UserDict):
+    calls = 0
+
+    def _fail(self):
+        type(self).calls += 1
+        raise AssertionError("caller UserDict code must not execute")
+
+    @property
+    def data(self):
+        return self._fail()
+
+    @data.setter
+    def data(self, value):
+        self.__dict__["_hostile_data"] = value
 
 
 def at(month=9, day=24, hour=16, minute=0, second=0):
@@ -427,6 +444,24 @@ class MarketNormalizationTests(unittest.TestCase):
 
         self.assertEqual(CallbackDict.calls, 0)
         self.assertEqual(CallbackList.calls, 0)
+
+        CallbackUserDict.calls = 0
+        hostile_user_dict = CallbackUserDict(
+            {"price": "100.01", "quantity": "1", "side": "buy"}
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "payload must use an exact dict",
+        ):
+            raw("TRADE", hostile_user_dict)
+        self.assertEqual(CallbackUserDict.calls, 0)
+
+        exact_user_dict = UserDict(
+            {"price": "100.01", "quantity": "1", "side": "buy"}
+        )
+        admitted = raw("TRADE", exact_user_dict)
+        exact_user_dict["price"] = "999.99"
+        self.assertEqual(admitted.payload["price"], "100.01")
 
     def test_raw_evidence_rejects_executable_mapping_before_callbacks(self):
         CallbackDict.calls = 0

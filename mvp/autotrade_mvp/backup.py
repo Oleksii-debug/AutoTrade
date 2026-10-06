@@ -48,6 +48,7 @@ _RESTORE_PROVENANCE_FIELDS = (
     "source_owner_scope",
     "source_owner_id",
     "source_owner_epoch",
+    "restored_journal_backing_identity",
 )
 MANIFEST_NAME = "backup-manifest.json"
 MANIFEST_DIGEST_NAME = "backup-manifest.sha256"
@@ -356,6 +357,11 @@ def _restore_provenance_payload(value: object) -> dict[str, Any]:
                 "Restore provenance source_owner_epoch is invalid"
             )
 
+    _canonical_sha256_ref(
+        payload["restored_journal_backing_identity"],
+        name="restored_journal_backing_identity",
+    )
+
     runtime_evidence = payload["runtime_checkpoint_evidence"]
     reconstitution_required = payload[
         "runtime_checkpoint_reconstitution_required"
@@ -382,13 +388,44 @@ def _restore_provenance_payload(value: object) -> dict[str, Any]:
     return payload
 
 
-def _append_restore_provenance(root: Path, marker: dict[str, Any]) -> None:
+def _journal_backing_identity_ref(store: JournalStore) -> str:
+    """Digest only the backing-object identity, never relocatable path text."""
+
+    identity = store.store_identity
+    if identity.identity_source == "posix_stat":
+        material = {
+            "identity_source": "posix_stat",
+            "filesystem_device": identity.filesystem_device,
+            "filesystem_inode": identity.filesystem_inode,
+        }
+    elif identity.identity_source == "windows_by_handle":
+        material = {
+            "identity_source": "windows_by_handle",
+            "windows_volume_serial": identity.windows_volume_serial,
+            "windows_file_index_high": identity.windows_file_index_high,
+            "windows_file_index_low": identity.windows_file_index_low,
+        }
+    else:
+        raise BackupIntegrityError(
+            "Restore journal backing identity source is unsupported"
+        )
+    return payload_digest(material)
+
+
+def _append_restore_provenance(
+    root: Path,
+    marker: dict[str, Any],
+) -> dict[str, Any]:
     """Bind restore/checkpoint claims into the canonical durable journal."""
 
-    payload = _restore_provenance_payload(
-        {key: marker.get(key) for key in _RESTORE_PROVENANCE_FIELDS}
-    )
     store = JournalStore(root / "state" / "journal.sqlite3")
+    bound_marker = {
+        **marker,
+        "restored_journal_backing_identity": _journal_backing_identity_ref(store),
+    }
+    payload = _restore_provenance_payload(
+        {key: bound_marker.get(key) for key in _RESTORE_PROVENANCE_FIELDS}
+    )
     aggregate_version = store.next_aggregate_version(
         _RESTORE_PROVENANCE_AGGREGATE_TYPE,
         _RESTORE_PROVENANCE_AGGREGATE_ID,
@@ -418,6 +455,7 @@ def _append_restore_provenance(root: Path, marker: dict[str, Any]) -> None:
         raise BackupIntegrityError(
             "Restore provenance could not be bound to the durable journal"
         ) from error
+    return bound_marker
 
 
 def _load_restore_provenance(root: Path) -> dict[str, Any] | None:
@@ -433,6 +471,7 @@ def _load_restore_provenance(root: Path) -> dict[str, Any] | None:
         )
     try:
         store = JournalStore(journal_path)
+        current_backing_identity = _journal_backing_identity_ref(store)
         events = store.load_events(
             _RESTORE_PROVENANCE_AGGREGATE_TYPE,
             _RESTORE_PROVENANCE_AGGREGATE_ID,
@@ -451,6 +490,10 @@ def _load_restore_provenance(root: Path) -> dict[str, Any] | None:
     ):
         raise BackupIntegrityError("Restore provenance journal event is invalid")
     payload = _restore_provenance_payload(event.get("payload"))
+    if payload["restored_journal_backing_identity"] != current_backing_identity:
+        raise BackupIntegrityError(
+            "Restore journal backing generation differs from durable provenance"
+        )
     if (
         event.get("payload_hash") != payload_digest(payload)
         or event.get("committed_at") != payload["restored_at"]
@@ -1788,7 +1831,7 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
                 source_owner.epoch if source_owner is not None else None
             ),
         }
-        _append_restore_provenance(stage, marker)
+        marker = _append_restore_provenance(stage, marker)
         _write_bytes_durable(stage / RESTORE_MARKER_NAME, _canonical_json(marker))
         _fsync_directory_tree(stage)
         os.replace(stage, destination)

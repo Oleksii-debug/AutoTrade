@@ -778,6 +778,31 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertIsNone(marker["runtime_checkpoint_evidence_sha256"])
             self.assertTrue(restore_requires_reconciliation(restored))
 
+    def test_copied_restored_journal_cannot_replay_restore_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            copied = root / "copied-restored"
+            shutil.copytree(restored, copied)
+
+            self.assertTrue(restore_requires_reconciliation(copied))
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "backing generation differs from durable provenance",
+            ):
+                complete_restore_reconciliation(
+                    copied,
+                    controller=None,
+                    reconciliation_checkpoint_event_id="unused",
+                    fencing_evidence=(),
+                    completed_at="2026-09-25T08:00:03Z",
+                )
+            self.assertFalse(
+                (copied / "RESTORE_RECONCILIATION_COMPLETE.json").exists()
+            )
+
     def test_restore_validation_never_recreates_missing_journal(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -843,6 +868,13 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertEqual(
                 event["payload"]["source_owner_scope"],
                 marker["source_owner_scope"],
+            )
+            self.assertEqual(
+                event["payload"]["restored_journal_backing_identity"],
+                marker["restored_journal_backing_identity"],
+            )
+            self.assertTrue(
+                marker["restored_journal_backing_identity"].startswith("sha256:")
             )
 
     def test_restore_marker_cannot_override_journal_bound_manifest_identity(self):

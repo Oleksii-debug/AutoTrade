@@ -53,9 +53,12 @@ class SequenceConflict(MarketDataError):
 
 
 def _text(value: str, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
+        raise MarketDataError(f"{field} must be an exact string")
+    normalized = value.strip()
+    if not normalized:
         raise MarketDataError(f"{field} is required")
-    return value.strip()
+    return normalized
 
 
 def _admission_text(value: object, field: str) -> str:
@@ -130,8 +133,8 @@ def _instant(value: datetime, field: str) -> datetime:
 def _sequence(value: int | None, field: str) -> int | None:
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise MarketDataError(f"{field} must be a non-negative integer")
+    if type(value) is not int or value < 0:
+        raise MarketDataError(f"{field} must be an exact non-negative integer")
     return value
 
 

@@ -614,6 +614,9 @@ def _install_kraken_futures_prepared_request_authority(builder):
     canonical_id = id
     canonical_tuple = tuple
     canonical_str = str
+    canonical_dict = dict
+    canonical_dict_get = canonical_dict.get
+    canonical_len = len
     canonical_getattr = getattr
     canonical_object = object
     object_getattribute = canonical_object.__getattribute__
@@ -665,7 +668,25 @@ def _install_kraken_futures_prepared_request_authority(builder):
             or id is not canonical_id
             or tuple is not canonical_tuple
             or str is not canonical_str
+            or dict is not canonical_dict
+            or len is not canonical_len
             or getattr is not canonical_getattr
+            or canonical_type(base_urls) is not canonical_dict
+            or canonical_len(base_urls) != 2
+            or canonical_dict_get(base_urls, "LIVE") != "https://futures.kraken.com"
+            or canonical_dict_get(base_urls, "DEMO") != "https://demo-futures.kraken.com"
+            or canonical_type(runtime_map) is not canonical_dict
+            or canonical_len(runtime_map) != 2
+            or canonical_dict_get(runtime_map, "LIVE") != "LIVE"
+            or canonical_dict_get(runtime_map, "DEMO") != "PAPER"
+            or canonical_type(endpoints) is not canonical_dict
+            or canonical_len(endpoints) != 6
+            or canonical_dict_get(endpoints, "PLACE_ORDER") != "/derivatives/api/v3/sendorder"
+            or canonical_dict_get(endpoints, "OPEN_ORDERS") != "/derivatives/api/v3/openorders"
+            or canonical_dict_get(endpoints, "FILLS") != "/derivatives/api/v3/fills"
+            or canonical_dict_get(endpoints, "ORDER_HISTORY") != "/api/history/v3/orders"
+            or canonical_dict_get(endpoints, "POSITION_HISTORY") != "/api/history/v3/positions"
+            or canonical_dict_get(endpoints, "CANCEL_AFTER") != "/derivatives/api/v3/cancelallordersafter"
             or object is not canonical_object
             or AttributeError is not attribute_error_type
             or MappingProxyType is not mapping_proxy_type

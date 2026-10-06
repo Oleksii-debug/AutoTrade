@@ -733,6 +733,29 @@ class AlpacaAdapterTests(unittest.TestCase):
                 },
             )
 
+    def test_submission_consumer_rejects_prepared_subclass_before_virtual_callback(self):
+        callbacks = []
+
+        class HostilePrepared(AlpacaPreparedRequest):
+            def __getattribute__(self, _name):
+                callbacks.append(True)
+                raise AssertionError(
+                    "prepared-request virtual callback executed before type verification"
+                )
+
+        forged = object.__new__(HostilePrepared)
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact AlpacaPreparedRequest",
+        ):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=forged,
+                observation=None,
+                transport_ambiguous=True,
+            )
+        self.assertEqual(callbacks, [])
+
     def test_submission_consumer_rejects_subclass_before_virtual_callback(self):
         intent_id = "alpaca-hostile-observation"
         client_id = stable_client_order_id(

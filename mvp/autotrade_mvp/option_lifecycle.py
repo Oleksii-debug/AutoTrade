@@ -932,6 +932,18 @@ class DurableOptionLifecycleAuthority:
                         qualified_provider_evidence.qualified_route_rule_digest
                     ),
                     "data_entitlement": qualified_provider_evidence.data_entitlement,
+                    "provider_environment": (
+                        qualified_provider_evidence.query_binding.provider_environment
+                    ),
+                    "authority_journal_sequence_cut": (
+                        qualified_provider_evidence.query_binding.authority_journal_sequence_cut
+                    ),
+                    "adapter_code_sha": (
+                        qualified_provider_evidence.query_binding.adapter_code_sha
+                    ),
+                    "packaged_artifact_digest": (
+                        qualified_provider_evidence.query_binding.packaged_artifact_digest
+                    ),
                 }
             )
         provider_evidence_digest = payload_digest(provider_evidence_payload)

@@ -149,6 +149,76 @@ class SignedHttpRequestEnvelopeTests(unittest.TestCase):
                 timeout_seconds=HostileInt(5),
             )
 
+    def test_write_headers_reject_wire_grammar_drift_and_case_duplicates(self):
+        invalid_names = (
+            "X:Injected",
+            "X-\x00Injected",
+            "X-É",
+        )
+        for name in invalid_names:
+            with self.subTest(name=repr(name)):
+                with self.assertRaisesRegex(
+                    ProviderTransportScopeError,
+                    "signed request header names must be canonical text",
+                ):
+                    SignedHttpRequest(
+                        method="POST",
+                        url="https://api.example.test/v1/order",
+                        headers={name: "value"},
+                        body=b"{}",
+                        timeout_seconds=5,
+                    )
+
+        invalid_values = (
+            "value\x00tail",
+            "value\x1ftail",
+            "value\x7ftail",
+            "value\u0085tail",
+        )
+        for value in invalid_values:
+            with self.subTest(value=repr(value)):
+                with self.assertRaisesRegex(
+                    ProviderTransportScopeError,
+                    "signed request header values must be canonical text",
+                ):
+                    SignedHttpRequest(
+                        method="POST",
+                        url="https://api.example.test/v1/order",
+                        headers={"X-Test": value},
+                        body=b"{}",
+                        timeout_seconds=5,
+                    )
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "signed request header names must be unique case-insensitively",
+        ):
+            SignedHttpRequest(
+                method="POST",
+                url="https://api.example.test/v1/order",
+                headers={
+                    "Authorization": "Bearer good",
+                    "authorization": "Bearer evil",
+                },
+                body=b"{}",
+                timeout_seconds=5,
+            )
+
+        canonical = SignedHttpRequest(
+            method="POST",
+            url="https://api.example.test/v1/order",
+            headers={
+                "Authorization": "Bearer abc+/_-.=~",
+                "X-Trace_Id": "visible ASCII value",
+            },
+            body=b"{}",
+            timeout_seconds=5,
+        )
+        self.assertEqual(
+            dict(canonical.headers)["Authorization"],
+            "Bearer abc+/_-.=~",
+        )
+
     def test_wire_rejects_signed_request_subclass_before_field_access(self):
         class ExecutableSignedRequest(SignedHttpRequest):
             callbacks = 0

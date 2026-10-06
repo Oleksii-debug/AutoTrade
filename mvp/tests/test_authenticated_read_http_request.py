@@ -414,6 +414,72 @@ class AuthenticatedReadHttpRequestTests(unittest.TestCase):
                 method="GET",
             )
 
+    def test_headers_reject_wire_grammar_drift_and_case_duplicates(self):
+        invalid_names = (
+            "X:Injected",
+            "X-\x00Injected",
+            "X-É",
+        )
+        for name in invalid_names:
+            with self.subTest(name=repr(name)):
+                with self.assertRaisesRegex(
+                    ProviderTransportScopeError,
+                    "authenticated-read header names must be canonical text",
+                ):
+                    AuthenticatedReadHttpRequest(
+                        url="https://localhost/iserver/accounts",
+                        headers={name: "value"},
+                        timeout_seconds=5,
+                        method="GET",
+                    )
+
+        invalid_values = (
+            "value\x00tail",
+            "value\x1ftail",
+            "value\x7ftail",
+            "value\u0085tail",
+        )
+        for value in invalid_values:
+            with self.subTest(value=repr(value)):
+                with self.assertRaisesRegex(
+                    ProviderTransportScopeError,
+                    "authenticated-read header values must be canonical text",
+                ):
+                    AuthenticatedReadHttpRequest(
+                        url="https://localhost/iserver/accounts",
+                        headers={"X-Test": value},
+                        timeout_seconds=5,
+                        method="GET",
+                    )
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "authenticated-read header names must be unique case-insensitively",
+        ):
+            AuthenticatedReadHttpRequest(
+                url="https://localhost/iserver/accounts",
+                headers={
+                    "Authorization": "Bearer good",
+                    "authorization": "Bearer evil",
+                },
+                timeout_seconds=5,
+                method="GET",
+            )
+
+        canonical = AuthenticatedReadHttpRequest(
+            url="https://localhost/iserver/accounts",
+            headers={
+                "Authorization": "Bearer abc+/_-.=~",
+                "X-Trace_Id": "visible ASCII value",
+            },
+            timeout_seconds=5,
+            method="GET",
+        )
+        self.assertEqual(
+            dict(canonical.headers)["Authorization"],
+            "Bearer abc+/_-.=~",
+        )
+
     def test_timeout_requires_exact_integer_before_comparison(self):
         class HostileInt(int):
             def __lt__(self, other):

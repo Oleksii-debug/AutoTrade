@@ -15,7 +15,10 @@ from .persistence import (
     payload_digest,
     require_exact_journal_store_authority,
 )
-from .reconciliation_journal import require_current_reconciliation_checkpoint
+from .reconciliation_journal import (
+    load_latest_reconciliation_checkpoint_for_scope,
+    require_current_reconciliation_checkpoint,
+)
 
 
 class FinancialCutUnavailable(LookupError):
@@ -190,6 +193,16 @@ def capture_current_scientific_financial_cut(
             store,
             target_sequence=frozen_sequence,
         )
+        latest = load_latest_reconciliation_checkpoint_for_scope(
+            store,
+            provider_id=provider,
+            account_id=account,
+            environment=env,
+        )
+        if latest is None:
+            raise FinancialCutUnavailable(
+                "current reconciliation checkpoint is unavailable"
+            )
         try:
             checkpoint = require_current_reconciliation_checkpoint(
                 store,
@@ -198,10 +211,6 @@ def capture_current_scientific_financial_cut(
                 account_id=account,
                 environment=env,
             )
-        except KeyError as error:
-            raise FinancialCutUnavailable(
-                "current reconciliation checkpoint is unavailable"
-            ) from error
         except (TypeError, ValueError) as error:
             raise FinancialCutConflict(
                 "reconciliation checkpoint is not authoritative for the requested scope"

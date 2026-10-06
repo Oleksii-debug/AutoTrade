@@ -1231,6 +1231,107 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 ["SubmissionPrepared"],
             )
 
+    def test_terminal_reread_rejects_post_append_tamper(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            original_append = dispatcher._append
+            wire_calls = 0
+
+            def append_then_tamper(**kwargs):
+                result = original_append(**kwargs)
+                if kwargs["event_type"] == "SubmissionSent":
+                    self._tamper_event_field(
+                        path,
+                        "SubmissionSent",
+                        "client_order_id",
+                        "retargeted-client",
+                    )
+                return result
+
+            dispatcher._append = append_then_tamper
+
+            def transport(_client_order_id, _request, guard):
+                nonlocal wire_calls
+                guard()
+                wire_calls += 1
+                return ExactJsonTransportResponse(b'{"accepted":true}')
+
+            result = dispatcher.dispatch(
+                attempt_id="terminal-reread-tamper-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda *_args: (True, "allowed"),
+                transport_send=transport,
+                submission_scope={"endpoint": "/orders"},
+            )
+
+            self.assertEqual(wire_calls, 1)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "durable_submission_history_invalid")
+
+    def test_terminal_reread_rejects_post_append_disappearance(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            original_append = dispatcher._append
+
+            def append_then_delete(**kwargs):
+                result = original_append(**kwargs)
+                if kwargs["event_type"] == "SubmissionSent":
+                    connection = sqlite3.connect(path)
+                    try:
+                        connection.execute(
+                            "DELETE FROM events WHERE event_type = 'SubmissionSent'"
+                        )
+                        connection.commit()
+                    finally:
+                        connection.close()
+                return result
+
+            dispatcher._append = append_then_delete
+            result = dispatcher.dispatch(
+                attempt_id="terminal-reread-delete-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda *_args: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(b'{"accepted":true}'),
+                )[1],
+                submission_scope={"endpoint": "/orders"},
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "durable_submission_history_invalid")
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("terminal-reread-delete-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
     def test_runtime_redispatch_rejects_submission_scope_retargeting(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

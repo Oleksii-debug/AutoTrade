@@ -534,18 +534,63 @@ class VerticalSliceTests(unittest.TestCase):
             )
 
 
+    def test_resume_rejects_false_equity_before_repairing_missing_tail(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            checkpoint_path = root / "checkpoint.json"
+            evidence_path = root / "learning-evidence.jsonl"
+
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            evidence_id = checkpoint["evidence_ids"][-1]
+            record = checkpoint["evidence_records"][evidence_id]
+            self.assertIn("valuation_price", record)
+            record["equity"] = "1.00000000"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            evidence_path.unlink()
+            for journal_path in root.glob("journal.sqlite3*"):
+                journal_path.unlink()
+
+            checkpoint_before = checkpoint_path.read_bytes()
+            intents_before = {
+                path.name: path.read_bytes()
+                for path in (root / "order-intents").glob("*.json")
+            }
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "equity does not match valuation",
+            ):
+                run_vertical_slice(
+                    [103, 102, 101, 100],
+                    directory,
+                )
+
+            self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertFalse(evidence_path.exists())
+            self.assertEqual(list(root.glob("journal.sqlite3*")), [])
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in (root / "order-intents").glob("*.json")
+                },
+                intents_before,
+            )
+
+
     def test_resume_rejects_duplicate_checkpoint_json_keys_before_mutation(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)
             root = Path(directory)
             checkpoint_path = root / "checkpoint.json"
             checkpoint_text = checkpoint_path.read_text(encoding="utf-8")
-            marker = '"schema_version": 3,'
+            marker = '"schema_version": 4,'
             self.assertEqual(checkpoint_text.count(marker), 1)
             checkpoint_path.write_text(
                 checkpoint_text.replace(
                     marker,
-                    marker + '\n  "schema_version": 3,',
+                    marker + '\n  "schema_version": 4,',
                     1,
                 ),
                 encoding="utf-8",
@@ -964,7 +1009,7 @@ class VerticalSliceTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "forced durable sync failure"):
                     pipeline_module._atomic_json(
                         checkpoint_path,
-                        {"schema_version": 3},
+                        {"schema_version": 4},
                     )
 
             temporary = root / "checkpoint.json.tmp"

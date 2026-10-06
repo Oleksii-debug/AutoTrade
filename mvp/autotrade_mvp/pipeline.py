@@ -29,7 +29,7 @@ from .persistence import JournalStore, payload_digest
 
 
 MONEY_QUANTUM = Decimal("0.00000001")
-CHECKPOINT_SCHEMA_VERSION = 3
+CHECKPOINT_SCHEMA_VERSION = 4
 
 
 def _exact_decimal(value: Decimal | str | int, *, name: str) -> Decimal:
@@ -225,13 +225,14 @@ def handle_journal_event(
         "cash": evidence["cash"],
         "position": evidence["position"],
         "equity": evidence["equity"],
+        "valuation_price": evidence["valuation_price"],
         "reconciled": evidence["reconciled"],
         "financial_configuration_hash": financial_configuration_hash,
     }
     envelope = {
         "event_id": event_id,
         "event_type": "SimulationEpisodeRecorded",
-        "schema_version": "1.0.0",
+        "schema_version": "2.0.0",
         "aggregate_type": "simulation_portfolio",
         "aggregate_id": symbol,
         "aggregate_version": str(aggregate_version),
@@ -615,6 +616,7 @@ _REPLAY_EVIDENCE_FIELDS = frozenset(
         "cash",
         "position",
         "equity",
+        "valuation_price",
         "reconciled",
         "financial_configuration_hash",
         "recorded_at",
@@ -633,7 +635,7 @@ def _require_replay_evidence_record(
     if (
         type(record) is not dict
         or set(record) != _REPLAY_EVIDENCE_FIELDS
-        or record.get("schema_version") != 1
+        or record.get("schema_version") != 2
         or record.get("evidence_id") != evidence_id
         or type(record.get("input_hash")) is not str
         or len(record["input_hash"]) != 64
@@ -653,24 +655,40 @@ def _require_replay_evidence_record(
         or type(record.get("cash")) is not str
         or type(record.get("position")) is not str
         or type(record.get("equity")) is not str
+        or type(record.get("valuation_price")) is not str
         or record.get("reconciled") is not True
         or record.get("financial_configuration_hash")
         != financial_configuration_hash
     ):
         raise ValueError("Corrupt checkpoint replay evidence")
+    financial_values: dict[str, Decimal] = {}
     try:
-        for field in ("cash", "position", "equity"):
+        for field in ("cash", "position", "equity", "valuation_price"):
             value = _checkpoint_decimal(
                 record[field],
                 name=f"evidence {field}",
             )
             if str(value) != record[field]:
                 raise ValueError("non-canonical evidence decimal")
+            financial_values[field] = value
         timestamp = datetime.fromisoformat(
             _utc_z(record["recorded_at"]).replace("Z", "+00:00")
         )
     except (KeyError, TypeError, ValueError, ArithmeticError) as error:
         raise ValueError("Corrupt checkpoint replay evidence") from error
+    valuation_price = financial_values["valuation_price"]
+    if valuation_price <= 0:
+        raise ValueError("Checkpoint replay evidence valuation price is invalid")
+    expected_equity = _money(
+        exact_add(
+            financial_values["cash"],
+            exact_multiply(financial_values["position"], valuation_price),
+        )
+    )
+    if financial_values["equity"] != expected_equity:
+        raise ValueError(
+            "Checkpoint replay evidence equity does not match valuation"
+        )
     return timestamp
 
 
@@ -838,7 +856,7 @@ def _repair_interrupted_replay(
                 or event.get("host_id") != "local-mvp"
                 or event.get("owner_epoch") != "1"
                 or event.get("environment") != "SIMULATION"
-                or event.get("schema_version") != "1.0.0"
+                or event.get("schema_version") != "2.0.0"
                 or event.get("causation_id") is not None
                 or event.get("evidence_refs") != []
             ):
@@ -865,6 +883,7 @@ def _repair_interrupted_replay(
                 "cash": record.get("cash"),
                 "position": record.get("position"),
                 "equity": record.get("equity"),
+                "valuation_price": record.get("valuation_price"),
                 "reconciled": record.get("reconciled"),
                 "financial_configuration_hash": financial_configuration_hash,
             }
@@ -1133,6 +1152,7 @@ def verify_replay(state_dir: str | Path) -> bool:
                 "cash",
                 "position",
                 "equity",
+                "valuation_price",
                 "reconciled",
                 "financial_configuration_hash",
                 "recorded_at",
@@ -1145,7 +1165,7 @@ def verify_replay(state_dir: str | Path) -> bool:
         if any(
             type(row) is not dict
             or set(row) != evidence_fields
-            or row["schema_version"] != 1
+            or row["schema_version"] != 2
             or type(row["evidence_id"]) is not str
             or not row["evidence_id"]
             or type(row["input_hash"]) is not str
@@ -1158,6 +1178,7 @@ def verify_replay(state_dir: str | Path) -> bool:
             or type(row["cash"]) is not str
             or type(row["position"]) is not str
             or type(row["equity"]) is not str
+            or type(row["valuation_price"]) is not str
             or type(row["reconciled"]) is not bool
             or row["financial_configuration_hash"] != configuration_hash
             for row in rows
@@ -1187,10 +1208,22 @@ def verify_replay(state_dir: str | Path) -> bool:
                 return False
             if (row["order_id"] is None) != (row["fill_id"] is None):
                 return False
-            for field in ("cash", "position", "equity"):
+            financial_values: dict[str, Decimal] = {}
+            for field in ("cash", "position", "equity", "valuation_price"):
                 value = _checkpoint_decimal(row[field], name=f"evidence {field}")
                 if str(value) != row[field]:
                     return False
+                financial_values[field] = value
+            valuation_price = financial_values["valuation_price"]
+            if valuation_price <= 0:
+                return False
+            if financial_values["equity"] != _money(
+                exact_add(
+                    financial_values["cash"],
+                    exact_multiply(financial_values["position"], valuation_price),
+                )
+            ):
+                return False
 
         checkpoint_ledger = EconomicLedger(initial_cash, list(checkpoint["postings"]))
         restored_fills = _restore_simulated_fills(
@@ -1236,7 +1269,7 @@ def verify_replay(state_dir: str | Path) -> bool:
                 or event.get("host_id") != "local-mvp"
                 or event.get("owner_epoch") != "1"
                 or event.get("environment") != "SIMULATION"
-                or event.get("schema_version") != "1.0.0"
+                or event.get("schema_version") != "2.0.0"
                 or event.get("causation_id") is not None
                 or event.get("evidence_refs") != []
             ):
@@ -1262,6 +1295,7 @@ def verify_replay(state_dir: str | Path) -> bool:
                 "cash": record["cash"],
                 "position": record["position"],
                 "equity": record["equity"],
+                "valuation_price": record["valuation_price"],
                 "reconciled": record["reconciled"],
                 "financial_configuration_hash": configuration_hash,
             }
@@ -1444,7 +1478,7 @@ def run_vertical_slice(
         "financial_configuration_hash": financial_configuration_hash,
     })[:20]
     fresh_evidence = {
-        "schema_version": 1,
+        "schema_version": 2,
         "evidence_id": evidence_id,
         "input_hash": _stable_hash([str(item) for item in normalized]),
         "decision": decision.side,
@@ -1455,6 +1489,7 @@ def run_vertical_slice(
         "cash": str(ledger.cash),
         "position": str(ledger.position),
         "equity": str(equity),
+        "valuation_price": str(last_price),
         "reconciled": reconciled,
         "financial_configuration_hash": financial_configuration_hash,
         "recorded_at": datetime.now(timezone.utc).isoformat(),

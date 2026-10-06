@@ -167,6 +167,78 @@ class ScientificFinancialCutTests(unittest.TestCase):
                 reconciliation_checkpoint_digest=_SHA,
             )
 
+    def test_scope_aliases_share_one_canonical_financial_cut_identity(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.db")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="science-cut-alias",
+                result=_reconciliation(),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            exact = _capture(
+                store,
+                provider_id="TEST_PROVIDER",
+                environment="PAPER",
+                reconciliation_event_id=checkpoint["event_id"],
+            )
+            alias = _capture(
+                store,
+                provider_id="test_provider",
+                environment="paper",
+                reconciliation_event_id=checkpoint["event_id"],
+            )
+
+            self.assertEqual(exact.provider_id, alias.provider_id)
+            self.assertEqual(exact.provider_id, "TEST_PROVIDER")
+            self.assertEqual(exact.environment, alias.environment)
+            self.assertEqual(exact.environment, "PAPER")
+            self.assertEqual(exact.cut_digest, alias.cut_digest)
+
+    def test_absent_checkpoint_race_is_conflict_not_stable_unavailable(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.db")
+            mutation_happened = False
+
+            def append_then_report_absent(
+                selected_store,
+                *,
+                provider_id,
+                account_id,
+                environment,
+            ):
+                nonlocal mutation_happened
+                self.assertIs(selected_store, store)
+                self.assertEqual(provider_id, "TEST_PROVIDER")
+                self.assertEqual(account_id, "test-account")
+                self.assertEqual(environment, "PAPER")
+                record_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id="science-cut-race",
+                    result=_reconciliation(),
+                    observed_at="2026-09-24T19:00:00Z",
+                    host_id="test-host",
+                    owner_epoch="epoch-1",
+                )
+                mutation_happened = True
+                return None
+
+            with patch.object(
+                cut_module,
+                "load_latest_reconciliation_checkpoint_for_scope",
+                new=append_then_report_absent,
+            ):
+                with self.assertRaisesRegex(
+                    FinancialCutConflict,
+                    "financial journal changed",
+                ):
+                    _capture(store)
+
+            self.assertTrue(mutation_happened)
+            self.assertEqual(store.current_journal_sequence(), 1)
+
     def test_cut_distinguishes_reconciliation_sequence_from_later_journal_truth(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.db")

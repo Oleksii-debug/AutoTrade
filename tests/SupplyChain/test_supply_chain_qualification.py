@@ -481,6 +481,45 @@ class SupplyChainQualificationTests(unittest.TestCase):
         )
 
 
+    def test_terminal_trust_manifest_uses_accepted_snapshot_not_mutated_receipt(self):
+        value = evidence()
+        receipt, policy = _signed_review(value)
+        baseline = qualify_signed(value, receipt=receipt, canonical_policy=policy)
+
+        original_verify = supply_module.verify_canonical_qualification_attestation
+
+        def verify_then_mutate(*args, **kwargs):
+            accepted = original_verify(*args, **kwargs)
+            object.__setattr__(
+                receipt,
+                "signature_b64",
+                base64.b64encode(b"forged-after-acceptance").decode("ascii"),
+            )
+            object.__setattr__(
+                receipt.attestation,
+                "content_digest",
+                "sha256:" + "f" * 64,
+            )
+            return accepted
+
+        with patch.object(
+            supply_module,
+            "verify_canonical_qualification_attestation",
+            side_effect=verify_then_mutate,
+        ):
+            mutated = qualify_signed(
+                value,
+                receipt=receipt,
+                canonical_policy=policy,
+            )
+
+        self.assertEqual(mutated.status, baseline.status)
+        self.assertEqual(mutated.qualification_id, baseline.qualification_id)
+        self.assertEqual(
+            mutated.reason_codes,
+            baseline.reason_codes,
+        )
+
     def test_signed_review_must_cover_exact_supply_chain_evidence_set(self):
         value = evidence()
         refs = _evidence_refs(value)[:-1]

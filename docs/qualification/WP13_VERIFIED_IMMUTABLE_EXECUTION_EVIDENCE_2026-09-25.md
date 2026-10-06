@@ -32,3 +32,19 @@ Focused tests cover:
 This change is scientific/replay qualification only. It adds no provider credential handling, live send path, money movement, trading permission, promotion bypass or economic-edge claim.
 
 Exact-head CI remains required before integration.
+
+
+## 2026-10-06 price-grid authority reconvergence
+
+The remaining WP-13 MARKET projection boundary is now bound to an immutable `ExecutionPriceGrid` issued only from an exact canonical `InstrumentVersion`.
+
+The grid freezes:
+- canonical instrument version and venue price quantum;
+- projection policy identity and version;
+- the source metadata SHA-256;
+- the canonical instrument metadata binding;
+- adverse BUY=CEILING / SELL=FLOOR projection semantics.
+
+`ExecutionModel.fingerprint` includes the grid fingerprint. MARKET simulation and the independent oracle both fail closed when authoritative grid evidence is absent, mismatched, or invalid; the final market price continues to be projected with bounded exact rational arithmetic rather than ambient `Decimal` context.
+
+This is an implementation/reconvergence record only. It does not establish provider qualification, PAPER/LIVE authority, profitability, or physical Windows/NVDA acceptance.

@@ -6,10 +6,11 @@ store, or trading sender. Its only authority is the inference-call boundary:
 one deterministic semantic attempt may cross that boundary at most once.
 
 Remote/local adapters are injected. A durable ModelCallStarted event is written
-before adapter invocation. After that point an exception is conservatively
-UNKNOWN and the full reserved ceiling becomes estimated-unbilled until billing
-evidence resolves it. A provider adapter may raise ModelCallNotSent only when it
-can prove the external/local inference boundary was not crossed.
+before adapter invocation. After that point every adapter exception is
+conservatively UNKNOWN and the full reserved ceiling becomes estimated-unbilled
+until billing evidence resolves it. In particular, an injected adapter cannot
+self-author a NOT_SENT proof after ModelCallStarted merely by raising
+ModelCallNotSent.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from decimal import Decimal
 from hashlib import sha256
 import json
 import re
+from types import MappingProxyType
 from typing import Callable, Iterable, Mapping
 from uuid import uuid4
 
@@ -30,8 +32,15 @@ from .model_gateway import (
     RouteDecision,
     RouteStatus,
     RoutingPolicy,
+    _route_now,
+    route_model,
 )
-from .persistence import canonical_json, payload_digest
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .exact_decimal import exact_add, parse_bounded_exact_decimal
 
 
@@ -44,7 +53,98 @@ class ModelCallError(RuntimeError):
 
 
 class ModelCallNotSent(ModelCallError):
-    """Adapter proof that no inference boundary was crossed."""
+    """Legacy adapter hint; after durable STARTED it is not independent NOT_SENT proof."""
+
+
+# Callback code can retain the canonical JournalStore class itself.  Freezing
+# instance state and even the live class dictionary at callback entry is not
+# enough: __bases__ may be rebound to a layout-compatible hostile subclass,
+# changing inherited durable dispatch without changing vars(JournalStore).
+# Retain the exact project-owned topology and descriptors from trusted import.
+_MODEL_JOURNAL_CLASS_AUTHORITY = tuple(
+    (
+        cls,
+        tuple(cls.__bases__),
+        MappingProxyType(dict(vars(cls))),
+    )
+    for cls in JournalStore.__mro__
+    if cls is not object
+)
+
+
+def _model_journal_class_authority_changes(
+    *,
+    restore: bool,
+    authority=_MODEL_JOURNAL_CLASS_AUTHORITY,
+) -> list[str]:
+    """Detect and optionally restore trusted JournalStore class topology."""
+
+    changes: list[str] = []
+    for cls, expected_bases, expected_state in authority:
+        current_bases = tuple(cls.__bases__)
+        bases_changed = (
+            len(current_bases) != len(expected_bases)
+            or any(
+                current is not expected
+                for current, expected in zip(current_bases, expected_bases)
+            )
+        )
+        if bases_changed:
+            changes.append(f"budget.journal.class.{cls.__name__}.__bases__")
+            if restore:
+                try:
+                    type.__setattr__(cls, "__bases__", expected_bases)
+                except TypeError as error:
+                    raise ModelCallError(
+                        "journal class base authority could not be restored"
+                    ) from error
+
+        current_state = vars(cls)
+        current_keys = tuple(current_state)
+        if any(type(name) is not str for name in current_keys):
+            raise ModelCallError("journal class authority state keys are invalid")
+        names = set(current_keys) | set(expected_state)
+        for name in sorted(names):
+            label = f"budget.journal.class.{cls.__name__}.{name}"
+            if name not in expected_state:
+                changes.append(label)
+                if restore:
+                    try:
+                        type.__delattr__(cls, name)
+                    except (AttributeError, TypeError) as error:
+                        raise ModelCallError(
+                            "journal class authority could not be restored"
+                        ) from error
+                continue
+            expected = expected_state[name]
+            if name not in current_state or current_state[name] is not expected:
+                changes.append(label)
+                if restore:
+                    try:
+                        type.__setattr__(cls, name, expected)
+                    except TypeError as error:
+                        raise ModelCallError(
+                            "journal class authority could not be restored"
+                        ) from error
+
+        if restore:
+            restored_bases = tuple(cls.__bases__)
+            if (
+                len(restored_bases) != len(expected_bases)
+                or any(
+                    current is not expected
+                    for current, expected in zip(restored_bases, expected_bases)
+                )
+            ):
+                raise ModelCallError(
+                    "journal class base authority restore is incomplete"
+                )
+            restored = vars(cls)
+            if set(restored) != set(expected_state):
+                raise ModelCallError("journal class authority restore is incomplete")
+            if any(restored[name] is not expected_state[name] for name in expected_state):
+                raise ModelCallError("journal class authority restore is incomplete")
+    return changes
 
 
 def _canonical_text(value: object, *, name: str) -> str:
@@ -144,8 +244,7 @@ class ModelCallSpec:
                 ),
             )
         if (
-            not isinstance(self.fallback_index, int)
-            or isinstance(self.fallback_index, bool)
+            type(self.fallback_index) is not int
             or self.fallback_index < 0
             or self.fallback_index > 32
         ):
@@ -235,10 +334,10 @@ class PricingEvidenceSnapshot:
             "valid_until",
             _utc_text(self.valid_until, name="valid_until"),
         )
-        if datetime.fromisoformat(self.valid_until.replace("Z", "+00:00")) < datetime.fromisoformat(
+        if datetime.fromisoformat(self.valid_until.replace("Z", "+00:00")) <= datetime.fromisoformat(
             self.as_of.replace("Z", "+00:00")
         ):
-            raise ValueError("pricing evidence validity cannot precede as_of")
+            raise ValueError("pricing evidence valid_until must follow as_of")
         currency = _canonical_text(
             self.cost_currency, name="cost_currency"
         ).upper()
@@ -456,7 +555,7 @@ ObservationEvidenceResolver = Callable[
     ModelObservationEvidence,
 ]
 BillingEvidenceResolver = Callable[
-    [str, str, Decimal, Mapping[str, object]],
+    [str, str, Mapping[str, object]],
     BillingEvidence,
 ]
 ResultValidator = Callable[[object], bool]
@@ -489,14 +588,22 @@ class DurableModelCallOrchestrator:
         if not callable(billing_evidence_resolver):
             raise TypeError("billing_evidence_resolver must be callable")
         if (
-            not isinstance(started_lease_seconds, int)
-            or isinstance(started_lease_seconds, bool)
+            type(started_lease_seconds) is not int
             or started_lease_seconds < 1
             or started_lease_seconds > 3600
         ):
             raise ValueError(
                 "started_lease_seconds must be an integer from 1 through 3600"
             )
+        try:
+            require_exact_journal_store_authority(
+                budget.journal,
+                subject="model budget journal",
+            )
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise ModelCallError(
+                "durable model budget journal authority is invalid"
+            ) from error
         self.budget = budget
         self.journal = budget.journal
         self.clock = clock
@@ -511,11 +618,482 @@ class DurableModelCallOrchestrator:
         )
 
     def _now(self) -> str:
-        return _utc_text(self.clock(), name="clock")
+        """Capture injected chronology without allowing authority redirection."""
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
+        utc_text = _utc_text
+        module_globals = globals()
+        callback_shape = DurableModelCallOrchestrator._callback_shape_snapshot(self)
+        clock = callback_shape[1].get("clock")
+        if not callable(clock):
+            raise ModelCallError("model-call clock authority is invalid")
 
-    def attempt_id(self, spec: ModelCallSpec) -> str:
+        clock_error: Exception | None = None
+        clock_value: object = None
+        clock_changes: list[str] = []
+        try:
+            clock_value = clock()
+        except Exception as error:
+            clock_error = error
+        finally:
+            try:
+                clock_changes.extend(
+                    restore_callback_shape(
+                        self,
+                        callback_shape,
+                    )
+                )
+            finally:
+                current_utc_text = dict.get(module_globals, "_utc_text")
+                if current_utc_text is not utc_text:
+                    clock_changes.append("module._utc_text")
+                    dict.__setitem__(
+                        module_globals,
+                        "_utc_text",
+                        utc_text,
+                    )
+
+        if clock_changes:
+            error = ModelCallError(
+                "clock mutated orchestrator authority:"
+                + ",".join(sorted(set(clock_changes)))
+            )
+            if clock_error is not None:
+                raise error from clock_error
+            raise error
+        if clock_error is not None:
+            raise clock_error
+        return utc_text(clock_value, name="clock")
+
+    @staticmethod
+    def _safe_instance_snapshot(
+        value: object,
+        *,
+        subject: str,
+    ) -> dict[str, object]:
+        state = object.__getattribute__(value, "__dict__")
+        if type(state) is not dict:
+            raise ModelCallError(subject + " authority state is invalid")
+        keys = tuple(state)
+        if any(type(name) is not str for name in keys):
+            raise ModelCallError(subject + " authority state keys are invalid")
+        return dict.copy(state)
+
+    @staticmethod
+    def _restore_safe_instance_state(
+        value: object,
+        expected_state: dict[str, object],
+        *,
+        prefix: str,
+    ) -> list[str]:
+        current_state = object.__getattribute__(value, "__dict__")
+        if type(current_state) is not dict:
+            raise ModelCallError(prefix + " authority state is invalid")
+
+        changes: list[str] = []
+        current_keys = tuple(current_state)
+        if any(type(name) is not str for name in current_keys):
+            changes.append(prefix + ".<invalid-state-key>")
+        current_names = {name for name in current_keys if type(name) is str}
+        expected_names = set(expected_state)
+        for name in sorted(current_names | expected_names):
+            if name not in expected_state or name not in current_state:
+                changes.append(prefix + "." + name)
+                continue
+            current = current_state[name]
+            expected = expected_state[name]
+            if type(expected) in (str, int, bool, Decimal, type(None)):
+                if type(current) is not type(expected) or current != expected:
+                    changes.append(prefix + "." + name)
+            elif current is not expected:
+                changes.append(prefix + "." + name)
+
+        # Avoid deleting hostile keys one-by-one: dict.clear() does not re-enter
+        # attacker-controlled __hash__/__str__ methods, and all restored keys
+        # come from the previously validated exact-str snapshot.
+        dict.clear(current_state)
+        dict.update(current_state, expected_state)
+        return changes
+
+    def _callback_shape_snapshot(
+        self,
+    ) -> tuple[
+        type,
+        dict[str, object],
+        object,
+        type,
+        dict[str, object],
+        object,
+        type,
+        dict[str, object],
+        object | None,
+        type | None,
+        dict[str, object] | None,
+        tuple[tuple[type, str, tuple[type, ...], Mapping[str, object]], ...],
+    ]:
+        """Freeze exact class and instance authority around caller callbacks."""
+        orchestrator_class = object.__getattribute__(self, "__class__")
+        if orchestrator_class is not DurableModelCallOrchestrator:
+            raise ModelCallError("model orchestrator class authority is invalid")
+        self_state = DurableModelCallOrchestrator._safe_instance_snapshot(
+            self,
+            subject="model orchestrator",
+        )
+        budget = self_state.get("budget")
+        if type(budget) is not DurableModelBudget:
+            raise ModelCallError("model budget authority is invalid")
+        budget_class = object.__getattribute__(budget, "__class__")
+        budget_state = DurableModelCallOrchestrator._safe_instance_snapshot(
+            budget,
+            subject="model budget",
+        )
+        journal = self_state.get("journal")
+        if journal is None or journal is not budget_state.get("journal"):
+            raise ModelCallError("model budget journal authority is inconsistent")
+        journal_class = object.__getattribute__(journal, "__class__")
+        try:
+            require_exact_journal_store_authority(
+                journal,
+                subject="model budget journal",
+            )
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise ModelCallError(
+                "durable model budget journal authority is invalid"
+            ) from error
+        if _model_journal_class_authority_changes(restore=False):
+            raise ModelCallError(
+                "durable model budget journal class authority is invalid"
+            )
+        journal_state = DurableModelCallOrchestrator._safe_instance_snapshot(
+            journal,
+            subject="model budget journal",
+        )
+        identity = journal_state.get("_store_identity")
+        identity_class = (
+            object.__getattribute__(identity, "__class__")
+            if identity is not None
+            else None
+        )
+        identity_state = (
+            DurableModelCallOrchestrator._safe_instance_snapshot(
+                identity,
+                subject="model budget journal identity",
+            )
+            if identity is not None
+            else None
+        )
+
+        # Freeze executable class dictionaries as well as each object's
+        # __class__ pointer. A callback can otherwise leave every instance
+        # dictionary unchanged while rebinding budget, journal, or restore
+        # methods that execute before the next durable effect.
+        authority_classes: list[type] = []
+        seen_class_ids: set[int] = set()
+        for selected_class in (
+            orchestrator_class,
+            budget_class,
+            journal_class,
+            identity_class,
+        ):
+            if selected_class is None:
+                continue
+            for candidate_class in selected_class.__mro__:
+                if candidate_class is object:
+                    continue
+                candidate_id = id(candidate_class)
+                if candidate_id in seen_class_ids:
+                    continue
+                seen_class_ids.add(candidate_id)
+                authority_classes.append(candidate_class)
+        class_authority = tuple(
+            (
+                authority_class,
+                authority_class.__module__ + "." + authority_class.__qualname__,
+                tuple(type.__getattribute__(authority_class, "__bases__")),
+                MappingProxyType(dict(vars(authority_class))),
+            )
+            for authority_class in authority_classes
+        )
+        return (
+            orchestrator_class,
+            self_state,
+            budget,
+            budget_class,
+            budget_state,
+            journal,
+            journal_class,
+            journal_state,
+            identity,
+            identity_class,
+            identity_state,
+            class_authority,
+        )
+
+    @staticmethod
+    def _restore_callback_shape(
+        self: "DurableModelCallOrchestrator",
+        snapshot: tuple[
+            type,
+            dict[str, object],
+            object,
+            type,
+            dict[str, object],
+            object,
+            type,
+            dict[str, object],
+            object | None,
+            type | None,
+            dict[str, object] | None,
+            tuple[tuple[type, str, tuple[type, ...], Mapping[str, object]], ...],
+        ],
+        module_globals=globals(),
+        dataclass_fields=fields,
+        json_module=json,
+        json_loads=json.loads,
+        journal_class_authority_changes=_model_journal_class_authority_changes,
+        journal_authority_guard=require_exact_journal_store_authority,
+    ) -> list[str]:
+        """Restore exact callback authority before any dynamic attribute access."""
+        (
+            orchestrator_class,
+            self_state,
+            budget,
+            budget_class,
+            budget_state,
+            journal,
+            journal_class,
+            journal_state,
+            identity,
+            identity_class,
+            identity_state,
+            class_authority,
+        ) = snapshot
+        changes: list[str] = []
+        current_module_alias = dict.get(
+            module_globals,
+            "DurableModelCallOrchestrator",
+        )
+        if current_module_alias is not orchestrator_class:
+            changes.append("module.DurableModelCallOrchestrator")
+            dict.__setitem__(
+                module_globals,
+                "DurableModelCallOrchestrator",
+                orchestrator_class,
+            )
+
+        current_budget_alias = dict.get(
+            module_globals,
+            "DurableModelBudget",
+        )
+        if current_budget_alias is not budget_class:
+            changes.append("module.DurableModelBudget")
+            dict.__setitem__(
+                module_globals,
+                "DurableModelBudget",
+                budget_class,
+            )
+
+        current_fields = dict.get(module_globals, "fields")
+        if current_fields is not dataclass_fields:
+            changes.append("module.fields")
+            dict.__setitem__(
+                module_globals,
+                "fields",
+                dataclass_fields,
+            )
+
+        current_json = dict.get(module_globals, "json")
+        if current_json is not json_module:
+            changes.append("module.json")
+            dict.__setitem__(
+                module_globals,
+                "json",
+                json_module,
+            )
+        current_json_loads = dict.get(vars(json_module), "loads")
+        if current_json_loads is not json_loads:
+            changes.append("module.json.loads")
+            dict.__setitem__(
+                vars(json_module),
+                "loads",
+                json_loads,
+            )
+
+        current_journal_helper = dict.get(
+            module_globals,
+            "_model_journal_class_authority_changes",
+        )
+        if current_journal_helper is not journal_class_authority_changes:
+            changes.append("module._model_journal_class_authority_changes")
+            dict.__setitem__(
+                module_globals,
+                "_model_journal_class_authority_changes",
+                journal_class_authority_changes,
+            )
+
+        current_journal_guard = dict.get(
+            module_globals,
+            "require_exact_journal_store_authority",
+        )
+        if current_journal_guard is not journal_authority_guard:
+            changes.append("module.require_exact_journal_store_authority")
+            dict.__setitem__(
+                module_globals,
+                "require_exact_journal_store_authority",
+                journal_authority_guard,
+            )
+
+        # Restore the trusted JournalStore class topology before any generic
+        # class-dictionary or instance recovery.  In particular, inherited
+        # dispatch must not execute through a callback-injected base class.
+        changes.extend(journal_class_authority_changes(restore=True))
+
+        # Restore raw class dictionaries first. Descriptor identity comparison
+        # avoids invoking attacker-defined equality during recovery.
+        for (
+            authority_class,
+            class_label,
+            expected_bases,
+            expected_class_state,
+        ) in class_authority:
+            current_bases = type.__getattribute__(authority_class, "__bases__")
+            if len(current_bases) != len(expected_bases) or any(
+                current is not expected
+                for current, expected in zip(current_bases, expected_bases)
+            ):
+                label = "class." + class_label + ".__bases__"
+                changes.append(label)
+                try:
+                    type.__setattr__(authority_class, "__bases__", expected_bases)
+                except TypeError as error:
+                    raise ModelCallError(
+                        label + " could not be restored after callback"
+                    ) from error
+                restored_bases = type.__getattribute__(
+                    authority_class,
+                    "__bases__",
+                )
+                if len(restored_bases) != len(expected_bases) or any(
+                    current is not expected
+                    for current, expected in zip(restored_bases, expected_bases)
+                ):
+                    raise ModelCallError(
+                        label + " could not be restored after callback"
+                    )
+
+            current_class_state = vars(authority_class)
+            current_names = set(current_class_state)
+            expected_names = set(expected_class_state)
+            for name in sorted(current_names | expected_names):
+                label = "class." + class_label + "." + name
+                if name not in expected_class_state:
+                    changes.append(label)
+                    try:
+                        type.__delattr__(authority_class, name)
+                    except (AttributeError, TypeError) as error:
+                        raise ModelCallError(
+                            label + " could not be removed after callback"
+                        ) from error
+                    continue
+                expected = expected_class_state[name]
+                if (
+                    name not in current_class_state
+                    or current_class_state[name] is not expected
+                ):
+                    changes.append(label)
+                    try:
+                        type.__setattr__(authority_class, name, expected)
+                    except TypeError as error:
+                        raise ModelCallError(
+                            label + " could not be restored after callback"
+                        ) from error
+
+            restored_class_state = vars(authority_class)
+            if set(restored_class_state) != expected_names or any(
+                restored_class_state[name] is not expected_class_state[name]
+                for name in expected_names
+            ):
+                raise ModelCallError(
+                    "class authority restore is incomplete for " + class_label
+                )
+
+        def restore_class(
+            value: object,
+            expected_class: type,
+            *,
+            label: str,
+        ) -> None:
+            current_class = object.__getattribute__(value, "__class__")
+            if current_class is expected_class:
+                return
+            changes.append(label)
+            try:
+                object.__setattr__(value, "__class__", expected_class)
+            except (AttributeError, TypeError) as error:
+                raise ModelCallError(
+                    label + " could not be restored after callback"
+                ) from error
+
+        restore_class(self, orchestrator_class, label="orchestrator.__class__")
+        restore_class(budget, budget_class, label="budget.__class__")
+        restore_class(journal, journal_class, label="journal.__class__")
+        if identity is not None and identity_class is not None:
+            restore_class(
+                identity,
+                identity_class,
+                label="journal._store_identity.__class__",
+            )
+
+        changes.extend(
+            DurableModelCallOrchestrator._restore_safe_instance_state(
+                self,
+                self_state,
+                prefix="orchestrator",
+            )
+        )
+        changes.extend(
+            DurableModelCallOrchestrator._restore_safe_instance_state(
+                budget,
+                budget_state,
+                prefix="budget",
+            )
+        )
+        changes.extend(
+            DurableModelCallOrchestrator._restore_safe_instance_state(
+                journal,
+                journal_state,
+                prefix="journal",
+            )
+        )
+        if identity is not None and identity_state is not None:
+            changes.extend(
+                DurableModelCallOrchestrator._restore_safe_instance_state(
+                    identity,
+                    identity_state,
+                    prefix="journal._store_identity",
+                )
+            )
+
+        try:
+            journal_authority_guard(
+                journal,
+                subject="model budget journal",
+            )
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise ModelCallError(
+                "durable model budget journal authority changed"
+            ) from error
+        return changes
+
+    @staticmethod
+    def _sealed_spec(spec: ModelCallSpec) -> ModelCallSpec:
         if type(spec) is not ModelCallSpec:
             raise TypeError("spec must be ModelCallSpec")
+        return ModelCallSpec(
+            **{field.name: getattr(spec, field.name) for field in fields(ModelCallSpec)}
+        )
+
+    def attempt_id(self, spec: ModelCallSpec) -> str:
+        spec = self._sealed_spec(spec)
         material = {
             "budget_id": self.budget.budget_id,
             "environment": self.budget.environment,
@@ -672,12 +1250,84 @@ class DurableModelCallOrchestrator:
         spec: ModelCallSpec,
         descriptors: tuple[ModelDescriptor, ...],
     ) -> PricingEvidenceSnapshot:
+        # Evidence callbacks are not authority over the caller's deterministic
+        # attempt identity or the route descriptor graph. Give the resolver
+        # detached, revalidated values so object.__setattr__ mutation of frozen
+        # dataclasses cannot rewrite the authoritative copies after attempt_id
+        # or routing identity has been established.
+        resolver_spec = ModelCallSpec(**{
+            field.name: getattr(spec, field.name) for field in fields(ModelCallSpec)
+        })
+        resolver_descriptors = tuple(ModelDescriptor(**{
+            field.name: getattr(item, field.name) for field in fields(ModelDescriptor)
+        }) for item in descriptors)
+        resolver = self.pricing_evidence_resolver
+        callback_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        callback_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
+        callback_shape = self._callback_shape_snapshot()
+        budget_callback_refs = {
+            "journal": self.budget.journal,
+            "_clock": self.budget._clock,
+        }
+        budget_callback_values = {
+            "budget_id": self.budget.budget_id,
+            "environment": self.budget.environment,
+            "_ceiling": self.budget._ceiling,
+        }
+        callback_error: Exception | None = None
+        callback_changes: list[str] = []
         try:
-            snapshot = self.pricing_evidence_resolver(spec, descriptors)
-        except Exception as error:
+            try:
+                snapshot = resolver(
+                    resolver_spec,
+                    resolver_descriptors,
+                )
+            except Exception as error:
+                callback_error = error
+        finally:
+            callback_changes.extend(
+                restore_callback_shape(
+                    self, callback_shape
+                )
+            )
+            for name, expected in callback_refs.items():
+                if getattr(self, name, None) is not expected:
+                    callback_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in callback_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    callback_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in budget_callback_refs.items():
+                if getattr(self.budget, name, None) is not expected:
+                    callback_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+            for name, expected in budget_callback_values.items():
+                current = getattr(self.budget, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    callback_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+        if callback_changes:
+            raise ModelCallError(
+                "pricing evidence resolver mutated orchestrator authority:"
+                + ",".join(sorted(set(callback_changes)))
+            )
+        if callback_error is not None:
             raise ModelCallError(
                 "pricing evidence could not be resolved before route admission"
-            ) from error
+            ) from callback_error
         if type(snapshot) is not PricingEvidenceSnapshot:
             raise ModelCallError(
                 "pricing evidence resolver did not return PricingEvidenceSnapshot"
@@ -705,7 +1355,7 @@ class DurableModelCallOrchestrator:
         )
         if as_of > now:
             raise ModelCallError("pricing evidence is from the future")
-        if now > valid_until:
+        if now >= valid_until:
             raise ModelCallError("pricing evidence has expired")
         expected_keys = {
             (item.provider_id, item.model_id, item.revision) for item in descriptors
@@ -1027,14 +1677,91 @@ class DurableModelCallOrchestrator:
         self,
         observation: ModelCallObservation,
         binding: ModelCallBinding,
+        *,
+        resolver: ObservationEvidenceResolver,
     ) -> ModelObservationEvidence:
         expected = self._observation_digest(observation, binding)
+        # The authenticator may inspect evidence inputs, but it must not be able
+        # to mutate the authoritative observation/binding graph retained by this
+        # attempt. Deep-copy JSON output and reseal all scalar dataclass fields.
+        resolver_observation_values = {
+            field.name: getattr(observation, field.name)
+            for field in fields(ModelCallObservation)
+        }
+        resolver_observation_values["output"] = json.loads(
+            canonical_json(resolver_observation_values["output"])
+        )
+        resolver_observation = ModelCallObservation(**resolver_observation_values)
+        resolver_binding = ModelCallBinding(**{
+            field.name: getattr(binding, field.name)
+            for field in fields(ModelCallBinding)
+        })
+        callback_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        callback_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
+        callback_shape = self._callback_shape_snapshot()
+        budget_callback_refs = {
+            "journal": self.budget.journal,
+            "_clock": self.budget._clock,
+        }
+        budget_callback_values = {
+            "budget_id": self.budget.budget_id,
+            "environment": self.budget.environment,
+            "_ceiling": self.budget._ceiling,
+        }
+        callback_error: Exception | None = None
+        callback_changes: list[str] = []
         try:
-            evidence = self.observation_evidence_resolver(observation, binding)
-        except Exception as error:
+            try:
+                evidence = resolver(
+                    resolver_observation,
+                    resolver_binding,
+                )
+            except Exception as error:
+                callback_error = error
+        finally:
+            callback_changes.extend(
+                restore_callback_shape(
+                    self, callback_shape
+                )
+            )
+            for name, expected in callback_refs.items():
+                if getattr(self, name, None) is not expected:
+                    callback_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in callback_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    callback_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in budget_callback_refs.items():
+                if getattr(self.budget, name, None) is not expected:
+                    callback_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+            for name, expected in budget_callback_values.items():
+                current = getattr(self.budget, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    callback_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+        if callback_changes:
+            raise ModelCallError(
+                "observation evidence resolver mutated orchestrator authority:"
+                + ",".join(sorted(set(callback_changes)))
+            )
+        if callback_error is not None:
             raise ModelCallError(
                 "model usage/response evidence could not be authenticated"
-            ) from error
+            ) from callback_error
         if type(evidence) is not ModelObservationEvidence:
             raise ModelCallError(
                 "observation evidence resolver did not return ModelObservationEvidence"
@@ -1239,7 +1966,7 @@ class DurableModelCallOrchestrator:
         expiry = datetime.fromisoformat(_utc_text(prepared.get("pricing_valid_until"), name="pricing_valid_until").replace("Z", "+00:00"))
         if now < as_of:
             return "clock_before_pricing_authority_at_call_boundary"
-        if now > expiry:
+        if now >= expiry:
             return "pricing_evidence_expired_before_call_boundary"
         if now >= request.deadline_utc:
             return "request_deadline_expired_before_call_boundary"
@@ -1257,8 +1984,7 @@ class DurableModelCallOrchestrator:
         now_utc: datetime | None = None,
         cancel_requested: CancelCheck | None = None,
     ) -> ModelCallOutcome:
-        if type(spec) is not ModelCallSpec:
-            raise TypeError("spec must be ModelCallSpec")
+        spec = self._sealed_spec(spec)
         if type(policy) is not RoutingPolicy:
             raise TypeError("policy must be RoutingPolicy")
         if type(request) is not ModelRequest:
@@ -1290,13 +2016,107 @@ class DurableModelCallOrchestrator:
                 decision=None,
             )
 
-        materialized = tuple(descriptors)
+        first = existing[0] if existing else None
+        if first is None:
+            # Bind all new-attempt routing decisions to one exact time snapshot.
+            # Without this, omitted now_utc could be sampled before and after
+            # slow inventory/pricing work and cross the request deadline.
+            route_now = _route_now(now_utc)
+            inventory_free = route_model(
+                policy,
+                request,
+                (),
+                now_utc=route_now,
+            )
+            if inventory_free.reason in {
+                "request_cancelled",
+                "deadline_expired",
+                "zero_model_policy",
+            }:
+                decision = self.budget.admit_route(
+                    policy,
+                    request,
+                    (),
+                    now_utc=route_now,
+                )
+                if decision.status is RouteStatus.ADMITTED:
+                    raise ModelCallError(
+                        "inventory-free route unexpectedly admitted a model"
+                    )
+                return ModelCallOutcome(
+                    decision.status.value,
+                    attempt_id,
+                    decision,
+                    decision.reason,
+                )
+
+        descriptor_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        descriptor_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
+        descriptor_shape = self._callback_shape_snapshot()
+        descriptor_budget_refs = {
+            "journal": self.budget.journal,
+            "_clock": self.budget._clock,
+        }
+        descriptor_budget_values = {
+            "budget_id": self.budget.budget_id,
+            "environment": self.budget.environment,
+            "_ceiling": self.budget._ceiling,
+        }
+        descriptor_error: Exception | None = None
+        descriptor_changes: list[str] = []
+        materialized: tuple[ModelDescriptor, ...] | tuple[object, ...] = ()
+        try:
+            try:
+                materialized = tuple(descriptors)
+            except Exception as error:
+                descriptor_error = error
+        finally:
+            descriptor_changes.extend(
+                restore_callback_shape(
+                    self, descriptor_shape
+                )
+            )
+            for name, expected in descriptor_refs.items():
+                if getattr(self, name, None) is not expected:
+                    descriptor_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in descriptor_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    descriptor_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in descriptor_budget_refs.items():
+                if getattr(self.budget, name, None) is not expected:
+                    descriptor_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+            for name, expected in descriptor_budget_values.items():
+                current = getattr(self.budget, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    descriptor_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+        if descriptor_changes:
+            raise ModelCallError(
+                "descriptor inventory mutated orchestrator authority:"
+                + ",".join(sorted(set(descriptor_changes)))
+            )
+        if descriptor_error is not None:
+            raise ModelCallError("descriptor inventory could not be materialized") from descriptor_error
         if any(type(item) is not ModelDescriptor for item in materialized):
             raise TypeError("descriptors must be exact ModelDescriptor values")
         materialized = tuple(ModelDescriptor(**{
             field.name: getattr(item, field.name) for field in fields(ModelDescriptor)
         }) for item in materialized)
-        first = existing[0] if existing else None
         pricing: PricingEvidenceSnapshot | None = None
 
         if first is not None:
@@ -1374,7 +2194,7 @@ class DurableModelCallOrchestrator:
                 policy,
                 request,
                 materialized,
-                now_utc=now_utc,
+                now_utc=route_now,
                 reservation_context=self._reservation_context(spec, pricing),
             )
             if decision.status is not RouteStatus.ADMITTED:
@@ -1410,14 +2230,95 @@ class DurableModelCallOrchestrator:
                 payload=prepared_payload,
             )
 
-        cancelled = cancel_requested or (lambda: False)
-        # The cancellation callback may consume time; check time afterwards.
-        cancelled_before_start = cancelled()
+        cancelled = (
+            cancel_requested if cancel_requested is not None else (lambda: False)
+        )
+        # The cancellation probe is caller-owned code that runs before the
+        # inference boundary. Freeze the exact durable authorities around it so
+        # it cannot redirect the NOT_SENT proof, release, chronology, or a later
+        # call through a retained orchestrator closure.
+        cancellation_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        cancellation_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
+        cancellation_shape = self._callback_shape_snapshot()
+        cancellation_budget_refs = {
+            "journal": self.budget.journal,
+            "_clock": self.budget._clock,
+        }
+        cancellation_budget_values = {
+            "budget_id": self.budget.budget_id,
+            "environment": self.budget.environment,
+            "_ceiling": self.budget._ceiling,
+        }
+        cancellation_error: Exception | None = None
+        cancellation_changes: list[str] = []
+        cancelled_before_start: object = False
+        try:
+            try:
+                cancelled_before_start = cancelled()
+            except Exception as error:
+                cancellation_error = error
+        finally:
+            cancellation_changes.extend(
+                restore_callback_shape(
+                    self, cancellation_shape
+                )
+            )
+            for name, expected in cancellation_refs.items():
+                if getattr(self, name, None) is not expected:
+                    cancellation_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in cancellation_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    cancellation_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in cancellation_budget_refs.items():
+                if getattr(self.budget, name, None) is not expected:
+                    cancellation_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+            for name, expected in cancellation_budget_values.items():
+                current = getattr(self.budget, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    cancellation_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+
+        if cancellation_changes:
+            error = ModelCallError(
+                "cancellation probe mutated orchestrator authority:"
+                + ",".join(sorted(set(cancellation_changes)))
+            )
+            if cancellation_error is not None:
+                raise error from cancellation_error
+            raise error
+        if cancellation_error is not None:
+            raise cancellation_error
+        if type(cancelled_before_start) is not bool:
+            raise ModelCallError(
+                "cancellation probe must return an exact boolean"
+            )
+
         temporal_reason = self._temporal_reason(prepared_payload, request)
-        if cancelled_before_start or temporal_reason is not None:
+        cancellation_reason: str | None = None
+        if cancelled_before_start:
+            cancellation_reason = "cancelled_before_call_boundary"
+        elif temporal_reason is not None:
+            cancellation_reason = temporal_reason
+
+        if cancellation_reason is not None:
             payload = {
                 "attempt_id": attempt_id,
-                "reason": "cancelled_before_call_boundary" if cancelled_before_start else temporal_reason,
+                "reason": cancellation_reason,
                 "released": str(decision.reserved_cost),
             }
             self._append(
@@ -1471,30 +2372,126 @@ class DurableModelCallOrchestrator:
             descriptor=descriptor,
             pricing_evidence_digest=pricing_evidence_digest,
         )
+        adapter_binding = ModelCallBinding(
+            **{field.name: getattr(binding, field.name) for field in fields(ModelCallBinding)}
+        )
+
+        # The injected adapter is not an authority over the orchestrator itself.
+        # Capture every mutable orchestrator reference that can affect durable
+        # evidence, chronology or budget settlement after ModelCallStarted. The
+        # adapter may retain a reference to this orchestrator through its closure,
+        # so restore these exact authorities before any post-call durable action
+        # and classify any attempted replacement as UNKNOWN.
+        adapter_boundary_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        adapter_boundary_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
+        adapter_shape = self._callback_shape_snapshot()
+        adapter_budget_refs = {
+            "journal": self.budget.journal,
+            "_clock": self.budget._clock,
+        }
+        adapter_budget_values = {
+            "budget_id": self.budget.budget_id,
+            "environment": self.budget.environment,
+            "_ceiling": self.budget._ceiling,
+        }
+        observation_evidence_resolver = self.observation_evidence_resolver
+        adapter_error: Exception | None = None
+        authority_changes: list[str] = []
         try:
-            observation = call(binding, cancelled)
-        except ModelCallNotSent:
+            try:
+                observation = call(adapter_binding, cancelled)
+            except Exception as error:
+                adapter_error = error
+        finally:
+            authority_changes.extend(
+                restore_callback_shape(
+                    self, adapter_shape
+                )
+            )
+            for name, expected in adapter_boundary_refs.items():
+                if getattr(self, name, None) is not expected:
+                    authority_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in adapter_boundary_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    authority_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in adapter_budget_refs.items():
+                if getattr(self.budget, name, None) is not expected:
+                    authority_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+            for name, expected in adapter_budget_values.items():
+                current = getattr(self.budget, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    authority_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+
+        if authority_changes:
             payload = {
                 "attempt_id": attempt_id,
-                "reason": "adapter_proved_not_sent",
-                "released": str(decision.reserved_cost),
+                "reason": "adapter_mutated_orchestrator_authority:"
+                + ",".join(sorted(set(authority_changes))),
+                "estimated_unbilled": str(decision.reserved_cost),
             }
             self._append(
                 attempt_id=attempt_id,
-                event_type="ModelCallNotSent",
+                event_type="ModelCallUnknown",
                 version=3,
                 payload=payload,
             )
-            self.budget.release(attempt_id)
+            self.budget.settle(
+                attempt_id,
+                incurred="0",
+                estimated_unbilled=decision.reserved_cost,
+            )
             return self._outcome_from_terminal(
                 self._events(attempt_id)[-1],
                 route=decision,
             )
-        except Exception as error:
+
+        if isinstance(adapter_error, ModelCallNotSent):
+            # Once ModelCallStarted is durable, the injected adapter is inside
+            # the possibly-billed boundary. Its own exception type is not an
+            # independently authenticated proof that no external/local work
+            # crossed that boundary. Preserve the entire reserved ceiling as
+            # uncertain until billing evidence reconciles it.
+            payload = {
+                "attempt_id": attempt_id,
+                "reason": "adapter_not_sent_claim_unverified",
+                "estimated_unbilled": str(decision.reserved_cost),
+            }
+            self._append(
+                attempt_id=attempt_id,
+                event_type="ModelCallUnknown",
+                version=3,
+                payload=payload,
+            )
+            self.budget.settle(
+                attempt_id,
+                incurred="0",
+                estimated_unbilled=decision.reserved_cost,
+            )
+            return self._outcome_from_terminal(
+                self._events(attempt_id)[-1],
+                route=decision,
+            )
+        if adapter_error is not None:
             payload = {
                 "attempt_id": attempt_id,
                 "reason": "call_boundary_result_ambiguous:"
-                + type(error).__name__,
+                + type(adapter_error).__name__,
                 "estimated_unbilled": str(decision.reserved_cost),
             }
             self._append(
@@ -1580,6 +2577,7 @@ class DurableModelCallOrchestrator:
             observation_evidence = self._verified_observation_evidence(
                 observation,
                 binding,
+                resolver=observation_evidence_resolver,
             )
         except ModelCallError as error:
             payload = {
@@ -1664,11 +2662,60 @@ class DurableModelCallOrchestrator:
             "result_schema_id": spec.result_schema_id,
             "schema_valid": None,
         }
+        validation_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        validation_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
+        validation_shape = self._callback_shape_snapshot()
+        validation_budget_refs = {
+            "journal": self.budget.journal,
+            "_clock": self.budget._clock,
+        }
+        validation_budget_values = {
+            "budget_id": self.budget.budget_id,
+            "environment": self.budget.environment,
+            "_ceiling": self.budget._ceiling,
+        }
+        validation_changes: list[str] = []
         try:
-            schema_valid = validate_result(json.loads(result_json))
-        except Exception:
-            schema_valid = False
-        if type(schema_valid) is not bool:
+            try:
+                schema_valid = validate_result(json.loads(result_json))
+            except Exception:
+                schema_valid = False
+        finally:
+            validation_changes.extend(
+                restore_callback_shape(
+                    self, validation_shape
+                )
+            )
+            for name, expected in validation_refs.items():
+                if getattr(self, name, None) is not expected:
+                    validation_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in validation_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    validation_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in validation_budget_refs.items():
+                if getattr(self.budget, name, None) is not expected:
+                    validation_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+            for name, expected in validation_budget_values.items():
+                current = getattr(self.budget, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    validation_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+        if validation_changes or type(schema_valid) is not bool:
             schema_valid = False
         observed_payload["schema_valid"] = schema_valid
         self._append(
@@ -1703,11 +2750,79 @@ class DurableModelCallOrchestrator:
         The caller must provide the existing canonical host/recovery fence. This
         method does not invent a second ownership authority.
         """
-        if not isinstance(spec, ModelCallSpec):
+        if type(spec) is not ModelCallSpec:
             raise TypeError("spec must be ModelCallSpec")
+        # Fence callbacks may capture caller-owned objects in closures. Freeze
+        # recovery identity before invoking the fence so it cannot redirect the
+        # reservation lookup by mutating a frozen ModelCallSpec.
+        spec = ModelCallSpec(**{
+            field.name: getattr(spec, field.name) for field in fields(ModelCallSpec)
+        })
         if not callable(recovery_fence):
             raise TypeError("recovery_fence must be callable")
-        recovery_fence()
+
+        recovery_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        recovery_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
+        recovery_shape = self._callback_shape_snapshot()
+        recovery_budget_refs = {
+            "journal": self.budget.journal,
+            "_clock": self.budget._clock,
+        }
+        recovery_budget_values = {
+            "budget_id": self.budget.budget_id,
+            "environment": self.budget.environment,
+            "_ceiling": self.budget._ceiling,
+        }
+        recovery_error: Exception | None = None
+        authority_changes: list[str] = []
+        try:
+            try:
+                recovery_fence()
+            except Exception as error:
+                recovery_error = error
+        finally:
+            authority_changes.extend(
+                restore_callback_shape(
+                    self, recovery_shape
+                )
+            )
+            for name, expected in recovery_refs.items():
+                if getattr(self, name, None) is not expected:
+                    authority_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in recovery_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    authority_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in recovery_budget_refs.items():
+                if getattr(self.budget, name, None) is not expected:
+                    authority_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+            for name, expected in recovery_budget_values.items():
+                current = getattr(self.budget, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    authority_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+        if authority_changes:
+            raise ModelCallError(
+                "recovery fence mutated orchestrator authority:"
+                + ",".join(sorted(set(authority_changes)))
+            )
+        if recovery_error is not None:
+            raise ModelCallError("recovery fence failed") from recovery_error
+
         attempt_id = self.attempt_id(spec)
         events = self._events(attempt_id)
         if events:
@@ -1790,19 +2905,19 @@ class DurableModelCallOrchestrator:
         *,
         attempt_id: str,
         billing_id: str,
-        billed: object,
+        expected_billed: object | None = None,
     ) -> bool:
-        """Reconcile authenticated provider billing for OBSERVED or UNKNOWN calls.
+        """Reconcile independently authenticated billing for OBSERVED or UNKNOWN calls.
 
-        UNKNOWN attempts retain their full reservation as estimated-unbilled.
-        Provider-authenticated invoice evidence may later convert part of that
-        uncertainty into incurred cost without re-entering the inference boundary.
+        The billing resolver, not the caller, is the source of truth for the
+        billed amount. expected_billed is assertion-only and is never presented
+        to the resolver.
         """
 
         return self._reconcile_billing(
             attempt_id=attempt_id,
             billing_id=billing_id,
-            billed=billed,
+            expected_billed=expected_billed,
             observed_only=False,
         )
 
@@ -1811,14 +2926,14 @@ class DurableModelCallOrchestrator:
         *,
         attempt_id: str,
         billing_id: str,
-        billed: object,
+        expected_billed: object | None = None,
     ) -> bool:
-        """Backward-compatible observed-call-only reconciliation boundary."""
+        """Observed-call-only billing reconciliation with evidence-derived amount."""
 
         return self._reconcile_billing(
             attempt_id=attempt_id,
             billing_id=billing_id,
-            billed=billed,
+            expected_billed=expected_billed,
             observed_only=True,
         )
 
@@ -1827,14 +2942,17 @@ class DurableModelCallOrchestrator:
         *,
         attempt_id: str,
         billing_id: str,
-        billed: object,
+        expected_billed: object | None,
         observed_only: bool,
     ) -> bool:
         attempt = _canonical_text(attempt_id, name="attempt_id")
         billing = _canonical_text(billing_id, name="billing_id")
-        normalized = _exact_decimal(billed, name="billed")
         if type(observed_only) is not bool:
             raise TypeError("observed_only must be boolean")
+
+        expected: Decimal | None = None
+        if expected_billed is not None:
+            expected = _exact_decimal(expected_billed, name="expected_billed")
 
         events = self._events(attempt)
         terminal = next(
@@ -1865,40 +2983,165 @@ class DurableModelCallOrchestrator:
         if not isinstance(terminal_payload, Mapping):
             raise ModelCallError("durable terminal model-call payload is invalid")
 
+        prepared = next(
+            (
+                event
+                for event in events
+                if event.get("event_type") == "ModelCallPrepared"
+            ),
+            None,
+        )
+        if prepared is None or not isinstance(prepared.get("payload"), Mapping):
+            raise ModelCallError(
+                "billing reconciliation lacks durable prepared scope"
+            )
+        prepared_payload = prepared["payload"]
+
         if terminal_type == "ModelCallObserved":
-            scope_payload = terminal_payload
-            if scope_payload.get("billing_id") != billing:
+            if terminal_payload.get("billing_id") != billing:
                 raise ModelCallError(
                     "billing identity does not match the observed model call"
                 )
             scope_name = "observed model call"
         else:
-            prepared = next(
-                (
-                    event
-                    for event in events
-                    if event.get("event_type") == "ModelCallPrepared"
-                ),
-                None,
-            )
-            if prepared is None or not isinstance(prepared.get("payload"), Mapping):
-                raise ModelCallError(
-                    "UNKNOWN billing reconciliation lacks durable prepared scope"
-                )
-            scope_payload = prepared["payload"]
             scope_name = "UNKNOWN model call"
 
+        # Give evidence resolvers a detached, immutable scope. A callback may
+        # inspect durable authority but cannot mutate the object subsequently
+        # used for the acceptance comparison.
+        billing_scope = {
+            "attempt_id": attempt,
+            "request_id": prepared_payload.get("request_id"),
+            "request_identity_digest": prepared_payload.get(
+                "request_identity_digest"
+            ),
+            "budget_id": prepared_payload.get("budget_id"),
+            "environment": prepared_payload.get("environment"),
+            "provider_id": prepared_payload.get("provider_id"),
+            "model_id": prepared_payload.get("model_id"),
+            "revision": prepared_payload.get("revision"),
+            "remote": prepared_payload.get("remote"),
+            "pricing_evidence_id": prepared_payload.get("pricing_evidence_id"),
+            "pricing_evidence_digest": prepared_payload.get(
+                "pricing_evidence_digest"
+            ),
+            "cost_currency": prepared_payload.get("cost_currency"),
+            "terminal_state": (
+                "OBSERVED" if terminal_type == "ModelCallObserved" else "UNKNOWN"
+            ),
+            "provider_request_id": (
+                terminal_payload.get("provider_request_id")
+                if terminal_type == "ModelCallObserved"
+                else None
+            ),
+            "provider_response_id": (
+                terminal_payload.get("provider_response_id")
+                if terminal_type == "ModelCallObserved"
+                else None
+            ),
+            "usage_id": (
+                terminal_payload.get("usage_id")
+                if terminal_type == "ModelCallObserved"
+                else None
+            ),
+            "observation_digest": (
+                terminal_payload.get("observation_digest")
+                if terminal_type == "ModelCallObserved"
+                else None
+            ),
+            "observation_evidence_id": (
+                terminal_payload.get("observation_evidence_id")
+                if terminal_type == "ModelCallObserved"
+                else None
+            ),
+            "observation_evidence_digest": (
+                terminal_payload.get("observation_evidence_digest")
+                if terminal_type == "ModelCallObserved"
+                else None
+            ),
+            "observation_evidence_issuer": (
+                terminal_payload.get("observation_evidence_issuer")
+                if terminal_type == "ModelCallObserved"
+                else None
+            ),
+        }
         try:
-            evidence = self.billing_evidence_resolver(
-                attempt,
-                billing,
-                normalized,
-                scope_payload,
+            frozen_scope = MappingProxyType(
+                json.loads(canonical_json(billing_scope))
             )
-        except Exception as error:
+        except (TypeError, ValueError) as error:
+            raise ModelCallError(
+                "durable billing scope cannot be canonicalized"
+            ) from error
+
+        resolver = self.billing_evidence_resolver
+        callback_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        callback_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
+        callback_shape = self._callback_shape_snapshot()
+        budget_callback_refs = {
+            "journal": self.budget.journal,
+            "_clock": self.budget._clock,
+        }
+        budget_callback_values = {
+            "budget_id": self.budget.budget_id,
+            "environment": self.budget.environment,
+            "_ceiling": self.budget._ceiling,
+        }
+        callback_error: Exception | None = None
+        callback_changes: list[str] = []
+        try:
+            try:
+                evidence = resolver(
+                    attempt,
+                    billing,
+                    frozen_scope,
+                )
+            except Exception as error:
+                callback_error = error
+        finally:
+            callback_changes.extend(
+                restore_callback_shape(
+                    self, callback_shape
+                )
+            )
+            for name, expected in callback_refs.items():
+                if getattr(self, name, None) is not expected:
+                    callback_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in callback_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    callback_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in budget_callback_refs.items():
+                if getattr(self.budget, name, None) is not expected:
+                    callback_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+            for name, expected in budget_callback_values.items():
+                current = getattr(self.budget, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    callback_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+        if callback_changes:
+            raise ModelCallError(
+                "billing evidence resolver mutated orchestrator authority:"
+                + ",".join(sorted(set(callback_changes)))
+            )
+        if callback_error is not None:
             raise ModelCallError(
                 "billing evidence could not be authenticated"
-            ) from error
+            ) from callback_error
         if type(evidence) is not BillingEvidence:
             raise ModelCallError(
                 "billing evidence resolver did not return BillingEvidence"
@@ -1909,14 +3152,17 @@ class DurableModelCallOrchestrator:
         if (
             evidence.attempt_id != attempt
             or evidence.billing_id != billing
-            or evidence.billed != normalized
-            or evidence.provider_id != scope_payload.get("provider_id")
-            or evidence.model_id != scope_payload.get("model_id")
-            or evidence.revision != scope_payload.get("revision")
-            or evidence.cost_currency != scope_payload.get("cost_currency")
+            or evidence.provider_id != billing_scope.get("provider_id")
+            or evidence.model_id != billing_scope.get("model_id")
+            or evidence.revision != billing_scope.get("revision")
+            or evidence.cost_currency != billing_scope.get("cost_currency")
         ):
             raise ModelCallError(
                 f"billing evidence scope does not match the {scope_name}"
+            )
+        if expected is not None and evidence.billed != expected:
+            raise ModelCallError(
+                "billing evidence amount does not match caller expectation"
             )
 
         evidence_payload = {
@@ -1955,5 +3201,5 @@ class DurableModelCallOrchestrator:
         return self.budget.reconcile_unbilled(
             billing_id=billing,
             request_id=attempt,
-            billed=normalized,
+            billed=evidence.billed,
         )

@@ -17,18 +17,19 @@ from types import MappingProxyType
 from typing import Mapping, Sequence
 from uuid import UUID
 
-from research.autotrade_research.artifacts import trusted_authenticated_reader
-from research.autotrade_research.artifacts.store import (
+from autotrade_runtime.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
+    trusted_authenticated_reader,
 )
 
 from .qualification_attestation import (
     AcceptedQualificationAttestation,
+    EvidenceArtifactRef,
     QualificationTrustError,
-    QualificationTrustPolicy,
+    QualificationTrustUnavailable,
     SignedQualificationAttestation,
-    verify_qualification_attestation,
+    verify_canonical_qualification_attestation,
 )
 
 
@@ -40,6 +41,7 @@ _QUALIFICATION_DOMAIN = "RECOVERY"
 _QUALIFICATION_GATE = "RELEASE"
 _QUALIFICATION_PACKAGE = "WP-59"
 _QUALIFICATION_REQUIREMENT = "recovery-release-qualification"
+_RECOVERY_POLICY_REQUIREMENT_PREFIX = "recovery-decision-policy/sha256:"
 
 
 class RecoveryScenario(StrEnum):
@@ -61,7 +63,7 @@ _REQUIRED_SCENARIOS = frozenset(RecoveryScenario)
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
@@ -76,7 +78,7 @@ def _artifact_id(value: str, *, name: str) -> str:
 
 def _git_sha(value: str, *, name: str) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or value != value.strip()
         or value != value.lower()
         or _GIT_SHA.fullmatch(value) is None
@@ -89,7 +91,7 @@ def _git_sha(value: str, *, name: str) -> str:
 
 def _sha256(value: str, *, name: str) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or value != value.strip()
         or _SHA256.fullmatch(value) is None
     ):
@@ -98,7 +100,7 @@ def _sha256(value: str, *, name: str) -> str:
 
 
 def _nonnegative_int(value: int, *, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if type(value) is not int or value < 0:
         raise ValueError(f"{name} must be a non-negative integer")
     return value
 
@@ -109,15 +111,31 @@ def _boolean(value: bool, *, name: str) -> bool:
     return value
 
 
-def _text_tuple(value: tuple[str, ...], *, name: str, allow_empty: bool = False) -> tuple[str, ...]:
-    if not isinstance(value, tuple):
-        raise TypeError(f"{name} must be a tuple")
+def _text_tuple(
+    value: tuple[str, ...],
+    *,
+    name: str,
+    allow_empty: bool = False,
+) -> tuple[str, ...]:
+    if type(value) is not tuple:
+        raise TypeError(f"{name} must be an exact tuple")
     normalized = tuple(_text(item, name=name) for item in value)
     if not allow_empty and not normalized:
         raise ValueError(f"{name} must be non-empty")
     if len(normalized) != len(set(normalized)):
         raise ValueError(f"{name} must contain unique values")
     return normalized
+
+
+def _exact_mapping(value: object, *, name: str) -> dict:
+    # Public qualification constructors must not trust an arbitrary mappingproxy:
+    # MappingProxyType(hostile_mapping) is still an exact built-in proxy but
+    # delegates iteration/lookups to the wrapped caller-controlled mapping.
+    # Accept only an exact detached dict here; the dataclasses freeze their
+    # validated module-owned copies to MappingProxyType on output.
+    if type(value) is not dict:
+        raise TypeError(f"{name} must be an exact dict")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,11 +168,15 @@ class RecoveryScenarioEvidence:
     protection_state: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.scenario, RecoveryScenario):
+        if type(self.scenario) is not RecoveryScenario:
             raise TypeError("scenario must be RecoveryScenario")
-        if not isinstance(self.status, RecoveryEvidenceStatus):
+        if type(self.status) is not RecoveryEvidenceStatus:
             raise TypeError("status must be RecoveryEvidenceStatus")
-        object.__setattr__(self, "source_sha", _git_sha(self.source_sha, name="source_sha"))
+        object.__setattr__(
+            self,
+            "source_sha",
+            _git_sha(self.source_sha, name="source_sha"),
+        )
         object.__setattr__(
             self,
             "release_artifact_id",
@@ -173,11 +195,16 @@ class RecoveryScenarioEvidence:
         object.__setattr__(
             self,
             "evidence_artifact_sha256",
-            _sha256(self.evidence_artifact_sha256, name="evidence_artifact_sha256"),
+            _sha256(
+                self.evidence_artifact_sha256,
+                name="evidence_artifact_sha256",
+            ),
         )
-        if not isinstance(self.evidence_refs, tuple) or not self.evidence_refs:
+        if type(self.evidence_refs) is not tuple or not self.evidence_refs:
             raise ValueError("evidence_refs must be a non-empty tuple")
-        normalized_refs = tuple(_text(value, name="evidence_ref") for value in self.evidence_refs)
+        normalized_refs = tuple(
+            _text(value, name="evidence_ref") for value in self.evidence_refs
+        )
         if len(normalized_refs) != len(set(normalized_refs)):
             raise ValueError("evidence_refs must be unique")
         object.__setattr__(self, "evidence_refs", normalized_refs)
@@ -186,8 +213,16 @@ class RecoveryScenarioEvidence:
             "evidence_schema_version",
             _text(self.evidence_schema_version, name="evidence_schema_version"),
         )
-        object.__setattr__(self, "protocol_id", _text(self.protocol_id, name="protocol_id"))
-        object.__setattr__(self, "test_run_id", _text(self.test_run_id, name="test_run_id"))
+        object.__setattr__(
+            self,
+            "protocol_id",
+            _text(self.protocol_id, name="protocol_id"),
+        )
+        object.__setattr__(
+            self,
+            "test_run_id",
+            _text(self.test_run_id, name="test_run_id"),
+        )
         object.__setattr__(
             self,
             "tests_run",
@@ -224,8 +259,15 @@ class RecoveryScenarioEvidence:
             "open_risk_present",
         ):
             _boolean(getattr(self, field), name=field)
-        protection = _text(self.protection_state, name="protection_state").upper()
-        if protection not in {"NO_OPEN_RISK", "PROVIDER_NATIVE", "QUALIFIED_EMERGENCY"}:
+        protection = _text(
+            self.protection_state,
+            name="protection_state",
+        ).upper()
+        if protection not in {
+            "NO_OPEN_RISK",
+            "PROVIDER_NATIVE",
+            "QUALIFIED_EMERGENCY",
+        }:
             raise ValueError("unsupported protection_state")
         if self.open_risk_present and protection == "NO_OPEN_RISK":
             raise ValueError("open risk requires qualified protection evidence")
@@ -245,7 +287,11 @@ class RecoveryQualificationPolicy:
     required_tests: Mapping[RecoveryScenario, tuple[str, ...]]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "source_sha", _git_sha(self.source_sha, name="source_sha"))
+        object.__setattr__(
+            self,
+            "source_sha",
+            _git_sha(self.source_sha, name="source_sha"),
+        )
         object.__setattr__(
             self,
             "release_artifact_id",
@@ -261,25 +307,42 @@ class RecoveryQualificationPolicy:
             "evidence_schema_version",
             _text(self.evidence_schema_version, name="evidence_schema_version"),
         )
-        object.__setattr__(self, "protocol_id", _text(self.protocol_id, name="protocol_id"))
-        if not isinstance(self.max_downtime_ms, Mapping):
-            raise TypeError("max_downtime_ms must be a mapping")
+        object.__setattr__(
+            self,
+            "protocol_id",
+            _text(self.protocol_id, name="protocol_id"),
+        )
+        max_downtime_ms = _exact_mapping(
+            self.max_downtime_ms,
+            name="max_downtime_ms",
+        )
         normalized: dict[RecoveryScenario, int] = {}
-        for scenario, limit in self.max_downtime_ms.items():
-            if not isinstance(scenario, RecoveryScenario):
+        for scenario, limit in max_downtime_ms.items():
+            if type(scenario) is not RecoveryScenario:
                 raise TypeError("max_downtime_ms keys must be RecoveryScenario")
             if scenario in normalized:
                 raise ValueError("duplicate recovery scenario limit")
-            normalized[scenario] = _nonnegative_int(limit, name=f"max_downtime_ms[{scenario}]")
+            normalized[scenario] = _nonnegative_int(
+                limit,
+                name=f"max_downtime_ms[{scenario}]",
+            )
         if set(normalized) != _REQUIRED_SCENARIOS:
-            raise ValueError("max_downtime_ms must cover every required recovery scenario")
-        object.__setattr__(self, "max_downtime_ms", MappingProxyType(normalized))
+            raise ValueError(
+                "max_downtime_ms must cover every required recovery scenario"
+            )
+        object.__setattr__(
+            self,
+            "max_downtime_ms",
+            MappingProxyType(normalized),
+        )
 
-        if not isinstance(self.required_tests, Mapping):
-            raise TypeError("required_tests must be a mapping")
+        required_tests = _exact_mapping(
+            self.required_tests,
+            name="required_tests",
+        )
         normalized_tests: dict[RecoveryScenario, tuple[str, ...]] = {}
-        for scenario, tests in self.required_tests.items():
-            if not isinstance(scenario, RecoveryScenario):
+        for scenario, tests in required_tests.items():
+            if type(scenario) is not RecoveryScenario:
                 raise TypeError("required_tests keys must be RecoveryScenario")
             if scenario in normalized_tests:
                 raise ValueError("duplicate recovery scenario test requirement")
@@ -288,7 +351,9 @@ class RecoveryQualificationPolicy:
                 name=f"required_tests[{scenario}]",
             )
         if set(normalized_tests) != _REQUIRED_SCENARIOS:
-            raise ValueError("required_tests must cover every required recovery scenario")
+            raise ValueError(
+                "required_tests must cover every required recovery scenario"
+            )
         object.__setattr__(
             self,
             "required_tests",
@@ -296,12 +361,45 @@ class RecoveryQualificationPolicy:
         )
 
 
+def recovery_policy_subject_requirement(
+    policy: RecoveryQualificationPolicy,
+) -> str:
+    """Bind the exact terminal recovery criteria into signed qualification."""
+
+    if type(policy) is not RecoveryQualificationPolicy:
+        raise TypeError("policy must be RecoveryQualificationPolicy")
+    scenarios = sorted(RecoveryScenario, key=lambda item: item.value)
+    payload = {
+        "source_sha": policy.source_sha,
+        "release_artifact_id": policy.release_artifact_id,
+        "release_artifact_sha256": policy.release_artifact_sha256,
+        "evidence_schema_version": policy.evidence_schema_version,
+        "protocol_id": policy.protocol_id,
+        "max_downtime_ms": {
+            scenario.value: policy.max_downtime_ms[scenario]
+            for scenario in scenarios
+        },
+        "required_tests": {
+            scenario.value: sorted(policy.required_tests[scenario])
+            for scenario in scenarios
+        },
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return _RECOVERY_POLICY_REQUIREMENT_PREFIX + sha256(encoded).hexdigest()
+
+
 def recovery_evidence_receipt_metadata(
     item: RecoveryScenarioEvidence,
 ) -> dict[str, object]:
     """Canonical immutable binding carried by one recovery evidence receipt."""
 
-    if not isinstance(item, RecoveryScenarioEvidence):
+    if type(item) is not RecoveryScenarioEvidence:
         raise TypeError("item must be RecoveryScenarioEvidence")
     return {
         "evidence_kind": "RECOVERY_SCENARIO_EVIDENCE",
@@ -334,6 +432,54 @@ def recovery_evidence_receipt_metadata(
     }
 
 
+def recovery_evidence_receipt_payload(
+    item: RecoveryScenarioEvidence,
+) -> dict[str, object]:
+    """Canonical bytes whose digest binds every recovery decision fact."""
+
+    payload = dict(recovery_evidence_receipt_metadata(item))
+    payload.pop("evidence_artifact_sha256")
+    return payload
+
+
+def recovery_evidence_receipt_bytes(
+    item: RecoveryScenarioEvidence,
+) -> bytes:
+    return json.dumps(
+        recovery_evidence_receipt_payload(item),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _evidence_ref_identity(
+    ref: EvidenceArtifactRef,
+) -> tuple[str, str, str, str, str]:
+    if type(ref) is not EvidenceArtifactRef:
+        raise TypeError("accepted evidence refs must be EvidenceArtifactRef")
+    return (
+        ref.artifact_id,
+        ref.sha256,
+        ref.source_sha,
+        ref.media_type,
+        ref.evidence_kind,
+    )
+
+
+def _summary_evidence_ref_identity(
+    item: RecoveryScenarioEvidence,
+) -> tuple[str, str, str, str, str]:
+    return (
+        item.evidence_artifact_id,
+        item.evidence_artifact_sha256,
+        item.source_sha,
+        _RECOVERY_EVIDENCE_MEDIA_TYPE,
+        "RECOVERY_SCENARIO_EVIDENCE",
+    )
+
+
 def _store_artifact_matches(
     read_snapshot,
     *,
@@ -342,17 +488,27 @@ def _store_artifact_matches(
     media_type: str,
     source_sha: str,
     metadata: dict[str, object],
+    expected_bytes: bytes | None = None,
 ) -> bool:
-    """Verify stored bytes and declared bindings, not independent producer trust."""
+    """Verify exact stored bytes and immutable declared bindings."""
     try:
-        manifest, _raw = read_snapshot(artifact_id)
-        if not isinstance(manifest.get("manifest_hash"), str):
+        manifest, raw = read_snapshot(artifact_id)
+        if type(manifest) is not dict or type(raw) is not bytes:
+            return False
+        if "sha256:" + sha256(raw).hexdigest() != artifact_sha256:
+            return False
+        if expected_bytes is not None:
+            if type(expected_bytes) is not bytes or raw != expected_bytes:
+                return False
+        if type(manifest.get("manifest_hash")) is not str:
             return False
         if manifest.get("sha256") != artifact_sha256:
             return False
         if manifest.get("media_type") != media_type:
             return False
         if manifest.get("source_refs") != [f"git:{source_sha}"]:
+            return False
+        if type(manifest.get("metadata")) is not dict:
             return False
         if manifest.get("metadata") != metadata:
             return False
@@ -372,7 +528,10 @@ def _recovery_evidence_set_sha256(
 ) -> str:
     payload = [
         recovery_evidence_receipt_metadata(item)
-        for item in sorted(evidence, key=lambda current: current.scenario.value)
+        for item in sorted(
+            evidence,
+            key=lambda current: current.scenario.value,
+        )
     ]
     encoded = json.dumps(
         payload,
@@ -400,6 +559,8 @@ class RecoveryQualificationDecision:
     qualification_trust_root_id: str | None = None
 
     def __post_init__(self) -> None:
+        if type(self.status) is not RecoveryEvidenceStatus:
+            raise TypeError("status must be RecoveryEvidenceStatus")
         object.__setattr__(
             self,
             "source_sha",
@@ -430,19 +591,23 @@ class RecoveryQualificationDecision:
             "evidence_set_sha256",
             _sha256(self.evidence_set_sha256, name="evidence_set_sha256"),
         )
-        if not isinstance(self.status, RecoveryEvidenceStatus):
-            raise TypeError("status must be RecoveryEvidenceStatus")
-        if not isinstance(self.blockers, tuple):
+        if type(self.blockers) is not tuple:
             raise TypeError("blockers must be a tuple")
-        blockers = tuple(_text(value, name="blocker") for value in self.blockers)
+        blockers = tuple(
+            _text(value, name="blocker") for value in self.blockers
+        )
         if len(blockers) != len(set(blockers)):
             raise ValueError("blockers must be unique")
-        if not isinstance(self.measured_downtime_ms, Mapping):
-            raise TypeError("measured_downtime_ms must be a mapping")
+        measured_downtime_ms = _exact_mapping(
+            self.measured_downtime_ms,
+            name="measured_downtime_ms",
+        )
         measured: dict[RecoveryScenario, int] = {}
-        for scenario, value in self.measured_downtime_ms.items():
-            if not isinstance(scenario, RecoveryScenario):
-                raise TypeError("measured_downtime_ms keys must be RecoveryScenario")
+        for scenario, value in measured_downtime_ms.items():
+            if type(scenario) is not RecoveryScenario:
+                raise TypeError(
+                    "measured_downtime_ms keys must be RecoveryScenario"
+                )
             if scenario in measured:
                 raise ValueError("duplicate measured recovery scenario")
             measured[scenario] = _nonnegative_int(
@@ -452,13 +617,37 @@ class RecoveryQualificationDecision:
 
         if self.status is RecoveryEvidenceStatus.PASS:
             if blockers:
-                raise ValueError("PASS recovery decision cannot contain blockers")
+                raise ValueError(
+                    "PASS recovery decision cannot contain blockers"
+                )
             if set(measured) != _REQUIRED_SCENARIOS:
                 raise ValueError(
                     "PASS recovery decision must measure every required scenario"
                 )
         elif not blockers:
             raise ValueError("non-PASS recovery decision requires blockers")
+
+        if self.qualification_attestation_id is not None:
+            object.__setattr__(
+                self,
+                "qualification_attestation_id",
+                _artifact_id(
+                    self.qualification_attestation_id,
+                    name="qualification_attestation_id",
+                ),
+            )
+        for field in (
+            "qualification_attestation_digest",
+            "qualification_policy_id",
+            "qualification_trust_root_id",
+        ):
+            value = getattr(self, field)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    field,
+                    _sha256(value, name=field),
+                )
 
         object.__setattr__(self, "blockers", blockers)
         object.__setattr__(
@@ -472,7 +661,7 @@ class RecoveryQualificationDecision:
         return False
 
     def matches_policy(self, policy: RecoveryQualificationPolicy) -> bool:
-        if not isinstance(policy, RecoveryQualificationPolicy):
+        if type(policy) is not RecoveryQualificationPolicy:
             raise TypeError("policy must be RecoveryQualificationPolicy")
         return (
             self.source_sha == policy.source_sha
@@ -490,28 +679,24 @@ def qualify_recovery_release(
     evidence_store: ArtifactStore | None = None,
     evidence_root: str | Path | None = None,
     qualification_receipt: SignedQualificationAttestation | None = None,
-    qualification_policy: QualificationTrustPolicy | None = None,
-    expected_policy_id: str | None = None,
-    expected_policy_version: str | None = None,
 ) -> RecoveryQualificationDecision:
     """Evaluate recovery evidence without performing recovery itself."""
 
-    if not isinstance(policy, RecoveryQualificationPolicy):
+    if type(policy) is not RecoveryQualificationPolicy:
         raise TypeError("policy must be RecoveryQualificationPolicy")
-    if isinstance(evidence, (str, bytes)) or not isinstance(evidence, Sequence):
-        raise TypeError("evidence must be a sequence")
+    if type(evidence) not in {list, tuple}:
+        raise TypeError("evidence must be an exact list or tuple")
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
         raise TypeError(
             "evidence_store must be ArtifactStore (canonical exact type required)"
         )
-    if qualification_receipt is not None and not isinstance(
-        qualification_receipt, SignedQualificationAttestation
+    if (
+        qualification_receipt is not None
+        and type(qualification_receipt) is not SignedQualificationAttestation
     ):
-        raise TypeError("qualification_receipt must be SignedQualificationAttestation")
-    if qualification_policy is not None and not isinstance(
-        qualification_policy, QualificationTrustPolicy
-    ):
-        raise TypeError("qualification_policy must be QualificationTrustPolicy")
+        raise TypeError(
+            "qualification_receipt must be SignedQualificationAttestation"
+        )
 
     by_scenario: dict[RecoveryScenario, RecoveryScenarioEvidence] = {}
     blockers: list[str] = []
@@ -534,14 +719,19 @@ def qualify_recovery_release(
             trusted_read = None
 
     for item in evidence:
-        if not isinstance(item, RecoveryScenarioEvidence):
-            raise TypeError("evidence must contain RecoveryScenarioEvidence")
+        if type(item) is not RecoveryScenarioEvidence:
+            raise TypeError(
+                "evidence must contain RecoveryScenarioEvidence"
+            )
         if item.scenario in by_scenario:
             raise ValueError(f"duplicate evidence for {item.scenario.value}")
         by_scenario[item.scenario] = item
 
     missing = sorted(
-        (scenario.value for scenario in _REQUIRED_SCENARIOS - set(by_scenario)),
+        (
+            scenario.value
+            for scenario in _REQUIRED_SCENARIOS - set(by_scenario)
+        ),
     )
     for scenario in missing:
         blockers.append(f"missing_scenario:{scenario}")
@@ -565,15 +755,8 @@ def qualify_recovery_release(
         inconclusive = True
 
     accepted: AcceptedQualificationAttestation | None = None
-    trust_inputs = (
-        evidence_store,
-        evidence_root,
-        qualification_receipt,
-        qualification_policy,
-        expected_policy_id,
-        expected_policy_version,
-    )
-    if all(value is None for value in trust_inputs[1:]):
+    trust_inputs = (evidence_store, evidence_root, qualification_receipt)
+    if all(value is None for value in trust_inputs):
         blockers.append("independent_evidence_trust_unavailable")
         inconclusive = True
     elif any(value is None for value in trust_inputs):
@@ -581,13 +764,10 @@ def qualify_recovery_release(
         inconclusive = True
     else:
         try:
-            accepted = verify_qualification_attestation(
+            accepted = verify_canonical_qualification_attestation(
                 qualification_receipt,
-                policy=qualification_policy,
                 evidence_store=evidence_store,
                 evidence_root=evidence_root,
-                expected_policy_id=expected_policy_id,
-                expected_policy_version=expected_policy_version,
                 expected_source_sha=policy.source_sha,
                 expected_domain=_QUALIFICATION_DOMAIN,
                 expected_gate=_QUALIFICATION_GATE,
@@ -598,26 +778,37 @@ def qualify_recovery_release(
                 expected_release_artifact_id=policy.release_artifact_id,
                 expected_release_artifact_sha256=policy.release_artifact_sha256,
             )
+        except QualificationTrustUnavailable:
+            blockers.append("independent_evidence_trust_unavailable")
+            inconclusive = True
         except (QualificationTrustError, TypeError, ValueError):
             blockers.append("independent_evidence_trust_invalid")
             inconclusive = True
         else:
             signed_refs = {
-                (item.artifact_id, item.sha256)
-                for item in qualification_receipt.attestation.evidence_refs
+                _evidence_ref_identity(item)
+                for item in accepted.evidence_refs
             }
             expected_refs = {
-                (item.evidence_artifact_id, item.evidence_artifact_sha256)
+                _summary_evidence_ref_identity(item)
                 for item in by_scenario.values()
             }
             if accepted.result == "FAIL":
                 blockers.append("independent_evidence_attestation_failed")
                 hard_failure = True
             elif accepted.result != "PASS":
-                blockers.append("independent_evidence_attestation_inconclusive")
+                blockers.append(
+                    "independent_evidence_attestation_inconclusive"
+                )
                 inconclusive = True
             elif signed_refs != expected_refs:
                 blockers.append("independent_evidence_set_mismatch")
+                hard_failure = True
+            if (
+                recovery_policy_subject_requirement(policy)
+                not in accepted.requirement_ids
+            ):
+                blockers.append("independent_recovery_policy_mismatch")
                 hard_failure = True
 
     for scenario in sorted(by_scenario, key=lambda item: item.value):
@@ -633,6 +824,7 @@ def qualify_recovery_release(
                 media_type=_RECOVERY_EVIDENCE_MEDIA_TYPE,
                 source_sha=item.source_sha,
                 metadata=recovery_evidence_receipt_metadata(item),
+                expected_bytes=recovery_evidence_receipt_bytes(item),
             )
         if not integrity_verified:
             blockers.append(f"{prefix}:evidence_integrity_unverified")
@@ -653,7 +845,9 @@ def qualify_recovery_release(
         if item.protocol_id != policy.protocol_id:
             blockers.append(f"{prefix}:protocol_id_mismatch")
             hard_failure = True
-        missing_tests = sorted(set(policy.required_tests[scenario]) - set(item.tests_run))
+        missing_tests = sorted(
+            set(policy.required_tests[scenario]) - set(item.tests_run)
+        )
         if missing_tests:
             blockers.extend(
                 f"{prefix}:required_test_missing:{test_id}"
@@ -703,7 +897,10 @@ def qualify_recovery_release(
         if not item.old_sender_fenced:
             blockers.append(f"{prefix}:old_sender_not_fenced")
             hard_failure = True
-        if scenario is RecoveryScenario.UPGRADE_FAILURE and not item.rollback_completed:
+        if (
+            scenario is RecoveryScenario.UPGRADE_FAILURE
+            and not item.rollback_completed
+        ):
             blockers.append(f"{prefix}:rollback_incomplete")
             hard_failure = True
         if item.open_risk_present and item.protection_state not in {
@@ -720,15 +917,13 @@ def qualify_recovery_release(
     else:
         status = RecoveryEvidenceStatus.PASS
 
-    measured = MappingProxyType(
-        {
-            scenario: item.downtime_ms
-            for scenario, item in sorted(
-                by_scenario.items(),
-                key=lambda pair: pair[0].value,
-            )
-        }
-    )
+    measured = {
+        scenario: item.downtime_ms
+        for scenario, item in sorted(
+            by_scenario.items(),
+            key=lambda pair: pair[0].value,
+        )
+    }
     return RecoveryQualificationDecision(
         status=status,
         source_sha=policy.source_sha,
@@ -736,7 +931,9 @@ def qualify_recovery_release(
         release_artifact_sha256=policy.release_artifact_sha256,
         evidence_schema_version=policy.evidence_schema_version,
         protocol_id=policy.protocol_id,
-        evidence_set_sha256=_recovery_evidence_set_sha256(tuple(by_scenario.values())),
+        evidence_set_sha256=_recovery_evidence_set_sha256(
+            tuple(by_scenario.values())
+        ),
         blockers=tuple(blockers),
         measured_downtime_ms=measured,
         qualification_attestation_id=(

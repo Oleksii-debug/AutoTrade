@@ -1366,6 +1366,32 @@ def unknown_submissions_from_dispatch(
             payload.get("client_order_id"),
             name="client_order_id",
         )
+        for event in events[1:]:
+            event_type = _text(event.get("event_type"), name="event_type")
+            if _text(event.get("aggregate_id"), name="event.aggregate_id") != aggregate_id:
+                raise ValueError(
+                    "submission event aggregate identity does not match selected attempt"
+                )
+            if (
+                _text(event.get("environment"), name="event.environment").upper()
+                != environment
+            ):
+                raise ValueError(
+                    "submission event environment does not match SubmissionPrepared"
+                )
+            event_payload = event.get("payload")
+            if not isinstance(event_payload, Mapping):
+                raise ValueError(f"{event_type} payload must be an object")
+            if (
+                _text(
+                    event_payload.get("client_order_id"),
+                    name=f"{event_type}.client_order_id",
+                )
+                != client_order_id
+            ):
+                raise ValueError(
+                    "submission event client_order_id does not match SubmissionPrepared"
+                )
         started_at = _instant(
             payload.get("prepared_at"),
             name="prepared_at",

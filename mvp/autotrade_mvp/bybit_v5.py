@@ -1386,7 +1386,11 @@ def parse_option_delivery_page(
         )
 
     requested_symbol = query.get("symbol")
-    if requested_symbol is not None and (
+    if requested_symbol is None:
+        raise ProviderCoreError(
+            "Bybit option delivery query symbol is required for bounded delivery evidence"
+        )
+    if (
         type(requested_symbol) is not str
         or not requested_symbol
         or len(requested_symbol) > 160
@@ -1396,23 +1400,6 @@ def parse_option_delivery_page(
             "Bybit option delivery query symbol is non-canonical"
         )
     instrument_version = binding.instrument_version
-    if "@" not in instrument_version:
-        raise ProviderCoreError(
-            "Bybit option delivery instrument_version is not canonical"
-        )
-    expected_symbol, version_suffix = instrument_version.rsplit("@", 1)
-    if (
-        not expected_symbol
-        or not version_suffix
-        or re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", expected_symbol) is None
-        or (
-            requested_symbol is not None
-            and expected_symbol != requested_symbol
-        )
-    ):
-        raise ProviderCoreError(
-            "Bybit option delivery query symbol does not match instrument_version"
-        )
 
     start_ms = (
         _bybit_option_delivery_query_integer(query["startTime"], name="startTime")
@@ -1424,6 +1411,10 @@ def parse_option_delivery_page(
         if "endTime" in query
         else None
     )
+    if start_ms is None and end_ms is None:
+        raise ProviderCoreError(
+            "Bybit option delivery query must include explicit startTime or endTime"
+        )
     if start_ms is not None and end_ms is not None:
         if end_ms < start_ms or end_ms - start_ms > _BYBIT_OPTION_DELIVERY_MAX_RANGE_MS:
             raise ProviderCoreError(
@@ -1558,7 +1549,7 @@ def parse_option_delivery_page(
                 f"result.list[{index}].deliveryTime must be an exact non-negative integer"
             )
         delivery_time_ms = delivery_time_value
-        if symbol != expected_symbol:
+        if symbol != requested_symbol:
             raise ProviderCoreError(
                 "Bybit option delivery row violates bound instrument symbol"
             )

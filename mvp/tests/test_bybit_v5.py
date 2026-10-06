@@ -1901,6 +1901,77 @@ class BybitV5AdapterTests(unittest.TestCase):
             )
         self.assertEqual(callbacks, [])
 
+    def test_execution_parser_uses_sealed_observation_projection(self):
+        observation = bound_execution_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "list": [
+                        {
+                            "execId": "exec-sealed-projection",
+                            "orderLinkId": "",
+                            "symbol": "BTCUSDT",
+                            "side": "Buy",
+                            "execQty": "0.01",
+                            "execPrice": "65000",
+                            "execFee": "0",
+                            "feeCurrency": "USDT",
+                            "execTime": "1790280000000",
+                        }
+                    ]
+                },
+            }
+        )
+        callbacks = []
+
+        def forged_scope(*_args, **_kwargs):
+            callbacks.append("require_scope")
+            raise AssertionError("public scope method executed")
+
+        with patch.object(type(observation), "require_scope", forged_scope), patch.object(
+            type(observation.query_binding),
+            "require_scope",
+            forged_scope,
+        ):
+            fills = parse_executions(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+        self.assertEqual(callbacks, [])
+        self.assertEqual(fills[0].provider_execution_id, "exec-sealed-projection")
+        self.assertEqual(fills[0].evidence_refs, (observation.evidence_ref,))
+
+    def test_execution_instrument_version_must_match_authenticated_read_capability(self):
+        observation = bound_execution_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "list": [
+                        {
+                            "execId": "exec-instrument-authority",
+                            "orderLinkId": "",
+                            "symbol": "BTCUSDT",
+                            "side": "Buy",
+                            "execQty": "0.01",
+                            "execPrice": "65000",
+                            "execFee": "0",
+                            "feeCurrency": "USDT",
+                            "execTime": "1790280000000",
+                        }
+                    ]
+                },
+            },
+            instrument_version="BTCUSDT@v1",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "does not match authenticated read capability",
+        ):
+            parse_executions(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v2"},
+            )
+
     def test_execution_read_scope_and_response_category_are_bound(self):
         row = {
             "execId": "exec-scope-category",
@@ -1999,20 +2070,21 @@ class BybitV5AdapterTests(unittest.TestCase):
                         instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
                     )
 
-        priority_bound = bound_execution_response(
+        ambiguous = bound_execution_response(
             {"retCode": 0, "result": {"list": [row]}},
             query_overrides={
                 "orderId": "provider-order-1",
-                "orderLinkId": "ignored-lower-priority-client",
-                "symbol": "ETHUSDT",
+                "orderLinkId": "client-filter-1",
             },
         )
-        fills = parse_executions(
-            priority_bound,
-            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
-        )
-        self.assertEqual(len(fills), 1)
-        self.assertEqual(fills[0].provider_execution_id, "exec-query-filter")
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "must not combine provider selectors",
+        ):
+            parse_executions(
+                ambiguous,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
 
         base_coin_only = bound_execution_response(
             {"retCode": 0, "result": {"list": [row]}},

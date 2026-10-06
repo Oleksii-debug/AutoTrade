@@ -41,6 +41,7 @@ from .provider_core import (
     ProviderResponseObservation,
     ProviderSubmissionObservation,
     Surface,
+    provider_response_observation_require_scope,
     provider_submission_observation_projection,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
@@ -1423,17 +1424,17 @@ def parse_executions(
 
     if type(observation) is not ProviderResponseObservation:
         raise TypeError("observation must be exact ProviderResponseObservation")
-    observation.require_scope(
+    projection = provider_response_observation_require_scope(
+        observation,
         provider_id="BYBIT",
         surface=Surface.AUTHENTICATED_READ,
         endpoint=BYBIT_DOCUMENTED_ENDPOINTS["EXECUTIONS"],
     )
-    binding = observation.query_binding
-    if binding.permission_scope != "ORDER.READ":
+    if projection["permission_scope"] != "ORDER.READ":
         raise ProviderCoreError(
             "Bybit execution evidence requires ORDER.READ permission scope"
         )
-    query = binding.query
+    query = projection["query"]
     query_category = query.get("category")
     if (
         type(query_category) is not str
@@ -1454,7 +1455,7 @@ def parse_executions(
             "Bybit canonical fill evidence requires query execType to be exact Trade"
         )
 
-    execution_filter = None
+    execution_filters = []
     for filter_name in ("orderId", "orderLinkId", "symbol", "baseCoin"):
         filter_value = query.get(filter_name)
         if filter_value is None:
@@ -1467,16 +1468,25 @@ def parse_executions(
             raise ProviderCoreError(
                 f"Bybit execution query {filter_name} must be canonical exact text"
             )
-        if execution_filter is None:
-            execution_filter = (filter_name, filter_value)
+        execution_filters.append((filter_name, filter_value))
+    if len(execution_filters) > 1:
+        raise ProviderCoreError(
+            "Bybit execution query must not combine provider selectors without "
+            "qualified conjunction semantics"
+        )
+    execution_filter = execution_filters[0] if execution_filters else None
     if execution_filter is not None and execution_filter[0] == "baseCoin":
         raise ProviderCoreError(
             "Bybit baseCoin-filtered execution rows require qualified "
             "symbol/base-coin authority"
         )
-    response = observation.payload
-    account_id = observation.account_id
-    environment = observation.environment
+    response = projection["payload"]
+    account_id = projection["account_id"]
+    entity_id = projection["entity_id"]
+    environment = projection["environment"]
+    capability_snapshot_id = projection["capability_snapshot_id"]
+    admitted_instrument_version = projection["instrument_version"]
+    observation_evidence_ref = projection["evidence_ref"]
     envelope = _mapping(response, name="response")
     ret_code = envelope.get("retCode")
     if type(ret_code) is not int:
@@ -1578,6 +1588,11 @@ def parse_executions(
         ):
             raise ProviderCoreError(
                 "Bybit instrument version must be canonical exact text"
+            )
+        if instrument != admitted_instrument_version:
+            raise ProviderCoreError(
+                "Bybit execution instrument version does not match authenticated "
+                "read capability"
             )
 
         link = row.get("orderLinkId")
@@ -1689,8 +1704,8 @@ def parse_executions(
                     provider_id="BYBIT",
                     runtime_environment=environment,
                     account_id=account_id,
-                    entity_id=binding.entity_id,
-                    capability_snapshot_id=binding.capability_snapshot_id,
+                    entity_id=entity_id,
+                    capability_snapshot_id=capability_snapshot_id,
                     category=query_category,
                     instrument_version=instrument,
                     provider_symbol=symbol,
@@ -1739,9 +1754,9 @@ def parse_executions(
             fee_currency=fee_currency,
             trade_time=trade_time,
             evidence_refs=(
-                (observation.evidence_ref,)
+                (observation_evidence_ref,)
                 if authority_evidence_ref is None
-                else (observation.evidence_ref, authority_evidence_ref)
+                else (observation_evidence_ref, authority_evidence_ref)
             ),
         )
         previous = by_execution.get(execution_id)
@@ -1755,7 +1770,7 @@ def parse_executions(
 
 
 BYBIT_EXECUTION_PARSER_IDENTITY = "BYBIT_EXECUTION_V5_JSON_V1"
-BYBIT_EXECUTION_PARSER_VERSION = "1.1.0"
+BYBIT_EXECUTION_PARSER_VERSION = "1.2.0"
 BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST = (
     "sha256:"
     + sha256(
@@ -1787,7 +1802,9 @@ BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST = (
                     "baseCoin": (
                         "FAIL_CLOSED_WITHOUT_QUALIFIED_SYMBOL_BASE_COIN_AUTHORITY"
                     ),
-                    "lower_priority": "IGNORED_AFTER_FIRST_PRESENT",
+                    "multiple_selectors": (
+                        "FAIL_CLOSED_WITHOUT_QUALIFIED_CONJUNCTION_SEMANTICS"
+                    ),
                 },
                 "row_identity": {
                     "execId": "EXACT_NONEMPTY_TEXT",
@@ -1795,10 +1812,16 @@ BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST = (
                     "symbol": "EXACT_NONEMPTY_TEXT",
                     "side": ["Buy", "Sell"],
                 },
+                "source_authority": (
+                    "CLOSURE_OWNED_PROVIDER_RESPONSE_SCOPE_PROJECTION"
+                ),
                 "metadata_inputs": (
                     "CALLBACK_FREE_EXACT_DICT_OR_MAPPINGPROXY_TEXT_SNAPSHOT"
                 ),
-                "instrument_binding": "SYMBOL_TO_CANONICAL_VERSION_TEXT",
+                "instrument_binding": (
+                    "SYMBOL_MAPPING_MUST_EQUAL_AUTHENTICATED_READ_"
+                    "CAPABILITY_INSTRUMENT_VERSION"
+                ),
                 "economic_fields": {
                     "execQty": "BOUNDED_EXACT_DECIMAL_TEXT",
                     "execPrice": "BOUNDED_EXACT_DECIMAL_TEXT",

@@ -25,6 +25,7 @@ from .provider_core import (
     ProviderResponseObservation,
     ProviderSubmissionObservation,
     Surface,
+    submission_observation_projection,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
@@ -671,22 +672,21 @@ def _submission_evidence(
     *,
     prepared_request: BybitPreparedSubmission,
 ) -> dict[str, str]:
-    if not isinstance(observation, ProviderSubmissionObservation):
-        raise TypeError(
-            "observation must be durable ProviderSubmissionObservation"
-        )
-    observation.require_scope(
-        provider_id="BYBIT",
-        endpoint=prepared_request.endpoint,
-        prepared_request_sha256=prepared_request.body_sha256,
-        capability_snapshot_ids=prepared_request.capability_snapshot_ids,
-        instrument_versions=prepared_request.instrument_versions,
-        account_id=prepared_request.account_id,
-        environment=prepared_request.environment,
-        client_order_id=_client_order_id(
-            prepared_request.body.get("orderLinkId")
-        ),
+    projection = submission_observation_projection(observation)
+    expected_client_order_id = _client_order_id(
+        prepared_request.body.get("orderLinkId")
     )
+    if (
+        projection["provider_id"] != "BYBIT"
+        or projection["endpoint"] != prepared_request.endpoint
+        or projection["request_sha256"] != prepared_request.body_sha256
+        or projection["capability_snapshot_ids"] != prepared_request.capability_snapshot_ids
+        or projection["instrument_versions"] != prepared_request.instrument_versions
+        or projection["account_id"] != prepared_request.account_id
+        or projection["environment"] != prepared_request.environment
+        or projection["client_order_id"] != expected_client_order_id
+    ):
+        raise ProviderCoreError("provider-write provenance scope mismatch")
     source_uri = (
         _REST_BASE_BY_ENVIRONMENT[prepared_request.provider_environment]
         + prepared_request.endpoint
@@ -695,12 +695,12 @@ def _submission_evidence(
         "artifact_id": str(
             uuid5(
                 NAMESPACE_URL,
-                f"{source_uri}#{observation.evidence_ref}",
+                f"{source_uri}#{projection["evidence_ref"]}",
             )
         ),
-        "sha256": observation.response_sha256,
+        "sha256": projection["response_sha256"],
         "source_uri": source_uri,
-        "observed_at": observation.observed_at,
+        "observed_at": projection["observed_at"],
         "rights_id": "provider-observation-bybit",
     }
 
@@ -732,11 +732,8 @@ def parse_submission_response(
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",
         }
-    if not isinstance(observation, ProviderSubmissionObservation):
-        raise TypeError(
-            "observation must be durable ProviderSubmissionObservation"
-        )
-    if observation.response_binding.attempt_id != aid:
+    projection = submission_observation_projection(observation)
+    if projection["attempt_id"] != aid:
         raise ProviderCoreError("Bybit submission observation attempt_id mismatch")
     evidence = [
         _submission_evidence(
@@ -744,7 +741,7 @@ def parse_submission_response(
             prepared_request=prepared_request,
         )
     ]
-    envelope = _mapping(observation.payload, name="response")
+    envelope = _mapping(projection["payload"], name="response")
     code = _integer(envelope.get("retCode"), name="retCode")
     provider_received_at = (
         _millis_to_utc(envelope.get("time"), name="response.time")

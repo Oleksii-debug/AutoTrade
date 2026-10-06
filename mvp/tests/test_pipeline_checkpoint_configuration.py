@@ -10,9 +10,11 @@ from mvp.autotrade_mvp.pipeline import (
     SIMULATION_STRATEGY_FAST,
     SIMULATION_STRATEGY_ID,
     SIMULATION_STRATEGY_SLOW,
+    _event_uuid,
     _stable_hash,
     run_vertical_slice,
 )
+from mvp.autotrade_mvp.persistence import JournalStore
 
 
 def _snapshot_tree(root: Path) -> dict[str, bytes]:
@@ -54,6 +56,21 @@ class PipelineCheckpointConfigurationTests(unittest.TestCase):
             self.assertEqual(
                 checkpoint["checkpoint_configuration_digest"],
                 _stable_hash(configuration),
+            )
+
+    def test_journal_event_explicitly_binds_configuration_digest(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_vertical_slice(["100", "101", "102", "103"], root)
+            checkpoint = json.loads((root / "checkpoint.json").read_text(encoding="utf-8"))
+            evidence_id = checkpoint["evidence_ids"][0]
+            event = JournalStore(root / "journal.sqlite3").get_event(
+                _event_uuid("simulation-episode", evidence_id)
+            )
+            self.assertIsNotNone(event)
+            self.assertEqual(
+                event["payload"]["checkpoint_configuration_digest"],
+                checkpoint["checkpoint_configuration_digest"],
             )
 
     def test_configuration_identity_is_durable_before_episode_work(self):

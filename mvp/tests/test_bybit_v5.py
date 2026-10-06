@@ -576,6 +576,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         provider_environment="MAINNET",
         submission_scope_provider_environment=None,
         submission_scope_capability_snapshot_id=None,
+        submission_scope_route_provider_environment=None,
         http_status=200,
         intent_id="bybit-write-intent",
         attempt_id=None,
@@ -676,7 +677,11 @@ class BybitV5AdapterTests(unittest.TestCase):
                         else prepared.capability_snapshot_id
                     ),
                     "provider_route_decision_journal_sequence_cut": 41,
-                    "provider_route_provider_environment": provider_environment,
+                    "provider_route_provider_environment": (
+                        submission_scope_route_provider_environment
+                        if submission_scope_route_provider_environment is not None
+                        else provider_environment
+                    ),
                     "provider_route_adapter_code_sha": "adapter-code-sha",
                     "provider_route_packaged_artifact_digest": (
                         "sha256:" + "8" * 64
@@ -898,6 +903,25 @@ class BybitV5AdapterTests(unittest.TestCase):
                 provider_environment="TESTNET",
                 submission_scope_capability_snapshot_id="other-capability",
                 intent_id="bybit-route-capability-retarget",
+            )
+
+    def test_submission_observation_rejects_route_provider_environment_retarget(self):
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "provider-route environment scope mismatch",
+        ):
+            self._durable_write_observation(
+                {
+                    "retCode": 0,
+                    "retMsg": "OK",
+                    "result": {
+                        "orderId": "provider-environment-retarget",
+                        "orderLinkId": "__CLIENT__",
+                    },
+                },
+                provider_environment="TESTNET",
+                submission_scope_route_provider_environment="MAINNET",
+                intent_id="bybit-route-provider-environment-retarget",
             )
 
     def test_submission_response_rejects_missing_http_status_sent_binding(self):

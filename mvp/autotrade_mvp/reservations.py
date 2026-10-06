@@ -21,7 +21,7 @@ class CapitalAvailabilityEvidence(Protocol):
 
     blocks_new_risk: bool
 
-    def reservation_resources(self) -> Mapping[str, Decimal]:
+    def reservation_resources(self) -> dict[str, Decimal]:
         ...
 
 
@@ -57,7 +57,7 @@ def _text(value: str, *, name: str) -> str:
     return normalized
 
 
-def _amounts(values: Mapping[str, Decimal | str | int], *, allow_zero: bool = False) -> dict[str, Decimal]:
+def _amounts(values: dict[str, Decimal | str | int], *, allow_zero: bool = False) -> dict[str, Decimal]:
     # Reservation admission is hard financial authority. Arbitrary Mapping
     # implementations (including MappingProxyType over an executable backing
     # mapping) must not run callbacks while capacity is being normalized.
@@ -138,8 +138,8 @@ class ReservationBook:
         *,
         reservation_id: str,
         intent_id: str,
-        requirements: Mapping[str, Decimal | str | int],
-        available: Mapping[str, Decimal | str | int],
+        requirements: dict[str, Decimal | str | int],
+        available: dict[str, Decimal | str | int],
     ) -> ReservationSnapshot:
         rid = _text(reservation_id, name="reservation_id")
         iid = _text(intent_id, name="intent_id")
@@ -193,7 +193,7 @@ class ReservationBook:
         *,
         reservation_id: str,
         intent_id: str,
-        requirements: Mapping[str, Decimal | str | int],
+        requirements: dict[str, Decimal | str | int],
         capital: CapitalAvailabilityEvidence,
     ) -> ReservationSnapshot:
         """Reserve only from an explicit, non-blocking capital projection."""
@@ -221,7 +221,7 @@ class ReservationBook:
     def consume(
         self,
         reservation_id: str,
-        usage: Mapping[str, Decimal | str | int],
+        usage: dict[str, Decimal | str | int],
     ) -> ReservationSnapshot:
         current = self._get_record(reservation_id)
         if current.state not in ACTIVE_STATES:

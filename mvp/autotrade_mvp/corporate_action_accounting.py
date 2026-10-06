@@ -494,10 +494,6 @@ def _split_transaction(
             "durable split accounting for borrowed/short positions is not qualified"
         )
     if before.quantity == after.quantity:
-        if corrects_transaction_id is not None:
-            raise AccountingConflict(
-                "split correction requires one canonical replacement effect"
-            )
         return None
 
     payload = accepted.event.payload

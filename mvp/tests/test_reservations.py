@@ -84,6 +84,49 @@ class ReservationFoundationTests(unittest.TestCase):
                     )
                 self.assertEqual(book.active(), ())
 
+    def test_executable_available_mapping_is_rejected_before_callbacks_or_mutation(self):
+        book = ReservationBook()
+        hostile = _HostileMapping()
+        dict.__setitem__(hostile, "CASH:USD", "100")
+
+        for available in (hostile, MappingProxyType(hostile)):
+            with self.subTest(mapping_type=type(available).__name__):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "resource amounts must use an exact dict",
+                ):
+                    book.reserve(
+                        reservation_id="reservation-hostile-available",
+                        intent_id="intent-hostile-available",
+                        requirements={"CASH:USD": "10"},
+                        available=available,
+                    )
+                self.assertEqual(book.active(), ())
+
+    def test_executable_consume_mapping_is_rejected_before_callbacks_or_mutation(self):
+        book = ReservationBook()
+        original = book.reserve(
+            reservation_id="reservation-hostile-consume",
+            intent_id="intent-hostile-consume",
+            requirements={"CASH:USD": "10"},
+            available={"CASH:USD": "100"},
+        )
+        hostile = _HostileMapping()
+        dict.__setitem__(hostile, "CASH:USD", "1")
+
+        for usage in (hostile, MappingProxyType(hostile)):
+            with self.subTest(mapping_type=type(usage).__name__):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "resource amounts must use an exact dict",
+                ):
+                    book.consume("reservation-hostile-consume", usage)
+                self.assertEqual(book.get("reservation-hostile-consume"), original)
+                self.assertEqual(
+                    book.total_reserved("CASH:USD"),
+                    Decimal("10"),
+                )
+
     def test_capital_projection_cannot_smuggle_executable_resource_mapping(self):
         book = ReservationBook()
         hostile = _HostileMapping()

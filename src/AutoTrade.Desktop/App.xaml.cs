@@ -38,6 +38,14 @@ public partial class App : Application
                 throw new InvalidOperationException(
                     "Owned runtime smoke did not bind a canonical loopback origin.");
             }
+            if (!string.Equals(
+                    Path.GetFullPath(owned.DataDirectory),
+                    Path.GetFullPath(args[1]),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "Owned runtime smoke escaped the requested isolated data directory.");
+            }
         }
         finally
         {

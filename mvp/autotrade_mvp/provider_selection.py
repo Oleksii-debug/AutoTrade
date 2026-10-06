@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import re
+from types import MappingProxyType
 from typing import Callable
 from weakref import ref as weakref_ref
 
@@ -28,41 +29,44 @@ from .provider_qualification_current_scope import (
 )
 
 
-ASSET_FAMILY_COMPATIBILITY = {
-    "CRYPTO_SPOT": {
+_ASSET_FAMILY_COMPATIBILITY = MappingProxyType({
+    "CRYPTO_SPOT": frozenset({
         ("BYBIT", "SPOT"),
         ("KRAKEN", "SPOT"),
         ("WHITEBIT", "SPOT"),
         ("BINANCE", "SPOT"),
         ("ALPACA", "CRYPTO"),
-    },
-    "CRYPTO_MARGIN": {
+    }),
+    "CRYPTO_MARGIN": frozenset({
         ("BYBIT", "MARGIN"),
         ("KRAKEN", "MARGIN"),
         ("WHITEBIT", "COLLATERAL"),
         ("BINANCE", "MARGIN"),
-    },
-    "LINEAR_PERPETUAL": {
+    }),
+    "LINEAR_PERPETUAL": frozenset({
         ("BYBIT", "LINEAR_DERIVATIVES"),
         ("KRAKEN", "DERIVATIVES"),
         ("WHITEBIT", "FUTURES"),
         ("BINANCE", "USD_M"),
-    },
-    "INVERSE_PERPETUAL": {
+    }),
+    "INVERSE_PERPETUAL": frozenset({
         ("BYBIT", "INVERSE_DERIVATIVES"),
         ("KRAKEN", "DERIVATIVES"),
         ("BINANCE", "COIN_M"),
-    },
-    "LISTED_FUTURE": {("IBKR", "FUTURES")},
-    "EQUITY": {("IBKR", "EQUITIES"), ("ALPACA", "EQUITIES")},
-    "OPTION": {
+    }),
+    "LISTED_FUTURE": frozenset({("IBKR", "FUTURES")}),
+    "EQUITY": frozenset({("IBKR", "EQUITIES"), ("ALPACA", "EQUITIES")}),
+    "OPTION": frozenset({
         ("BYBIT", "OPTIONS"),
         ("BINANCE", "OPTIONS"),
         ("IBKR", "OPTIONS"),
         ("ALPACA", "OPTIONS"),
-    },
-    "FX": {("IBKR", "FX")},
-}
+    }),
+    "FX": frozenset({("IBKR", "FX")}),
+})
+# Public diagnostic view only. Financial selection binds the original immutable
+# object at function definition time and does not trust later module rebinding.
+ASSET_FAMILY_COMPATIBILITY = _ASSET_FAMILY_COMPATIBILITY
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -122,9 +126,12 @@ class ProviderRouteRequest:
     permission_scope: str
     preferred_provider_id: str | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _compatibility=_ASSET_FAMILY_COMPATIBILITY,
+    ) -> None:
         asset = _text(self.asset_class, "asset_class").upper()
-        if asset not in ASSET_FAMILY_COMPATIBILITY:
+        if asset not in _compatibility:
             raise ProviderSelectionError("asset_class has no canonical provider crosswalk")
         object.__setattr__(self, "asset_class", asset)
         environment = _text(self.environment, "environment").upper()
@@ -469,6 +476,7 @@ def _select_provider_impl(
     capability_registry: DurableCapabilityRegistry,
     qualification_registry: DurableProviderQualificationRegistry,
     route_issuer: Callable[..., SelectedProviderRoute],
+    _compatibility=_ASSET_FAMILY_COMPATIBILITY,
 ) -> ProviderSelection:
     if type(request) is not ProviderRouteRequest:
         raise TypeError("request must be exact ProviderRouteRequest")
@@ -497,7 +505,7 @@ def _select_provider_impl(
         raise ProviderSelectionError("provider route candidate identities must be unique")
 
     decision_cut = _journal_cut(capability_registry.store)
-    allowed_pairs = ASSET_FAMILY_COMPATIBILITY[request.asset_class]
+    allowed_pairs = _compatibility[request.asset_class]
     requested_features = _unsupported_features(request)
     eligible: list[SelectedProviderRoute] = []
     decisions: list[CandidateDecision] = []

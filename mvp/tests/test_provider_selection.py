@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from autotrade_runtime.artifacts import ArtifactStore
+import mvp.autotrade_mvp.provider_selection as provider_selection_module
 
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.durable_provider_qualification import (
@@ -248,6 +249,36 @@ class ProviderSelectionTests(unittest.TestCase):
                 )
 
             self.assertEqual(_HostileTimezone.calls, 0)
+
+    def test_selection_compatibility_authority_ignores_public_rebinding(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            original = provider_selection_module.ASSET_FAMILY_COMPATIBILITY
+            self.assertIsInstance(original["FX"], frozenset)
+            with self.assertRaises(TypeError):
+                original["FX"] = frozenset({("BYBIT", "SPOT")})
+            with self.assertRaises(AttributeError):
+                original["FX"].add(("BYBIT", "SPOT"))
+
+            provider_selection_module.ASSET_FAMILY_COMPATIBILITY = {
+                "FX": {("BYBIT", "SPOT")}
+            }
+            self.addCleanup(
+                setattr,
+                provider_selection_module,
+                "ASSET_FAMILY_COMPATIBILITY",
+                original,
+            )
+
+            result = select_provider(
+                request(asset_class="FX"),
+                [candidate()],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            self.assertEqual(result.status, "NO_ELIGIBLE_PROVIDER")
+            self.assertIn("ASSET_PRODUCT_MISMATCH", result.decisions[0].reasons)
 
     def test_selection_rejects_executable_candidate_container_before_iteration(self):
         with TemporaryDirectory() as directory:

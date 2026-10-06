@@ -554,6 +554,79 @@ class AblationTests(unittest.TestCase):
         self.assertEqual(matched.full.components, ("base", "agent"))
         self.assertEqual(summary.total_pairs, 1)
 
+    def test_hostile_text_subclass_is_rejected_before_identity_callbacks(self):
+        calls = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("hostile strip executed")
+
+        hostile = HostileText("agent")
+        with self.assertRaisesRegex(ValueError, "target_component"):
+            summarize_ablation(hostile, [])
+        with self.assertRaisesRegex(ValueError, "case_id"):
+            AblationOutcome(
+                case_id=HostileText("case-hostile"),
+                input_fingerprint=FINGERPRINT_A,
+                variant="FULL",
+                utility=Decimal("0.1"),
+                cost=Decimal("0"),
+                elapsed_ms=10,
+                deadline_ms=100,
+                components=("base",),
+                input_cutoff_utc=CUT,
+                decision_utc=CUT,
+                outcome_available_utc=CUT + timedelta(hours=1),
+            )
+        with self.assertRaisesRegex(ValueError, "content_digest"):
+            CausalInputEvidence(
+                evidence_id="input",
+                content_digest=HostileText(FINGERPRINT_A),
+                component_id="base",
+                available_utc=CUT,
+            )
+        self.assertEqual(calls, [])
+
+    def test_pair_rejects_noncanonical_outcome_type_before_field_access(self):
+        calls = []
+
+        class HostileOutcome:
+            def __getattribute__(self, name):
+                calls.append(name)
+                raise AssertionError("hostile outcome field accessed")
+
+        valid = outcome(
+            variant="ABLATED",
+            utility=0,
+            cost=0,
+            elapsed=10,
+            components=("base",),
+        )
+        with self.assertRaisesRegex(TypeError, "exact AblationOutcome"):
+            AblationPair("agent", HostileOutcome(), valid)
+        self.assertEqual(calls, [])
+
+    def test_input_evidence_requires_exact_causal_evidence_type(self):
+        class DerivedEvidence(CausalInputEvidence):
+            pass
+
+        derived = DerivedEvidence(
+            evidence_id="derived",
+            content_digest=FINGERPRINT_B,
+            component_id="base",
+            available_utc=CUT,
+        )
+        with self.assertRaisesRegex(TypeError, "exact CausalInputEvidence"):
+            outcome(
+                variant="FULL",
+                utility=1,
+                cost=0,
+                elapsed=10,
+                components=("base",),
+                input_evidence=(derived,),
+            )
+
     def test_components_must_be_immutable_tuple(self):
         mutable = ["base", "agent"]
         with self.assertRaisesRegex(TypeError, "immutable tuple"):
@@ -668,6 +741,62 @@ class AblationTests(unittest.TestCase):
                 components=("base",),
                 cutoff=invalid,
             )
+
+    def test_non_utc_offset_is_rejected_instead_of_normalized(self):
+        shifted = datetime(
+            2026,
+            9,
+            25,
+            2,
+            0,
+            tzinfo=timezone(timedelta(hours=2)),
+        )
+        with self.assertRaisesRegex(ValueError, "canonical timezone-aware UTC"):
+            outcome(
+                variant="FULL",
+                utility=1,
+                cost=0,
+                elapsed=10,
+                components=("base",),
+                cutoff=shifted,
+                decision=CUT,
+                outcome_available=CUT + timedelta(hours=1),
+                input_evidence=(),
+            )
+
+    def test_datetime_subclass_is_rejected_before_virtual_time_callbacks(self):
+        calls = []
+
+        class HostileDatetime(datetime):
+            def utcoffset(self):
+                calls.append("utcoffset")
+                raise AssertionError("hostile utcoffset executed")
+
+            def astimezone(self, *args, **kwargs):
+                calls.append("astimezone")
+                raise AssertionError("hostile astimezone executed")
+
+        hostile = HostileDatetime(
+            2026,
+            9,
+            25,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        )
+        with self.assertRaisesRegex(TypeError, "exact built-in datetime"):
+            outcome(
+                variant="FULL",
+                utility=1,
+                cost=0,
+                elapsed=10,
+                components=("base",),
+                cutoff=hostile,
+                decision=CUT,
+                outcome_available=CUT + timedelta(hours=1),
+                input_evidence=(),
+            )
+        self.assertEqual(calls, [])
 
     def test_future_leakage_is_rejected_when_cutoff_is_after_decision(self):
         with self.assertRaisesRegex(ValueError, "cannot precede"):

@@ -756,8 +756,8 @@
         "Exclusive mutation key: RISK / independent-risk",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Independent deterministic risk admission is present on main with state-version, reservation, freshness, leverage, loss, drawdown, margin, stress, borrow and reduce-only gates. Remaining work: full portfolio/correlation/margin model coverage, provider-account constraints, property/stress qualification and production integration."
+      "proposed_status": "DONE",
+      "status_note": "DONE for Section 13 provider-free independent hard-risk authority. Current main contains the merged Section-13 closure #1594 and stronger #1726 hard-risk trust-ingress result, with exact Decimal/Fraction arithmetic, freshness, leverage, concentration, liquidity, stress/expected-shortfall, margin/liquidation, borrow, settlement, option/derivative/futures and strict reduce-only gates. Durable quantitative RiskPolicy registration/activation, rollback protection, exact JournalStore-generation binding and registry-issued ResolvedRiskPolicy are integrated, together with durable MARK/FX valuation history and policy-bound exact freshness evidence. Positive PAPER/LIVE provider-origin risk composition remains deliberately fail-closed and is separately tracked by #987/#652; it is not a reason to reopen the provider-free hard-risk section."
     },
     {
       "id": "WP-17",

@@ -438,6 +438,50 @@ class ExecutionOracleTests(unittest.TestCase):
         ):
             assert_conservative_execution(order=o, observation=q, model=m, result=forged)
 
+    def test_oracle_rejects_stop_trigger_from_same_or_earlier_liquidity(self):
+        o = order(
+            order_type="STOP_LIMIT",
+            limit_price="102",
+            stop_price="100",
+        )
+        q = observation(
+            market_time="2026-09-24T10:00:00.100000Z",
+            available_at="2026-09-24T10:00:00.150000Z",
+            ask="101",
+        )
+        m = model(latency_ms=100)
+        waiting = simulate_execution(o, q, m)
+        self.assertFalse(waiting.triggered)
+        forged = replace(waiting, triggered=True)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "same or earlier liquidity",
+        ):
+            assert_conservative_execution(order=o, observation=q, model=m, result=forged)
+
+    def test_oracle_rejects_stop_trigger_from_bar_started_before_arrival(self):
+        o = order(
+            order_type="STOP_LIMIT",
+            limit_price="102",
+            stop_price="100",
+        )
+        q = observation(
+            market_time="2026-09-24T10:01:00Z",
+            available_at="2026-09-24T10:01:01Z",
+            interval_start="2026-09-24T10:00:00Z",
+            bar_low="99",
+            bar_high="101",
+        )
+        m = model(data_fidelity="BAR", latency_ms=100)
+        waiting = simulate_execution(o, q, m)
+        self.assertFalse(waiting.triggered)
+        forged = replace(waiting, triggered=True)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "BAR evidence from before venue arrival",
+        ):
+            assert_conservative_execution(order=o, observation=q, model=m, result=forged)
+
     def test_oracle_accepts_observed_stop_trigger_without_same_observation_fill(self):
         o = order(
             order_type="STOP_LIMIT",

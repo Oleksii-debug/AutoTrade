@@ -347,11 +347,33 @@ def assert_conservative_execution(
             "filled quantity exceeds independently qualified participation capacity"
         )
 
+    submitted = _instant(order.submitted_at, name="submitted_at")
+    arrival = submitted + timedelta(milliseconds=model.latency_ms)
+    market_time = _instant(observation.market_time, name="market_time")
+    canonical_arrival = arrival.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
     if result.triggered and not order.already_triggered:
         if order.order_type != "STOP_LIMIT":
             raise ExecutionOracleError(
                 "non-stop order cannot mint triggered state"
             )
+        if market_time <= arrival:
+            raise ExecutionOracleError(
+                "triggered state uses same or earlier liquidity"
+            )
+        if model.data_fidelity == "BAR":
+            if observation.interval_start is None:
+                raise ExecutionOracleError(
+                    "BAR trigger requires interval_start for causal evidence"
+                )
+            trigger_interval_start = _instant(
+                observation.interval_start,
+                name="interval_start",
+            )
+            if trigger_interval_start < arrival:
+                raise ExecutionOracleError(
+                    "triggered state uses BAR evidence from before venue arrival"
+                )
         if independent_capacity <= zero or not _oracle_stop_touched(
             order=order,
             observation=observation,
@@ -372,10 +394,6 @@ def assert_conservative_execution(
     elif result.status in {"FILLED", "PARTIAL"}:
         raise ExecutionOracleError("zero fill cannot claim FILLED or PARTIAL status")
 
-    submitted = _instant(order.submitted_at, name="submitted_at")
-    arrival = submitted + timedelta(milliseconds=model.latency_ms)
-    market_time = _instant(observation.market_time, name="market_time")
-    canonical_arrival = arrival.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     if result.arrival_at != canonical_arrival:
         raise ExecutionOracleError("result arrival_at must equal independently derived arrival")
 

@@ -91,10 +91,14 @@ class ProviderOriginJournalIdentityTests(unittest.TestCase):
             expected = canonical_provider_origin_journal_identity(store)
             original_digest = identity_module.payload_digest
             original_material = identity_module._journal_identity_material
+            original_schema = identity_module._JOURNAL_IDENTITY_SCHEMA
             identity_module.payload_digest = lambda _value: "sha256:" + "f" * 64
             identity_module._journal_identity_material = lambda _value: {
                 "attacker": True
             }
+            identity_module._JOURNAL_IDENTITY_SCHEMA = (
+                "attacker-controlled-journal-identity:v1"
+            )
             try:
                 self.assertEqual(
                     canonical_provider_origin_journal_identity(store),
@@ -103,6 +107,7 @@ class ProviderOriginJournalIdentityTests(unittest.TestCase):
             finally:
                 identity_module.payload_digest = original_digest
                 identity_module._journal_identity_material = original_material
+                identity_module._JOURNAL_IDENTITY_SCHEMA = original_schema
 
 
 if __name__ == "__main__":

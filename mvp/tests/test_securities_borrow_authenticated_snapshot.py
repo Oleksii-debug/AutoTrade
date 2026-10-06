@@ -4,6 +4,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import mvp.autotrade_mvp.securities_borrow as securities_borrow_module
+
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.securities_borrow import (
     BorrowAvailabilityEvidence,
@@ -154,6 +156,64 @@ class SecuritiesBorrowAuthenticatedSnapshotTests(unittest.TestCase):
                 verify_provider_borrow_evidence(bound, malicious)
 
             self.assertEqual(malicious.override_calls, 0)
+
+    def test_verifier_ignores_late_module_global_retargets(self):
+        with TemporaryDirectory() as directory:
+            artifacts = ArtifactStore(directory)
+            bound = bind_provider_evidence(artifacts, recall())
+
+            with (
+                patch.object(
+                    securities_borrow_module,
+                    "provider_borrow_evidence_receipt",
+                    side_effect=AssertionError(
+                        "late receipt helper must not reinterpret provider evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "provider_borrow_evidence_metadata",
+                    side_effect=AssertionError(
+                        "late metadata helper must not reinterpret provider evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_immutable_evidence_ref",
+                    side_effect=AssertionError(
+                        "late reference helper must not retarget artifact authority"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "strict_json_loads",
+                    side_effect=AssertionError(
+                        "late JSON parser must not reinterpret authenticated bytes"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "canonical_json",
+                    side_effect=AssertionError(
+                        "late canonical renderer must not redefine authenticated bytes"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "ArtifactStore",
+                    new=object,
+                ),
+                patch.object(
+                    BorrowRecallEvidence,
+                    "payload",
+                    side_effect=AssertionError(
+                        "late evidence method replacement must not reinterpret economics"
+                    ),
+                ),
+            ):
+                reference = verify_provider_borrow_evidence(bound, artifacts)
+
+            self.assertEqual(reference, bound.evidence_ref)
 
     def test_malformed_snapshot_representation_fails_closed(self):
         with TemporaryDirectory() as directory:

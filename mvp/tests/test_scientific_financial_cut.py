@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reconciliation import (
@@ -124,6 +125,7 @@ class ScientificFinancialCutTests(unittest.TestCase):
             account_id="test-account",
             environment="PAPER",
             reconciliation_event_id="checkpoint-1",
+            reconciliation_journal_sequence=1,
             journal_sequence=3,
             journal_population_digest=_SHA,
             reconciliation_checkpoint_digest=_SHA,
@@ -143,10 +145,64 @@ class ScientificFinancialCutTests(unittest.TestCase):
                 account_id="test-account",
                 environment="PAPER",
                 reconciliation_event_id="checkpoint-1",
+                reconciliation_journal_sequence=1,
                 journal_sequence=True,
                 journal_population_digest=_SHA,
                 reconciliation_checkpoint_digest=_SHA,
             )
+
+    def test_scope_aliases_resolve_to_one_canonical_cut_identity(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.db")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="science-cut-alias",
+                result=_reconciliation(),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            exact = _capture(
+                store,
+                reconciliation_event_id=checkpoint["event_id"],
+            )
+            alias = _capture(
+                store,
+                provider_id="test_provider",
+                environment="paper",
+                reconciliation_event_id=checkpoint["event_id"],
+            )
+            self.assertEqual(exact.provider_id, "TEST_PROVIDER")
+            self.assertEqual(alias.provider_id, "TEST_PROVIDER")
+            self.assertEqual(exact.environment, "PAPER")
+            self.assertEqual(alias.environment, "PAPER")
+            self.assertEqual(exact.cut_digest, alias.cut_digest)
+
+    def test_absent_checkpoint_race_is_conflict_not_unavailable(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.db")
+
+            def racing_lookup(*args, **kwargs):
+                record_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id="science-cut-race",
+                    result=_reconciliation(),
+                    observed_at="2026-09-24T19:00:00Z",
+                    host_id="test-host",
+                    owner_epoch="epoch-1",
+                )
+                return None
+
+            with patch(
+                "mvp.autotrade_mvp.scientific_financial_cut."
+                "load_latest_reconciliation_checkpoint_for_scope",
+                side_effect=racing_lookup,
+            ):
+                with self.assertRaisesRegex(
+                    FinancialCutConflict,
+                    "changed while reconciliation absence was checked",
+                ):
+                    _capture(store)
 
     def test_exact_journal_population_cut_rejects_superseded_provider_truth(self):
         with TemporaryDirectory() as directory:
@@ -171,6 +227,10 @@ class ScientificFinancialCutTests(unittest.TestCase):
             self.assertEqual(first, repeated)
             self.assertEqual(
                 first.journal_sequence,
+                first_checkpoint["journal_sequence"],
+            )
+            self.assertEqual(
+                first.reconciliation_journal_sequence,
                 first_checkpoint["journal_sequence"],
             )
             self.assertTrue(first.journal_population_digest.startswith("sha256:"))

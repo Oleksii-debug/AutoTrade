@@ -38,10 +38,12 @@ class CanonicalEventEnvelopeAdmissionTests(unittest.TestCase):
             envelope = canonical_event()
             result = store.append_event(envelope, outbox_topic="events")
             self.assertTrue(result.inserted)
-            self.assertEqual(store.get_event(envelope["event_id"]), {
-                **envelope,
-                "journal_sequence": 1,
-            })
+            persisted = store.get_event(envelope["event_id"])
+            self.assertIsNotNone(persisted)
+            expected = dict(envelope)
+            expected["aggregate_version"] = 1
+            expected["journal_sequence"] = 1
+            self.assertEqual(persisted, expected)
 
     def test_claimed_event_envelope_rejects_missing_and_unknown_fields(self):
         with TemporaryDirectory() as directory:

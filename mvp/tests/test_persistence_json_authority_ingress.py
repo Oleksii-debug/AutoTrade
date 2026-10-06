@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from tempfile import TemporaryDirectory
+import json
+import sqlite3
 import unittest
 
 from mvp.autotrade_mvp.persistence import (
     JournalStore,
     canonical_json,
     payload_digest,
+    _event_envelope_digest,
 )
 
 
@@ -310,6 +313,44 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
             ):
                 store.claim_first_event(candidate)
             self.assertEqual(store.current_journal_sequence(), 0)
+
+    def test_restart_rejects_rehashed_noncanonical_event_text(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            candidate = _event("evt-restart-canonical")
+            store.append_event(candidate)
+
+            connection = sqlite3.connect(path)
+            try:
+                raw_envelope = connection.execute(
+                    "SELECT envelope_json FROM events WHERE event_id = ?",
+                    ("evt-restart-canonical",),
+                ).fetchone()[0]
+                envelope = json.loads(raw_envelope)
+                envelope["event_type"] = " ExecutionFillObserved "
+                replacement_json = canonical_json(envelope)
+                replacement_hash = _event_envelope_digest(replacement_json)
+                connection.execute(
+                    "UPDATE events SET event_type = ?, envelope_json = ?, envelope_hash = ? "
+                    "WHERE event_id = ?",
+                    (
+                        " ExecutionFillObserved ",
+                        replacement_json,
+                        replacement_hash,
+                        "evt-restart-canonical",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(
+                ValueError,
+                "event_type must be canonical non-empty text",
+            ):
+                reopened.get_event("evt-restart-canonical")
 
     def test_exact_tuple_keeps_legacy_json_array_semantics(self):
         self.assertEqual(

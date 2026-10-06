@@ -1133,7 +1133,12 @@ class DurableCorporateActionEvidenceStore:
         self.environment = environment_value
         self.aggregate_id = aggregate_id
 
-    def _composition(self):
+    def _composition(
+        self,
+        *,
+        _binding,
+        _require_store_authority,
+    ):
         (
             store,
             expected_identity,
@@ -1141,7 +1146,7 @@ class DurableCorporateActionEvidenceStore:
             account_id,
             environment,
             aggregate_id,
-        ) = _durable_corporate_action_store_binding(self)
+        ) = _binding(self)
         visible = vars(self)
         if (
             visible.get("store") is not store
@@ -1154,7 +1159,7 @@ class DurableCorporateActionEvidenceStore:
             raise CorporateActionEvidenceConflict(
                 "corporate-action evidence composition was modified"
             )
-        current_identity = require_exact_journal_store_authority(
+        current_identity = _require_store_authority(
             store,
             subject="corporate-action evidence JournalStore",
         )
@@ -1495,6 +1500,31 @@ class DurableCorporateActionEvidenceStore:
             provenance_digest=accepted.provenance_digest,
             corrects_external_event_id=accepted.corrects_external_event_id,
         )
+
+def _bind_durable_corporate_action_composition(
+    composition,
+    binding,
+    require_store_authority,
+):
+    def bound_composition(self):
+        return composition(
+            self,
+            _binding=binding,
+            _require_store_authority=require_store_authority,
+        )
+
+    return bound_composition
+
+
+DurableCorporateActionEvidenceStore._composition = (
+    _bind_durable_corporate_action_composition(
+        DurableCorporateActionEvidenceStore._composition,
+        _durable_corporate_action_store_binding,
+        require_exact_journal_store_authority,
+    )
+)
+del _bind_durable_corporate_action_composition
+
 
 def _bind_durable_corporate_action_verifier(
     prepare_record_mutation,

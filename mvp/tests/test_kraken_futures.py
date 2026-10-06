@@ -552,6 +552,52 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 observation={"result": "success"},
             )
 
+    def test_submission_consumer_rejects_prepared_subclass_before_virtual_callback(self):
+        callbacks = []
+
+        class HostilePrepared(KrakenFuturesPreparedRequest):
+            def __getattribute__(self, _name):
+                callbacks.append(True)
+                raise AssertionError(
+                    "prepared-request virtual callback executed before type verification"
+                )
+
+        forged = object.__new__(HostilePrepared)
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact KrakenFuturesPreparedRequest",
+        ):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=forged,
+                observation=None,
+                transport_ambiguous=True,
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_submission_evidence_rejects_provider_environment_retarget(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "provider-domain-retarget",
+                    "status": "placed",
+                },
+            },
+            intent_id="kraken-futures-provider-domain-retarget",
+            provider_environment="LIVE",
+        )
+        object.__setattr__(prepared, "provider_environment", "DEMO")
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "provider environment does not match runtime environment",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+
     def test_submission_consumer_rejects_subclass_before_virtual_callback(self):
         attempt, prepared, _observation = self._durable_submission_observation(
             {

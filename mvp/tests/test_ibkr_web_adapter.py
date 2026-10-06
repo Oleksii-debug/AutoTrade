@@ -761,6 +761,32 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 **{**base, "query": MappingProxyType({})}
             )
 
+    def test_cancel_request_rejects_hostile_key_before_hash_callback(self):
+        class HostileCancelKey(str):
+            armed = False
+
+            def __hash__(self):
+                if type(self).armed:
+                    raise AssertionError("hostile cancel-key hash executed")
+                return str.__hash__(self)
+
+        key = HostileCancelKey("manualIndicator")
+        query = {key: "false", "extOperator": "operator-1"}
+        HostileCancelKey.armed = True
+        try:
+            with self.assertRaisesRegex(
+                IbkrWebAdapterError,
+                "cancel query must use exact text",
+            ):
+                IbkrCancelRequest(
+                    endpoint="/iserver/account/U1234567/order/123456789",
+                    query=query,
+                    account_id="U1234567",
+                    provider_order_id="123456789",
+                )
+        finally:
+            HostileCancelKey.armed = False
+
     def test_cancel_acknowledgement_never_proves_terminal_cancel(self):
         outcome = parse_cancel_response(
             provider_order_id="123456789",

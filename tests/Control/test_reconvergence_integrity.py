@@ -258,6 +258,54 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertEqual(exact_scope.protected_violations, ())
         self.assertEqual(exact_scope.scope_violations, ())
 
+    def test_git_guard_requires_exact_scope_for_real_sentinel_modification(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "reconvergence-test@example.invalid")
+            git("config", "user.name", "Reconvergence Test")
+            sentinel = root / "control" / "tools" / "reconvergence_integrity.py"
+            sentinel.parent.mkdir(parents=True)
+            sentinel.write_text("VALUE = 1\n", encoding="utf-8")
+            (root / "README.md").write_text("base\n", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-m", "base")
+            base_sha = git("rev-parse", "HEAD")
+
+            sentinel.write_text("VALUE = 2\n", encoding="utf-8")
+            git("add", str(sentinel.relative_to(root)))
+            git("commit", "-m", "modify protected sentinel")
+            head_sha = git("rev-parse", "HEAD")
+
+            blocked = assess_git_revisions(base_sha, head_sha, cwd=root)
+            directory_only = assess_git_revisions(
+                base_sha,
+                head_sha,
+                cwd=root,
+                allowed_scopes=("control/tools",),
+            )
+            exact = assess_git_revisions(
+                base_sha,
+                head_sha,
+                cwd=root,
+                allowed_scopes=("control/tools/reconvergence_integrity.py",),
+            )
+
+        self.assertFalse(blocked.allowed)
+        self.assertFalse(directory_only.allowed)
+        self.assertTrue(exact.allowed)
+
     def test_workflow_trust_root_content_change_is_blocked_without_scope(self):
         sentinel = ".github/workflows/reconvergence-integrity.yml"
         result = assess_reconvergence(

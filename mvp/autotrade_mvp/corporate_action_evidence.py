@@ -399,6 +399,7 @@ class AuthoritativeCorporateAction:
     provider_instrument_version: str
     observed_at: str
     provenance_digest: str
+    provider_fact_digest: str
     corrects_external_event_id: str | None
 
 
@@ -473,6 +474,7 @@ def _authoritative_corporate_action_operations():
             "provider_instrument_version",
             "observed_at",
             "provenance_digest",
+            "provider_fact_digest",
         ):
             if type(getattr(value, name)) is not str:
                 raise CorporateActionEvidenceError(
@@ -499,6 +501,7 @@ def _authoritative_corporate_action_operations():
             value.provider_instrument_version,
             value.observed_at,
             value.provenance_digest,
+            value.provider_fact_digest,
             value.corrects_external_event_id,
         )
 
@@ -531,7 +534,8 @@ def _authoritative_corporate_action_operations():
             provider_instrument_version=state[10],
             observed_at=state[11],
             provenance_digest=state[12],
-            corrects_external_event_id=state[13],
+            provider_fact_digest=state[13],
+            corrects_external_event_id=state[14],
         )
 
     def prune_dead() -> None:
@@ -768,8 +772,47 @@ def _resolve_authoritative_corporate_action_impl(
             "corporate action does not match canonical instrument/provider binding"
         )
 
+    provider_fact = {
+        "schema_version": "1.0.0",
+        "provider_id": observation.provider_id,
+        "account_id": observation.account_id,
+        "environment": observation.environment,
+        "external_event_id": observation.external_event_id,
+        "provider_revision": observation.provider_revision,
+        "provider_instrument_version": observation.provider_instrument_version,
+        "instrument_id": observation.instrument_id,
+        "instrument_version": observation.instrument_version,
+        "kind": observation.kind,
+        "effective_at": _utc_text_fn(observation.effective_at),
+        "source_sequence": observation.source_sequence,
+        "announcement_at": (
+            None
+            if observation.announcement_at is None
+            else _utc_text_fn(observation.announcement_at)
+        ),
+        "record_at": (
+            None
+            if observation.record_at is None
+            else _utc_text_fn(observation.record_at)
+        ),
+        "ex_at": (
+            None
+            if observation.ex_at is None
+            else _utc_text_fn(observation.ex_at)
+        ),
+        "pay_at": (
+            None
+            if observation.pay_at is None
+            else _utc_text_fn(observation.pay_at)
+        ),
+        "corrects_external_event_id": observation.corrects_external_event_id,
+        "payload": dict(observation.payload),
+    }
+    provider_fact_digest = _payload_digest_fn(provider_fact)
+
     provenance = {
         "schema_version": "1.0.0",
+        "provider_fact_digest": provider_fact_digest,
         "evidence_ref": projection["evidence_ref"],
         "provider_id": observation.provider_id,
         "account_id": observation.account_id,
@@ -827,7 +870,7 @@ def _resolve_authoritative_corporate_action_impl(
         effective_at=observation.effective_at,
         source_revision=(
             f"{observation.provider_id}:{observation.provider_revision}:"
-            f"{provenance_digest}"
+            f"{provider_fact_digest}"
         ),
         source_sequence=observation.source_sequence,
         payload=dict(observation.payload),
@@ -846,6 +889,7 @@ def _resolve_authoritative_corporate_action_impl(
         provider_instrument_version=projection["instrument_version"],
         observed_at=projection["observed_at"],
         provenance_digest=provenance_digest,
+        provider_fact_digest=provider_fact_digest,
         corrects_external_event_id=observation.corrects_external_event_id,
     )
     _register_authority(accepted)
@@ -967,6 +1011,7 @@ def _bind_authoritative_corporate_action_projection(
                 "provider_instrument_version": trusted.provider_instrument_version,
                 "observed_at": trusted.observed_at,
                 "provenance_digest": trusted.provenance_digest,
+                "provider_fact_digest": trusted.provider_fact_digest,
                 "corrects_external_event_id": trusted.corrects_external_event_id,
                 "instrument_id": event.instrument_id,
                 "instrument_version": event.instrument_version,
@@ -1345,29 +1390,29 @@ class DurableCorporateActionEvidenceStore:
                 )
             saved = DurableCorporateActionEvidenceStore._payload(same_identity[0])
             if (
-                saved.get("provenance_digest") != accepted.provenance_digest
-                or saved.get("evidence_ref") != accepted.evidence_ref
-                or saved.get("raw_evidence_digest") != accepted.raw_evidence_digest
+                saved.get("provider_fact_digest") != accepted.provider_fact_digest
                 or saved.get("provider_revision") != accepted.provider_revision
                 or saved.get("corrects_external_event_id")
                 != accepted.corrects_external_event_id
             ):
                 raise CorporateActionEvidenceConflict(
-                    "external corporate-action identity was reused with changed evidence"
+                    "external corporate-action identity was reused with changed provider fact"
                 )
             event_id = str(same_identity[0]["event_id"])
             version = int(same_identity[0]["aggregate_version"])
             request = {
-                "schema_version": "1.0.0",
+                "schema_version": "1.1.0",
                 "external_event_id": accepted.external_event_id,
-                "provenance_digest": accepted.provenance_digest,
-                "evidence_ref": accepted.evidence_ref,
+                "provider_fact_digest": accepted.provider_fact_digest,
+                "retained_provenance_digest": saved.get("provenance_digest"),
+                "retained_evidence_ref": saved.get("evidence_ref"),
             }
             result = {
                 "event_id": event_id,
                 "external_event_id": accepted.external_event_id,
                 "aggregate_version": version,
-                "provenance_digest": accepted.provenance_digest,
+                "provider_fact_digest": accepted.provider_fact_digest,
+                "provenance_digest": saved.get("provenance_digest"),
                 "corrects_external_event_id": accepted.corrects_external_event_id,
             }
             return PreparedCorporateActionEvidenceMutation(
@@ -1466,6 +1511,7 @@ class DurableCorporateActionEvidenceStore:
             "capability_snapshot_id": accepted.capability_snapshot_id,
             "provider_instrument_version": accepted.provider_instrument_version,
             "provenance_digest": accepted.provenance_digest,
+            "provider_fact_digest": accepted.provider_fact_digest,
             "source_revision": accepted.event.source_revision,
             "payload": dict(accepted.event.payload),
         }
@@ -1480,8 +1526,9 @@ class DurableCorporateActionEvidenceStore:
             "payload_hash": payload_digest(durable_payload),
         }
         request = {
-            "schema_version": "1.0.0",
+            "schema_version": "1.1.0",
             "external_event_id": accepted.external_event_id,
+            "provider_fact_digest": accepted.provider_fact_digest,
             "provenance_digest": accepted.provenance_digest,
             "evidence_ref": accepted.evidence_ref,
         }
@@ -1489,6 +1536,7 @@ class DurableCorporateActionEvidenceStore:
             "event_id": event_id,
             "external_event_id": accepted.external_event_id,
             "aggregate_version": next_version,
+            "provider_fact_digest": accepted.provider_fact_digest,
             "provenance_digest": accepted.provenance_digest,
             "corrects_external_event_id": corrected,
         }
@@ -1517,7 +1565,7 @@ class DurableCorporateActionEvidenceStore:
                 external_event_id=accepted.external_event_id,
                 aggregate_version=plan.aggregate_version,
                 inserted=False,
-                provenance_digest=accepted.provenance_digest,
+                provenance_digest=str(plan.result["provenance_digest"]),
                 corrects_external_event_id=accepted.corrects_external_event_id,
             )
         if plan.envelope is None:

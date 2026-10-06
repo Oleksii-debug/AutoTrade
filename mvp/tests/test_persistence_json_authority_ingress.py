@@ -62,7 +62,46 @@ class _HostileText(str):
         raise AssertionError("hostile text upper dispatched")
 
 
+class _HostilePathLike:
+    def __fspath__(self):
+        raise AssertionError("hostile path conversion dispatched")
+
+
+class _HostileInt(int):
+    def __int__(self):
+        raise AssertionError("hostile int conversion dispatched")
+
+    def __index__(self):
+        raise AssertionError("hostile int index dispatched")
+
+    def __lt__(self, other):
+        raise AssertionError("hostile int less-than dispatched")
+
+    def __gt__(self, other):
+        raise AssertionError("hostile int greater-than dispatched")
+
+
 class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
+    def test_journal_store_rejects_executable_pathlike_before_filesystem_authority(self):
+        hostile = _HostilePathLike()
+        with self.assertRaisesRegex(
+            TypeError,
+            "journal database path must be exact text or exact platform Path",
+        ):
+            JournalStore(hostile)
+
+    def test_sequence_text_subclass_is_not_durable_sequence_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            candidate = _event("evt-hostile-sequence")
+            candidate["aggregate_version"] = _HostileText("1")
+            with self.assertRaisesRegex(
+                ValueError,
+                "aggregate_version must be a positive canonical integer sequence string",
+            ):
+                store.append_event(candidate)
+            self.assertEqual(store.current_journal_sequence(), 0)
+
     def test_outer_event_subclass_is_rejected_before_virtual_get(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
@@ -83,6 +122,73 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
             ):
                 store.append_event(candidate)
             self.assertEqual(store.current_journal_sequence(), 0)
+
+    def test_load_command_event_batch_rejects_executable_request_before_authority_read(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            request = {"action": "ORDER.SUBMIT"}
+            store.commit_command(
+                command_id="cmd-load-hostile-request",
+                actor="operator",
+                environment="PAPER",
+                idempotency_key="key-load-hostile-request",
+                request=request,
+                result={"status": "ACCEPTED"},
+                state_version=1,
+                events=[(_event("evt-load-hostile-request"), None)],
+            )
+            before = store.whole_store_state_counts()
+            with self.assertRaisesRegex(
+                TypeError,
+                "persistent JSON values must use exact built-in JSON containers and scalars",
+            ):
+                store.load_command_event_batch(
+                    command_id="cmd-load-hostile-request",
+                    actor="operator",
+                    environment="PAPER",
+                    idempotency_key="key-load-hostile-request",
+                    request=_HostileDict(request),
+                )
+            self.assertEqual(store.whole_store_state_counts(), before)
+
+    def test_record_command_rejects_executable_state_version_before_write(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            before = store.whole_store_state_counts()
+            with self.assertRaisesRegex(
+                ValueError,
+                "state_version must be a non-negative integer",
+            ):
+                store.record_command(
+                    command_id="cmd-hostile-state-version",
+                    actor="operator",
+                    environment="PAPER",
+                    idempotency_key="key-hostile-state-version",
+                    request={"action": "TEST"},
+                    result={"status": "ACCEPTED"},
+                    state_version=_HostileInt(0),
+                )
+            self.assertEqual(store.whole_store_state_counts(), before)
+
+    def test_commit_command_rejects_executable_state_version_before_write(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            before = store.whole_store_state_counts()
+            with self.assertRaisesRegex(
+                ValueError,
+                "state_version must be a non-negative integer",
+            ):
+                store.commit_command(
+                    command_id="cmd-hostile-commit-state-version",
+                    actor="operator",
+                    environment="PAPER",
+                    idempotency_key="key-hostile-commit-state-version",
+                    request={"action": "ORDER.SUBMIT"},
+                    result={"status": "ACCEPTED"},
+                    state_version=_HostileInt(0),
+                    events=[(_event("evt-hostile-commit-state-version"), None)],
+                )
+            self.assertEqual(store.whole_store_state_counts(), before)
 
     def test_commit_command_rejects_executable_request_before_any_durable_mutation(self):
         with TemporaryDirectory() as directory:

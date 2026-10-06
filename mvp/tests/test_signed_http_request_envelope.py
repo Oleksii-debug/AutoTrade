@@ -1,6 +1,7 @@
 import unittest
 from io import BytesIO
 
+from mvp.autotrade_mvp import provider_transport as provider_transport_module
 from mvp.autotrade_mvp.provider_transport import (
     ProviderTransportScopeError,
     SignedHttpRequest,
@@ -406,6 +407,57 @@ class SignedHttpRequestEnvelopeTests(unittest.TestCase):
         ):
             client.send(forged)
 
+        self.assertEqual(opener.calls, 0)
+
+
+    def test_wire_client_retains_signed_verifier_after_module_rebinding(self):
+        class Opener:
+            def __init__(self):
+                self.calls = 0
+
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                raise AssertionError("wire must not be reached")
+
+        request = SignedHttpRequest(
+            method="POST",
+            url="https://api.example.test/v1/order",
+            headers={"Content-Type": "application/json"},
+            body=b"{}",
+            timeout_seconds=5,
+        )
+        object.__setattr__(
+            request,
+            "url",
+            "https://attacker.invalid/v1/order",
+        )
+        client = UrllibJsonWireClient(max_response_bytes=1024)
+        opener = Opener()
+        client._opener = opener
+        hostile_callbacks = {"count": 0}
+
+        def hostile(*_args, **_kwargs):
+            hostile_callbacks["count"] += 1
+            raise AssertionError("rebound wire authority executed")
+
+        original_type = provider_transport_module.SignedHttpRequest
+        original_require = provider_transport_module._require_signed_http_request
+        original_request = provider_transport_module.Request
+        try:
+            provider_transport_module.SignedHttpRequest = object
+            provider_transport_module._require_signed_http_request = hostile
+            provider_transport_module.Request = hostile
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "changed after construction",
+            ):
+                client.send(request)
+        finally:
+            provider_transport_module.SignedHttpRequest = original_type
+            provider_transport_module._require_signed_http_request = original_require
+            provider_transport_module.Request = original_request
+
+        self.assertEqual(hostile_callbacks["count"], 0)
         self.assertEqual(opener.calls, 0)
 
 

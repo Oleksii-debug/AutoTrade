@@ -947,10 +947,88 @@ def observe_submission_json_response(
         "instrument_versions": list(instruments),
     }
     actual_scope = _thaw_json(binding["submission_scope"])
-    if actual_scope != expected_scope:
+    if type(actual_scope) is not dict:
+        raise ProviderCoreError("durable submission scope is non-canonical")
+    if any(actual_scope.get(key) != value for key, value in expected_scope.items()):
         raise ProviderCoreError(
             "durable submission scope does not match prepared provider request"
         )
+
+    # Provider-route and financial authority may extend the prepared-request
+    # scope. Those extensions remain authenticated by submission_scope_hash and
+    # therefore by this observation's evidence_ref; this neutral verifier owns
+    # only the prepared-request axes plus cross-layer identities it can prove
+    # from the durable response binding itself.
+    provider_extension_keys = {"provider_environment"}
+    financial_extension_keys = {
+        "provider_id",
+        "account_id",
+        "environment",
+        "capability_snapshot_id",
+    }
+    route_extension_keys = {
+        "provider_route_qualification_id",
+        "provider_route_capability_snapshot_id",
+        "provider_route_decision_journal_sequence_cut",
+        "provider_route_provider_environment",
+        "provider_route_adapter_code_sha",
+        "provider_route_packaged_artifact_digest",
+        "provider_route_protocol_id",
+        "provider_route_protocol_version",
+        "provider_route_entity_policy_id",
+        "provider_route_entity_id",
+    }
+    extension_keys = set(actual_scope) - set(expected_scope)
+    allowed_extension_keys = (
+        provider_extension_keys | financial_extension_keys | route_extension_keys
+    )
+    if not extension_keys <= allowed_extension_keys:
+        raise ProviderCoreError("durable submission scope has unknown authority axes")
+
+    route_shape_present = bool(
+        extension_keys & (financial_extension_keys | route_extension_keys)
+    )
+    if route_shape_present:
+        required_route_shape = (
+            provider_extension_keys | financial_extension_keys | route_extension_keys
+        )
+        if not required_route_shape <= set(actual_scope):
+            raise ProviderCoreError(
+                "durable financial route submission scope is incomplete"
+            )
+
+    financial_scope = {
+        "provider_id": provider,
+        "account_id": binding["account_id"],
+        "environment": binding["environment"],
+        "provider_environment": binding["provider_environment"],
+        "provider_route_provider_environment": binding["provider_environment"],
+    }
+    for key, value in financial_scope.items():
+        if key in actual_scope and actual_scope[key] != value:
+            raise ProviderCoreError(
+                "durable submission financial scope does not match response binding"
+            )
+    for key in (
+        "capability_snapshot_id",
+        "provider_route_capability_snapshot_id",
+    ):
+        if key in actual_scope and (
+            len(capabilities) != 1 or actual_scope[key] != capabilities[0]
+        ):
+            raise ProviderCoreError(
+                "durable submission capability scope does not match prepared request"
+            )
+
+    if "provider_route_provider_environment" in actual_scope:
+        if (
+            "provider_environment" not in actual_scope
+            or actual_scope["provider_route_provider_environment"]
+            != actual_scope["provider_environment"]
+        ):
+            raise ProviderCoreError(
+                "durable submission provider-route environment scope mismatch"
+            )
 
     identity_material = json.dumps(
         {
@@ -1430,7 +1508,7 @@ def _install_provider_submission_observation_authority(binding_projection):
         scope = binding["submission_scope"]
         if canonical_type(scope) is not mapping_proxy_type:
             authority_changed()
-        expected_keys = canonical_frozenset(
+        required_keys = canonical_frozenset(
             (
                 "endpoint",
                 "prepared_request_sha256",
@@ -1443,11 +1521,12 @@ def _install_provider_submission_observation_authority(binding_projection):
                 ),
             )
         )
-        if canonical_frozenset(scope.keys()) != expected_keys:
+        scope_keys = canonical_frozenset(scope.keys())
+        if not required_keys.issubset(scope_keys):
             raise error_type(
                 "durable submission scope does not match prepared provider request"
             )
-        if provider == "BYBIT":
+        if "provider_environment" in scope:
             raw_provider_environment = scope["provider_environment"]
             scoped_provider_environment = canonical_text(
                 raw_provider_environment,
@@ -1468,6 +1547,105 @@ def _install_provider_submission_observation_authority(binding_projection):
             raise error_type(
                 "durable submission scope does not match prepared provider request"
             )
+
+        # Financial/provider-route extensions are sealed by submission_scope_hash.
+        # Accept only the canonical base write shape or the complete financial-route
+        # shape; partial/unknown authority axes fail closed.
+        provider_extension_keys = canonical_frozenset(("provider_environment",))
+        financial_extension_keys = canonical_frozenset(
+            ("provider_id", "account_id", "environment", "capability_snapshot_id")
+        )
+        route_extension_keys = canonical_frozenset(
+            (
+                "provider_route_qualification_id",
+                "provider_route_capability_snapshot_id",
+                "provider_route_decision_journal_sequence_cut",
+                "provider_route_provider_environment",
+                "provider_route_adapter_code_sha",
+                "provider_route_packaged_artifact_digest",
+                "provider_route_protocol_id",
+                "provider_route_protocol_version",
+                "provider_route_entity_policy_id",
+                "provider_route_entity_id",
+            )
+        )
+        extension_keys = scope_keys.difference(required_keys)
+        allowed_extension_keys = (
+            provider_extension_keys
+            | financial_extension_keys
+            | route_extension_keys
+        )
+        if not extension_keys.issubset(allowed_extension_keys):
+            raise error_type("durable submission scope has unknown authority axes")
+        route_shape_present = bool(
+            extension_keys.intersection(
+                financial_extension_keys | route_extension_keys
+            )
+        )
+        if route_shape_present:
+            required_route_shape = (
+                required_keys
+                | provider_extension_keys
+                | financial_extension_keys
+                | route_extension_keys
+            )
+            if scope_keys != required_route_shape:
+                raise error_type(
+                    "durable financial route submission scope is incomplete"
+                )
+
+        financial_scope = {
+            "provider_id": provider,
+            "account_id": binding["account_id"],
+            "environment": binding["environment"],
+        }
+        for key, value in financial_scope.items():
+            if key in scope and canonical_text(
+                scope[key],
+                "submission_scope." + key,
+            ) != value:
+                raise error_type(
+                    "durable submission financial scope does not match response binding"
+                )
+        for key in (
+            "capability_snapshot_id",
+            "provider_route_capability_snapshot_id",
+        ):
+            if key in scope and (
+                len(capabilities) != 1
+                or canonical_text(
+                    scope[key],
+                    "submission_scope." + key,
+                )
+                != capabilities[0]
+            ):
+                raise error_type(
+                    "durable submission capability scope does not match prepared request"
+                )
+        if "provider_route_provider_environment" in scope:
+            if "provider_environment" not in scope:
+                raise error_type(
+                    "durable submission provider-route environment scope mismatch"
+                )
+            raw_route_provider_environment = scope[
+                "provider_route_provider_environment"
+            ]
+            route_provider_environment = canonical_text(
+                raw_route_provider_environment,
+                "submission_scope.provider_route_provider_environment",
+            ).upper()
+            if route_provider_environment != raw_route_provider_environment:
+                raise error_type(
+                    "durable submission provider-route environment is not canonical"
+                )
+            scoped_provider_environment = canonical_text(
+                scope["provider_environment"],
+                "submission_scope.provider_environment",
+            ).upper()
+            if route_provider_environment != scoped_provider_environment:
+                raise error_type(
+                    "durable submission provider-route environment scope mismatch"
+                )
 
         identity_material = canonical_json_dumps(
             {

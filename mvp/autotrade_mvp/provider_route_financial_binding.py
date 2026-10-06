@@ -11,6 +11,8 @@ the existing provider transport are prepared.
 
 from __future__ import annotations
 
+import re
+
 from .capabilities import CapabilityRegistry, CapabilitySnapshot
 from .financial_request_binding import FinancialRequestBindingMaterial
 from .provider_route_dispatch import bind_selected_provider_route_submission_scope
@@ -34,13 +36,17 @@ def build_selected_provider_route_financial_submission_scope(
     *,
     account_id: str,
     runtime_environment: str,
+    endpoint: str,
+    prepared_request_sha256: str,
+    capability_snapshot_ids: tuple[str, ...],
+    instrument_versions: tuple[str, ...],
 ) -> dict[str, object]:
     """Build the exact durable scope whose digest belongs in a financial binding.
 
-    The caller supplies only the financial host account/environment already
-    owned by the admission path.  Provider, provider environment, C, Q and build
-    provenance all come from the sealed selected route and therefore cannot be
-    relabelled independently while constructing ``submission_scope_digest``.
+    The selected route remains the owner of provider/C/Q/build identity while
+    the exact prepared-request axes are supplied by the canonical request
+    preparation path.  Keeping both in one scope lets the durable response
+    binding prove the same request that crossed the final financial send fence.
     """
 
     if type(route) is not SelectedProviderRoute:
@@ -50,6 +56,42 @@ def build_selected_provider_route_financial_submission_scope(
         runtime_environment,
         name="runtime_environment",
     )
+    canonical_endpoint = _exact_text(endpoint, name="endpoint")
+    if not canonical_endpoint.startswith("/") or "://" in canonical_endpoint:
+        raise ProviderRouteFinancialBindingError(
+            "endpoint must be a canonical provider-relative path"
+        )
+    if (
+        type(prepared_request_sha256) is not str
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", prepared_request_sha256) is None
+    ):
+        raise ProviderRouteFinancialBindingError(
+            "prepared_request_sha256 must be a canonical SHA-256 digest"
+        )
+    if type(capability_snapshot_ids) is not tuple:
+        raise TypeError("capability_snapshot_ids must be an exact tuple")
+    canonical_capabilities = tuple(
+        _exact_text(value, name="capability_snapshot_id")
+        for value in capability_snapshot_ids
+    )
+    if (
+        len(canonical_capabilities) != 1
+        or canonical_capabilities[0] != route.capability_snapshot_id
+    ):
+        raise ProviderRouteFinancialBindingError(
+            "prepared request capability differs from selected provider route"
+        )
+    if type(instrument_versions) is not tuple:
+        raise TypeError("instrument_versions must be an exact tuple")
+    canonical_instruments = tuple(
+        _exact_text(value, name="instrument_version")
+        for value in instrument_versions
+    )
+    if len(canonical_instruments) != 1:
+        raise ProviderRouteFinancialBindingError(
+            "financial submission requires exactly one instrument version"
+        )
+
     candidate = route.candidate
     provider_scope = route.qualification.scope.provider_scope
     if candidate.account_id != canonical_account_id:
@@ -68,6 +110,10 @@ def build_selected_provider_route_financial_submission_scope(
             "environment": canonical_environment,
             "provider_environment": candidate.provider_environment,
             "capability_snapshot_id": route.capability_snapshot_id,
+            "endpoint": canonical_endpoint,
+            "prepared_request_sha256": prepared_request_sha256,
+            "capability_snapshot_ids": list(canonical_capabilities),
+            "instrument_versions": list(canonical_instruments),
         },
     )
 

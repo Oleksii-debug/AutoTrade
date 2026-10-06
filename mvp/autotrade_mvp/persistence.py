@@ -57,6 +57,12 @@ class JournalStore(_JournalStoreImpl):
     """
 
     def __init__(self, path: str | Path):
+        # Reject executable PathLike/subclass ingress before pathname
+        # interpretation or filesystem qualification can dispatch caller code.
+        if type(path) is not str and type(path) is not type(Path()):
+            raise TypeError(
+                "journal database path must be exact text or exact platform Path"
+            )
         # Freeze caller-relative text before locality admission performs Win32
         # I/O. A concurrent process-wide chdir after admission must not retarget
         # durable financial state into an unclassified namespace.
@@ -379,7 +385,8 @@ class JournalStore(_JournalStoreImpl):
             raise TypeError("referenced_event_ids must be exact canonical text tuple")
         if len(set(referenced_event_ids)) != len(referenced_event_ids):
             raise ValueError("referenced_event_ids must be unique")
-        request_hash = _impl.payload_digest(request)
+        request_snapshot = _impl._detach_json_value(request)
+        request_hash = _impl.payload_digest(request_snapshot)
 
         with self._connect() as connection:
             connection.execute("BEGIN")

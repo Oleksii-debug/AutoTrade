@@ -1894,6 +1894,120 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 ],
             )
 
+    def test_post_send_module_helper_rebinding_is_restored_without_execution(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        surfaces = (
+            "_canonical_journal_authority_snapshot",
+            "_journal_store_call",
+            "_envelope",
+            "_detach_submission_json",
+        )
+        for surface in surfaces:
+            with self.subTest(surface=surface), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+                original = getattr(dispatch_module, surface)
+                hostile_calls = 0
+                wire_calls = 0
+
+                def forged(*_args, **_kwargs):
+                    nonlocal hostile_calls
+                    hostile_calls += 1
+                    raise AssertionError(f"rebound {surface} executed")
+
+                def transport(_client_order_id, _request, guard):
+                    nonlocal wire_calls
+                    guard()
+                    wire_calls += 1
+                    setattr(dispatch_module, surface, forged)
+                    return ExactJsonTransportResponse(b'{"accepted":true}')
+
+                attempt_id = f"post-send-module-helper-{surface}"
+                try:
+                    result = dispatcher.dispatch(
+                        attempt_id=attempt_id,
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=lambda *_args: (True, "allowed"),
+                        transport_send=transport,
+                        submission_scope={"endpoint": "/orders"},
+                    )
+                    self.assertIs(getattr(dispatch_module, surface), original)
+                finally:
+                    setattr(dispatch_module, surface, original)
+
+                self.assertEqual(wire_calls, 1)
+                self.assertEqual(hostile_calls, 0)
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertEqual(
+                    result.reason,
+                    "dispatcher_authority_changed_after_send_barrier",
+                )
+                events = JournalStore.load_events(
+                    store,
+                    "submission_attempt",
+                    dispatcher._aggregate_id(attempt_id),
+                )
+                self.assertEqual(
+                    [event["event_type"] for event in events],
+                    ["SubmissionPrepared", "SubmissionSending"],
+                )
+
+                resend_calls = 0
+
+                def must_not_resend(*_args):
+                    nonlocal resend_calls
+                    resend_calls += 1
+                    raise AssertionError("recovered possible-send state must not resend")
+
+                recovered = dispatcher.dispatch(
+                    attempt_id=attempt_id,
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T14:00:01Z",
+                    authority_check=lambda *_args: (
+                        (_ for _ in ()).throw(
+                            AssertionError(
+                                "Sending recovery must not rerun authority"
+                            )
+                        )
+                    ),
+                    transport_send=must_not_resend,
+                    submission_scope={"endpoint": "/orders"},
+                )
+                self.assertEqual(resend_calls, 0)
+                self.assertEqual(recovered.status, "UNKNOWN")
+                self.assertEqual(
+                    recovered.reason,
+                    "recovered_after_send_barrier_without_terminal_result",
+                )
+                self.assertEqual(
+                    [
+                        event["event_type"]
+                        for event in JournalStore.load_events(
+                            store,
+                            "submission_attempt",
+                            dispatcher._aggregate_id(attempt_id),
+                        )
+                    ],
+                    [
+                        "SubmissionPrepared",
+                        "SubmissionSending",
+                        "SubmissionUnknown",
+                    ],
+                )
+
     def test_exact_response_post_construction_tamper_is_revalidated_without_callbacks(self):
         class TrapBytes(bytes):
             callbacks = 0

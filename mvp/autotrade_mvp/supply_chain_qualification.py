@@ -818,6 +818,8 @@ def _store_artifact_matches(
             return False
         if manifest.get("sha256") != artifact_hash:
             return False
+        if "sha256:" + sha256(raw).hexdigest() != artifact_hash:
+            return False
         if manifest.get("media_type") != media_type:
             return False
         if manifest.get("source_refs") != [f"git:{release_sha}"]:
@@ -1035,6 +1037,12 @@ def qualify_supply_chain(
             "independent_evidence_trust",
             _INCONCLUSIVE,
             "SUPPLY_CHAIN.TRUST_EVIDENCE_ROOT_INCOMPLETE",
+        )
+    elif evidence.release_artifact_id is None:
+        record(
+            "independent_evidence_trust",
+            _INCONCLUSIVE,
+            "SUPPLY_CHAIN.DELIVERED_RELEASE_IDENTITY_MISSING",
         )
     else:
         try:

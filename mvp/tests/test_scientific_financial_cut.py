@@ -127,10 +127,12 @@ class ScientificFinancialCutTests(unittest.TestCase):
             journal_sequence=3,
             journal_population_digest=_SHA,
             reconciliation_checkpoint_digest=_SHA,
-            cut_digest=_SHA,
         )
         self.assertEqual(cut.journal_sequence, 3)
         self.assertFalse(hasattr(cut, "journal_state"))
+        self.assertTrue(cut.cut_digest.startswith("sha256:"))
+        with self.assertRaises(AttributeError):
+            object.__setattr__(cut, "hidden_authority", "forged")
 
     def test_bool_is_not_accepted_as_journal_sequence(self):
         with self.assertRaisesRegex(ValueError, "non-negative integer"):
@@ -144,7 +146,6 @@ class ScientificFinancialCutTests(unittest.TestCase):
                 journal_sequence=True,
                 journal_population_digest=_SHA,
                 reconciliation_checkpoint_digest=_SHA,
-                cut_digest=_SHA,
             )
 
     def test_exact_journal_population_cut_rejects_superseded_provider_truth(self):

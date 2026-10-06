@@ -48,9 +48,12 @@ _SIDES = frozenset({"BUY", "SELL"})
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
+        raise IbkrWebAdapterError(f"{name} must be exact text")
+    normalized = value.strip()
+    if not normalized:
         raise IbkrWebAdapterError(f"{name} is required")
-    return value.strip()
+    return normalized
 
 
 def _provider_text(value: object, *, name: str) -> str:
@@ -74,10 +77,10 @@ def _optional_provider_text(value: object, *, name: str) -> str | None:
 
 
 def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
+    if type(value) not in {str, int, Decimal}:
         raise IbkrWebAdapterError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, TypeError, ValueError) as error:
         raise IbkrWebAdapterError(f"{name} must be a finite decimal") from error
     if not result.is_finite():
@@ -88,7 +91,9 @@ def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
 
 
 def _instant(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+    if type(value) is not datetime:
+        raise IbkrWebAdapterError(f"{name} must be an exact datetime")
+    if value.tzinfo is None or value.utcoffset() is None:
         raise IbkrWebAdapterError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc)
 
@@ -142,8 +147,8 @@ class IbkrContractIdentity:
         if (self.conid is None) == (self.conidex is None):
             raise IbkrWebAdapterError("exactly one of conid or conidex is required")
         if self.conid is not None:
-            if not isinstance(self.conid, int) or isinstance(self.conid, bool) or self.conid <= 0:
-                raise IbkrWebAdapterError("conid must be a positive integer")
+            if type(self.conid) is not int or self.conid <= 0:
+                raise IbkrWebAdapterError("conid must be a positive exact integer")
         if self.conidex is not None:
             value = _text(self.conidex, name="conidex")
             match = _CONIDEX.fullmatch(value)
@@ -332,8 +337,7 @@ def prepare_normalized_order(
         raise TypeError("session must be exact IbkrBrokerageSessionStatus")
     point = _instant(at, name="at")
     if (
-        isinstance(maximum_session_age_seconds, bool)
-        or not isinstance(maximum_session_age_seconds, int)
+        type(maximum_session_age_seconds) is not int
         or maximum_session_age_seconds < 0
     ):
         raise IbkrWebAdapterError(
@@ -408,12 +412,10 @@ class IbkrExecutionEvidence:
         quantity,
         price,
     ) -> "IbkrExecutionEvidence":
-        if (
-            not isinstance(permanent_order_id, int)
-            or isinstance(permanent_order_id, bool)
-            or permanent_order_id <= 0
-        ):
-            raise IbkrWebAdapterError("permanent_order_id must be a positive integer")
+        if type(permanent_order_id) is not int or permanent_order_id <= 0:
+            raise IbkrWebAdapterError(
+                "permanent_order_id must be a positive exact integer"
+            )
         return cls(
             execution_id=_text(execution_id, name="execution_id"),
             permanent_order_id=str(permanent_order_id),
@@ -1030,8 +1032,8 @@ def parse_web_api_trades(
             )
 
         conid = raw.get("conid")
-        if not isinstance(conid, int) or isinstance(conid, bool) or conid <= 0:
-            raise IbkrWebAdapterError("trade conid must be a positive integer")
+        if type(conid) is not int or conid <= 0:
+            raise IbkrWebAdapterError("trade conid must be a positive exact integer")
         if conid not in instrument_versions_by_conid:
             raise IbkrWebAdapterError(f"unmapped IBKR conid: {conid}")
         instrument = _text(
@@ -1102,8 +1104,8 @@ def execution_to_reconciliation_fill(
     must not invent commission or timestamp evidence that was not observed.
     """
 
-    if not isinstance(execution, IbkrExecutionEvidence):
-        raise TypeError("execution must be IbkrExecutionEvidence")
+    if type(execution) is not IbkrExecutionEvidence:
+        raise TypeError("execution must be exact IbkrExecutionEvidence")
     account = _text(expected_account_id, name="expected_account_id")
     if execution.account_id != account:
         raise IbkrWebAdapterError("execution account does not match reconciliation account")

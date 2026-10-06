@@ -236,3 +236,28 @@ Source mutation is frozen after this evidence update unless exact-head CI or
 review identifies a concrete defect. Closure still requires terminal exact-head
 baseline + Verify + reconvergence-integrity success, clean review, current-main
 topology, merge and post-merge readback.
+
+
+## 2026-10-06 final BAR causal-status boundary
+
+A mechanical review of the zero-fill status hardening caught and repaired one
+boundary overreach before acceptance: pre-arrival BAR observations legitimately
+remain WAITING_FOR_LATENCY without requiring interval_start, because the
+simulator returns before post-arrival BAR-volume classification.
+
+The independent oracle now classifies BAR ambiguity exactly after arrival:
+- interval_start before venue arrival => AMBIGUOUS_NO_FILL;
+- a causally future, untriggered STOP_LIMIT with positive capacity and both stop
+  and limit touched in the same bar => AMBIGUOUS_NO_FILL because intrabar
+  stop-before-limit ordering is unknowable;
+- BAR results lacking either ambiguity cause cannot claim AMBIGUOUS_NO_FILL;
+- pre-arrival BAR WAITING does not require interval_start.
+
+Regressions cover all four directions, including forged NO_FILL for real
+ambiguity and forged ambiguity where no causal ambiguity exists.
+
+This is the final source/evidence update before acceptance. The branch head must
+remain stable unless exact-head CI or review proves a concrete defect. Closure
+requires terminal baseline + Verify + reconvergence-integrity success on that
+stable head, clean review, 0-behind current-main topology, merge, and post-merge
+readback.

@@ -2737,6 +2737,55 @@ class GuardedDispatcher:
             (decoder_number_parser, decoder_number_parser_code),
             (decoder_integer_parser, decoder_integer_parser_code),
         )
+        exact_response_function_defaults = []
+        for dependency, expected_code in exact_response_code_bindings:
+            if expected_code is None or dependency is decoder_json_loads:
+                continue
+            dependency_defaults = snapshot_getattr(
+                dependency,
+                "__defaults__",
+                None,
+            )
+            if (
+                dependency_defaults is not None
+                and snapshot_type(dependency_defaults) is not snapshot_tuple
+            ):
+                raise RuntimeError(
+                    "exact response callable defaults are unavailable"
+                )
+            dependency_kwdefaults = snapshot_getattr(
+                dependency,
+                "__kwdefaults__",
+                None,
+            )
+            if dependency_kwdefaults is None:
+                dependency_kwdefault_items = None
+            else:
+                if snapshot_type(dependency_kwdefaults) is not snapshot_dict:
+                    raise RuntimeError(
+                        "exact response callable keyword defaults are unavailable"
+                    )
+                dependency_kwdefault_items = snapshot_tuple(
+                    dependency_kwdefaults.items()
+                )
+                if any(
+                    snapshot_type(key) is not str
+                    for key, _value in dependency_kwdefault_items
+                ):
+                    raise RuntimeError(
+                        "exact response callable keyword default keys are unavailable"
+                    )
+            exact_response_function_defaults.append(
+                (
+                    dependency,
+                    dependency_defaults,
+                    dependency_kwdefault_items,
+                )
+            )
+        exact_response_function_defaults = snapshot_tuple(
+            exact_response_function_defaults
+        )
+        function_kwdefault_missing = object()
 
         def restore_exact_response_authority() -> bool:
             changed = False
@@ -2784,6 +2833,68 @@ class GuardedDispatcher:
                         dependency,
                         "__code__",
                         expected_code,
+                    )
+                    changed = True
+            for (
+                dependency,
+                expected_defaults,
+                expected_kwdefault_items,
+            ) in exact_response_function_defaults:
+                if (
+                    snapshot_getattr(
+                        dependency,
+                        "__defaults__",
+                        None,
+                    )
+                    is not expected_defaults
+                ):
+                    snapshot_setattr(
+                        dependency,
+                        "__defaults__",
+                        expected_defaults,
+                    )
+                    changed = True
+                current_kwdefaults = snapshot_getattr(
+                    dependency,
+                    "__kwdefaults__",
+                    None,
+                )
+                if expected_kwdefault_items is None:
+                    if current_kwdefaults is not None:
+                        snapshot_setattr(
+                            dependency,
+                            "__kwdefaults__",
+                            None,
+                        )
+                        changed = True
+                    continue
+                callable_kwdefaults_changed = (
+                    snapshot_type(current_kwdefaults) is not snapshot_dict
+                    or snapshot_len(current_kwdefaults)
+                    != snapshot_len(expected_kwdefault_items)
+                )
+                if not callable_kwdefaults_changed:
+                    for current_key in current_kwdefaults:
+                        if snapshot_type(current_key) is not str:
+                            callable_kwdefaults_changed = True
+                            break
+                if not callable_kwdefaults_changed:
+                    current_kwdefault_get = current_kwdefaults.get
+                    for key, expected_value in expected_kwdefault_items:
+                        if (
+                            current_kwdefault_get(
+                                key,
+                                function_kwdefault_missing,
+                            )
+                            is not expected_value
+                        ):
+                            callable_kwdefaults_changed = True
+                            break
+                if callable_kwdefaults_changed:
+                    snapshot_setattr(
+                        dependency,
+                        "__kwdefaults__",
+                        snapshot_dict(expected_kwdefault_items),
                     )
                     changed = True
 

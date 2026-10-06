@@ -255,11 +255,28 @@ def _stable_hash(payload: object) -> str:
     return sha256(encoded).hexdigest()
 
 
+def _fsync_directory(directory: Path) -> None:
+    """Persist a completed rename on platforms that expose directory fsync."""
+
+    if os.name == "nt":
+        return
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _atomic_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(serialized)
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(temporary, path)
+    _fsync_directory(path.parent)
 
 
 @dataclass(frozen=True)

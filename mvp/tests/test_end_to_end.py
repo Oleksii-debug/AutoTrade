@@ -950,6 +950,40 @@ class VerticalSliceTests(unittest.TestCase):
                     intents_before,
                 )
 
+    def test_atomic_json_sync_failure_never_commits_canonical_state(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint_path = root / "checkpoint.json"
+            with patch.object(
+                pipeline_module.os,
+                "fsync",
+                side_effect=OSError("forced durable sync failure"),
+            ):
+                with self.assertRaisesRegex(OSError, "forced durable sync failure"):
+                    pipeline_module._atomic_json(
+                        checkpoint_path,
+                        {"schema_version": 3},
+                    )
+
+            temporary = root / "checkpoint.json.tmp"
+            self.assertFalse(checkpoint_path.exists())
+            self.assertTrue(temporary.exists())
+            temporary_before = temporary.read_bytes()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Interrupted durable atomic write requires explicit recovery",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+            self.assertEqual(temporary.read_bytes(), temporary_before)
+            self.assertFalse(checkpoint_path.exists())
+            self.assertFalse((root / "learning-evidence.jsonl").exists())
+            self.assertEqual(list(root.glob("journal.sqlite3*")), [])
+
+
     def test_orphan_order_intent_temp_blocks_fresh_run_rebinding(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

@@ -213,6 +213,7 @@ def _install_exact_transport_response_authority():
     require_response_bytes_code = canonical_require_response_bytes.__code__
     canonical_decode = _decode_exact_json_bytes
     decode_code = canonical_decode.__code__
+    canonical_sha256 = sha256
     canonical_hard_response_bytes = HARD_MAX_PROVIDER_RESPONSE_BYTES
     states: dict[int, tuple[object, tuple[object, ...]]] = {}
     installed: list[object] = []
@@ -239,6 +240,7 @@ def _install_exact_transport_response_authority():
             or canonical_require_response_bytes.__code__ is not require_response_bytes_code
             or _decode_exact_json_bytes is not canonical_decode
             or canonical_decode.__code__ is not decode_code
+            or sha256 is not canonical_sha256
             or type(HARD_MAX_PROVIDER_RESPONSE_BYTES) is not canonical_int
             or HARD_MAX_PROVIDER_RESPONSE_BYTES != canonical_hard_response_bytes
             or canonical_len(installed) != 2

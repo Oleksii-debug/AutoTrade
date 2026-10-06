@@ -448,6 +448,28 @@ class ExecutionRealismTests(unittest.TestCase):
         self.assertEqual(result.status, "NO_FILL")
         self.assertEqual(result.filled_quantity, Decimal("0"))
 
+    def test_stop_trigger_is_recorded_even_when_fill_capacity_is_below_one_lot(self):
+        result = simulate_execution(
+            order(
+                order_type="STOP_LIMIT",
+                stop_price="100",
+                limit_price="102",
+                lot_size="5",
+                quantity="10",
+            ),
+            top(
+                ask="101",
+                available_volume="0",
+            ),
+            model(),
+        )
+        self.assertEqual(result.status, "NO_FILL")
+        self.assertEqual(result.filled_quantity, Decimal("0"))
+        self.assertTrue(result.triggered)
+        self.assertIn("stop triggered", result.reason)
+        self.assertIn("below one lot", result.reason)
+
+
     def test_limit_fill_does_not_assume_price_improvement(self):
         result = simulate_execution(
             order(order_type="LIMIT", limit_price="102"),

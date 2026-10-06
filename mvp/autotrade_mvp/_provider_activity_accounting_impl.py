@@ -2915,6 +2915,36 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
 del _install_durable_provider_economic_book_authority
 
 
+def _make_durable_provider_economic_init(initialize):
+    """Retain the canonical constructor issuer selected at module import."""
+
+    def __init__(
+        self,
+        store: JournalStore,
+        *,
+        provider_id: str,
+        account_id: str,
+        environment: str,
+        provider_environment: str | None = None,
+    ):
+        initialize(
+            self,
+            store,
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            provider_environment=provider_environment,
+        )
+
+    return __init__
+
+
+DurableProviderEconomicBook.__init__ = _make_durable_provider_economic_init(
+    _initialize_durable_provider_economic_book
+)
+del _make_durable_provider_economic_init
+
+
 def _make_durable_provider_economic_read_facade(
     require_authority,
     *,

@@ -1389,7 +1389,7 @@ class GuardedDispatcher:
         sender_check: SenderCheck | None = None,
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
-        require_dispatch_call_authority()
+        self._require_dispatch_authority_state()
         dispatch_call_authority = (
             self.environment,
             self.account_id,

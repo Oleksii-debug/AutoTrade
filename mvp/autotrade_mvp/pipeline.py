@@ -94,6 +94,11 @@ def _financial_configuration(
     max_abs_position: Decimal,
     max_notional: Decimal,
     fee_rate: Decimal,
+    _checkpoint_schema_version: int = CHECKPOINT_SCHEMA_VERSION,
+    _money_quantum: Decimal = MONEY_QUANTUM,
+    _strategy_kind: str = "MOVING_AVERAGE",
+    _strategy_fast: int = 2,
+    _strategy_slow: int = 3,
 ) -> dict[str, object]:
     """Return the exact effective financial configuration for one durable run."""
 
@@ -104,12 +109,12 @@ def _financial_configuration(
         "max_abs_position": str(max_abs_position),
         "max_notional": str(max_notional),
         "fee_rate": canonical_decimal_text(fee_rate),
-        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
-        "money_quantum": str(MONEY_QUANTUM),
+        "checkpoint_schema_version": _checkpoint_schema_version,
+        "money_quantum": str(_money_quantum),
         "strategy": {
-            "kind": "MOVING_AVERAGE",
-            "fast": 2,
-            "slow": 3,
+            "kind": _strategy_kind,
+            "fast": _strategy_fast,
+            "slow": _strategy_slow,
         },
     }
 
@@ -589,7 +594,7 @@ def _initial_checkpoint(financial_configuration: dict[str, object]) -> dict[str,
     """Persist run economics before the first durable intent/provider mutation."""
 
     return {
-        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "schema_version": financial_configuration["checkpoint_schema_version"],
         "symbol": financial_configuration["symbol"],
         "financial_configuration": financial_configuration,
         "financial_configuration_hash": _stable_hash(financial_configuration),
@@ -618,7 +623,13 @@ def _strict_json_loads(text: str) -> object:
     return json.loads(text, object_pairs_hook=unique_object)
 
 
-def _read_state(path: Path, initial_cash: Decimal) -> tuple[dict, bool]:
+def _read_state(
+    path: Path,
+    initial_cash: Decimal,
+    *,
+    _checkpoint_schema_version: int = CHECKPOINT_SCHEMA_VERSION,
+    _checkpoint_fields: frozenset[str] = _CHECKPOINT_FIELDS,
+) -> tuple[dict, bool]:
     if not path.exists():
         return {"initial_cash": str(initial_cash), "postings": [], "fills": {}, "evidence_ids": []}, False
     try:
@@ -632,9 +643,9 @@ def _read_state(path: Path, initial_cash: Decimal) -> tuple[dict, bool]:
         raise ValueError(
             "Legacy checkpoint schema 1 lacks exact financial configuration identity"
         )
-    if schema_version != CHECKPOINT_SCHEMA_VERSION:
+    if schema_version != _checkpoint_schema_version:
         raise ValueError("Unsupported or corrupt checkpoint schema")
-    if set(data) != _CHECKPOINT_FIELDS:
+    if set(data) != _checkpoint_fields:
         raise ValueError("Corrupt checkpoint structure")
     if not isinstance(data.get("postings"), list) or not isinstance(data.get("fills"), dict):
         raise ValueError("Corrupt checkpoint ledger or fills")
@@ -1376,7 +1387,12 @@ def _reconcile(provider: SimulatedProvider, ledger: EconomicLedger) -> bool:
     return True
 
 
-def verify_replay(state_dir: str | Path) -> bool:
+def verify_replay(
+    state_dir: str | Path,
+    *,
+    _checkpoint_schema_version: int = CHECKPOINT_SCHEMA_VERSION,
+    _checkpoint_fields: frozenset[str] = _CHECKPOINT_FIELDS,
+) -> bool:
     """Verify checkpoint, evidence and durable journal share one financial config root."""
     root = Path(state_dir)
     checkpoint_path = root / "checkpoint.json"
@@ -1386,9 +1402,9 @@ def verify_replay(state_dir: str | Path) -> bool:
         return False
     try:
         checkpoint = _strict_json_loads(checkpoint_path.read_text(encoding="utf-8"))
-        if type(checkpoint) is not dict or set(checkpoint) != _CHECKPOINT_FIELDS:
+        if type(checkpoint) is not dict or set(checkpoint) != _checkpoint_fields:
             return False
-        if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        if checkpoint.get("schema_version") != _checkpoint_schema_version:
             return False
         configuration = checkpoint["financial_configuration"]
         configuration_hash = checkpoint["financial_configuration_hash"]
@@ -1933,7 +1949,7 @@ def run_vertical_slice(
     evidence_ids.add(evidence["evidence_id"])
     evidence_records[evidence_id] = evidence
     checkpoint = {
-        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "schema_version": financial_configuration["checkpoint_schema_version"],
         "symbol": symbol,
         "financial_configuration": financial_configuration,
         "financial_configuration_hash": financial_configuration_hash,

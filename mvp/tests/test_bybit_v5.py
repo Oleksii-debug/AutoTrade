@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
@@ -678,6 +678,262 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(
             result["evidence"][0]["observed_at"],
             "2026-09-24T20:00:00Z",
+        )
+
+    def test_raw_option_payload_fails_closed_without_option_semantics(self):
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "dedicated option semantics",
+        ):
+            build_order_payload(
+                product_family="OPTIONS",
+                symbol="BTC-30OCT26-100000-C",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.1",
+                price="100",
+                client_order_id="option-payload-unqualified",
+                time_in_force="GTC",
+            )
+
+    def test_canonical_preparation_rejects_cross_provider_environment_capability(self):
+        capability = submission_write_capability(
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "capability provider environment does not match target",
+        ):
+            prepare_order_submission(
+                capability=capability,
+                at=READ_AT,
+                provider_environment="DEMO",
+                product_family="SPOT",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.01",
+                price="100",
+                client_order_id="domain-mismatch-rejected",
+                time_in_force="GTC",
+            )
+
+    def test_derivative_payload_rejects_cross_provider_environment_capability(self):
+        capability = write_capability(provider_environment="TESTNET")
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "capability provider environment does not match target",
+        ):
+            build_order_payload(
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.01",
+                price="100",
+                client_order_id="derivative-domain-mismatch",
+                time_in_force="GTC",
+                position_side="LONG",
+                capability=capability,
+                capability_at=READ_AT,
+                account_id=capability.account_id,
+                instrument_version=capability.instrument_version,
+                provider_environment="DEMO",
+            )
+
+    def test_canonical_preparation_rejects_executable_tzinfo_before_callback(self):
+        capability = submission_write_capability(
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        callbacks = []
+
+        class ExecutableTimezone(tzinfo):
+            def utcoffset(self, _dt):
+                callbacks.append("utcoffset")
+                return timedelta(0)
+
+            def dst(self, _dt):
+                callbacks.append("dst")
+                return timedelta(0)
+
+            def tzname(self, _dt):
+                callbacks.append("tzname")
+                return "forged"
+
+        at = datetime(2026, 9, 24, 20, tzinfo=ExecutableTimezone())
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "exact stdlib timezone",
+        ):
+            prepare_order_submission(
+                capability=capability,
+                at=at,
+                provider_environment="DEMO",
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.01",
+                price="100",
+                client_order_id="tzinfo-authority-required",
+                time_in_force="GTC",
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_canonical_preparation_refuses_margin_without_borrow_authority(self):
+        capability = submission_write_capability(
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "dedicated spot-margin borrow/collateral authority",
+        ):
+            prepare_order_submission(
+                capability=capability,
+                at=READ_AT,
+                provider_environment="DEMO",
+                product_family="MARGIN",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.01",
+                price="100",
+                client_order_id="margin-authority-required",
+                time_in_force="GTC",
+            )
+
+    def test_canonical_preparation_refuses_options_without_payoff_authority(self):
+        capability = submission_write_capability(
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "dedicated option capability/payoff authority",
+        ):
+            prepare_order_submission(
+                capability=capability,
+                at=READ_AT,
+                provider_environment="DEMO",
+                product_family="OPTIONS",
+                symbol="BTC-30OCT26-100000-C",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.1",
+                price="100",
+                client_order_id="option-authority-required",
+                time_in_force="GTC",
+            )
+
+    def test_prepared_issuer_runtime_shadowing_fails_before_callback(self):
+        capability = submission_write_capability()
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            return None
+
+        for name in (
+            "type",
+            "id",
+            "tuple",
+            "getattr",
+            "isinstance",
+            "object",
+            "AttributeError",
+            "MappingProxyType",
+            "ProviderCoreError",
+            "datetime",
+            "timezone",
+            "CapabilitySnapshot",
+            "BybitPreparedSubmission",
+        ):
+            with self.subTest(name=name):
+                with patch.object(
+                    bybit_v5_module,
+                    name,
+                    forged,
+                    create=True,
+                ):
+                    with self.assertRaisesRegex(
+                        ProviderCoreError,
+                        "prepared submission authority changed",
+                    ):
+                        bybit_v5_module.prepare_order_submission(
+                            capability=capability,
+                            at=READ_AT,
+                            provider_environment="MAINNET",
+                            product_family="SPOT",
+                            symbol="BTCUSDT",
+                            side="BUY",
+                            order_type="MARKET",
+                            quantity="0.01",
+                            client_order_id=f"shadow-{name.lower()}",
+                            time_in_force="IOC",
+                        )
+                self.assertEqual(callbacks, [])
+
+    def test_guarded_projection_rejects_runtime_shadowing_before_callback(self):
+        prepared = prepare_order_submission(
+            capability=submission_write_capability(),
+            at=READ_AT,
+            provider_environment="MAINNET",
+            product_family="SPOT",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="0.01",
+            client_order_id="projection-shadow",
+            time_in_force="IOC",
+        )
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            return None
+
+        for name in (
+            "require_canonical_bybit_prepared_submission",
+            "BybitPreparedSubmission",
+            "ProviderCoreError",
+            "object",
+            "dict",
+            "MappingProxyType",
+            "getattr",
+        ):
+            with self.subTest(name=name):
+                with patch.object(
+                    bybit_v5_module,
+                    name,
+                    forged,
+                    create=True,
+                ):
+                    with self.assertRaisesRegex(
+                        ProviderCoreError,
+                        "guarded projection authority changed",
+                    ):
+                        bybit_v5_module.guarded_order_projection(prepared)
+                self.assertEqual(callbacks, [])
+
+        with patch.object(
+            BybitPreparedSubmission,
+            "__getattribute__",
+            forged,
+        ):
+            projected = bybit_v5_module.guarded_order_projection(prepared)
+        self.assertEqual(callbacks, [])
+        self.assertEqual(projected["endpoint"], "/v5/order/create")
+        self.assertEqual(projected["body"]["category"], "spot")
+        self.assertEqual(
+            projected["capability_snapshot_ids"],
+            [prepared.capability_snapshot_id],
+        )
+        self.assertEqual(
+            projected["instrument_versions"],
+            [prepared.instrument_version],
         )
 
     def test_transport_loss_after_possible_write_is_unknown(self):

@@ -298,6 +298,10 @@ def _position_idx_from_capability(
         raise ProviderCoreError(
             "capability environment does not match target Bybit environment"
         )
+    if capability.provider_environment != provider_env:
+        raise ProviderCoreError(
+            "capability provider environment does not match target Bybit provider environment"
+        )
 
     family = _text(product_family, name="product_family").upper()
     try:
@@ -384,6 +388,10 @@ def build_order_payload(
         category = _CATEGORY_BY_FAMILY[family]
     except KeyError as error:
         raise ProviderCoreError("unsupported Bybit product family") from error
+    if family == "OPTIONS":
+        raise ProviderCoreError(
+            "Bybit option payload serialization requires dedicated option semantics"
+        )
 
     provider_symbol = _text(symbol, name="symbol")
     if provider_symbol != provider_symbol.upper():
@@ -600,6 +608,10 @@ def prepare_order_submission(
         raise ProviderCoreError(
             "capability environment does not match Bybit provider environment"
         )
+    if capability.provider_environment != provider_env:
+        raise ProviderCoreError(
+            "capability provider environment does not match target Bybit provider environment"
+        )
     point = (
         at.astimezone(timezone.utc)
         if isinstance(at, datetime) and at.tzinfo is not None
@@ -607,6 +619,26 @@ def prepare_order_submission(
     )
     if point is None:
         raise ProviderCoreError("at must be timezone-aware")
+    normalized_family = _text(product_family, name="product_family").upper()
+    if normalized_family == "MARGIN":
+        # Bybit MARGIN maps to spot isLeverage=1 and can borrow. Generic
+        # ORDER_WRITE capability is not evidence of current spot-margin mode,
+        # collateral eligibility, leverage or borrow quota. Keep the pure
+        # payload serializer available for deterministic fixtures, but never
+        # issue a canonical executable prepared request until those financial
+        # authorities are composed explicitly.
+        raise ProviderCoreError(
+            "Bybit MARGIN canonical preparation requires dedicated "
+            "spot-margin borrow/collateral authority"
+        )
+    if normalized_family == "OPTIONS":
+        # Option orders carry distinct payoff, exercise/lifecycle and protection
+        # semantics. Generic ORDER_WRITE does not prove the option-specific
+        # capability/economic authorities required for an executable request.
+        raise ProviderCoreError(
+            "Bybit OPTIONS canonical preparation requires dedicated "
+            "option capability/payoff authority"
+        )
     normalized_type = _text(order_type, name="order_type").upper()
     normalized_tif = _text(time_in_force, name="time_in_force").upper()
     if not capability.admits(
@@ -619,7 +651,7 @@ def prepare_order_submission(
             "exact capability evidence does not admit this Bybit order"
         )
     body = build_order_payload(
-        product_family=product_family,
+        product_family=normalized_family,
         symbol=symbol,
         side=side,
         order_type=order_type,
@@ -656,6 +688,8 @@ def _install_bybit_prepared_submission_authority(
 
     prepared_type = BybitPreparedSubmission
     capability_type = CapabilitySnapshot
+    datetime_type = datetime
+    timezone_type = timezone
     prepared_ref = weakref_ref
     prepared_init = prepared_type.__init__
     prepared_init_code = prepared_init.__code__
@@ -674,44 +708,99 @@ def _install_bybit_prepared_submission_authority(
     canonical_position_idx_code = _position_idx_from_capability.__code__
     canonical_capability_admits = capability_type.admits
     canonical_capability_admits_code = capability_type.admits.__code__
+    error_type = ProviderCoreError
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_getattr = getattr
+    canonical_isinstance = isinstance
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    attribute_error_type = AttributeError
+    mapping_proxy_type = MappingProxyType
 
     bindings: dict[int, tuple[object, tuple[object, ...]]] = {}
 
     def authority_changed():
-        raise ProviderCoreError("Bybit prepared submission authority changed")
+        raise error_type("Bybit prepared submission authority changed")
+
+    def implementation_changed():
+        if (
+            ProviderCoreError is not error_type
+            or type is not canonical_type
+            or id is not canonical_id
+            or tuple is not canonical_tuple
+            or getattr is not canonical_getattr
+            or isinstance is not canonical_isinstance
+            or object is not canonical_object
+            or AttributeError is not attribute_error_type
+            or MappingProxyType is not mapping_proxy_type
+            or datetime is not datetime_type
+            or timezone is not timezone_type
+            or CapabilitySnapshot is not capability_type
+            or BybitPreparedSubmission is not prepared_type
+            or prepared_type.__init__ is not prepared_init
+            or canonical_getattr(prepared_init, "__code__", None)
+            is not prepared_init_code
+            or prepared_type.__post_init__ is not prepared_post_init
+            or canonical_getattr(prepared_post_init, "__code__", None)
+            is not prepared_post_init_code
+            or canonical_getattr(builder, "__code__", None) is not builder_code
+            or build_order_payload is not canonical_build_order_payload
+            or canonical_getattr(
+                canonical_build_order_payload,
+                "__code__",
+                None,
+            )
+            is not canonical_build_order_payload_code
+            or _text is not canonical_text
+            or canonical_getattr(canonical_text, "__code__", None)
+            is not canonical_text_code
+            or _decimal_text is not canonical_decimal_text
+            or canonical_getattr(canonical_decimal_text, "__code__", None)
+            is not canonical_decimal_text_code
+            or _client_order_id is not canonical_client_order_id
+            or canonical_getattr(canonical_client_order_id, "__code__", None)
+            is not canonical_client_order_id_code
+            or _position_idx_from_capability is not canonical_position_idx
+            or canonical_getattr(canonical_position_idx, "__code__", None)
+            is not canonical_position_idx_code
+            or capability_type.admits is not canonical_capability_admits
+            or canonical_getattr(canonical_capability_admits, "__code__", None)
+            is not canonical_capability_admits_code
+        ):
+            authority_changed()
 
     def snapshot(value):
         try:
             return (
-                object.__getattribute__(value, "endpoint"),
-                object.__getattribute__(value, "body"),
-                object.__getattribute__(value, "account_id"),
-                object.__getattribute__(value, "environment"),
-                object.__getattribute__(value, "provider_environment"),
-                object.__getattribute__(value, "capability_snapshot_id"),
-                object.__getattribute__(value, "entity_id"),
-                object.__getattribute__(value, "instrument_version"),
-                object.__getattribute__(value, "body_sha256"),
+                object_getattribute(value, "endpoint"),
+                object_getattribute(value, "body"),
+                object_getattribute(value, "account_id"),
+                object_getattribute(value, "environment"),
+                object_getattribute(value, "provider_environment"),
+                object_getattribute(value, "capability_snapshot_id"),
+                object_getattribute(value, "entity_id"),
+                object_getattribute(value, "instrument_version"),
+                object_getattribute(value, "body_sha256"),
             )
-        except AttributeError:
+        except attribute_error_type:
             authority_changed()
 
     def require_canonical_bybit_prepared_submission(value):
-        if type(value) is not prepared_type or BybitPreparedSubmission is not prepared_type:
+        implementation_changed()
+        if canonical_type(value) is not prepared_type:
             authority_changed()
-        binding = bindings.get(id(value))
+        binding = bindings.get(canonical_id(value))
         if binding is None:
             authority_changed()
         bound_ref, expected = binding
         if bound_ref() is not value:
             authority_changed()
         current = snapshot(value)
-        if (
-            current[1] is not expected[1]
-            or current[:1] + current[2:] != expected[:1] + expected[2:]
-        ):
+        if current[1] is not expected[1] or current[:1] + current[2:] != expected[:1] + expected[2:]:
             authority_changed()
-        if type(current[1]) is not MappingProxyType:
+        if canonical_type(current[1]) is not mapping_proxy_type:
             authority_changed()
         return value
 
@@ -732,52 +821,17 @@ def _install_bybit_prepared_submission_authority(
         position_side: str | None = None,
         position_idx: int | None = None,
     ) -> BybitPreparedSubmission:
-        if (
-            type(capability) is not capability_type
-            or CapabilitySnapshot is not capability_type
-        ):
-            raise ProviderCoreError(
+        implementation_changed()
+        if canonical_type(capability) is not capability_type:
+            raise error_type(
                 "Bybit preparation requires exact CapabilitySnapshot authority"
             )
-        if type(at) is not datetime:
-            raise ProviderCoreError("Bybit preparation time must be exact datetime")
-        if BybitPreparedSubmission is not prepared_type:
-            authority_changed()
-        if (
-            prepared_type.__init__ is not prepared_init
-            or getattr(prepared_init, "__code__", None) is not prepared_init_code
-            or prepared_type.__post_init__ is not prepared_post_init
-            or getattr(prepared_post_init, "__code__", None) is not prepared_post_init_code
-        ):
-            authority_changed()
-        if getattr(builder, "__code__", None) is not builder_code:
-            authority_changed()
-        function_authorities = (
-            (
-                build_order_payload,
-                canonical_build_order_payload,
-                canonical_build_order_payload_code,
-            ),
-            (_text, canonical_text, canonical_text_code),
-            (_decimal_text, canonical_decimal_text, canonical_decimal_text_code),
-            (_client_order_id, canonical_client_order_id, canonical_client_order_id_code),
-            (
-                _position_idx_from_capability,
-                canonical_position_idx,
-                canonical_position_idx_code,
-            ),
-            (
-                capability_type.admits,
-                canonical_capability_admits,
-                canonical_capability_admits_code,
-            ),
-        )
-        for current, expected, code in function_authorities:
-            if (
-                current is not expected
-                or getattr(expected, "__code__", None) is not code
-            ):
-                authority_changed()
+        if canonical_type(at) is not datetime_type:
+            raise error_type("Bybit preparation time must be exact datetime")
+        if canonical_type(at.tzinfo) is not timezone_type:
+            raise error_type(
+                "Bybit preparation time must use exact stdlib timezone"
+            )
 
         prepared = builder(
             capability=capability,
@@ -795,18 +849,19 @@ def _install_bybit_prepared_submission_authority(
             position_side=position_side,
             position_idx=position_idx,
         )
-        if type(prepared) is not prepared_type:
+        implementation_changed()
+        if canonical_type(prepared) is not prepared_type:
             authority_changed()
 
         dead = [
             key
-            for key, (existing_ref, _snapshot) in tuple(bindings.items())
+            for key, (existing_ref, _snapshot) in canonical_tuple(bindings.items())
             if existing_ref() is None
         ]
         for key in dead:
             bindings.pop(key, None)
 
-        bindings[id(prepared)] = (
+        bindings[canonical_id(prepared)] = (
             prepared_ref(prepared),
             snapshot(prepared),
         )
@@ -824,29 +879,77 @@ _unissued_prepare_order_submission = prepare_order_submission
 del _unissued_prepare_order_submission
 del _install_bybit_prepared_submission_authority
 
+def _install_guarded_order_projection(verifier):
+    """Capture the final prepared-request projection TCB outside module aliases."""
 
-def guarded_order_projection(
-    prepared_request: BybitPreparedSubmission,
-) -> Mapping[str, object]:
-    """Project canonical Bybit preparation into the shared guarded transport seam."""
+    verifier_code = verifier.__code__
+    prepared_type = BybitPreparedSubmission
+    error_type = ProviderCoreError
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    canonical_dict = dict
+    mapping_proxy_type = MappingProxyType
+    canonical_getattr = getattr
 
-    require_canonical_bybit_prepared_submission(prepared_request)
-    return MappingProxyType(
-        {
-            "endpoint": prepared_request.endpoint,
-            "body": dict(prepared_request.body),
-            "account_id": prepared_request.account_id,
-            "environment": prepared_request.environment,
-            "provider_environment": prepared_request.provider_environment,
-            "capability_snapshot_id": prepared_request.capability_snapshot_id,
-            "entity_id": prepared_request.entity_id,
-            "capability_snapshot_ids": list(
-                prepared_request.capability_snapshot_ids
-            ),
-            "instrument_versions": list(prepared_request.instrument_versions),
-            "body_sha256": prepared_request.body_sha256,
-        }
-    )
+    def guarded_order_projection(
+        prepared_request: BybitPreparedSubmission,
+    ) -> Mapping[str, object]:
+        """Project one canonical preparation without late-bound caller callbacks."""
+
+        if (
+            require_canonical_bybit_prepared_submission is not verifier
+            or canonical_getattr(verifier, "__code__", None) is not verifier_code
+            or BybitPreparedSubmission is not prepared_type
+            or ProviderCoreError is not error_type
+            or object is not canonical_object
+            or dict is not canonical_dict
+            or MappingProxyType is not mapping_proxy_type
+            or getattr is not canonical_getattr
+        ):
+            raise error_type("Bybit guarded projection authority changed")
+
+        verifier(prepared_request)
+        endpoint = object_getattribute(prepared_request, "endpoint")
+        body = object_getattribute(prepared_request, "body")
+        account_id = object_getattribute(prepared_request, "account_id")
+        environment = object_getattribute(prepared_request, "environment")
+        provider_environment = object_getattribute(
+            prepared_request,
+            "provider_environment",
+        )
+        capability_snapshot_id = object_getattribute(
+            prepared_request,
+            "capability_snapshot_id",
+        )
+        entity_id = object_getattribute(prepared_request, "entity_id")
+        instrument_version = object_getattribute(
+            prepared_request,
+            "instrument_version",
+        )
+        body_sha256 = object_getattribute(prepared_request, "body_sha256")
+
+        return mapping_proxy_type(
+            {
+                "endpoint": endpoint,
+                "body": canonical_dict(body),
+                "account_id": account_id,
+                "environment": environment,
+                "provider_environment": provider_environment,
+                "capability_snapshot_id": capability_snapshot_id,
+                "entity_id": entity_id,
+                "capability_snapshot_ids": [capability_snapshot_id],
+                "instrument_versions": [instrument_version],
+                "body_sha256": body_sha256,
+            }
+        )
+
+    return guarded_order_projection
+
+
+guarded_order_projection = _install_guarded_order_projection(
+    require_canonical_bybit_prepared_submission
+)
+del _install_guarded_order_projection
 
 
 def _submission_projection(

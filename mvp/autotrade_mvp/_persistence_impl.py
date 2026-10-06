@@ -44,9 +44,8 @@ def _detach_json_value(value: Any, *, _depth: int = 0) -> Any:
 
 
 def canonical_json(value: Any) -> str:
-    detached = _detach_json_value(value)
     return json.dumps(
-        detached,
+        value,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,

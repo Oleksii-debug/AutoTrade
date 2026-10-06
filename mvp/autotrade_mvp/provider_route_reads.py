@@ -786,18 +786,13 @@ def _observe_qualified_provider_json_response_impl(
     _register_authority(qualified)
     return qualified
 
-def qualify_provider_response_observation(
+def _qualify_provider_response_observation_impl(
     *,
     query_binding: QualifiedProviderReadQueryBinding,
     observation: ProviderResponseObservation,
+    _register_authority,
 ) -> QualifiedProviderResponseObservation:
-    """Attach exact current Q/rule provenance to one canonical wire observation.
-
-    The neutral provider transport owns credential use and exact response-byte
-    observation. This function proves that it executed the exact base binding
-    sealed inside the qualified route binding before adding the historical Q
-    identity. It does not reparse or copy provider bytes.
-    """
+    """Attach exact current Q/rule provenance to one canonical wire observation."""
 
     if type(query_binding) is not QualifiedProviderReadQueryBinding:
         raise TypeError(
@@ -821,8 +816,39 @@ def qualify_provider_response_observation(
     qualified = object.__new__(QualifiedProviderResponseObservation)
     object.__setattr__(qualified, "observation", observation)
     object.__setattr__(qualified, "query_binding", query_binding)
-    _register_qualified_provider_response_authority(qualified)
+    _register_authority(qualified)
     return qualified
+
+
+def _bind_existing_qualified_response_minting(impl, register_response):
+    def qualify_provider_response_observation(
+        *,
+        query_binding: QualifiedProviderReadQueryBinding,
+        observation: ProviderResponseObservation,
+    ) -> QualifiedProviderResponseObservation:
+        """Seal exact current Q/rule provenance onto one wire observation.
+
+        The neutral provider transport owns credential use and exact response
+        bytes. This proves that it executed the exact base binding sealed inside
+        the qualified route binding; provider bytes are neither reparsed nor
+        copied into a second authority.
+        """
+
+        return impl(
+            query_binding=query_binding,
+            observation=observation,
+            _register_authority=register_response,
+        )
+
+    return qualify_provider_response_observation
+
+
+qualify_provider_response_observation = _bind_existing_qualified_response_minting(
+    _qualify_provider_response_observation_impl,
+    _register_qualified_provider_response_authority,
+)
+del _bind_existing_qualified_response_minting
+del _qualify_provider_response_observation_impl
 
 
 def execute_qualified_provider_read(

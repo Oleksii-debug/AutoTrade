@@ -185,7 +185,7 @@ class BybitMarginConventionTests(unittest.TestCase):
     def test_maintenance_rate_cannot_decrease(self):
         rows = [
             _row(1, "100000", "1.0", "2", 1, "50", ""),
-            _row(2, "200000", "0.5", "2.5", 0, "40", "-500"),
+            _row(2, "200000", "0.5", "2.5", 0, "40", "0"),
         ]
         with self.assertRaisesRegex(
             BybitMarginConventionError,

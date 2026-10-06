@@ -1210,10 +1210,11 @@ def _trading_response_evidence(
         status = value.http_status
         if type(status) is not int or not 100 <= status <= 599:
             raise ProviderTransportError("invalid trading HTTP response status")
+        _require_canonical_response_resource_authority()
         try:
-            raw = require_provider_response_bytes(
+            raw = _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES(
                 value.body,
-                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                max_bytes=_CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES,
                 allow_empty=True,
             )
         except (TypeError, ValueError) as error:
@@ -1222,10 +1223,11 @@ def _trading_response_evidence(
             ) from error
         return raw, status
     if type(value) is bytes:
+        _require_canonical_response_resource_authority()
         try:
-            raw = require_provider_response_bytes(
+            raw = _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES(
                 value,
-                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                max_bytes=_CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES,
                 allow_empty=True,
             )
         except (TypeError, ValueError) as error:

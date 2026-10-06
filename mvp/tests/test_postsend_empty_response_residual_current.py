@@ -54,6 +54,24 @@ class EmptyWriteResidualCurrentTests(unittest.TestCase):
             original,
         )
 
+    def test_raw_trading_response_resource_helper_rebinding_fails_before_callback(self):
+        import mvp.autotrade_mvp.provider_transport as transport_module
+        from unittest.mock import patch
+
+        calls = []
+
+        def hostile(*_args, **_kwargs):
+            calls.append("called")
+            raise AssertionError("hostile response resource helper executed")
+
+        with patch.object(transport_module, "require_provider_response_bytes", hostile):
+            with self.assertRaisesRegex(
+                transport_module.ProviderTransportScopeError,
+                "provider response resource authority changed",
+            ):
+                _bybit_exact_trading_response(b"{}")
+        self.assertEqual(calls, [])
+
     def test_response_resource_helper_code_mutation_fails_closed(self):
         import mvp.autotrade_mvp.provider_transport as transport_module
 
@@ -397,6 +415,7 @@ class EmptyWriteResidualCurrentTests(unittest.TestCase):
                 timestamp_ms=1,
             )
         self.assertEqual(callbacks, [])
+
 
 
 

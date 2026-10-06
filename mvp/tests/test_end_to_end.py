@@ -211,6 +211,59 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertTrue(verify_replay(directory))
 
 
+    def test_resume_rejects_reordered_postings_before_tail_repair_write(self):
+        with TemporaryDirectory() as directory:
+            run_multi_episode(
+                [
+                    [100, 101, 102, 103],
+                    [100, 100, 100],
+                    [103, 102, 101, 100],
+                ],
+                directory,
+            )
+            root = Path(directory)
+            evidence_path = root / "learning-evidence.jsonl"
+            rows = evidence_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(rows), 3)
+            evidence_path.write_text(
+                "\n".join(rows[:2]) + "\n",
+                encoding="utf-8",
+            )
+
+            checkpoint_path = root / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(checkpoint["postings"]), 2)
+            checkpoint["postings"].reverse()
+            checkpoint_path.write_text(
+                json.dumps(checkpoint),
+                encoding="utf-8",
+            )
+
+            checkpoint_before = checkpoint_path.read_bytes()
+            evidence_before = evidence_path.read_bytes()
+            journal_before = (root / "journal.sqlite3").read_bytes()
+            intents_before = {
+                path.name: path.read_bytes()
+                for path in (root / "order-intents").glob("*.json")
+            }
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "posting chronology conflicts with durable replay prefix",
+            ):
+                run_vertical_slice([100, 100, 100], directory)
+
+            self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertEqual(evidence_path.read_bytes(), evidence_before)
+            self.assertEqual((root / "journal.sqlite3").read_bytes(), journal_before)
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in (root / "order-intents").glob("*.json")
+                },
+                intents_before,
+            )
+
     def test_resume_rejects_foreign_journal_before_repairing_latest_evidence(self):
         with TemporaryDirectory() as directory:
             run_multi_episode(

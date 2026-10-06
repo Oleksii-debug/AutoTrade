@@ -916,6 +916,7 @@ def _repair_interrupted_replay(
 
     evidence_path = root / "learning-evidence.jsonl"
     existing_evidence_ids: set[str] = set()
+    existing_evidence_order: list[str] = []
     if evidence_path.is_file():
         try:
             for line in evidence_path.read_text(encoding="utf-8").splitlines():
@@ -941,6 +942,7 @@ def _repair_interrupted_replay(
                         "Learning evidence conflicts with checkpoint before replay repair"
                     )
                 existing_evidence_ids.add(evidence_id)
+                existing_evidence_order.append(evidence_id)
         except (OSError, ValueError, KeyError, TypeError) as error:
             raise ValueError(
                 "Corrupt learning evidence before replay repair"
@@ -951,6 +953,7 @@ def _repair_interrupted_replay(
 
     journal_path = root / "journal.sqlite3"
     journal_ids: set[str] = set()
+    journal_order: list[str] = []
     if journal_path.is_file():
         store = JournalStore(journal_path)
         replay_events = store.load_events("simulation_portfolio", symbol)
@@ -1033,6 +1036,7 @@ def _repair_interrupted_replay(
                 topic="autotrade.simulation.events",
             )
             journal_ids.add(evidence_id)
+            journal_order.append(evidence_id)
         if store.whole_store_state_cut() != initial_store_cut:
             raise ValueError(
                 "Durable journal state changed during replay preflight"
@@ -1042,6 +1046,47 @@ def _repair_interrupted_replay(
     missing_journal = expected_ids - journal_ids
     if missing_journal - {latest_id}:
         raise ValueError("Historical simulation journal is incomplete before latest episode")
+
+    postings = state.get("postings", [])
+    if type(postings) is not list:
+        raise ValueError("Corrupt checkpoint posting chronology")
+    posting_fill_ids: list[str] = []
+    for posting in postings:
+        if (
+            type(posting) is not dict
+            or type(posting.get("fill_id")) is not str
+            or not posting["fill_id"]
+        ):
+            raise ValueError("Corrupt checkpoint posting chronology")
+        posting_fill_ids.append(posting["fill_id"])
+    if len(posting_fill_ids) != len(set(posting_fill_ids)):
+        raise ValueError("Corrupt checkpoint posting chronology")
+
+    latest_fill_id = latest_record["fill_id"]
+
+    def require_durable_fill_prefix(
+        evidence_order: list[str],
+        missing_ids: set[str],
+    ) -> None:
+        observed_fill_ids = [
+            records[evidence_id]["fill_id"]
+            for evidence_id in evidence_order
+            if records[evidence_id]["fill_id"] is not None
+        ]
+        expected_fill_ids = posting_fill_ids
+        if latest_id in missing_ids and latest_fill_id is not None:
+            if not posting_fill_ids or posting_fill_ids[-1] != latest_fill_id:
+                raise ValueError(
+                    "Checkpoint posting chronology conflicts with durable replay prefix"
+                )
+            expected_fill_ids = posting_fill_ids[:-1]
+        if observed_fill_ids != expected_fill_ids:
+            raise ValueError(
+                "Checkpoint posting chronology conflicts with durable replay prefix"
+            )
+
+    require_durable_fill_prefix(existing_evidence_order, missing_evidence)
+    require_durable_fill_prefix(journal_order, missing_journal)
 
     for _timestamp, _evidence_id, record in ordered:
         _append_evidence(evidence_path, record)

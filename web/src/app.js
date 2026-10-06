@@ -449,7 +449,11 @@
     }
     const permissionSummary = parsePermissionSummary(
       snapshot.permission_summary);
-    if (!Array.isArray(snapshot.jobs)) throw new Error("jobs must be an array");
+    if (!Array.isArray(snapshot.jobs) ||
+        snapshot.jobs.some((item) =>
+          !item || typeof item !== "object" || Array.isArray(item))) {
+      throw new Error("jobs must be an array of objects");
+    }
 
     return {
       version: exactCounter(snapshot.state_version, "state_version"),

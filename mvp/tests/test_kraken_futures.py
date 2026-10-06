@@ -609,6 +609,35 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 )
         rebound.assert_not_called()
 
+    def test_submission_consumer_rejects_rebound_response_helpers_without_callback(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "response-helper-rebound",
+                    "status": "placed",
+                },
+            },
+            intent_id="kraken-futures-response-helper-rebound",
+            provider_environment="LIVE",
+        )
+        for helper in ("_submission_projection", "_response_evidence", "_uuid_text"):
+            with self.subTest(helper=helper):
+                with patch(
+                    f"mvp.autotrade_mvp.kraken_futures.{helper}",
+                    side_effect=AssertionError("rebound response helper executed"),
+                ) as rebound:
+                    with self.assertRaisesRegex(
+                        ProviderCoreError,
+                        "prepared response authority is unavailable",
+                    ):
+                        parse_submission_response(
+                            attempt_id=attempt,
+                            prepared_request=prepared,
+                            observation=observation,
+                        )
+                rebound.assert_not_called()
+
     def test_submission_consumer_rejects_prepared_subclass_before_virtual_callback(self):
         callbacks = []
 

@@ -71,6 +71,26 @@ from .provider_response_limits import (
     require_provider_response_bytes,
 )
 
+_CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES = require_provider_response_bytes
+_CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES_CODE = (
+    require_provider_response_bytes.__code__
+)
+_CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES = HARD_MAX_PROVIDER_RESPONSE_BYTES
+
+
+def _require_canonical_response_resource_authority() -> None:
+    if (
+        require_provider_response_bytes is not _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES
+        or require_provider_response_bytes.__code__
+        is not _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES_CODE
+        or HARD_MAX_PROVIDER_RESPONSE_BYTES
+        != _CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES
+    ):
+        raise ProviderTransportScopeError(
+            "provider response resource authority changed"
+        )
+
+
 
 class ProviderTransportError(RuntimeError):
     """Base error for the shared provider I/O seam."""
@@ -152,9 +172,12 @@ def _exclusive_nonce_send_lock(thread_lock, lock_path):
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
         raise ProviderTransportScopeError(f"{name} is required")
-    return value.strip()
+    text = value.strip()
+    if not text:
+        raise ProviderTransportScopeError(f"{name} is required")
+    return text
 
 
 def _canonical_text(value: object, *, name: str) -> str:
@@ -1603,9 +1626,10 @@ class TradingWireResponse:
         ):
             raise ProviderTransportScopeError("HTTP status must be an integer 100..599")
         try:
-            require_provider_response_bytes(
+            _require_canonical_response_resource_authority()
+            _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES(
                 self.body,
-                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                max_bytes=_CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES,
                 allow_empty=True,
             )
         except (TypeError, ValueError) as error:
@@ -1625,7 +1649,11 @@ class AuthenticatedReadWireResponse:
         ):
             raise ProviderTransportScopeError("HTTP status must be an integer 100..599")
         try:
-            require_provider_response_bytes(self.body, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+            _require_canonical_response_resource_authority()
+            _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES(
+                self.body,
+                max_bytes=_CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES,
+            )
         except (TypeError, ValueError) as error:
             raise ProviderTransportError("invalid or oversized authenticated-read response") from error
 
@@ -1708,7 +1736,8 @@ class UrllibJsonWireClient:
     """One-shot TLS client with redirects and automatic retries disabled."""
 
     def __init__(self, *, max_response_bytes: int = DEFAULT_MAX_PROVIDER_RESPONSE_BYTES) -> None:
-        if type(max_response_bytes) is not int or not 1 <= max_response_bytes <= HARD_MAX_PROVIDER_RESPONSE_BYTES:
+        _require_canonical_response_resource_authority()
+        if type(max_response_bytes) is not int or not 1 <= max_response_bytes <= _CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES:
             raise ProviderTransportScopeError("provider response byte budget is invalid")
         self.max_response_bytes = max_response_bytes
         # urllib otherwise discovers process/OS proxies implicitly. The
@@ -1720,7 +1749,7 @@ class UrllibJsonWireClient:
         budget = self.max_response_bytes
         if (
             type(budget) is not int
-            or not 1 <= budget <= HARD_MAX_PROVIDER_RESPONSE_BYTES
+            or not 1 <= budget <= _CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES
         ):
             raise ProviderTransportScopeError(
                 "provider response byte budget is invalid"
@@ -1728,8 +1757,9 @@ class UrllibJsonWireClient:
         return budget
 
     def _bounded_body(self, raw: bytes, *, max_bytes: int) -> bytes:
+        _require_canonical_response_resource_authority()
         try:
-            return require_provider_response_bytes(
+            return _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES(
                 raw,
                 max_bytes=max_bytes,
                 allow_empty=True,
@@ -2654,25 +2684,17 @@ def _direct_trading_exact_response(
 def _trading_response_evidence(
     value: object,
 ) -> tuple[bytes, int | None]:
-    """Validate exact post-SEND bytes/status without assuming a JSON body.
-
-    Provider-specific classifiers must be able to preserve an already observed
-    ambiguous HTTP result even when a gateway or upstream proxy returned HTML
-    or arbitrary opaque bytes. Definitive responses still pass through the
-    strict ExactJsonTransportResponse JSON contract below.
-    """
+    """Validate exact post-SEND bytes/status without assuming a JSON body."""
 
     if type(value) is TradingWireResponse:
-        # Frozen dataclasses can still be built without __init__ or modified
-        # through object.__setattr__. Revalidate the nested HTTP status at
-        # the actual post-SEND authority boundary, before virtual comparisons.
         status = value.http_status
         if type(status) is not int or not 100 <= status <= 599:
             raise ProviderTransportError("invalid trading HTTP response status")
+        _require_canonical_response_resource_authority()
         try:
-            raw = require_provider_response_bytes(
+            raw = _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES(
                 value.body,
-                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                max_bytes=_CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES,
                 allow_empty=True,
             )
         except (TypeError, ValueError) as error:
@@ -2681,10 +2703,12 @@ def _trading_response_evidence(
             ) from error
         return raw, status
     if type(value) is bytes:
+        _require_canonical_response_resource_authority()
         try:
-            raw = require_provider_response_bytes(
+            raw = _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES(
                 value,
-                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                max_bytes=_CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
             )
         except (TypeError, ValueError) as error:
             raise ProviderTransportError(
@@ -2747,6 +2771,14 @@ def _bybit_exact_trading_response(
             requires_reconciliation=True,
             ambiguity_reason="bybit_http_non_2xx_execution_unknown",
         )
+    if not raw:
+        return _direct_trading_exact_response(
+            value,
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="bybit_empty_response_execution_unknown",
+        )
     exact = _direct_trading_exact_response(
         value,
         raw,
@@ -2789,6 +2821,14 @@ def _kraken_spot_exact_trading_response(
             requires_reconciliation=True,
             ambiguity_reason="kraken_spot_http_5xx_execution_unknown",
         )
+    if not raw:
+        return _direct_trading_exact_response(
+            value,
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="kraken_spot_empty_response_execution_unknown",
+        )
     exact = _direct_trading_exact_response(
         value,
         raw,
@@ -2826,6 +2866,14 @@ def _alpaca_exact_trading_response(
             requires_reconciliation=True,
             ambiguity_reason="alpaca_http_5xx_execution_unknown",
         )
+    if not raw:
+        return _direct_trading_exact_response(
+            value,
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="alpaca_empty_response_execution_unknown",
+        )
     return _direct_trading_exact_response(
         value,
         raw,
@@ -2861,6 +2909,14 @@ def _binance_exact_trading_response(
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="binance_spot_http_5xx_execution_unknown",
+        )
+    if not raw:
+        return _direct_trading_exact_response(
+            value,
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="binance_spot_empty_response_execution_unknown",
         )
     exact = _direct_trading_exact_response(
         value,
@@ -2914,6 +2970,14 @@ def _whitebit_exact_trading_response(
             requires_reconciliation=True,
             ambiguity_reason="whitebit_" + decision.classification.lower(),
         )
+    if not raw:
+        return _direct_trading_exact_response(
+            value,
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="whitebit_empty_response_execution_unknown",
+        )
     return _direct_trading_exact_response(
         value,
         raw,
@@ -2928,7 +2992,7 @@ class WhiteBitCredential:
 
     @classmethod
     def parse(cls, plaintext: object) -> "WhiteBitCredential":
-        if not isinstance(plaintext, str) or not plaintext:
+        if type(plaintext) is not str or not plaintext:
             raise ProviderTransportScopeError(
                 "WhiteBIT credential material is unavailable"
             )
@@ -3999,7 +4063,7 @@ class KrakenSpotCredential:
 
     @classmethod
     def parse(cls, plaintext: object) -> "KrakenSpotCredential":
-        if not isinstance(plaintext, str) or not plaintext:
+        if type(plaintext) is not str or not plaintext:
             raise ProviderTransportScopeError(
                 "Kraken Spot credential material is unavailable"
             )
@@ -4707,7 +4771,7 @@ class AlpacaTradingCredential:
 
     @classmethod
     def parse(cls, plaintext: object) -> "AlpacaTradingCredential":
-        if not isinstance(plaintext, str) or not plaintext:
+        if type(plaintext) is not str or not plaintext:
             raise ProviderTransportScopeError(
                 "Alpaca credential material is unavailable"
             )
@@ -4989,7 +5053,7 @@ class BybitV5Credential:
 
     @classmethod
     def parse(cls, plaintext: object) -> "BybitV5Credential":
-        if not isinstance(plaintext, str) or not plaintext:
+        if type(plaintext) is not str or not plaintext:
             raise ProviderTransportScopeError(
                 "Bybit credential material is unavailable"
             )
@@ -5490,7 +5554,7 @@ class BybitV5AuthenticatedReadSigner:
         query: dict[str, str] = {}
         for raw_key, raw_value in query_binding.query.items():
             key = _canonical_text(raw_key, name="query parameter")
-            if not isinstance(raw_value, str) or raw_value != raw_value.strip():
+            if type(raw_value) is not str or raw_value != raw_value.strip():
                 raise ProviderTransportScopeError(
                     "Bybit authenticated-read query values must be canonical strings"
                 )
@@ -6058,7 +6122,7 @@ class BinanceSpotCredential:
 
     @classmethod
     def parse(cls, plaintext: object) -> "BinanceSpotCredential":
-        if not isinstance(plaintext, str) or not plaintext:
+        if type(plaintext) is not str or not plaintext:
             raise ProviderTransportScopeError(
                 "Binance credential material is unavailable"
             )
@@ -6111,7 +6175,7 @@ class BinanceSpotSigner:
         canonical: dict[str, str] = {}
         for raw_key, raw_value in body.items():
             key = _canonical_text(raw_key, name="order parameter")
-            if not isinstance(raw_value, str) or raw_value != raw_value.strip():
+            if type(raw_value) is not str or raw_value != raw_value.strip():
                 raise ProviderTransportScopeError(
                     "Binance order parameters must be canonical strings"
                 )
@@ -6280,7 +6344,7 @@ class BinanceSpotHttpTransport:
         normalized: dict[str, str] = {}
         for raw_key, raw_value in body.items():
             key = _canonical_text(raw_key, name="order parameter")
-            if not isinstance(raw_value, str) or raw_value != raw_value.strip():
+            if type(raw_value) is not str or raw_value != raw_value.strip():
                 raise ProviderTransportScopeError(
                     "prepared Binance body values must be canonical strings"
                 )
@@ -6402,7 +6466,7 @@ class BinanceSpotAuthenticatedReadSigner:
         canonical: dict[str, str] = {}
         for raw_key, raw_value in query_binding.query.items():
             key = _canonical_text(raw_key, name="query parameter")
-            if not isinstance(raw_value, str) or raw_value != raw_value.strip():
+            if type(raw_value) is not str or raw_value != raw_value.strip():
                 raise ProviderTransportScopeError(
                     "authenticated-read query values must be canonical strings"
                 )

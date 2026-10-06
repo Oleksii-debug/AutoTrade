@@ -328,6 +328,7 @@ class ResourceAvailabilityEvidence:
                     borrow.provider_id != self.provider_id
                     or borrow.account_id != self.account_id
                     or borrow.environment != self.environment
+                    or borrow.provider_environment != self.provider_environment
                 ):
                     raise ValueError("borrow availability scope mismatch")
                 if borrow.capacity_quantity != normalized[resource]:

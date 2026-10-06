@@ -41,6 +41,41 @@ ENVIRONMENT = "SIMULATION"
 NOW = "2026-09-24T18:01:00Z"
 
 
+class _ExplosiveAdmissionText(str):
+    calls = 0
+
+    def _explode(self, *_args, **_kwargs):
+        type(self).calls += 1
+        raise AssertionError("financial admission invoked polymorphic text")
+
+    strip = _explode
+    upper = _explode
+    lower = _explode
+    __eq__ = _explode
+
+
+class _ExplosiveAdmissionDict(dict):
+    calls = 0
+
+    def items(self, *_args, **_kwargs):
+        type(self).calls += 1
+        raise AssertionError("financial admission invoked polymorphic mapping")
+
+    def get(self, *_args, **_kwargs):
+        type(self).calls += 1
+        raise AssertionError("financial admission invoked polymorphic mapping")
+
+
+class _ExplosiveReservationBook(DurableReservationBook):
+    calls = 0
+
+    def __getattribute__(self, name):
+        if name == "store":
+            type(self).calls += 1
+            raise AssertionError("financial admission read subclass store descriptor")
+        return super().__getattribute__(name)
+
+
 def _policy():
     return AuthorityPolicy.create(
         policy_id="availability-policy",
@@ -277,6 +312,111 @@ def _admit(authority, reservations, checkpoint, **overrides):
 
 
 class AuthorityAccountAvailabilityTests(unittest.TestCase):
+    def test_financial_admission_rejects_polymorphic_scope_text_before_callbacks(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            fields = (
+                "command_id",
+                "idempotency_key",
+                "admission_id",
+                "policy_id",
+                "intent_id",
+                "intent_hash",
+                "account_id",
+                "environment",
+                "instrument_id",
+                "action",
+                "notional",
+                "capability_snapshot_id",
+                "risk_valid_until",
+                "reservation_id",
+                "reservation_checkpoint_event_id",
+                "reservation_provider_id",
+                "now",
+            )
+            for field in fields:
+                with self.subTest(field=field):
+                    _ExplosiveAdmissionText.calls = 0
+                    value = {
+                        "environment": ENVIRONMENT,
+                        "notional": "100",
+                        "risk_valid_until": "2026-09-24T18:05:00Z",
+                        "now": NOW,
+                        "reservation_provider_id": PROVIDER_ID,
+                        "reservation_checkpoint_event_id": checkpoint["event_id"],
+                        "instrument_id": INSTRUMENT_ID,
+                    }.get(field, f"hostile-{field}")
+                    with self.assertRaises(TypeError):
+                        _admit(
+                            authority,
+                            reservations,
+                            checkpoint,
+                            **{field: _ExplosiveAdmissionText(value)},
+                        )
+                    self.assertEqual(_ExplosiveAdmissionText.calls, 0)
+                    self.assertEqual(
+                        reservations.total_reserved("CASH:USD"),
+                        Decimal("0"),
+                    )
+
+    def test_financial_admission_rejects_reservation_book_subclass_before_store_access(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            hostile_book = object.__new__(_ExplosiveReservationBook)
+            _ExplosiveReservationBook.calls = 0
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "reservation_book must be exact DurableReservationBook",
+            ):
+                _admit(
+                    authority,
+                    hostile_book,
+                    checkpoint,
+                )
+            self.assertEqual(_ExplosiveReservationBook.calls, 0)
+
+    def test_financial_admission_rejects_polymorphic_availability_mapping_before_callbacks(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            _ExplosiveAdmissionDict.calls = 0
+            with self.assertRaisesRegex(
+                TypeError,
+                "reservation_available must be a mapping backed by an exact dict",
+            ):
+                _admit(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    reservation_available=_ExplosiveAdmissionDict(
+                        {"CASH:USD": "1000"}
+                    ),
+                )
+            self.assertEqual(_ExplosiveAdmissionDict.calls, 0)
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+
     def test_capital_binding_releases_retained_books_when_service_dies(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

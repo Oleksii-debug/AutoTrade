@@ -6,13 +6,16 @@ import unittest
 import weakref
 
 from mvp.autotrade_mvp.corporate_actions import EquityState
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.reconciliation import ResourceAvailabilityEvidence
 from mvp.autotrade_mvp.securities_borrow import (
     BorrowAvailabilityEvidence,
     BorrowRecallConflict,
     BorrowRecallEvidence,
     BorrowRecallResolutionEvidence,
     DurableBorrowRecallProjection,
+    _borrow_recall_aggregate_id,
+    _legacy_borrow_resource_key,
     borrow_resource_key,
     provider_borrow_evidence_receipt,
 )
@@ -119,6 +122,50 @@ class SecuritiesBorrowEvidenceTests(unittest.TestCase):
                 instrument_version=2,
             ),
         )
+        self.assertEqual(
+            base,
+            borrow_resource_key(
+                provider_id=PROVIDER_ID,
+                account_id=ACCOUNT_ID,
+                environment=ENVIRONMENT,
+                provider_environment=ENVIRONMENT,
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+            ),
+        )
+
+    def test_bybit_provider_environment_separates_identity_receipt_and_reconciliation(self):
+        testnet = availability(
+            provider_id="BYBIT",
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        demo = availability(
+            provider_id="BYBIT",
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        self.assertNotEqual(testnet.resource_key, demo.resource_key)
+        self.assertEqual(testnet.resource_detail()["provider_environment"], "TESTNET")
+        self.assertEqual(
+            provider_borrow_evidence_receipt(testnet)["observation"]["provider_environment"],
+            "TESTNET",
+        )
+        with self.assertRaisesRegex(ValueError, "provider_environment"):
+            availability(provider_id="BYBIT", environment="PAPER")
+        with self.assertRaisesRegex(ValueError, "borrow availability scope mismatch"):
+            ResourceAvailabilityEvidence(
+                provider_id="BYBIT",
+                account_id=ACCOUNT_ID,
+                environment="PAPER",
+                provider_environment="DEMO",
+                snapshot_id="borrow-domain-mismatch",
+                query_started_at="2026-09-25T05:00:00Z",
+                query_completed_at="2026-09-25T05:00:30Z",
+                valid_until="2026-09-25T05:01:30Z",
+                available_resources={testnet.resource_key: testnet.capacity_quantity},
+                resource_details={testnet.resource_key: testnet.resource_detail()},
+            )
 
     def test_availability_detail_round_trip_preserves_exact_capacity_and_provenance(self):
         evidence = availability()
@@ -169,6 +216,12 @@ class SecuritiesBorrowEvidenceTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             availability(provider_id=HostileText(PROVIDER_ID))
+        with self.assertRaises(ValueError):
+            availability(
+                provider_id="BYBIT",
+                environment="PAPER",
+                provider_environment=HostileText("TESTNET"),
+            )
         self.assertEqual(calls, [])
 
     def test_availability_rejects_ambiguous_or_non_exact_inputs(self):
@@ -201,6 +254,89 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
         )
         values.update(overrides)
         return EvidencedBorrowRecallProjection(store or self.store, **values)
+
+    def test_provider_environment_separates_recall_journal_and_rejects_legacy_alias(self):
+        testnet = self.projection(
+            provider_id="BYBIT",
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        demo = self.projection(
+            provider_id="BYBIT",
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        self.assertNotEqual(testnet.resource_key, demo.resource_key)
+        self.assertEqual(
+            testnet.record_recall(
+                recall(
+                    provider_id="BYBIT",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                )
+            ),
+            Decimal("3"),
+        )
+        self.assertEqual(
+            demo.record_recall(
+                recall(
+                    provider_id="BYBIT",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                )
+            ),
+            Decimal("3"),
+        )
+        restarted_testnet = self.projection(
+            JournalStore(self.path),
+            provider_id="BYBIT",
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        restarted_demo = self.projection(
+            JournalStore(self.path),
+            provider_id="BYBIT",
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        self.assertEqual(restarted_testnet.active_quantity, Decimal("3"))
+        self.assertEqual(restarted_demo.active_quantity, Decimal("3"))
+
+        legacy_key = _legacy_borrow_resource_key(
+            provider_id="BYBIT",
+            account_id="legacy-account",
+            environment="PAPER",
+            instrument_id=INSTRUMENT_ID,
+            instrument_version=1,
+        )
+        legacy_aggregate = _borrow_recall_aggregate_id(legacy_key)
+        payload = {"legacy": "ambiguous-provider-domain"}
+        self.store.append_event(
+            {
+                "event_id": "legacy-borrow-recall-domain",
+                "event_type": "BorrowRecallObserved",
+                "aggregate_type": "securities_borrow_recall",
+                "aggregate_id": legacy_aggregate,
+                "aggregate_version": "1",
+                "committed_at": "2026-09-25T05:00:30Z",
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+            }
+        )
+        with self.assertRaisesRegex(
+            BorrowRecallConflict,
+            "legacy runtime-only borrow recall history",
+        ):
+            DurableBorrowRecallProjection(
+                self.store,
+                provider_id="BYBIT",
+                account_id="legacy-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                evidence_artifact_store=artifact_store_for(self.store),
+            )
 
     def test_projection_rejects_noncanonical_journal_store(self):
         class JournalStoreSubclass(JournalStore):

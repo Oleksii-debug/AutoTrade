@@ -4339,32 +4339,36 @@ class AuthorityService:
             raise AuthorityConflict(
                 "durable financial admission requires a JournalStore"
             )
-        if not isinstance(reservation_book, DurableReservationBook):
-            raise TypeError("reservation_book must be DurableReservationBook")
+        if type(reservation_book) is not DurableReservationBook:
+            raise TypeError("reservation_book must be exact DurableReservationBook")
         if reservation_book.store is not _authority_service_store(self, required=True):
             raise AuthorityConflict(
                 "authority and reservation book must share one JournalStore"
             )
 
-        cid = _text(command_id, name="command_id")
-        idem = _text(idempotency_key, name="idempotency_key")
-        aid = _text(admission_id, name="admission_id")
-        pid = _text(policy_id, name="policy_id")
-        iid = _text(intent_id, name="intent_id")
-        ihash = _text(intent_hash, name="intent_hash")
-        account = _text(account_id, name="account_id")
-        env = _text(environment, name="environment").upper()
-        normalized_action = _text(action, name="action").upper()
-        normalized_notional = _decimal(notional, name="notional")
-        rid = _text(reservation_id, name="reservation_id")
+        cid = _authority_text(command_id, name="command_id")
+        idem = _authority_text(idempotency_key, name="idempotency_key")
+        aid = _authority_text(admission_id, name="admission_id")
+        pid = _authority_text(policy_id, name="policy_id")
+        iid = _authority_text(intent_id, name="intent_id")
+        ihash = _authority_text(intent_hash, name="intent_hash")
+        account = _authority_text(account_id, name="account_id")
+        env = _authority_text(environment, name="environment").upper()
+        normalized_action = _authority_text(action, name="action").upper()
+        normalized_notional = _authority_decimal(notional, name="notional")
+        rid = _authority_text(reservation_id, name="reservation_id")
+        normalized_risk_valid_until = _authority_text(
+            risk_valid_until, name="risk_valid_until"
+        )
+        evaluated_at = _authority_text(now, name="now")
         current_confirmation_id = (
             None
             if confirmation_id is None
-            else _text(confirmation_id, name="confirmation_id")
+            else _authority_text(confirmation_id, name="confirmation_id")
         )
         if type(risk_reducing) is not bool:
             raise TypeError("risk_reducing must be a boolean")
-        capability = _text(
+        capability = _authority_text(
             capability_snapshot_id, name="capability_snapshot_id"
         )
         scoped_idempotency_key = _authority_event_id(
@@ -4375,16 +4379,23 @@ class AuthorityService:
         if policy is None:
             raise KeyError(pid)
 
-        snapshot_provider_id = _text(
+        snapshot_provider_id = _authority_text(
             reservation_provider_id,
             name="reservation_provider_id",
         ).upper()
-        snapshot_checkpoint_event_id = _text(
+        snapshot_checkpoint_event_id = _authority_text(
             reservation_checkpoint_event_id,
             name="reservation_checkpoint_event_id",
         )
+        canonical_instrument_id = _authority_text(
+            instrument_id, name="instrument_id"
+        )
+        if type(instrument_version) is not int:
+            raise TypeError("instrument_version must be an exact integer")
+        if instrument_version < 1:
+            raise ValueError("instrument_version must be positive")
         snapshot_instrument = InstrumentVersionIdentity(
-            instrument_id,
+            canonical_instrument_id,
             instrument_version,
         )
 
@@ -4416,7 +4427,7 @@ class AuthorityService:
                     "admission_id already belongs to another financial command"
                 )
             if existing.risk_valid_until is None or _instant(
-                risk_valid_until, name="risk_valid_until"
+                normalized_risk_valid_until, name="risk_valid_until"
             ) != _instant(
                 existing.risk_valid_until,
                 name="existing risk_valid_until",
@@ -4553,13 +4564,13 @@ class AuthorityService:
                     risk_intent=risk_intent,
                     risk_context=canonical_caller_risk_context,
                     reservation_book=reservation_book,
-                    reservation_provider_id=reservation_provider_id,
+                    reservation_provider_id=snapshot_provider_id,
                     account_id=account,
                     environment=env,
                     capability_snapshot_id=capability,
-                    instrument_id=instrument_id,
-                    instrument_version=instrument_version,
-                    now=now,
+                    instrument_id=snapshot_instrument.instrument_id,
+                    instrument_version=snapshot_instrument.version,
+                    now=evaluated_at,
                 )
                 if (
                     not isinstance(durable_allocation, Mapping)
@@ -4574,14 +4585,11 @@ class AuthorityService:
         if existing is None:
             journal_sequence_cut = _authority_store_call(self, "current_journal_sequence")
             reservation_version = reservation_book.version
-            evaluated_at = _text(now, name="now")
-            caller_valid_until = _text(
-                risk_valid_until, name="risk_valid_until"
-            )
+            caller_valid_until = normalized_risk_valid_until
             risk_authority_request = RiskAuthorityRequest(
                 risk_intent=risk_intent,
-                account_id=account_id,
-                environment=environment,
+                account_id=account,
+                environment=env,
                 provider_id=snapshot_provider_id,
                 instrument_version=snapshot_instrument,
                 capability_snapshot_id=capability,
@@ -4595,7 +4603,7 @@ class AuthorityService:
                 authority_policy_version=policy.version,
                 evaluated_at=evaluated_at,
                 **self._risk_policy_cut(provider_id=snapshot_provider_id,
-                    account_id=account_id, environment=environment,
+                    account_id=account, environment=env,
                     journal_sequence_cut=journal_sequence_cut),
             )
             risk_snapshot = self._resolve_authoritative_risk_snapshot(
@@ -4633,7 +4641,7 @@ class AuthorityService:
             risk_intent,
             effective_risk_context,
             effective_risk_policy,
-            intent_hash=_text(intent_hash, name="intent_hash"),
+            intent_hash=ihash,
             policy_version=policy.version,
             reservation_version=reservation_version,
             reservation_requirements=reservation_requirements,
@@ -4677,11 +4685,12 @@ class AuthorityService:
                 )
                 if required_borrow_quantity > 0:
                     required_borrow_resource = borrow_resource_key(
-                        provider_id=reservation_provider_id,
-                        account_id=account_id,
-                        environment=environment,
-                        instrument_id=instrument_id,
-                        instrument_version=instrument_version,
+                        provider_id=snapshot_provider_id,
+                        account_id=account,
+                        environment=env,
+                        provider_environment=risk_authority_request.provider_environment,
+                        instrument_id=snapshot_instrument.instrument_id,
+                        instrument_version=snapshot_instrument.version,
                     )
                     if (
                         borrow_resources != (required_borrow_resource,)
@@ -4703,15 +4712,9 @@ class AuthorityService:
         availability_evidence: Mapping[str, Any] | None = None
         authoritative_available = reservation_available
         if decision.admitted:
-            checkpoint_event_id = _text(
-                reservation_checkpoint_event_id,
-                name="reservation_checkpoint_event_id",
-            )
-            provider_id = _text(
-                reservation_provider_id,
-                name="reservation_provider_id",
-            ).upper()
-            max_age = _decimal(
+            checkpoint_event_id = snapshot_checkpoint_event_id
+            provider_id = snapshot_provider_id
+            max_age = _authority_decimal(
                 reservation_max_age_seconds,
                 name="reservation_max_age_seconds",
             )
@@ -4758,14 +4761,14 @@ class AuthorityService:
                         _authority_service_store(self, required=True),
                         checkpoint_event_id=checkpoint_event_id,
                         provider_id=provider_id,
-                        account_id=account_id,
-                        environment=environment,
+                        account_id=account,
+                        environment=env,
                         provider_environment=risk_authority_request.provider_environment,
                         resources=tuple(
                             resource
                             for resource, _amount in normalized_requirements
                         ),
-                        now=now,
+                        now=evaluated_at,
                         max_age_seconds=normalized_max_age,
                         evidence_artifact_store=self.evidence_artifact_store,
                         require_latest_scope=True,
@@ -4785,17 +4788,25 @@ class AuthorityService:
                 }
 
             raw_authoritative = availability_evidence.get("availability")
-            if not isinstance(raw_authoritative, Mapping):
+            if (
+                type(raw_authoritative) is not dict
+                or any(type(key) is not str for key in raw_authoritative)
+            ):
                 raise AuthorityConflict(
                     "authoritative reservation availability is malformed"
                 )
-            authoritative_available = dict(raw_authoritative)
+            authoritative_available = dict.copy(raw_authoritative)
 
-            if not isinstance(reservation_available, Mapping):
-                raise TypeError("reservation_available must be a mapping")
+            if (
+                type(reservation_available) is not dict
+                or any(type(key) is not str for key in reservation_available)
+            ):
+                raise TypeError(
+                    "reservation_available must be a mapping backed by an exact dict"
+                )
             caller_available: dict[str, Decimal] = {}
-            for raw_resource, raw_amount in reservation_available.items():
-                resource = _text(
+            for raw_resource, raw_amount in dict.copy(reservation_available).items():
+                resource = _authority_text(
                     raw_resource,
                     name="reservation_available resource",
                 )
@@ -4803,7 +4814,7 @@ class AuthorityService:
                     raise ValueError(
                         "reservation_available resources must be unique after normalization"
                     )
-                amount = _decimal(
+                amount = _authority_decimal(
                     raw_amount,
                     name=f"reservation_available[{resource}]",
                 )
@@ -4813,10 +4824,10 @@ class AuthorityService:
                     )
                 caller_available[resource] = amount
             canonical_available = {
-                _text(
+                _authority_text(
                     resource,
                     name="authoritative availability resource",
-                ): _decimal(
+                ): _authority_decimal(
                     amount,
                     name=f"authoritative availability[{resource}]",
                 )
@@ -4965,9 +4976,9 @@ class AuthorityService:
                             provider_available=canonical_available,
                             required_resources=required_resource_names,
                             provider_id=provider_id,
-                            account_id=account_id,
-                            environment=environment,
-                            provider_environment=_text(
+                            account_id=account,
+                            environment=env,
+                            provider_environment=_authority_text(
                                 availability_evidence.get(
                                     "provider_environment",
                                     availability_evidence.get("environment"),
@@ -4996,9 +5007,9 @@ class AuthorityService:
                             provider_available=canonical_available,
                             required_resources=required_resource_names,
                             provider_id=provider_id,
-                            account_id=account_id,
-                            environment=environment,
-                            provider_environment=_text(
+                            account_id=account,
+                            environment=env,
+                            provider_environment=_authority_text(
                                 availability_evidence.get(
                                     "provider_environment",
                                     availability_evidence.get("environment"),
@@ -5024,13 +5035,13 @@ class AuthorityService:
                 risk_intent=risk_intent,
                 risk_context=effective_risk_context,
                 reservation_book=reservation_book,
-                reservation_provider_id=reservation_provider_id,
-                account_id=account_id,
-                environment=environment,
+                reservation_provider_id=snapshot_provider_id,
+                account_id=account,
+                environment=env,
                 capability_snapshot_id=capability,
-                instrument_id=instrument_id,
-                instrument_version=instrument_version,
-                now=now,
+                instrument_id=snapshot_instrument.instrument_id,
+                instrument_version=snapshot_instrument.version,
+                now=evaluated_at,
             )
 
         if existing is None:
@@ -5045,8 +5056,8 @@ class AuthorityService:
                 )
             current_risk_authority_request = RiskAuthorityRequest(
                 risk_intent=risk_intent,
-                account_id=account_id,
-                environment=environment,
+                account_id=account,
+                environment=env,
                 provider_id=snapshot_provider_id,
                 instrument_version=snapshot_instrument,
                 capability_snapshot_id=capability,
@@ -5060,7 +5071,7 @@ class AuthorityService:
                 authority_policy_version=policy.version,
                 evaluated_at=evaluated_at,
                 **self._risk_policy_cut(provider_id=snapshot_provider_id,
-                    account_id=account_id, environment=environment,
+                    account_id=account, environment=env,
                     journal_sequence_cut=current_cut),
             )
             current_risk_snapshot = self._resolve_authoritative_risk_snapshot(
@@ -5076,32 +5087,32 @@ class AuthorityService:
                 )
 
         return self._admit_bound_risk(
-            command_id=command_id,
-            idempotency_key=idempotency_key,
+            command_id=cid,
+            idempotency_key=idem,
             admission_id=aid,
             policy_id=pid,
-            intent_id=intent_id,
-            intent_hash=intent_hash,
+            intent_id=iid,
+            intent_hash=ihash,
             risk_intent=risk_intent,
-            account_id=account_id,
-            environment=environment,
-            instrument_id=instrument_id,
-            instrument_version=instrument_version,
-            action=action,
-            notional=notional,
+            account_id=account,
+            environment=env,
+            instrument_id=snapshot_instrument.instrument_id,
+            instrument_version=snapshot_instrument.version,
+            action=normalized_action,
+            notional=normalized_notional,
             current_state_version=effective_risk_context.state_version,
             capability_snapshot_id=capability,
             risk_decision=decision,
             reservation_book=reservation_book,
-            reservation_id=reservation_id,
+            reservation_id=rid,
             reservation_requirements=reservation_requirements,
             reservation_available=authoritative_available,
-            now=now,
+            now=evaluated_at,
             reservation_availability_evidence=availability_evidence,
             allocation_binding=allocation_binding,
             authoritative_risk_snapshot=risk_snapshot_payload,
             journal_sequence_cut=journal_sequence_cut,
-            confirmation_id=confirmation_id,
+            confirmation_id=current_confirmation_id,
             risk_reducing=risk_reducing,
         )
 
@@ -5148,29 +5159,44 @@ class AuthorityService:
             raise AuthorityConflict(
                 "durable financial admission requires a JournalStore"
             )
-        if not isinstance(reservation_book, DurableReservationBook):
-            raise TypeError("reservation_book must be DurableReservationBook")
+        if type(reservation_book) is not DurableReservationBook:
+            raise TypeError("reservation_book must be exact DurableReservationBook")
         if reservation_book.store is not _authority_service_store(self, required=True):
             raise AuthorityConflict(
                 "authority and reservation book must share one JournalStore"
             )
 
-        cid = _text(command_id, name="command_id")
-        idem = _text(idempotency_key, name="idempotency_key")
-        aid = _text(admission_id, name="admission_id")
-        pid = _text(policy_id, name="policy_id")
-        iid = _text(intent_id, name="intent_id")
-        ihash = _text(intent_hash, name="intent_hash")
+        cid = _authority_text(command_id, name="command_id")
+        idem = _authority_text(idempotency_key, name="idempotency_key")
+        aid = _authority_text(admission_id, name="admission_id")
+        pid = _authority_text(policy_id, name="policy_id")
+        iid = _authority_text(intent_id, name="intent_id")
+        ihash = _authority_text(intent_hash, name="intent_hash")
         canonical_risk_intent = _canonical_risk_intent(risk_intent)
         canonical_risk_intent_payload = _risk_intent_payload(
             canonical_risk_intent
         )
-        account = _text(account_id, name="account_id")
-        env = _text(environment, name="environment").upper()
-        capability = _text(
+        account = _authority_text(account_id, name="account_id")
+        env = _authority_text(environment, name="environment").upper()
+        capability = _authority_text(
             capability_snapshot_id, name="capability_snapshot_id"
         )
-        rid = _text(reservation_id, name="reservation_id")
+        rid = _authority_text(reservation_id, name="reservation_id")
+        canonical_instrument_id = _authority_text(
+            instrument_id, name="instrument_id"
+        )
+        if type(instrument_version) is not int:
+            raise TypeError("instrument_version must be an exact integer")
+        if instrument_version < 1:
+            raise ValueError("instrument_version must be positive")
+        normalized_action = _authority_text(action, name="action").upper()
+        normalized_notional = _authority_decimal(notional, name="notional")
+        normalized_now = _authority_text(now, name="now")
+        normalized_confirmation_id = (
+            None
+            if confirmation_id is None
+            else _authority_text(confirmation_id, name="confirmation_id")
+        )
         scoped_command_id = _authority_event_id(
             "FinancialAdmissionCommand", f"{env}:{account}:{cid}"
         )
@@ -5184,7 +5210,7 @@ class AuthorityService:
                     "authoritative_risk_snapshot must be a mapping or None"
                 )
             risk_snapshot_binding = dict(authoritative_risk_snapshot)
-            bound_snapshot_id = _text(
+            bound_snapshot_id = _authority_text(
                 risk_snapshot_binding.get("snapshot_id"),
                 name="authoritative risk snapshot_id",
             )
@@ -5262,7 +5288,7 @@ class AuthorityService:
             )
         if existing is not None:
             expected_instrument = InstrumentVersionIdentity(
-                instrument_id, instrument_version
+                canonical_instrument_id, instrument_version
             )
             same_command = (
                 existing.financial_command_id == cid
@@ -5272,8 +5298,8 @@ class AuthorityService:
                 and existing.account_id == account
                 and existing.environment == env
                 and existing.instrument_version == expected_instrument
-                and existing.action == _text(action, name="action").upper()
-                and existing.notional == _decimal(notional, name="notional")
+                and existing.action == normalized_action
+                and existing.notional == normalized_notional
                 and existing.state_version == current_state_version
                 and existing.risk_decision_id == risk_decision.decision_id
                 and existing.reservation_id == (
@@ -5282,7 +5308,7 @@ class AuthorityService:
                 and existing.capability_snapshot_id == capability
                 and existing.risk_valid_until == risk_decision.valid_until
                 and existing.policy_version == policy.version
-                and existing.confirmation_id == confirmation_id
+                and existing.confirmation_id == normalized_confirmation_id
                 and existing.risk_reducing == risk_reducing
             )
             if not same_command:
@@ -5335,7 +5361,7 @@ class AuthorityService:
                 )
             return existing
 
-        validate_bound_risk_decision(risk_decision, now=now)
+        validate_bound_risk_decision(risk_decision, now=normalized_now)
         if risk_decision.intent_hash != ihash:
             raise AuthorityConflict("risk decision intent_hash mismatch")
         if risk_decision.state_version != current_state_version:
@@ -5357,7 +5383,7 @@ class AuthorityService:
                 intent_id=iid,
                 requirements=reservation_requirements,
                 available=reservation_available,
-                committed_at=now,
+                committed_at=normalized_now,
             )
 
         # Evaluate authority/confirmation semantics against an isolated copy.
@@ -5370,14 +5396,14 @@ class AuthorityService:
             intent_hash=ihash,
             account_id=account,
             environment=env,
-            instrument_id=instrument_id,
+            instrument_id=canonical_instrument_id,
             instrument_version=instrument_version,
-            action=action,
-            notional=notional,
+            action=normalized_action,
+            notional=normalized_notional,
             state_version=current_state_version,
             risk_admitted=risk_decision.admitted,
-            now=now,
-            confirmation_id=confirmation_id,
+            now=normalized_now,
+            confirmation_id=normalized_confirmation_id,
             risk_reducing=risk_reducing,
         )
 
@@ -5482,7 +5508,7 @@ class AuthorityService:
             "aggregate_version": "1",
             "payload": risk_payload,
             "payload_hash": payload_digest(risk_payload),
-            "committed_at": now,
+            "committed_at": normalized_now,
         }
         admission_payload = self._admission_payload(record)
         admission_event = {
@@ -5495,7 +5521,7 @@ class AuthorityService:
             "aggregate_version": str(self._journal_version + 1),
             "payload": admission_payload,
             "payload_hash": payload_digest(admission_payload),
-            "committed_at": now,
+            "committed_at": normalized_now,
         }
 
         events = [(risk_event, None)]
@@ -5850,6 +5876,7 @@ class AuthorityService:
                             provider_id=borrow.provider_id,
                             account_id=borrow.account_id,
                             environment=borrow.environment,
+                            provider_environment=borrow.provider_environment,
                             instrument_id=borrow.instrument_id,
                             instrument_version=borrow.instrument_version,
                             evidence_artifact_store=self.evidence_artifact_store,

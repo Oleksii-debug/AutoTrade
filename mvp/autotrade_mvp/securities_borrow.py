@@ -38,6 +38,7 @@ from .persistence import (
     payload_digest,
     require_exact_journal_store_authority,
 )
+from .provider_domain import ProviderDomainError, normalize_provider_environment
 
 
 _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
@@ -80,6 +81,43 @@ def _environment(value: str) -> str:
     if normalized not in _ENVIRONMENTS:
         raise ValueError("environment must be LIVE, PAPER, REPLAY, or SIMULATION")
     return normalized
+
+
+def _provider_environment(
+    *,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    provider = _text(provider_id, name="provider_id").upper()
+    runtime = _environment(environment)
+    domain = (
+        None
+        if provider_environment is None
+        else _text(provider_environment, name="provider_environment")
+    )
+    try:
+        return normalize_provider_environment(
+            provider_id=provider,
+            environment=runtime,
+            provider_environment=domain,
+        )
+    except ProviderDomainError as error:
+        raise ValueError(
+            "provider_environment is invalid for securities-borrow scope"
+        ) from error
+
+
+def _provider_environment_payload(
+    *,
+    provider_environment: str,
+    environment: str,
+) -> dict[str, str]:
+    return (
+        {}
+        if provider_environment == environment
+        else {"provider_environment": provider_environment}
+    )
 
 
 def _instrument_id(value: str) -> str:
@@ -248,6 +286,10 @@ def provider_borrow_evidence_metadata(evidence: object) -> dict[str, object]:
         "provider_id": evidence.provider_id,
         "account_id": evidence.account_id,
         "environment": evidence.environment,
+        **_provider_environment_payload(
+            provider_environment=evidence.provider_environment,
+            environment=evidence.environment,
+        ),
         "instrument_id": evidence.instrument_id,
         "instrument_version": evidence.instrument_version,
         "provider_revision": evidence.provider_revision,
@@ -339,7 +381,17 @@ def verify_provider_borrow_evidence(
     return canonical_ref
 
 
-def borrow_resource_key(
+def _borrow_resource_key_from_identity(identity: list[object]) -> str:
+    canonical = json.dumps(identity, ensure_ascii=True, separators=(",", ":"))
+    return "BORROW:" + str(
+        uuid5(
+            NAMESPACE_URL,
+            "https://resources.autotrade.local/securities-borrow/" + canonical,
+        )
+    )
+
+
+def _legacy_borrow_resource_key(
     *,
     provider_id: str,
     account_id: str,
@@ -347,19 +399,47 @@ def borrow_resource_key(
     instrument_id: str,
     instrument_version: int,
 ) -> str:
-    """Canonical borrow resource including provider/account/environment scope."""
-    identity = [
-        _text(provider_id, name="provider_id").upper(),
-        _text(account_id, name="account_id"),
-        _environment(environment),
-        _instrument_id(instrument_id),
-        _version(instrument_version),
-    ]
-    canonical = json.dumps(identity, ensure_ascii=True, separators=(",", ":"))
-    return "BORROW:" + str(
+    return _borrow_resource_key_from_identity(
+        [
+            _text(provider_id, name="provider_id").upper(),
+            _text(account_id, name="account_id"),
+            _environment(environment),
+            _instrument_id(instrument_id),
+            _version(instrument_version),
+        ]
+    )
+
+
+def borrow_resource_key(
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    instrument_id: str,
+    instrument_version: int,
+    provider_environment: str | None = None,
+) -> str:
+    """Canonical borrow resource including exact provider financial domain."""
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    runtime = _environment(environment)
+    domain = _provider_environment(
+        provider_id=provider,
+        environment=runtime,
+        provider_environment=provider_environment,
+    )
+    identity: list[object] = [provider, account, runtime]
+    if domain != runtime:
+        identity.append(domain)
+    identity.extend([_instrument_id(instrument_id), _version(instrument_version)])
+    return _borrow_resource_key_from_identity(identity)
+
+
+def _borrow_recall_aggregate_id(resource_key: str) -> str:
+    return "borrow-recall:" + str(
         uuid5(
             NAMESPACE_URL,
-            "https://resources.autotrade.local/securities-borrow/" + canonical,
+            "https://events.autotrade.local/borrow-recall/" + resource_key,
         )
     )
 
@@ -387,11 +467,21 @@ class BorrowAvailabilityEvidence:
     expires_at: str
     evidence_ref: str
     indicative_rate: Decimal | None = None
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "provider_id", _text(self.provider_id, name="provider_id").upper())
         object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
         object.__setattr__(self, "environment", _environment(self.environment))
+        object.__setattr__(
+            self,
+            "provider_environment",
+            _provider_environment(
+                provider_id=self.provider_id,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            ),
+        )
         object.__setattr__(self, "instrument_id", _instrument_id(self.instrument_id))
         object.__setattr__(self, "instrument_version", _version(self.instrument_version))
         object.__setattr__(self, "locate_id", _text(self.locate_id, name="locate_id"))
@@ -423,6 +513,7 @@ class BorrowAvailabilityEvidence:
             provider_id=self.provider_id,
             account_id=self.account_id,
             environment=self.environment,
+            provider_environment=self.provider_environment,
             instrument_id=self.instrument_id,
             instrument_version=self.instrument_version,
         )
@@ -434,6 +525,10 @@ class BorrowAvailabilityEvidence:
             "provider_id": self.provider_id,
             "account_id": self.account_id,
             "environment": self.environment,
+            **_provider_environment_payload(
+                provider_environment=self.provider_environment,
+                environment=self.environment,
+            ),
             "instrument_id": self.instrument_id,
             "instrument_version": str(self.instrument_version),
             "locate_id": self.locate_id,
@@ -469,6 +564,7 @@ class BorrowAvailabilityEvidence:
             provider_id=detail.get("provider_id"),
             account_id=detail.get("account_id"),
             environment=detail.get("environment"),
+            provider_environment=detail.get("provider_environment"),
             instrument_id=detail.get("instrument_id"),
             instrument_version=version,
             locate_id=detail.get("locate_id"),
@@ -497,12 +593,22 @@ class BorrowRecallEvidence:
     effective_at: str
     evidence_ref: str
     deadline: str | None = None
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "recall_id", _text(self.recall_id, name="recall_id"))
         object.__setattr__(self, "provider_id", _text(self.provider_id, name="provider_id").upper())
         object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
         object.__setattr__(self, "environment", _environment(self.environment))
+        object.__setattr__(
+            self,
+            "provider_environment",
+            _provider_environment(
+                provider_id=self.provider_id,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            ),
+        )
         object.__setattr__(self, "instrument_id", _instrument_id(self.instrument_id))
         object.__setattr__(self, "instrument_version", _version(self.instrument_version))
         object.__setattr__(self, "provider_revision", _text(self.provider_revision, name="provider_revision"))
@@ -525,6 +631,7 @@ class BorrowRecallEvidence:
             provider_id=self.provider_id,
             account_id=self.account_id,
             environment=self.environment,
+            provider_environment=self.provider_environment,
             instrument_id=self.instrument_id,
             instrument_version=self.instrument_version,
         )
@@ -535,6 +642,10 @@ class BorrowRecallEvidence:
             "provider_id": self.provider_id,
             "account_id": self.account_id,
             "environment": self.environment,
+            **_provider_environment_payload(
+                provider_environment=self.provider_environment,
+                environment=self.environment,
+            ),
             "instrument_id": self.instrument_id,
             "instrument_version": self.instrument_version,
             "provider_revision": self.provider_revision,
@@ -564,6 +675,7 @@ class BorrowRecallResolutionEvidence:
     observed_at: str
     effective_at: str
     evidence_ref: str
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "resolution_id", _text(self.resolution_id, name="resolution_id"))
@@ -571,6 +683,15 @@ class BorrowRecallResolutionEvidence:
         object.__setattr__(self, "provider_id", _text(self.provider_id, name="provider_id").upper())
         object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
         object.__setattr__(self, "environment", _environment(self.environment))
+        object.__setattr__(
+            self,
+            "provider_environment",
+            _provider_environment(
+                provider_id=self.provider_id,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            ),
+        )
         object.__setattr__(self, "instrument_id", _instrument_id(self.instrument_id))
         object.__setattr__(self, "instrument_version", _version(self.instrument_version))
         object.__setattr__(self, "provider_revision", _text(self.provider_revision, name="provider_revision"))
@@ -589,6 +710,7 @@ class BorrowRecallResolutionEvidence:
             provider_id=self.provider_id,
             account_id=self.account_id,
             environment=self.environment,
+            provider_environment=self.provider_environment,
             instrument_id=self.instrument_id,
             instrument_version=self.instrument_version,
         )
@@ -600,6 +722,10 @@ class BorrowRecallResolutionEvidence:
             "provider_id": self.provider_id,
             "account_id": self.account_id,
             "environment": self.environment,
+            **_provider_environment_payload(
+                provider_environment=self.provider_environment,
+                environment=self.environment,
+            ),
             "instrument_id": self.instrument_id,
             "instrument_version": self.instrument_version,
             "provider_revision": self.provider_revision,
@@ -622,6 +748,7 @@ class _BorrowProjectionBinding:
     provider_id: str
     account_id: str
     environment: str
+    provider_environment: str
     instrument_id: str
     instrument_version: int
     resource_key: str
@@ -662,6 +789,7 @@ def _build_borrow_projection_binding_accessors():
         instrument_id: str,
         instrument_version: int,
         evidence_artifact_store: ArtifactStore,
+        provider_environment: str | None = None,
     ) -> None:
         if type(value) is not DurableBorrowRecallProjection:
             raise TypeError(
@@ -688,27 +816,48 @@ def _build_borrow_projection_binding_accessors():
         normalized_provider = _text(provider_id, name="provider_id").upper()
         normalized_account = _text(account_id, name="account_id")
         normalized_environment = _environment(environment)
+        normalized_provider_environment = _provider_environment(
+            provider_id=normalized_provider,
+            environment=normalized_environment,
+            provider_environment=provider_environment,
+        )
         normalized_instrument = _instrument_id(instrument_id)
         normalized_version = _version(instrument_version)
         resource_key = borrow_resource_key(
             provider_id=normalized_provider,
             account_id=normalized_account,
             environment=normalized_environment,
+            provider_environment=normalized_provider_environment,
             instrument_id=normalized_instrument,
             instrument_version=normalized_version,
         )
-        aggregate_id = "borrow-recall:" + str(
-            uuid5(
-                NAMESPACE_URL,
-                "https://events.autotrade.local/borrow-recall/" + resource_key,
+        aggregate_id = _borrow_recall_aggregate_id(resource_key)
+        if normalized_provider_environment != normalized_environment:
+            legacy_resource_key = _legacy_borrow_resource_key(
+                provider_id=normalized_provider,
+                account_id=normalized_account,
+                environment=normalized_environment,
+                instrument_id=normalized_instrument,
+                instrument_version=normalized_version,
             )
-        )
+            legacy_aggregate_id = _borrow_recall_aggregate_id(legacy_resource_key)
+            with journal_store_authority_scope(store, store_identity):
+                legacy_events = JournalStore.load_events(
+                    store,
+                    _AGGREGATE_TYPE,
+                    legacy_aggregate_id,
+                )
+            if legacy_events:
+                raise BorrowRecallConflict(
+                    "legacy runtime-only borrow recall history is ambiguous across provider environments"
+                )
         for name, item in {
             "store": store,
             "evidence_artifact_store": evidence_artifact_store,
             "provider_id": normalized_provider,
             "account_id": normalized_account,
             "environment": normalized_environment,
+            "provider_environment": normalized_provider_environment,
             "instrument_id": normalized_instrument,
             "instrument_version": normalized_version,
             "resource_key": resource_key,
@@ -732,6 +881,7 @@ def _build_borrow_projection_binding_accessors():
             provider_id=normalized_provider,
             account_id=normalized_account,
             environment=normalized_environment,
+            provider_environment=normalized_provider_environment,
             instrument_id=normalized_instrument,
             instrument_version=normalized_version,
             resource_key=resource_key,
@@ -795,6 +945,7 @@ def _build_borrow_projection_binding_accessors():
             "provider_id": binding.provider_id,
             "account_id": binding.account_id,
             "environment": binding.environment,
+            "provider_environment": binding.provider_environment,
             "instrument_id": binding.instrument_id,
             "instrument_version": binding.instrument_version,
             "resource_key": binding.resource_key,
@@ -879,6 +1030,7 @@ class DurableBorrowRecallProjection:
             "provider_id",
             "account_id",
             "environment",
+            "provider_environment",
             "instrument_id",
             "instrument_version",
             "resource_key",
@@ -899,6 +1051,7 @@ class DurableBorrowRecallProjection:
         instrument_id: str,
         instrument_version: int,
         evidence_artifact_store: ArtifactStore,
+        provider_environment: str | None = None,
     ):
         _initialize_borrow_projection_binding(
             self,
@@ -906,6 +1059,7 @@ class DurableBorrowRecallProjection:
             provider_id=provider_id,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
             instrument_id=instrument_id,
             instrument_version=instrument_version,
             evidence_artifact_store=evidence_artifact_store,
@@ -937,6 +1091,7 @@ class DurableBorrowRecallProjection:
             evidence.provider_id == self.provider_id
             and evidence.account_id == self.account_id
             and evidence.environment == self.environment
+            and evidence.provider_environment == self.provider_environment
             and evidence.instrument_id == self.instrument_id
             and evidence.instrument_version == self.instrument_version
             and evidence.resource_key == self.resource_key

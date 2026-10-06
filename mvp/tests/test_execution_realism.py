@@ -433,6 +433,20 @@ class ExecutionRealismTests(unittest.TestCase):
             instrument.metadata_evidence_binding().removeprefix("sha256:"),
         )
 
+    def test_model_rejects_projection_grid_mismatch_before_execution(self):
+        _, canonical_grid = price_authority()
+        mismatched_projection = ExecutionPriceProjectionPolicy.from_instrument(
+            canonical_instrument(price_tick="0.05")
+        )
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "price projection and canonical price grid authority mismatch",
+        ):
+            model(
+                price_projection=mismatched_projection,
+                price_grid=canonical_grid,
+            )
+
     def test_market_execution_requires_registry_issued_price_grid(self):
         with self.assertRaisesRegex(
             ExecutionRealismError,

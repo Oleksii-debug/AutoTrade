@@ -30,6 +30,19 @@ from .persistence import JournalStore, payload_digest
 
 MONEY_QUANTUM = Decimal("0.00000001")
 CHECKPOINT_SCHEMA_VERSION = 6
+_CHECKPOINT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "symbol",
+        "financial_configuration",
+        "financial_configuration_hash",
+        "initial_cash",
+        "postings",
+        "fills",
+        "evidence_ids",
+        "evidence_records",
+    }
+)
 
 
 def _exact_decimal(value: Decimal | str | int, *, name: str) -> Decimal:
@@ -590,7 +603,7 @@ def _read_state(path: Path, initial_cash: Decimal) -> tuple[dict, bool]:
         data = _strict_json_loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError) as error:
         raise ValueError("Corrupt checkpoint JSON") from error
-    if not isinstance(data, dict):
+    if type(data) is not dict or set(data) != _CHECKPOINT_FIELDS:
         raise ValueError("Corrupt checkpoint structure")
     schema_version = data.get("schema_version")
     if schema_version == 1:
@@ -1349,18 +1362,7 @@ def verify_replay(state_dir: str | Path) -> bool:
         return False
     try:
         checkpoint = _strict_json_loads(checkpoint_path.read_text(encoding="utf-8"))
-        checkpoint_fields = {
-            "schema_version",
-            "symbol",
-            "financial_configuration",
-            "financial_configuration_hash",
-            "initial_cash",
-            "postings",
-            "fills",
-            "evidence_ids",
-            "evidence_records",
-        }
-        if type(checkpoint) is not dict or set(checkpoint) != checkpoint_fields:
+        if type(checkpoint) is not dict or set(checkpoint) != _CHECKPOINT_FIELDS:
             return False
         if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
             return False

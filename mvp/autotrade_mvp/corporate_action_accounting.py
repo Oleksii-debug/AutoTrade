@@ -4,8 +4,8 @@ The provider-evidence module owns source authenticity. CorporateActionBook stays
 pure. DurableProviderEconomicBook remains the only economic ledger. This module
 only composes their prepared mutations in one JournalStore transaction.
 
-The first qualified economic mapping is CASH_DIVIDEND. Other action kinds fail
-closed until their exact position/basis/settlement semantics are implemented.
+Qualified durable mappings include CASH_DIVIDEND and long-position SPLIT. Other
+action kinds remain fail closed until their exact economics are implemented.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from .accounting import (
     AccountingConflict,
     JournalTransaction,
     Posting,
+    book_equity_split_adjustment,
     reverse_transaction,
     transaction_digest,
     validate_transaction,
@@ -43,7 +44,7 @@ from .provider_activity_accounting import DurableProviderEconomicBook
 from .reconciliation import ProviderActivityEvidence
 
 
-_SUPPORTED_DURABLE_KINDS = frozenset({"CASH_DIVIDEND"})
+_SUPPORTED_DURABLE_KINDS = frozenset({"CASH_DIVIDEND", "SPLIT"})
 
 
 def _identity(kind: str, *parts: str) -> str:
@@ -472,6 +473,89 @@ def _dividend_transaction(
     return transaction
 
 
+def _split_transaction(
+    accepted: AuthoritativeCorporateAction,
+    transition: Transition,
+    *,
+    order_key: str,
+    corrects_transaction_id: str | None = None,
+    economic_effective_at: str | None = None,
+    observed_at: str | None = None,
+) -> JournalTransaction | None:
+    before = transition.before
+    after = transition.after
+    if (
+        before.borrowed_quantity != 0
+        or before.recalled_quantity != 0
+        or after.borrowed_quantity != 0
+        or after.recalled_quantity != 0
+    ):
+        raise AccountingConflict(
+            "durable split accounting for borrowed/short positions is not qualified"
+        )
+    if before.quantity == after.quantity:
+        return None
+
+    payload = accepted.event.payload
+    try:
+        return book_equity_split_adjustment(
+            transaction_id=_transaction_id(accepted, "effect"),
+            cause_event_id=_identity(
+                "corporate-action-cause",
+                accepted.external_event_id,
+                accepted.provenance_digest,
+                "effect",
+            ),
+            instrument=before.symbol,
+            pre_split_quantity=before.quantity,
+            numerator=payload["numerator"],
+            denominator=payload["denominator"],
+            economic_effective_at=(
+                economic_effective_at
+                or accepted.event.effective_at.isoformat().replace("+00:00", "Z")
+            ),
+            economic_order_key=order_key,
+            observed_at=observed_at or accepted.observed_at,
+            corrects_transaction_id=corrects_transaction_id,
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise AccountingConflict(
+            "split action cannot produce a canonical durable quantity adjustment"
+        ) from error
+
+
+def _effect_transaction(
+    accepted: AuthoritativeCorporateAction,
+    transition: Transition,
+    *,
+    order_key: str,
+    corrects_transaction_id: str | None = None,
+    economic_effective_at: str | None = None,
+    observed_at: str | None = None,
+) -> JournalTransaction | None:
+    if accepted.event.kind == "CASH_DIVIDEND":
+        return _dividend_transaction(
+            accepted,
+            transition,
+            order_key=order_key,
+            corrects_transaction_id=corrects_transaction_id,
+            economic_effective_at=economic_effective_at,
+            observed_at=observed_at,
+        )
+    if accepted.event.kind == "SPLIT":
+        return _split_transaction(
+            accepted,
+            transition,
+            order_key=order_key,
+            corrects_transaction_id=corrects_transaction_id,
+            economic_effective_at=economic_effective_at,
+            observed_at=observed_at,
+        )
+    raise AccountingConflict(
+        f"{accepted.event.kind} has no qualified durable corporate-action accounting mapping"
+    )
+
+
 def _active_for_order_key(
     economic_book: DurableProviderEconomicBook,
     order_key: str,
@@ -546,7 +630,7 @@ def _correction_transactions(
             ),
             None,
         )
-        replacement = _dividend_transaction(
+        replacement = _effect_transaction(
             accepted,
             transition,
             order_key=original.economic_order_key or order_key,
@@ -592,7 +676,7 @@ def _correction_transactions(
         ),
         observed_at=accepted.observed_at,
     )
-    replacement = _dividend_transaction(
+    replacement = _effect_transaction(
         accepted,
         transition,
         order_key=original.economic_order_key or order_key,
@@ -630,7 +714,7 @@ def _economic_transactions(
         if exact_retry and len(active) == 1
         else transaction_observed_at
     )
-    transaction = _dividend_transaction(
+    transaction = _effect_transaction(
         accepted,
         transition,
         order_key=order_key,

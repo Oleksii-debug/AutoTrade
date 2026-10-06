@@ -1,5 +1,5 @@
 from contextlib import ExitStack
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from decimal import Decimal, localcontext, ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN
 import json
 from pathlib import Path
@@ -948,6 +948,175 @@ class InstrumentRegistryTests(unittest.TestCase):
                 underlying_id=f"{B}@1",
                 settlement_method="CASH",
                 margin_model_id="future-margin-v1",
+            )
+
+
+class _TrapText(str):
+    def strip(self, *args, **kwargs):
+        raise AssertionError("caller text method executed")
+
+
+class _TrapMapping(dict):
+    def items(self):
+        raise AssertionError("caller mapping method executed")
+
+    def __iter__(self):
+        raise AssertionError("caller mapping iteration executed")
+
+
+class _TrapList(list):
+    def __iter__(self):
+        raise AssertionError("caller list iteration executed")
+
+
+class _TrapTzInfo(tzinfo):
+    def utcoffset(self, dt):
+        raise AssertionError("caller tzinfo method executed")
+
+    def dst(self, dt):
+        raise AssertionError("caller tzinfo method executed")
+
+    def tzname(self, dt):
+        raise AssertionError("caller tzinfo method executed")
+
+
+class InstrumentIngressAuthorityTests(unittest.TestCase):
+    def test_text_subclass_is_rejected_before_virtual_strip(self):
+        with self.assertRaisesRegex(InstrumentRegistryError, "provider_symbol is required"):
+            spot(symbol=_TrapText("ABC"))
+
+
+    def test_instrument_id_subclass_is_rejected_before_uuid_parser(self):
+        with self.assertRaisesRegex(InstrumentRegistryError, "instrument_id is required"):
+            spot(instrument_id=_TrapText(A))
+
+    def test_decimal_text_subclass_is_rejected_before_decimal_parser(self):
+        with self.assertRaisesRegex(
+            InstrumentRegistryError,
+            "contract_multiplier must use exact decimal input",
+        ):
+            InstrumentVersion(
+                **{
+                    **spot().__dict__,
+                    "contract_multiplier": _TrapText("1"),
+                }
+            )
+
+    def test_metadata_mapping_subclass_is_rejected_before_iteration(self):
+        evidence = _TrapMapping(
+            {
+                "artifact_id": B,
+                "sha256": "sha256:" + "0" * 64,
+                "observed_at": "2026-01-01T00:00:00Z",
+            }
+        )
+        with self.assertRaisesRegex(
+            InstrumentRegistryError,
+            "metadata_evidence entries must be exact built-in objects",
+        ):
+            spot(metadata_evidence=(evidence,))
+
+    def test_custom_tzinfo_is_rejected_before_time_callbacks(self):
+        hostile_time = datetime(2026, 1, 1, tzinfo=_TrapTzInfo())
+        with self.assertRaisesRegex(
+            InstrumentRegistryError,
+            "exact timezone-aware UTC datetime",
+        ):
+            spot(effective_from=hostile_time)
+
+    def test_exact_builtin_ingress_remains_compatible(self):
+        candidate = spot(
+            symbol="ABC",
+            effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            metadata_evidence=(
+                {
+                    "artifact_id": B,
+                    "sha256": "sha256:" + "0" * 64,
+                    "observed_at": "2026-01-01T00:00:00Z",
+                },
+            ),
+        )
+        self.assertEqual(candidate.provider_symbol, "ABC")
+        self.assertEqual(candidate.effective_from.tzinfo, timezone.utc)
+        self.assertEqual(candidate.metadata_evidence[0]["artifact_id"], B)
+
+
+    def test_asset_class_subclass_is_rejected_before_hash_or_equality(self):
+        with self.assertRaisesRegex(InstrumentRegistryError, "asset_class is required"):
+            InstrumentVersion(
+                **{
+                    **spot().__dict__,
+                    "asset_class": _TrapText("CASH_EQUITY"),
+                }
+            )
+
+    def test_metadata_container_subclass_is_rejected_before_iteration(self):
+        with self.assertRaisesRegex(
+            InstrumentRegistryError,
+            "metadata_evidence must be an exact built-in array",
+        ):
+            spot(metadata_evidence=_TrapList())
+
+    def test_funding_mapping_subclass_is_rejected_before_mapping_callbacks(self):
+        hostile = _TrapMapping({"interval": "8h", "source": "provider"})
+        with self.assertRaisesRegex(
+            InstrumentRegistryError,
+            "funding_schedule must be a non-empty exact built-in object",
+        ):
+            InstrumentVersion(
+                instrument_id=A,
+                version=1,
+                provider_id="simulated",
+                venue_id="perpetuals",
+                provider_symbol="ABC-PERP",
+                asset_class="PERPETUAL",
+                base_currency="ABC",
+                quote_currency="USD",
+                settlement_currency="USD",
+                quantity_unit="contract",
+                contract_multiplier="1",
+                price_tick="0.01",
+                quantity_step="1",
+                minimum_quantity="1",
+                calendar_id="CONTINUOUS_24_7",
+                timezone_id="UTC",
+                effective_from=when(1),
+                payoff="LINEAR",
+                underlying_id=f"{B}@1",
+                settlement_method="CASH",
+                funding_schedule=hostile,
+                margin_model_id="perp-margin-v1",
+            )
+
+
+    def test_calendar_container_subclass_is_rejected_before_iteration(self):
+        with self.assertRaisesRegex(
+            InstrumentRegistryError,
+            "sessions must be an exact built-in array",
+        ):
+            TradingCalendar(
+                calendar_id="HOSTILE",
+                timezone_id="UTC",
+                sessions=_TrapList(),
+                transitions=(),
+                continuous=False,
+            )
+
+    def test_calendar_entries_must_be_exact_authority_types(self):
+        class DerivedSession(WeeklySession):
+            pass
+
+        with self.assertRaisesRegex(
+            InstrumentRegistryError,
+            "sessions entries must be exact WeeklySession",
+        ):
+            TradingCalendar(
+                calendar_id="DERIVED",
+                timezone_id="UTC",
+                sessions=(DerivedSession(0, 0, 1),),
+                transitions=(
+                    OffsetTransition(datetime(1970, 1, 1, tzinfo=timezone.utc), 0),
+                ),
             )
 
 

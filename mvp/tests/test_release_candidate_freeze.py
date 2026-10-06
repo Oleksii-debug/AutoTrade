@@ -3,6 +3,7 @@ from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -275,6 +276,35 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         self.assertEqual(
             manifest["qualification"]["policy_id"],
             decision.qualification_policy_id,
+        )
+
+    def test_freeze_manifest_uses_accepted_snapshot_after_receipt_mutation(self):
+        candidate = self.candidate()
+        original_verify = release_candidate_module.verify_qualification_attestation
+
+        def verify_then_mutate(*args, **kwargs):
+            accepted = original_verify(*args, **kwargs)
+            caller_receipt = args[0]
+            object.__setattr__(caller_receipt, "signature_b64", "forged-after-verify")
+            object.__setattr__(caller_receipt.attestation, "result", "FAIL")
+            return accepted
+
+        with patch.object(
+            release_candidate_module,
+            "verify_qualification_attestation",
+            side_effect=verify_then_mutate,
+        ):
+            decision = freeze_with_integrity_store(candidate, with_attestation=True)
+
+        self.assertEqual(decision.status, "FROZEN")
+        manifest = json.loads(decision.manifest_json)
+        self.assertNotEqual(
+            manifest["qualification"]["receipt"]["signature_b64"],
+            "forged-after-verify",
+        )
+        self.assertEqual(
+            manifest["qualification"]["receipt"]["attestation"]["result"],
+            "PASS",
         )
 
     def test_attestation_must_cover_exact_candidate_artifact_set(self):

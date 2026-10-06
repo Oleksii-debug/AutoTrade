@@ -6,6 +6,7 @@ import json
 import unittest
 
 import mvp.autotrade_mvp.ibkr_web as ibkr_web_module
+import mvp.autotrade_mvp.provider_core as provider_core_module
 from uuid import uuid4
 
 from mvp.autotrade_mvp.capabilities import (
@@ -350,6 +351,52 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 at=NOW,
                 maximum_session_age_seconds=30,
                 maximum_accounts_age_seconds=30,
+            )
+
+    def test_brokerage_accounts_use_sealed_provider_response_authority(self):
+        observation = ibkr_accounts_observation(
+            {
+                "accounts": ["U1234567", "FORGED"],
+                "selectedAccount": "U1234567",
+                "sessionId": "session-1",
+                "isPaper": True,
+            }
+        )
+        object.__setattr__(observation.query_binding, "account_id", "FORGED")
+
+        original_response_authority = (
+            provider_core_module._require_provider_response_observation_authority
+        )
+        original_query_authority = (
+            provider_core_module._require_authenticated_read_query_binding_authority
+        )
+        original_scope = (
+            provider_core_module.AuthenticatedReadQueryBinding.require_scope
+        )
+        provider_core_module._require_provider_response_observation_authority = (
+            lambda *_args, **_kwargs: None
+        )
+        provider_core_module._require_authenticated_read_query_binding_authority = (
+            lambda *_args, **_kwargs: None
+        )
+        provider_core_module.AuthenticatedReadQueryBinding.require_scope = (
+            lambda *_args, **_kwargs: None
+        )
+        try:
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "authenticated-read binding changed after preparation",
+            ):
+                brokerage_accounts_from_observation(observation)
+        finally:
+            provider_core_module._require_provider_response_observation_authority = (
+                original_response_authority
+            )
+            provider_core_module._require_authenticated_read_query_binding_authority = (
+                original_query_authority
+            )
+            provider_core_module.AuthenticatedReadQueryBinding.require_scope = (
+                original_scope
             )
 
     def test_brokerage_accounts_require_exact_endpoint_empty_query_and_read_scope(self):

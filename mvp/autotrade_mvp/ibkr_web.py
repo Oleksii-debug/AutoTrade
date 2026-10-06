@@ -598,7 +598,7 @@ def _install_ibkr_brokerage_accounts_observation_authority():
 
     accounts_type = IbkrBrokerageAccountsObservation
     observation_type = ProviderResponseObservation
-    canonical_require_scope = observation_type.require_scope
+    canonical_require_scope = provider_response_observation_require_scope
     canonical_instant = _instant
     canonical_text = _text
     mapping_proxy_type = MappingProxyType
@@ -621,7 +621,7 @@ def _install_ibkr_brokerage_accounts_observation_authority():
         if (
             IbkrBrokerageAccountsObservation is not accounts_type
             or ProviderResponseObservation is not observation_type
-            or observation_type.require_scope is not canonical_require_scope
+            or provider_response_observation_require_scope is not canonical_require_scope
             or IBKR_WEB_BROKERAGE_ACCOUNTS_ENDPOINT != accounts_endpoint
             or datetime is not datetime_type
             or _instant is not canonical_instant
@@ -642,18 +642,14 @@ def _install_ibkr_brokerage_accounts_observation_authority():
             raise TypeError(
                 "observation must be exact ProviderResponseObservation"
             )
-        canonical_require_scope(
+        projection = canonical_require_scope(
             observation,
             provider_id="IBKR",
             surface=surface,
             endpoint=accounts_endpoint,
         )
-        query_binding = object_getattribute(observation, "query_binding")
-        query = object_getattribute(query_binding, "query")
-        permission_scope = object_getattribute(
-            query_binding,
-            "permission_scope",
-        )
+        query = projection["query"]
+        permission_scope = projection["permission_scope"]
         if canonical_type(query) is not mapping_proxy_type or len(query) != 0:
             raise IbkrWebAdapterError(
                 "brokerage accounts requires an empty authenticated query"
@@ -663,7 +659,7 @@ def _install_ibkr_brokerage_accounts_observation_authority():
                 "brokerage accounts requires ORDER.READ scope"
             )
 
-        payload = object_getattribute(observation, "payload")
+        payload = projection["payload"]
         if canonical_type(payload) is not mapping_proxy_type:
             raise IbkrWebAdapterError(
                 "brokerage accounts payload must be an exact provider object"
@@ -716,7 +712,7 @@ def _install_ibkr_brokerage_accounts_observation_authority():
                 "brokerage isPaper must be exact boolean"
             )
 
-        observed_text = object_getattribute(observation, "observed_at")
+        observed_text = projection["observed_at"]
         if (
             canonical_type(observed_text) is not str
             or not observed_text.endswith("Z")
@@ -737,10 +733,10 @@ def _install_ibkr_brokerage_accounts_observation_authority():
             name="brokerage accounts observed_at",
         )
 
-        bound_account_id = object_getattribute(query_binding, "account_id")
-        bound_environment = object_getattribute(query_binding, "environment")
-        evidence_ref = object_getattribute(observation, "evidence_ref")
-        response_sha256 = object_getattribute(observation, "response_sha256")
+        bound_account_id = projection["account_id"]
+        bound_environment = projection["environment"]
+        evidence_ref = projection["evidence_ref"]
+        response_sha256 = projection["response_sha256"]
         if (
             canonical_type(bound_account_id) is not str
             or canonical_type(bound_environment) is not str

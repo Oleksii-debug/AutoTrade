@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, tzinfo
 from decimal import Decimal, ROUND_DOWN, localcontext
 import unittest
 
@@ -1039,6 +1039,69 @@ class EconomicSettlementCapitalTests(unittest.TestCase):
                 with self.assertRaisesRegex(TypeError, expected):
                     BuyingPowerEvidence(**values)
                 self.assertEqual(counter.calls, before)
+
+    def test_margin_buying_power_rejects_hostile_tzinfo_before_callbacks(self):
+        class HostileTimezone(tzinfo):
+            calls = 0
+
+            def utcoffset(self, _dt):
+                type(self).calls += 1
+                raise AssertionError("hostile tzinfo utcoffset dispatched")
+
+            def dst(self, _dt):
+                type(self).calls += 1
+                raise AssertionError("hostile tzinfo dst dispatched")
+
+            def tzname(self, _dt):
+                type(self).calls += 1
+                raise AssertionError("hostile tzinfo tzname dispatched")
+
+        common = {
+            "evidence_id": "bp-hostile-zone",
+            "scope": self.scope,
+            "currency": "USD",
+            "additional_credit": "250",
+            "observed_at": datetime(2026, 9, 24, 15, tzinfo=timezone.utc),
+            "valid_until": datetime(2026, 9, 24, 17, tzinfo=timezone.utc),
+            "evidence_refs": ("provider:buying-power:hostile-zone",),
+        }
+        for field, hour in (("observed_at", 15), ("valid_until", 17)):
+            with self.subTest(field=field):
+                values = dict(common)
+                values[field] = datetime(
+                    2026,
+                    9,
+                    24,
+                    hour,
+                    tzinfo=HostileTimezone(),
+                )
+                before = HostileTimezone.calls
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "timezone must use exact datetime.timezone",
+                ):
+                    BuyingPowerEvidence(**values)
+                self.assertEqual(HostileTimezone.calls, before)
+
+        settlement = SettlementBook(settled_cash={"USD": "1000"})
+        hostile_as_of = datetime(
+            2026,
+            9,
+            24,
+            16,
+            tzinfo=HostileTimezone(),
+        )
+        before = HostileTimezone.calls
+        with self.assertRaisesRegex(
+            TypeError,
+            "timezone must use exact datetime.timezone",
+        ):
+            settlement.available_capital(
+                scope=self.scope,
+                currency="USD",
+                as_of=hostile_as_of,
+            )
+        self.assertEqual(HostileTimezone.calls, before)
 
     def test_margin_buying_power_consumer_rejects_authority_subclasses(self):
         settlement = SettlementBook(settled_cash={"USD": "1000"})

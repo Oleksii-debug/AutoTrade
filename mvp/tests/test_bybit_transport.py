@@ -247,7 +247,7 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ProviderTransportScopeError,
-            "current capability",
+            "no longer valid",
         ):
             transport(binding)
 

@@ -27,7 +27,7 @@ env:
 
 jobs:
   browser-scenario:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,7 +56,7 @@ jobs:
           if-no-files-found: error
 
   windows-candidate:
-    runs-on: windows-latest
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
         with:

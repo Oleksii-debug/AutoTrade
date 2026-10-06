@@ -338,6 +338,34 @@ class AuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "AuthorityPolicy"):
             service.register_policy(MutablePolicy())
 
+    def test_simulation_policy_registration_uses_explicit_frozen_time(self):
+        class NoWallClock:
+            fromisoformat = staticmethod(authority_module.datetime.fromisoformat)
+
+            @staticmethod
+            def now(*args, **kwargs):
+                raise AssertionError("simulation registration cannot read wall clock")
+
+        frozen = "2026-09-24T18:00:00.123456Z"
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            service = authority_service(store)
+            item = policy(environments={"SIMULATION"}, autonomous=True)
+            with patch.object(authority_module, "datetime", NoWallClock):
+                self.assertTrue(service.register_policy(item, simulation_time=frozen))
+            events = store.load_events("authority_state", "canonical")
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["event_type"], "AuthorityPolicyRegistered")
+            self.assertEqual(events[0]["committed_at"], frozen)
+
+            restarted = authority_service(store)
+            with patch.object(authority_module, "datetime", NoWallClock):
+                self.assertFalse(restarted.register_policy(item, simulation_time=frozen))
+            self.assertEqual(len(store.load_events("authority_state", "canonical")), 1)
+
+        with self.assertRaisesRegex(ValueError, "SIMULATION-only"):
+            AuthorityService().register_policy(policy(), simulation_time=frozen)
+
     def test_confirmation_is_bound_to_exact_intent_and_single_use(self):
         service = AuthorityService()
         service.register_policy(policy())

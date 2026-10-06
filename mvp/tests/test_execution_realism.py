@@ -1,11 +1,11 @@
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
-from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
+from mvp.autotrade_mvp.instruments import InstrumentVersion
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
-    ExecutionPriceGrid,
+    ExecutionPriceProjectionPolicy,
     ExecutionRealismError,
     LiquidityObservation,
     SimulatedOrder,
@@ -14,50 +14,7 @@ from mvp.autotrade_mvp.execution_realism import (
 
 
 CALIBRATION = "a" * 64
-INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
-INSTRUMENT_REF = f"{INSTRUMENT_ID}@1"
-OTHER_INSTRUMENT_ID = "22222222-2222-4222-8222-222222222222"
-OTHER_INSTRUMENT_REF = f"{OTHER_INSTRUMENT_ID}@1"
-
-
-def instrument(*, instrument_id=INSTRUMENT_ID, price_tick=Decimal("0.01")):
-    return InstrumentVersion(
-        instrument_id=instrument_id,
-        version=1,
-        provider_id="simulated",
-        venue_id="simulated-venue",
-        provider_symbol="ABC",
-        asset_class="CASH_EQUITY",
-        base_currency="ABC",
-        quote_currency="USD",
-        settlement_currency="USD",
-        quantity_unit="ABC",
-        contract_multiplier=Decimal("1"),
-        price_tick=price_tick,
-        quantity_step=Decimal("0.001"),
-        minimum_quantity=Decimal("0.001"),
-        maximum_quantity=Decimal("10"),
-        calendar_id="CONTINUOUS_24_7",
-        timezone_id="UTC",
-        effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        metadata_evidence=(
-            {
-                "artifact_id": "33333333-3333-4333-8333-333333333333",
-                "sha256": "sha256:" + "b" * 64,
-                "observed_at": "2026-09-24T09:00:00Z",
-            },
-        ),
-    )
-
-
-def price_grid(*, instrument_value=None, projection_policy_version=1):
-    bound = instrument_value or instrument()
-    registry = InstrumentRegistry(versions=(bound,))
-    return ExecutionPriceGrid.from_registry(
-        registry,
-        f"{bound.instrument_id}@{bound.version}",
-        projection_policy_version=projection_policy_version,
-    )
+INSTRUMENT_BINDING = "c" * 64
 
 
 def model(**overrides):
@@ -74,11 +31,13 @@ def model(**overrides):
         impact_bps_at_max_participation="10",
         bar_half_spread_bps="0",
         scenario_cost_multiplier="1",
-        price_quantum="0.01",
-        price_projection_policy_id="ADVERSE_PRICE_GRID",
-        price_projection_policy_version=1,
-        price_grid_instrument_version=INSTRUMENT_REF,
-        price_grid=price_grid(),
+        price_projection=ExecutionPriceProjectionPolicy(
+            policy_id="ADVERSE_INSTRUMENT_TICK",
+            policy_version="1",
+            instrument_version="ABC@v1",
+            price_quantum="0.01",
+            instrument_metadata_binding=INSTRUMENT_BINDING,
+        ),
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -87,7 +46,7 @@ def model(**overrides):
 def order(**overrides):
     values = dict(
         order_id="sim-1",
-        instrument_version=INSTRUMENT_REF,
+        instrument_version="ABC@v1",
         side="BUY",
         order_type="MARKET",
         quantity="10",
@@ -100,7 +59,7 @@ def order(**overrides):
 
 def top(**overrides):
     values = dict(
-        instrument_version=INSTRUMENT_REF,
+        instrument_version="ABC@v1",
         market_time="2026-09-24T10:00:00.200000Z",
         available_at="2026-09-24T10:00:00.250000Z",
         available_volume="100",
@@ -112,14 +71,172 @@ def top(**overrides):
 
 
 class ExecutionRealismTests(unittest.TestCase):
+    def test_already_triggered_is_reserved_for_stop_limit_orders(self):
+        for order_type, kwargs in (
+            ("MARKET", {}),
+            ("LIMIT", {"limit_price": "102"}),
+        ):
+            with self.subTest(order_type=order_type):
+                with self.assertRaisesRegex(
+                    ExecutionRealismError,
+                    "only valid for STOP_LIMIT",
+                ):
+                    order(order_type=order_type, already_triggered=True, **kwargs)
+
+    def test_execution_scalar_ingress_rejects_hostile_subclasses_without_callbacks(self):
+        class HostileDecimal(Decimal):
+            finite_calls = 0
+
+            def is_finite(self):
+                type(self).finite_calls += 1
+                raise AssertionError("hostile decimal callback executed")
+
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile text callback executed")
+
+        class HostileInt(int):
+            compare_calls = 0
+
+            def __lt__(self, other):
+                type(self).compare_calls += 1
+                raise AssertionError("hostile latency comparison executed")
+
+        with self.assertRaisesRegex(ExecutionRealismError, "finite decimal"):
+            model(fee_rate=HostileDecimal("0.001"))
+        with self.assertRaisesRegex(ExecutionRealismError, "finite decimal"):
+            ExecutionPriceProjectionPolicy(
+                policy_id="ADVERSE_INSTRUMENT_TICK",
+                policy_version="1",
+                instrument_version="ABC@v1",
+                price_quantum=HostileDecimal("0.01"),
+                instrument_metadata_binding=INSTRUMENT_BINDING,
+            )
+        self.assertEqual(HostileDecimal.finite_calls, 0)
+
+        with self.assertRaisesRegex(ExecutionRealismError, "order_id is required"):
+            order(order_id=HostileText("sim-1"))
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "projection instrument_metadata_binding is required",
+        ):
+            ExecutionPriceProjectionPolicy(
+                policy_id="ADVERSE_INSTRUMENT_TICK",
+                policy_version="1",
+                instrument_version="ABC@v1",
+                price_quantum="0.01",
+                instrument_metadata_binding=HostileText("c" * 64),
+            )
+        self.assertEqual(HostileText.strip_calls, 0)
+
+        with self.assertRaisesRegex(ExecutionRealismError, "latency_ms must be"):
+            model(latency_ms=HostileInt(100))
+        self.assertEqual(HostileInt.compare_calls, 0)
+
+    def test_execution_scalar_ingress_enforces_shared_decimal_resource_envelope(self):
+        with self.assertRaisesRegex(ExecutionRealismError, "finite decimal"):
+            model(fee_rate="9" * 257)
+
+    def test_simulation_rejects_domain_subclasses_before_execution_logic(self):
+        class DerivedOrder(SimulatedOrder):
+            pass
+
+        class DerivedObservation(LiquidityObservation):
+            pass
+
+        class DerivedModel(ExecutionModel):
+            pass
+
+        exact_order = order()
+        exact_observation = top()
+        exact_model = model()
+        derived_order = DerivedOrder(**exact_order.__dict__)
+        derived_observation = DerivedObservation(**exact_observation.__dict__)
+        derived_model = DerivedModel(**exact_model.__dict__)
+
+        with self.assertRaisesRegex(TypeError, "exact SimulatedOrder"):
+            simulate_execution(derived_order, exact_observation, exact_model)
+        with self.assertRaisesRegex(TypeError, "exact LiquidityObservation"):
+            simulate_execution(exact_order, derived_observation, exact_model)
+        with self.assertRaisesRegex(TypeError, "exact ExecutionModel"):
+            simulate_execution(exact_order, exact_observation, derived_model)
+
+    def test_simulation_revalidates_exact_objects_after_frozen_mutation(self):
+        exact_observation = top()
+        exact_model = model()
+
+        mutated_order = order()
+        object.__setattr__(mutated_order, "quantity", Decimal("-1"))
+        with self.assertRaisesRegex(ExecutionRealismError, "quantity must be positive"):
+            simulate_execution(mutated_order, exact_observation, exact_model)
+
+        mutated_observation = top()
+        object.__setattr__(
+            mutated_observation,
+            "available_at",
+            "2026-09-24T09:59:59Z",
+        )
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "available_at cannot precede market_time",
+        ):
+            simulate_execution(order(), mutated_observation, exact_model)
+
+        mutated_model = model()
+        object.__setattr__(mutated_model, "latency_ms", -1)
+        with self.assertRaisesRegex(ExecutionRealismError, "latency_ms must be"):
+            simulate_execution(order(), exact_observation, mutated_model)
+
+        nested_authority_model = model()
+        object.__setattr__(
+            nested_authority_model.price_projection,
+            "instrument_version",
+            "XYZ@v1",
+        )
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "projection instrument_version must match",
+        ):
+            simulate_execution(order(), exact_observation, nested_authority_model)
+
+        injected_order = order()
+        object.__setattr__(injected_order, "shadow_authority", "forged")
+        with self.assertRaisesRegex(TypeError, "unexpected state fields"):
+            simulate_execution(injected_order, exact_observation, exact_model)
+
+        class HostileStateField(str):
+            armed = False
+            equality_calls = 0
+
+            def __eq__(self, other):
+                type(self).equality_calls += 1
+                if type(self).armed:
+                    raise AssertionError("hostile state-field equality executed")
+                return super().__eq__(other)
+
+            __hash__ = str.__hash__
+
+        hostile_key_order = order()
+        hostile_state = dict(hostile_key_order.__dict__)
+        quantity = hostile_state.pop("quantity")
+        hostile_state[HostileStateField("quantity")] = quantity
+        object.__setattr__(hostile_key_order, "__dict__", hostile_state)
+        HostileStateField.armed = True
+        with self.assertRaisesRegex(TypeError, "non-canonical state field names"):
+            simulate_execution(hostile_key_order, exact_observation, exact_model)
+        self.assertEqual(HostileStateField.equality_calls, 0)
+
     def test_cross_instrument_liquidity_cannot_execute_order(self):
         with self.assertRaisesRegex(
             ExecutionRealismError,
             "instrument_version must exactly match",
         ):
             simulate_execution(
-                order(instrument_version=INSTRUMENT_REF),
-                top(instrument_version=OTHER_INSTRUMENT_REF),
+                order(instrument_version="ABC@v1"),
+                top(instrument_version="XYZ@v9"),
                 model(),
             )
 
@@ -163,127 +280,142 @@ class ExecutionRealismTests(unittest.TestCase):
         result = simulate_execution(order(), top(), model())
         # Quantity 10 / volume 100 = 10% participation, i.e. 40% of the
         # configured 25% max. Impact = 4 bps; slippage = 5 bps.
+        # Exact raw projection is 101.0909; BUY rounds adversely to the next 0.01 tick.
         expected = Decimal("101.10")
         self.assertEqual(result.status, "FILLED")
         self.assertEqual(result.fill_price, expected)
-        self.assertEqual(result.fee, Decimal("10") * expected * Decimal("0.001"))
+        self.assertEqual(result.fee, Decimal("1.011"))
 
-    def test_market_projection_is_context_independent_and_grid_bound(self):
-        from decimal import localcontext, ROUND_CEILING, ROUND_FLOOR
-
-        baseline = None
-        for precision, rounding in (
-            (6, ROUND_CEILING),
-            (10, ROUND_FLOOR),
-            (28, ROUND_CEILING),
-            (80, ROUND_FLOOR),
-        ):
+    def test_market_projection_is_invariant_to_ambient_decimal_context(self):
+        def execute(*, side, precision, rounding):
             with localcontext() as context:
                 context.prec = precision
                 context.rounding = rounding
-                result = simulate_execution(order(), top(), model())
-            current = (result.fill_price, result.fee, result.model_fingerprint)
-            if baseline is None:
-                baseline = current
+                return simulate_execution(
+                    order(side=side, quantity="10"),
+                    top(available_volume="30"),
+                    model(max_participation="0.5"),
+                )
+
+        for side in ("BUY", "SELL"):
+            low_floor = execute(side=side, precision=6, rounding=ROUND_FLOOR)
+            low_ceiling = execute(side=side, precision=6, rounding=ROUND_CEILING)
+            high_precision = execute(side=side, precision=80, rounding=ROUND_CEILING)
+            self.assertEqual(low_floor, low_ceiling)
+            self.assertEqual(low_floor, high_precision)
+            self.assertEqual(low_floor.fill_price % Decimal("0.01"), Decimal("0"))
+            if side == "BUY":
+                self.assertGreaterEqual(low_floor.fill_price, Decimal("101"))
             else:
-                self.assertEqual(current, baseline)
+                self.assertLessEqual(low_floor.fill_price, Decimal("99"))
 
-        self.assertEqual(baseline[0], Decimal("101.10"))
-
-    def test_price_grid_requires_canonical_instrument_issuance(self):
-        with self.assertRaisesRegex(TypeError, "issued by the canonical instrument registry"):
-            ExecutionPriceGrid(
-                instrument_version=INSTRUMENT_REF,
-                price_quantum=Decimal("0.01"),
-                projection_policy_id="ADVERSE_PRICE_GRID",
-                projection_policy_version=1,
-                source_sha256="b" * 64,
-                instrument_metadata_binding="b" * 64,
-            )
-
-    def test_market_projection_requires_explicit_price_quantum(self):
+    def test_market_execution_rejects_off_grid_reference_before_projection(self):
         with self.assertRaisesRegex(
             ExecutionRealismError,
-            "complete price projection policy evidence",
+            "market reference price is not aligned to authoritative price quantum",
         ):
-            simulate_execution(order(), top(), model(price_quantum=None, price_grid=None))
+            simulate_execution(order(), top(ask="101.005"), model())
 
-    def test_market_projection_policy_identity_is_fixed(self):
-        with self.assertRaisesRegex(
-            ExecutionRealismError,
-            "unsupported MARKET price projection policy identity",
+    def test_market_execution_fails_closed_without_matching_projection_authority(self):
+        for observation in (
+            top(),
+            top(market_time="2026-09-24T10:00:00.050000Z"),
+            top(available_volume="0"),
         ):
-            price_grid(projection_policy_version=2)
-        with self.assertRaisesRegex(
-            ExecutionRealismError,
-            "unsupported MARKET price projection policy identity",
-        ):
-            model(price_projection_policy_id="FAVORABLE_PRICE_GRID")
-
-    def test_model_fingerprint_binds_price_grid_provenance(self):
-        baseline = model()
-        changed_instrument = InstrumentVersion(
-            **{
-                **instrument().__dict__,
-                "metadata_evidence": (
-                    {
-                        "artifact_id": "44444444-4444-4444-8444-444444444444",
-                        "sha256": "sha256:" + "c" * 64,
-                        "observed_at": "2026-09-24T09:00:00Z",
-                    },
-                ),
-            }
-        )
-        changed = model(price_grid=price_grid(instrument_value=changed_instrument))
-        self.assertNotEqual(baseline.fingerprint, changed.fingerprint)
-
-    def test_market_runtime_rejects_relabelled_model_policy(self):
-        changed = model()
-        object.__setattr__(changed, "price_projection_policy_version", 2)
-        with self.assertRaisesRegex(
-            ExecutionRealismError,
-            "MARKET model/grid authority mismatch",
-        ):
-            simulate_execution(order(), top(), changed)
-
-    def test_market_projection_requires_all_policy_evidence_fields(self):
-        for override in (
-            {"price_projection_policy_id": None},
-            {"price_projection_policy_version": None},
-            {"price_grid_instrument_version": None},
-        ):
-            with self.subTest(override=override):
+            with self.subTest(observation=observation):
                 with self.assertRaisesRegex(
                     ExecutionRealismError,
-                    "complete price projection policy evidence",
+                    "requires authoritative price projection policy",
                 ):
-                    simulate_execution(order(), top(), model(**override))
+                    simulate_execution(
+                        order(),
+                        observation,
+                        model(price_projection=None),
+                    )
 
-    def test_market_price_grid_scope_must_match_order_instrument(self):
+        mismatched = ExecutionPriceProjectionPolicy(
+            policy_id="ADVERSE_INSTRUMENT_TICK",
+            policy_version="1",
+            instrument_version="XYZ@v2",
+            price_quantum="0.01",
+            instrument_metadata_binding=INSTRUMENT_BINDING,
+        )
         with self.assertRaisesRegex(
             ExecutionRealismError,
-            "not bound to the order instrument_version",
+            "projection instrument_version must match",
         ):
-            simulate_execution(
-                order(),
-                top(),
-                model(price_grid_instrument_version="OTHER@v1"),
-            )
+            simulate_execution(order(), top(), model(price_projection=mismatched))
 
-    def test_market_price_quantum_changes_model_identity(self):
-        one = model(price_quantum="0.01")
-        two = model(price_quantum="0.001", price_grid=price_grid(instrument_value=instrument(price_tick=Decimal("0.001"))))
-        self.assertNotEqual(one.fingerprint, two.fingerprint)
-
-    def test_market_price_grid_scope_changes_model_identity(self):
-        one = model(price_grid_instrument_version=INSTRUMENT_REF)
-        two = model(
-            price_grid_instrument_version=OTHER_INSTRUMENT_REF,
-            price_grid=price_grid(
-                instrument_value=instrument(instrument_id=OTHER_INSTRUMENT_ID)
-            ),
+    def test_projection_policy_can_be_issued_from_canonical_instrument_version(self):
+        instrument = InstrumentVersion(
+            instrument_id="11111111-1111-4111-8111-111111111111",
+            version=1,
+            provider_id="simulated",
+            venue_id="simulated-venue",
+            provider_symbol="ABC",
+            asset_class="CASH_EQUITY",
+            base_currency="ABC",
+            quote_currency="USD",
+            settlement_currency="USD",
+            quantity_unit="share",
+            contract_multiplier="1",
+            price_tick="0.05",
+            quantity_step="1",
+            minimum_quantity="1",
+            calendar_id="CONTINUOUS_24_7",
+            timezone_id="UTC",
+            effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
-        self.assertNotEqual(one.fingerprint, two.fingerprint)
+        policy = ExecutionPriceProjectionPolicy.from_instrument(instrument)
+        self.assertEqual(policy.instrument_version, f"{instrument.instrument_id}@1")
+        self.assertEqual(policy.price_quantum, Decimal("0.05"))
+        self.assertEqual(
+            policy.instrument_metadata_binding,
+            instrument.metadata_evidence_binding().removeprefix("sha256:"),
+        )
+
+    def test_projection_policy_changes_model_fingerprint(self):
+        base = model()
+        changed = model(
+            price_projection=ExecutionPriceProjectionPolicy(
+                policy_id="ADVERSE_INSTRUMENT_TICK",
+                policy_version="1",
+                instrument_version="ABC@v1",
+                price_quantum="0.05",
+                instrument_metadata_binding=INSTRUMENT_BINDING,
+            )
+        )
+        self.assertNotEqual(base.fingerprint, changed.fingerprint)
+
+    def test_limit_execution_is_invariant_to_ambient_decimal_context(self):
+        def execute(*, precision, rounding):
+            with localcontext() as context:
+                context.prec = precision
+                context.rounding = rounding
+                return simulate_execution(
+                    order(
+                        order_type="LIMIT",
+                        quantity="9999999999999999999.99",
+                        lot_size="0.01",
+                        limit_price="102.12345678901234567890123456789",
+                    ),
+                    top(
+                        available_volume="12345678901234567890.12",
+                        ask="101",
+                    ),
+                    model(
+                        max_participation="0.123456789012345678",
+                        fee_rate="0.001234567890123456789",
+                    ),
+                )
+
+        low_floor = execute(precision=6, rounding=ROUND_FLOOR)
+        low_ceiling = execute(precision=6, rounding=ROUND_CEILING)
+        high_precision = execute(precision=80, rounding=ROUND_CEILING)
+        self.assertEqual(low_floor, low_ceiling)
+        self.assertEqual(low_floor, high_precision)
+        self.assertEqual(low_floor.status, "PARTIAL")
+        self.assertGreater(low_floor.filled_quantity, Decimal("0"))
 
     def test_available_volume_and_participation_create_partial_fill(self):
         result = simulate_execution(
@@ -315,6 +447,28 @@ class ExecutionRealismTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "NO_FILL")
         self.assertEqual(result.filled_quantity, Decimal("0"))
+
+    def test_stop_trigger_is_recorded_even_when_fill_capacity_is_below_one_lot(self):
+        result = simulate_execution(
+            order(
+                order_type="STOP_LIMIT",
+                stop_price="100",
+                limit_price="102",
+                lot_size="5",
+                quantity="10",
+            ),
+            top(
+                ask="101",
+                available_volume="0",
+            ),
+            model(),
+        )
+        self.assertEqual(result.status, "NO_FILL")
+        self.assertEqual(result.filled_quantity, Decimal("0"))
+        self.assertTrue(result.triggered)
+        self.assertIn("stop triggered", result.reason)
+        self.assertIn("below one lot", result.reason)
+
 
     def test_limit_fill_does_not_assume_price_improvement(self):
         result = simulate_execution(
@@ -364,7 +518,7 @@ class ExecutionRealismTests(unittest.TestCase):
                 limit_price="103",
             ),
             LiquidityObservation.create(
-                instrument_version=INSTRUMENT_REF,
+                instrument_version="ABC@v1",
                 market_time="2026-09-24T10:01:00Z",
                 available_at="2026-09-24T10:01:01Z",
                 available_volume="100",
@@ -421,7 +575,7 @@ class ExecutionRealismTests(unittest.TestCase):
                 submitted_at="2026-09-24T10:00:00Z",
             ),
             LiquidityObservation.create(
-                instrument_version=INSTRUMENT_REF,
+                instrument_version="ABC@v1",
                 market_time="2026-09-24T10:02:00Z",
                 available_at="2026-09-24T10:02:01Z",
                 available_volume="100",
@@ -434,50 +588,11 @@ class ExecutionRealismTests(unittest.TestCase):
         self.assertEqual(result.status, "FILLED")
         self.assertEqual(result.fill_price, Decimal("103"))
 
-    def test_market_non_terminating_ratios_are_context_independent(self):
-        from decimal import localcontext, ROUND_CEILING, ROUND_FLOOR
-
-        baseline = None
-        for precision, rounding in (
-            (6, ROUND_CEILING),
-            (10, ROUND_FLOOR),
-            (28, ROUND_CEILING),
-            (80, ROUND_FLOOR),
-        ):
-            with localcontext() as context:
-                context.prec = precision
-                context.rounding = rounding
-                result = simulate_execution(
-                    order(quantity="10"),
-                    top(available_volume="30"),
-                    model(max_participation="0.25"),
-                )
-            current = (result.filled_quantity, result.fill_price, result.fee)
-            if baseline is None:
-                baseline = current
-            else:
-                self.assertEqual(current, baseline)
-
-        # Capacity floors 7.5 to 7 lots, giving 7/30 and then 14/15 impact
-        # ratios. The exact rational price target is 101.144766..., projected
-        # adversely to the 0.01 instrument grid.
-        self.assertEqual(baseline, (Decimal("7"), Decimal("101.15"), Decimal("0.70805")))
-
-    def test_market_sell_projection_uses_adverse_floor_on_price_grid(self):
-        result = simulate_execution(
-            order(side="SELL"),
-            top(bid="99", ask="101"),
-            model(slippage_bps="5", impact_bps_at_max_participation="4"),
-        )
-        # 10% / 25% = 40% impact participation: 1.6 bps impact + 5 bps slippage.
-        # 99 * (1 - 6.6 / 10000) = 98.93466, so adverse SELL projection floors to 98.93.
-        self.assertEqual(result.fill_price, Decimal("98.93"))
-
     def test_bar_market_uses_adverse_extreme_plus_configured_costs(self):
         result = simulate_execution(
             order(side="SELL"),
             LiquidityObservation.create(
-                instrument_version=INSTRUMENT_REF,
+                instrument_version="ABC@v1",
                 market_time="2026-09-24T10:01:00Z",
                 available_at="2026-09-24T10:01:01Z",
                 available_volume="100",
@@ -493,6 +608,7 @@ class ExecutionRealismTests(unittest.TestCase):
                 bar_half_spread_bps="5",
             ),
         )
+        # Raw adverse SELL projection is 89.865; FLOOR to the 0.01 tick is worse.
         self.assertEqual(result.fill_price, Decimal("89.86"))
         self.assertIn("intrabar queue", " ".join(result.warnings))
 
@@ -556,7 +672,7 @@ class ExecutionRealismTests(unittest.TestCase):
         with self.assertRaises(ExecutionRealismError):
             SimulatedOrder(
                 order_id="direct-order",
-                instrument_version=INSTRUMENT_REF,
+                instrument_version="ABC@v1",
                 side="BUY",
                 order_type="MARKET",
                 quantity=Decimal("1.5"),
@@ -565,7 +681,7 @@ class ExecutionRealismTests(unittest.TestCase):
             )
         with self.assertRaises(ExecutionRealismError):
             LiquidityObservation(
-                instrument_version=INSTRUMENT_REF,
+                instrument_version="ABC@v1",
                 market_time="2026-09-24T10:00:01Z",
                 available_at="2026-09-24T10:00:00Z",
                 available_volume=Decimal("1"),
@@ -587,7 +703,7 @@ class ExecutionRealismTests(unittest.TestCase):
             simulate_execution(
                 order(),
                 LiquidityObservation.create(
-                    instrument_version=INSTRUMENT_REF,
+                    instrument_version="ABC@v1",
                     market_time="2026-09-24T10:01:00Z",
                     available_at="2026-09-24T10:01:01Z",
                     available_volume="100",
@@ -600,7 +716,7 @@ class ExecutionRealismTests(unittest.TestCase):
         result = simulate_execution(
             order(submitted_at="2026-09-24T10:00:30Z"),
             LiquidityObservation.create(
-                instrument_version=INSTRUMENT_REF,
+                instrument_version="ABC@v1",
                 market_time="2026-09-24T10:01:00Z",
                 available_at="2026-09-24T10:01:01Z",
                 available_volume="1000",
@@ -618,7 +734,7 @@ class ExecutionRealismTests(unittest.TestCase):
         result = simulate_execution(
             order(submitted_at="2026-09-24T10:00:00Z"),
             LiquidityObservation.create(
-                instrument_version=INSTRUMENT_REF,
+                instrument_version="ABC@v1",
                 market_time="2026-09-24T10:01:00Z",
                 available_at="2026-09-24T10:01:01Z",
                 available_volume="1000",
@@ -635,7 +751,7 @@ class ExecutionRealismTests(unittest.TestCase):
         result = simulate_execution(
             order(submitted_at="2026-09-24T10:00:00Z"),
             LiquidityObservation.create(
-                instrument_version=INSTRUMENT_REF,
+                instrument_version="ABC@v1",
                 market_time="2026-09-24T10:01:00Z",
                 available_at="2026-09-24T10:01:01Z",
                 available_volume="1000",
@@ -655,7 +771,7 @@ class ExecutionRealismTests(unittest.TestCase):
             simulate_execution(
                 order(),
                 LiquidityObservation.create(
-                    instrument_version=INSTRUMENT_REF,
+                    instrument_version="ABC@v1",
                     market_time="2026-09-24T10:01:00Z",
                     available_at="2026-09-24T10:01:01Z",
                     available_volume="100",

@@ -62,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-22.04, windows-2025]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -93,7 +93,7 @@ jobs:
           if-no-files-found: error
 
   desktop-build:
-    runs-on: windows-latest
+    runs-on: windows-2025
     env:
       NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
     steps:

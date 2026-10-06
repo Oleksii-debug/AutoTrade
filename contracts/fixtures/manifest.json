@@ -62,6 +62,15 @@
         "csharp",
         "typescript"
       ]
+    },
+    {
+      "path": "contract-shapes.corpus.json",
+      "scope": "closed-object-shape-subset",
+      "languages": [
+        "python",
+        "csharp",
+        "typescript"
+      ]
     }
   ]
 }

@@ -53,12 +53,9 @@ class SequenceConflict(MarketDataError):
 
 
 def _text(value: str, field: str) -> str:
-    if type(value) is not str:
-        raise MarketDataError(f"{field} must be an exact string")
-    normalized = value.strip()
-    if not normalized:
+    if not isinstance(value, str) or not value.strip():
         raise MarketDataError(f"{field} is required")
-    return normalized
+    return value.strip()
 
 
 def _admission_text(value: object, field: str) -> str:
@@ -115,18 +112,12 @@ def _book_causal_text(value: object, field: str) -> str:
 
 
 def _admission_instant(value: object, field: str) -> datetime:
-    """Normalize one exact datetime without executing caller timezone code."""
+    """Normalize one exact datetime without retaining caller timezone authority."""
 
-    if type(value) is not datetime:
+    if type(value) is not datetime or value.tzinfo is None:
         raise MarketDataError(f"{field} must be an exact timezone-aware datetime")
-    if type(value.tzinfo) is not timezone:
-        raise MarketDataError(
-            f"{field} must use an exact datetime with a built-in timezone"
-        )
-    if datetime.utcoffset(value) is None:
-        raise MarketDataError(f"{field} must be timezone-aware")
     try:
-        normalized = datetime.astimezone(value, timezone.utc)
+        normalized = value.astimezone(timezone.utc)
     except (OverflowError, ValueError, TypeError) as error:
         raise MarketDataError(
             f"{field} must have a deterministic timezone"
@@ -147,7 +138,9 @@ def _admission_sequence(value: object, field: str) -> int | None:
 
 
 def _instant(value: datetime, field: str) -> datetime:
-    return _admission_instant(value, field)
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise MarketDataError(f"{field} must be timezone-aware")
+    return value.astimezone(timezone.utc)
 
 
 def _sequence(value: int | None, field: str) -> int | None:
@@ -182,7 +175,7 @@ def _decimal_text(value: Decimal) -> str:
 
 
 def _utc_text(value: datetime) -> str:
-    return _admission_instant(value, "timestamp").isoformat().replace("+00:00", "Z")
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _canonical(value: Any) -> str:
@@ -516,12 +509,12 @@ class MarketNormalizer:
         max_retained_book_events_per_stream: int = _MAX_RETAINED_BOOK_EVENTS_PER_STREAM,
         book_stream_policies: tuple[BookStreamPolicyBinding, ...] = (),
     ) -> None:
-        if type(registry) is not InstrumentRegistry:
-            raise TypeError("registry must be an exact InstrumentRegistry")
-        if type(max_available_age) is not timedelta or max_available_age <= timedelta(0):
-            raise MarketDataError("max_available_age must be an exact positive timedelta")
-        if type(max_book_age) is not timedelta or max_book_age <= timedelta(0):
-            raise MarketDataError("max_book_age must be an exact positive timedelta")
+        if not isinstance(registry, InstrumentRegistry):
+            raise TypeError("registry must be InstrumentRegistry")
+        if not isinstance(max_available_age, timedelta) or max_available_age <= timedelta(0):
+            raise MarketDataError("max_available_age must be positive")
+        if not isinstance(max_book_age, timedelta) or max_book_age <= timedelta(0):
+            raise MarketDataError("max_book_age must be positive")
         if type(max_book_levels_per_side) is not int or max_book_levels_per_side <= 0:
             raise MarketDataError("max_book_levels_per_side must be an exact positive integer")
         if (

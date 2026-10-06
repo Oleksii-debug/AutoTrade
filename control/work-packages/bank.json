@@ -42,8 +42,8 @@
         "Exclusive mutation key: CONTRACT / core-schemas",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Canonical JSON Schema coverage now materializes common, event, instrument/market, information/dataset, decision/portfolio, authority/risk, execution, provider results, persistence/reconciliation, learning/science/jobs, model gateway and UI contracts; OpenAPI host entrypoint and common fixtures committed. Remaining WP-01 work: cross-language generated bindings/corpus equivalence, OpenAPI validation/codegen and version-change enforcement. Finalization repaired invalid execution JSON and added whole-schema reference resolution; no generated binding completion claimed."
+      "proposed_status": "DONE",
+      "status_note": "DONE on main via PR #1440, merge commit 57f1064fbdf0e13ecdf563da6f0ebdbf3ab0131a. Canonical contract v6 (6.0.0) now includes complete JSON Schema/OpenAPI authority, cross-language Python/C#/TypeScript conformance corpora (51 common-scalar cases, 13 DatasetManifest semantic cases, 201 closed-object shape cases across 48 definitions), major-version breaking-change enforcement, exact-numeric package identity 0.0.2, Host canonical Sequence contract/runtime convergence, MarketEvent adapter-build identity, and exact-head CI evidence generation that records source SHA, input/schema versions, tested commands and unresolved qualification limits. Historical duplicate Section-1 lineages were superseded by #1440."
     },
     {
       "id": "WP-02",

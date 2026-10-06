@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp import simulation_session as session
+from mvp.autotrade_mvp import authority as authority_module
 from mvp.autotrade_mvp.cli import get_economic_report, get_status, main
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
@@ -25,6 +26,19 @@ from research.autotrade_research.artifacts.store import ArtifactStore
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = "TWO_EQUAL_PARTIALS"
 PRICES = ["100", "101", "103", "90", "110", "120", "121"]
+
+
+class _ClockType(type):
+    def __instancecheck__(cls, value):
+        return isinstance(value, datetime)
+
+
+class _NoWallClock(metaclass=_ClockType):
+    fromisoformat = staticmethod(datetime.fromisoformat)
+
+    @staticmethod
+    def now(*args, **kwargs):
+        raise AssertionError("simulated policy cannot read physical time")
 
 
 def run(directory, prices=PRICES, **kwargs):
@@ -45,19 +59,19 @@ def owners(directory):
 class AutonomousPartialFillLoopTests(unittest.TestCase):
     def test_each_partial_atomically_consumes_only_its_cash_and_creates_its_settlement(self):
         with TemporaryDirectory() as directory, patch.object(session, "INITIAL_CASH", Decimal("500")):
-            original = session.commit_provider_fill_with_reservation_consumption
+            original = session.commit_order_fill_with_reservation_consumption
             intermediate = []
 
             def capture(*args, **kwargs):
                 result = original(*args, **kwargs)
                 store, economic, orders, reservations, settlements = owners(directory)
                 intermediate.append((economic.cash("USD"), economic.position(session.INSTRUMENT),
-                    orders.order(kwargs["projected_fill"].client_order_id).state,
+                    orders.order(kwargs["client_order_id"]).state,
                     reservations.get(kwargs["reservation_id"]).remaining["CASH:USD"],
                     len(settlements.obligations)))
                 return result
 
-            with patch.object(session, "commit_provider_fill_with_reservation_consumption", capture):
+            with patch.object(session, "commit_order_fill_with_reservation_consumption", capture):
                 run(directory, PRICES, stop_after_episodes=4, execution_profile=PROFILE)
             self.assertEqual(intermediate, [
                 (Decimal("396.897"), Decimal("1"), "PARTIALLY_FILLED", Decimal("103.103"), 1),
@@ -94,13 +108,13 @@ class AutonomousPartialFillLoopTests(unittest.TestCase):
                 program = '''
 import os, sys
 from mvp.autotrade_mvp import simulation_session as session
-original = session.commit_provider_fill_with_reservation_consumption
+original = session.commit_order_fill_with_reservation_consumption
 def crash(*args, **kwargs):
     result = original(*args, **kwargs)
     if kwargs["order_event_key"].endswith(":" + sys.argv[2] + ":part:1:fill"):
         os._exit(23)
     return result
-session.commit_provider_fill_with_reservation_consumption = crash
+session.commit_order_fill_with_reservation_consumption = crash
 session.run_autonomous_simulation(["100", "101", "103", "90", "110", "120", "121"], sys.argv[1],
     run_id="acceptance", now="2026-10-03T00:00:00Z", execution_profile="TWO_EQUAL_PARTIALS", target_quantity="2")
 '''
@@ -153,6 +167,33 @@ session.run_autonomous_simulation(["100", "101", "103", "90", "110", "120", "121
                 actual = run(partial, PRICES, execution_profile=PROFILE)
             self.assertEqual((actual["cash"], actual["position"]), (expected["cash"], expected["position"]))
             self.assertEqual(get_economic_report(partial), get_economic_report(full))
+
+    def test_policy_registration_uses_frozen_time_and_matches_after_restart(self):
+        original_register = session.AuthorityService.register_policy
+
+        def guarded_register(service, policy, **kwargs):
+            if service.store is not None:
+                with patch.object(authority_module, "datetime", _NoWallClock):
+                    return original_register(service, policy, **kwargs)
+            # An in-memory validation probe emits no durable policy event.
+            return original_register(service, policy, **kwargs)
+
+        for profile in ("IMMEDIATE", PROFILE):
+            with self.subTest(profile=profile), TemporaryDirectory() as full, TemporaryDirectory() as resumed:
+                with patch.object(session.AuthorityService, "register_policy", guarded_register):
+                    run(full, PRICES, execution_profile=profile)
+                    run(resumed, PRICES, stop_after_episodes=4, execution_profile=profile)
+                    run(resumed, PRICES, execution_profile=profile)
+                def registrations(directory):
+                    return [(event["event_id"], event["committed_at"], event["payload_hash"])
+                            for event in owners(directory)[0].load_events_by_aggregate_type("authority_state")
+                            if event["event_type"] == "AuthorityPolicyRegistered"]
+                expected = registrations(full)
+                self.assertEqual(expected, registrations(resumed))
+                self.assertEqual([timestamp for _, timestamp, _ in expected], [
+                    "2026-10-03T00:00:02.000001Z", "2026-10-03T00:00:03.000001Z",
+                    "2026-10-03T00:00:05.000001Z",
+                ])
 
     def test_invalid_frozen_quantity_or_profile_is_rejected_before_state_creation(self):
         for profile, quantity in ((PROFILE, "1"), (PROFILE, "3"), ("UNKNOWN", "2"),

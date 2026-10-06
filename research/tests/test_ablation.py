@@ -768,6 +768,103 @@ class AblationTests(unittest.TestCase):
                 )
         self.assertEqual(calls, [])
 
+    def test_unissued_qualification_authority_cannot_resolve(self):
+        rogue = object.__new__(AblationQualificationAuthority)
+        with self.assertRaisesRegex(ValueError, "not issued by the canonical constructor"):
+            rogue.resolve([], outcome_refs=[])
+
+    def test_qualification_authority_rejects_post_issuance_identity_retargeting(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def issued():
+                science = ScientificRegistry(root / "science.sqlite3")
+                memory = ExperienceMemory(root / "memory.sqlite3")
+                artifacts = ArtifactStore(root / "artifacts")
+                authority = AblationQualificationAuthority(
+                    scientific_registry=science,
+                    experience_memory=memory,
+                    artifact_store=artifacts,
+                    protocol_id="11111111-1111-4111-8111-111111111111",
+                    protocol_hash=FINGERPRINT_A,
+                    source_revision="9" * 40,
+                    causal_cutoff=CUT,
+                    granted_permissions={"RESEARCH"},
+                    task="ablation-qualification",
+                    instrument_family="EQUITY",
+                )
+                return authority, science, memory, artifacts
+
+            authority, _science, _memory, _artifacts = issued()
+            object.__setattr__(
+                authority,
+                "protocol_id",
+                "22222222-2222-4222-8222-222222222222",
+            )
+            with self.assertRaisesRegex(ValueError, "protocol binding changed"):
+                authority.resolve([], outcome_refs=[])
+
+            authority, _science, _memory, _artifacts = issued()
+            authority.granted_permissions.add("OTHER")
+            with self.assertRaisesRegex(ValueError, "permissions changed"):
+                authority.resolve([], outcome_refs=[])
+
+            authority, _science, _memory, _artifacts = issued()
+            replacement = ScientificRegistry(root / "replacement-science.sqlite3")
+            object.__setattr__(authority, "scientific_registry", replacement)
+            with self.assertRaisesRegex(ValueError, "registry binding changed"):
+                authority.resolve([], outcome_refs=[])
+
+    def test_qualification_authority_rejects_owner_path_or_method_retargeting(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def issued():
+                science = ScientificRegistry(root / "science.sqlite3")
+                memory = ExperienceMemory(root / "memory.sqlite3")
+                artifacts = ArtifactStore(root / "artifacts")
+                authority = AblationQualificationAuthority(
+                    scientific_registry=science,
+                    experience_memory=memory,
+                    artifact_store=artifacts,
+                    protocol_id="11111111-1111-4111-8111-111111111111",
+                    protocol_hash=FINGERPRINT_A,
+                    source_revision="9" * 40,
+                    causal_cutoff=CUT,
+                    granted_permissions={"RESEARCH"},
+                )
+                return authority, science, memory, artifacts
+
+            authority, science, _memory, _artifacts = issued()
+            science.path = root / "retargeted-science.sqlite3"
+            with self.assertRaisesRegex(ValueError, "database path changed after issuance"):
+                authority.resolve([], outcome_refs=[])
+
+            authority, science, _memory, _artifacts = issued()
+            science.protocol_registration = lambda _protocol_id: None
+            with self.assertRaisesRegex(ValueError, "shadows canonical methods"):
+                authority.resolve([], outcome_refs=[])
+
+    def test_qualification_authority_rejects_memory_correction_retargeting(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            science = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            authority = AblationQualificationAuthority(
+                scientific_registry=science,
+                experience_memory=memory,
+                artifact_store=artifacts,
+                protocol_id="11111111-1111-4111-8111-111111111111",
+                protocol_hash=FINGERPRINT_A,
+                source_revision="9" * 40,
+                causal_cutoff=CUT,
+                granted_permissions={"RESEARCH"},
+            )
+            memory._correction_evidence_resolver = lambda *_args, **_kwargs: None
+            with self.assertRaisesRegex(ValueError, "correction authority changed"):
+                authority.resolve([], outcome_refs=[])
+
     def test_pair_rejects_noncanonical_outcome_type_before_field_access(self):
         calls = []
 

@@ -1378,8 +1378,9 @@ def unknown_submissions_from_dispatch(
     SubmissionSending is ambiguous after a crash because the external request may
     already have crossed the final send barrier. SubmissionUnknown is explicitly
     ambiguous. Neither state is converted to retry authority here. `aggregate_ids`
-    lets callers bind a logical attempt id to the exact durable aggregate identity
-    used by a scoped dispatcher, without duplicating dispatch identity logic.
+    is only a locator for a durable aggregate; it cannot bind or relabel logical
+    attempt identity. Current rows prove that identity with SubmissionPrepared
+    attempt_id, while legacy rows may only use their original aggregate identity.
     """
 
     require_exact_journal_store_authority(
@@ -1425,7 +1426,12 @@ def unknown_submissions_from_dispatch(
     recovered: list[UnknownSubmission] = []
     for attempt_id in normalized:
         aggregate_id = durable_ids.get(attempt_id, attempt_id)
-        events = _journal_store_call(store, "load_events", "submission_attempt", aggregate_id)
+        events = _journal_store_call(
+            store,
+            "load_events",
+            "submission_attempt",
+            aggregate_id,
+        )
         if not events:
             raise KeyError(f"Unknown submission attempt: {attempt_id}")
         first = events[0]
@@ -1436,27 +1442,48 @@ def unknown_submissions_from_dispatch(
         payload = first["payload"]
         if not isinstance(payload, Mapping):
             raise ValueError("SubmissionPrepared payload must be an object")
-        provider_id = _text(
-            payload.get("provider"), name="provider"
-        ).upper()
-        account_id = _text(
-            payload.get("account_id"), name="account_id"
+
+        # The caller-supplied aggregate map is a locator only. Modern dispatch
+        # rows carry the logical attempt identity in SubmissionPrepared and must
+        # agree exactly with the requested identity. Historical rows without
+        # that field remain readable only through their original aggregate id.
+        if "attempt_id" in payload:
+            durable_attempt_id = _text(
+                payload.get("attempt_id"),
+                name="SubmissionPrepared.attempt_id",
+            )
+            if durable_attempt_id != attempt_id:
+                raise ValueError(
+                    "SubmissionPrepared durable attempt_id does not match "
+                    "requested attempt identity"
+                )
+        elif aggregate_ids is not None and aggregate_id != attempt_id:
+            raise ValueError(
+                "legacy SubmissionPrepared without durable attempt_id "
+                "cannot be remapped"
+            )
+
+        provider_id = _text(payload.get("provider"), name="provider").upper()
+        durable_account_id = _text(
+            payload.get("account_id"),
+            name="account_id",
         )
         durable_environment = _text(
-            payload.get("environment"), name="environment"
+            payload.get("environment"),
+            name="environment",
         ).upper()
         if scoped_lookup and (
             durable_environment != lookup_environment
-            or account_id != lookup_account
+            or durable_account_id != lookup_account
         ):
             raise ValueError(
                 "SubmissionPrepared durable scope does not match requested scope"
             )
-        environment = durable_environment
-        intent_id = _text(
-            payload.get("intent_id"), name="intent_id"
-        )
-        if _text(first.get("environment"), name="event.environment").upper() != environment:
+        intent_id = _text(payload.get("intent_id"), name="intent_id")
+        if (
+            _text(first.get("environment"), name="event.environment").upper()
+            != durable_environment
+        ):
             raise ValueError(
                 "SubmissionPrepared envelope environment does not match payload"
             )
@@ -1464,6 +1491,41 @@ def unknown_submissions_from_dispatch(
             payload.get("client_order_id"),
             name="client_order_id",
         )
+
+        # Every later possible-send event must remain on the same durable
+        # aggregate/environment/client-order identity as SubmissionPrepared.
+        # The last event alone is insufficient because an injected intermediate
+        # row must not disappear from the reconstruction authority chain.
+        for event in events[1:]:
+            event_type = _text(event.get("event_type"), name="event_type")
+            if (
+                _text(event.get("aggregate_id"), name="event.aggregate_id")
+                != aggregate_id
+            ):
+                raise ValueError(
+                    "submission event aggregate identity does not match selected attempt"
+                )
+            if (
+                _text(event.get("environment"), name="event.environment").upper()
+                != durable_environment
+            ):
+                raise ValueError(
+                    "submission event environment does not match SubmissionPrepared"
+                )
+            event_payload = event.get("payload")
+            if not isinstance(event_payload, Mapping):
+                raise ValueError(f"{event_type} payload must be an object")
+            if (
+                _text(
+                    event_payload.get("client_order_id"),
+                    name=f"{event_type}.client_order_id",
+                )
+                != client_order_id
+            ):
+                raise ValueError(
+                    "submission event client_order_id does not match SubmissionPrepared"
+                )
+
         started_at = _instant(
             payload.get("prepared_at"),
             name="prepared_at",
@@ -1476,8 +1538,8 @@ def unknown_submissions_from_dispatch(
                     intent_id=intent_id,
                     client_order_id=client_order_id,
                     provider_id=provider_id,
-                    account_id=account_id,
-                    environment=environment,
+                    account_id=durable_account_id,
+                    environment=durable_environment,
                     started_at=started_at,
                 )
             )

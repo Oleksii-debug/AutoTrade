@@ -10,6 +10,7 @@ import weakref
 from unittest.mock import patch
 
 import mvp.autotrade_mvp.authority as authority_module
+import mvp.autotrade_mvp.reconciliation_journal as reconciliation_journal_module
 from mvp.autotrade_mvp.accounting import book_external_cash_flow
 from mvp.autotrade_mvp.authority import (
     AuthoritativeRiskSnapshot,
@@ -1906,7 +1907,23 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     "evidence_refs"
                 ] = bad_refs
 
-                with patch.object(JournalStore, "get_event", return_value=tampered):
+                original_call = reconciliation_journal_module._journal_store_call
+
+                def tampered_call(selected_store, operation_name, *args, **kwargs):
+                    if operation_name == "get_event":
+                        return deepcopy(tampered)
+                    return original_call(
+                        selected_store,
+                        operation_name,
+                        *args,
+                        **kwargs,
+                    )
+
+                with patch.object(
+                    reconciliation_journal_module,
+                    "_journal_store_call",
+                    new=tampered_call,
+                ):
                     with self.assertRaisesRegex(
                         ValueError,
                         "resource availability evidence_refs",

@@ -675,6 +675,22 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
         )
         return journal, durable
 
+    def test_prepared_mutation_uses_detached_issued_action_snapshot(self):
+        accepted = self._accepted()
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            _journal, durable = self._store(path)
+            plan = durable.prepare_record_mutation(accepted)
+
+        self.assertIsNot(plan.accepted, accepted)
+        self.assertIsNot(plan.accepted.event, accepted.event)
+        self.assertEqual(plan.accepted, accepted)
+
+        accepted.event.payload["per_share"] = "999"
+        object.__setattr__(accepted, "provider_revision", "forged-revision")
+        self.assertEqual(plan.accepted.provider_revision, "1")
+        self.assertEqual(plan.accepted.event.payload["per_share"], "1.25")
+
     def test_module_global_decoys_cannot_mint_or_verify_corporate_action_authority(self):
         decoy_calls = []
         corporate_action_evidence_module._register_authoritative_corporate_action = (

@@ -24,7 +24,12 @@ from .allocation import (
 from .durable_reservations import DurableReservationBook
 from .durable_settlement import DurableSettlementBook
 from .exact_decimal import exact_add, exact_subtract, exact_abs
-from .instruments import InstrumentRegistry, InstrumentRegistryError, InstrumentVersion
+from .instruments import (
+    InstrumentRegistry,
+    InstrumentRegistryError,
+    InstrumentVersion,
+    _registry_versions_for as _instrument_registry_versions_for,
+)
 from .provider_activity_accounting import DurableProviderEconomicBook
 from .persistence import (
     JournalStore,
@@ -596,7 +601,7 @@ def _authority_service_instrument_operations():
     registry_type = InstrumentRegistry
     version_type = InstrumentVersion
     registry_error = InstrumentRegistryError
-    exact_lookup = InstrumentRegistry.exact
+    registry_versions_for = _instrument_registry_versions_for
     states: dict[
         int,
         tuple[weakref.ReferenceType, weakref.ReferenceType | None],
@@ -664,23 +669,25 @@ def _authority_service_instrument_operations():
         registry = binding(service, required=True)
         assert registry is not None
         try:
-            version = exact_lookup(
-                registry,
-                f"{identity.instrument_id}@{identity.version}",
-            )
+            versions = registry_versions_for(registry, identity.instrument_id)
         except registry_error as error:
             raise AuthorityConflict(
                 "financial borrow authority cannot resolve canonical instrument version"
             ) from error
-        if (
-            type(version) is not version_type
-            or version.instrument_id != identity.instrument_id
-            or version.version != identity.version
-        ):
+        matches = tuple(
+            version
+            for version in versions
+            if (
+                type(version) is version_type
+                and version.instrument_id == identity.instrument_id
+                and version.version == identity.version
+            )
+        )
+        if len(matches) != 1:
             raise AuthorityConflict(
                 "canonical instrument registry returned mismatched instrument identity"
             )
-        return version
+        return matches[0]
 
     return register, binding, resolve
 

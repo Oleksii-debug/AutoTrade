@@ -1029,6 +1029,70 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertEqual(list(root.glob("journal.sqlite3*")), [])
 
 
+    def test_resume_rejects_orphan_durable_order_intent_before_mutation(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            checkpoint_before = (root / "checkpoint.json").read_bytes()
+            evidence_before = (root / "learning-evidence.jsonl").read_bytes()
+            journal_before = (root / "journal.sqlite3").read_bytes()
+            intents = root / "order-intents"
+            original_intent = next(intents.glob("*.json"))
+            orphan = intents / ("intent-" + "f" * 20 + ".json")
+            orphan.write_bytes(original_intent.read_bytes())
+            orphan_before = orphan.read_bytes()
+
+            self.assertFalse(verify_replay(directory))
+            with self.assertRaisesRegex(
+                ValueError,
+                "Durable order intents do not match checkpoint fills",
+            ):
+                run_vertical_slice([103, 102, 101, 100], directory)
+
+            self.assertEqual((root / "checkpoint.json").read_bytes(), checkpoint_before)
+            self.assertEqual(
+                (root / "learning-evidence.jsonl").read_bytes(),
+                evidence_before,
+            )
+            self.assertEqual((root / "journal.sqlite3").read_bytes(), journal_before)
+            self.assertEqual(orphan.read_bytes(), orphan_before)
+
+    def test_crash_after_durable_intent_fails_closed_on_resume(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(
+                SimulatedProvider,
+                "execute",
+                side_effect=RuntimeError("forced provider interruption"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "forced provider interruption",
+                ):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
+            checkpoint_path = root / "checkpoint.json"
+            checkpoint_before = checkpoint_path.read_bytes()
+            checkpoint = json.loads(checkpoint_before)
+            self.assertEqual(checkpoint["fills"], {})
+            self.assertEqual(checkpoint["evidence_ids"], [])
+            intents = list((root / "order-intents").glob("*.json"))
+            self.assertEqual(len(intents), 1)
+            intent_before = intents[0].read_bytes()
+            self.assertFalse((root / "learning-evidence.jsonl").exists())
+            self.assertFalse((root / "journal.sqlite3").exists())
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Durable order intents do not match checkpoint fills",
+            ):
+                run_vertical_slice([103, 102, 101, 100], directory)
+
+            self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertEqual(intents[0].read_bytes(), intent_before)
+            self.assertFalse((root / "learning-evidence.jsonl").exists())
+            self.assertFalse((root / "journal.sqlite3").exists())
+
     def test_orphan_order_intent_temp_blocks_fresh_run_rebinding(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

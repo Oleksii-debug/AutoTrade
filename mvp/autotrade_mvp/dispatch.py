@@ -2517,12 +2517,23 @@ class GuardedDispatcher:
         snapshot_getattr = getattr
         snapshot_setattr = setattr
         snapshot_type = type
+        snapshot_isinstance = isinstance
         snapshot_tuple = tuple
         snapshot_dict = dict
         snapshot_len = len
         snapshot_module_globals = globals()
         snapshot_module_globals_get = snapshot_module_globals.get
         snapshot_module_globals_set = snapshot_module_globals.__setitem__
+        snapshot_module_globals_pop = snapshot_module_globals.pop
+        snapshot_builtin_missing = object()
+        snapshot_type_global = snapshot_module_globals_get(
+            "type",
+            snapshot_builtin_missing,
+        )
+        snapshot_isinstance_global = snapshot_module_globals_get(
+            "isinstance",
+            snapshot_builtin_missing,
+        )
         snapshot_code = snapshot_getattr(
             exact_response_snapshot,
             "__code__",
@@ -2987,6 +2998,21 @@ class GuardedDispatcher:
                 changed = True
             return changed
 
+        def restore_postsend_builtin_globals() -> None:
+            for name, expected in (
+                ("type", snapshot_type_global),
+                ("isinstance", snapshot_isinstance_global),
+            ):
+                current = snapshot_module_globals_get(
+                    name,
+                    snapshot_builtin_missing,
+                )
+                if expected is snapshot_builtin_missing:
+                    if current is not snapshot_builtin_missing:
+                        snapshot_module_globals_pop(name, None)
+                elif current is not expected:
+                    snapshot_module_globals_set(name, expected)
+
         exact_response_authority_changed = False
         try:
             try:
@@ -3000,6 +3026,7 @@ class GuardedDispatcher:
                     restore_exact_response_authority()
                     or exact_response_authority_changed
                 )
+                restore_postsend_builtin_globals()
             try:
                 require_dispatch_call_authority()
             except _DispatchAuthorityChanged:
@@ -3079,7 +3106,7 @@ class GuardedDispatcher:
                         version=3,
                         payload={
                             "client_order_id": client_order_id,
-                            "reason": f"transport_exception_after_send_barrier:{type(error).__name__}",
+                            "reason": f"transport_exception_after_send_barrier:{snapshot_type(error).__name__}",
                         },
                         now=barrier_now,
                     )
@@ -3120,7 +3147,7 @@ class GuardedDispatcher:
                     version=2,
                     payload={
                         "client_order_id": client_order_id,
-                        "reason": f"transport_failed_before_final_guard:{type(error).__name__}",
+                        "reason": f"transport_failed_before_final_guard:{snapshot_type(error).__name__}",
                     },
                     now=now,
                 )
@@ -3140,7 +3167,7 @@ class GuardedDispatcher:
                         "client_order_id": client_order_id,
                         "reason": (
                             "provider_wrapper_masked_final_guard_failure:"
-                            + type(error).__name__
+                            + snapshot_type(error).__name__
                         ),
                     },
                     now=barrier_now,
@@ -3228,7 +3255,7 @@ class GuardedDispatcher:
         terminal_requires_reconciliation = False
         terminal_reason = "sent_confirmed"
         try:
-            if type(response) is ExactJsonTransportResponse:
+            if snapshot_type(response) is exact_response_type:
                 # Revalidate raw exact state now. Frozen dataclass construction
                 # is not sufficient authority because object.__setattr__ can
                 # alter fields after __post_init__ and before transport returns.
@@ -3263,7 +3290,7 @@ class GuardedDispatcher:
                     )
                     sent_payload["reason"] = terminal_reason
                     sent_payload["retry_disposition"] = "RECONCILE_FIRST"
-            elif isinstance(response, ExactJsonTransportResponse):
+            elif snapshot_isinstance(response, exact_response_type):
                 # Caller-polymorphic post-SEND response getters are not evidence.
                 # A durable UNKNOWN retains the no-blind-retry property.
                 raise TypeError("exact provider response subtype is forbidden")
@@ -3302,7 +3329,7 @@ class GuardedDispatcher:
                         "client_order_id": client_order_id,
                         "reason": (
                             "sent_response_persistence_failed:"
-                            + type(persistence_error).__name__
+                            + snapshot_type(persistence_error).__name__
                         ),
                     },
                     now=barrier_now,

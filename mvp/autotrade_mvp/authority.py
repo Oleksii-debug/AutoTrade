@@ -79,6 +79,16 @@ def _text(value: str, *, name: str) -> str:
     return value.strip()
 
 
+def _authority_text(value: object, *, name: str) -> str:
+    """Detach authority-bearing text without invoking polymorphic callbacks."""
+
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact text")
+    if not value.strip():
+        raise ValueError(f"{name} is required")
+    return value.strip()
+
+
 def _instant(value: str, *, name: str) -> datetime:
     text = _text(value, name=name)
     try:
@@ -1415,25 +1425,60 @@ class RiskAuthorityRequest:
 
     def __post_init__(self) -> None:
         canonical_intent = _canonical_risk_intent(self.risk_intent)
-        account = _text(self.account_id, name="risk authority account_id")
-        environment = _text(
+        account = _authority_text(
+            self.account_id, name="risk authority account_id"
+        )
+        environment = _authority_text(
             self.environment, name="risk authority environment"
         ).upper()
         if environment not in {"SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("risk authority environment is unsupported")
-        provider = _text(
+        provider = _authority_text(
             self.provider_id, name="risk authority provider_id"
         ).upper()
+        provider_environment = None
+        entity_policy_id = None
+        instrument_family = None
         if self.resolved_risk_policy is not None:
             resolved = require_registry_issued_resolved_policy(self.resolved_risk_policy)
             scope = resolved.identity.scope
-            if (scope.provider_id, scope.account_id, scope.environment,
-                scope.provider_environment, scope.entity_policy_id, scope.instrument_family) != (
-                provider, account, environment, self.provider_environment,
-                self.entity_policy_id, self.instrument_family):
-                raise AuthorityConflict("resolved RiskPolicy scope differs from financial cut")
+            raw_provider_environment = _authority_text(
+                self.provider_environment,
+                name="risk authority provider_environment",
+            )
+            raw_entity_policy_id = _authority_text(
+                self.entity_policy_id,
+                name="risk authority entity_policy_id",
+            )
+            raw_instrument_family = _authority_text(
+                self.instrument_family,
+                name="risk authority instrument_family",
+            )
+            if (
+                scope.provider_id,
+                scope.account_id,
+                scope.environment,
+                scope.provider_environment,
+                scope.entity_policy_id,
+                scope.instrument_family,
+            ) != (
+                provider,
+                account,
+                environment,
+                raw_provider_environment,
+                raw_entity_policy_id,
+                raw_instrument_family,
+            ):
+                raise AuthorityConflict(
+                    "resolved RiskPolicy scope differs from financial cut"
+                )
+            provider_environment = scope.provider_environment
+            entity_policy_id = scope.entity_policy_id
+            instrument_family = scope.instrument_family
             if resolved.resolved_journal_sequence_cut != self.journal_sequence_cut:
-                raise AuthorityConflict("resolved RiskPolicy journal cut differs from financial cut")
+                raise AuthorityConflict(
+                    "resolved RiskPolicy journal cut differs from financial cut"
+                )
         elif any(value is not None for value in (
             self.provider_environment, self.entity_policy_id, self.instrument_family)):
             raise AuthorityConflict("provider-domain dimensions require resolved RiskPolicy authority")
@@ -1446,12 +1491,19 @@ class RiskAuthorityRequest:
             or self.authority_policy_version < 1
         ):
             raise ValueError("authority_policy_version must be positive")
-        evaluated = _text(self.evaluated_at, name="risk authority evaluated_at")
+        evaluated = _authority_text(
+            self.evaluated_at, name="risk authority evaluated_at"
+        )
         _instant(evaluated, name="risk authority evaluated_at")
         object.__setattr__(self, "risk_intent", canonical_intent)
         object.__setattr__(self, "account_id", account)
         object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "provider_id", provider)
+        object.__setattr__(
+            self, "provider_environment", provider_environment
+        )
+        object.__setattr__(self, "entity_policy_id", entity_policy_id)
+        object.__setattr__(self, "instrument_family", instrument_family)
         object.__setattr__(
             self,
             "instrument_version",
@@ -1463,7 +1515,7 @@ class RiskAuthorityRequest:
         object.__setattr__(
             self,
             "capability_snapshot_id",
-            _text(
+            _authority_text(
                 self.capability_snapshot_id,
                 name="risk authority capability_snapshot_id",
             ),
@@ -1471,7 +1523,7 @@ class RiskAuthorityRequest:
         object.__setattr__(
             self,
             "reconciliation_checkpoint_event_id",
-            _text(
+            _authority_text(
                 self.reconciliation_checkpoint_event_id,
                 name="risk authority reconciliation_checkpoint_event_id",
             ),
@@ -1479,7 +1531,7 @@ class RiskAuthorityRequest:
         object.__setattr__(
             self,
             "reservation_state_digest",
-            _text(
+            _authority_text(
                 self.reservation_state_digest,
                 name="risk authority reservation_state_digest",
             ),
@@ -1487,7 +1539,7 @@ class RiskAuthorityRequest:
         object.__setattr__(
             self,
             "authority_policy_id",
-            _text(
+            _authority_text(
                 self.authority_policy_id,
                 name="risk authority policy_id",
             ),
@@ -1584,25 +1636,60 @@ class AuthoritativeRiskSnapshot:
     def __post_init__(self) -> None:
         normalized_context = _canonical_risk_context(self.context)
         canonical_policy = canonical_risk_policy(self.risk_policy)
-        account = _text(self.account_id, name="authoritative risk account_id")
-        environment = _text(
+        account = _authority_text(
+            self.account_id, name="authoritative risk account_id"
+        )
+        environment = _authority_text(
             self.environment, name="authoritative risk environment"
         ).upper()
         if environment not in {"SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("authoritative risk environment is unsupported")
-        provider = _text(
+        provider = _authority_text(
             self.provider_id, name="authoritative risk provider_id"
         ).upper()
+        provider_environment = None
+        entity_policy_id = None
+        instrument_family = None
         if self.resolved_risk_policy is not None:
             resolved = require_registry_issued_resolved_policy(self.resolved_risk_policy)
             scope = resolved.identity.scope
-            if (scope.provider_id, scope.account_id, scope.environment,
-                scope.provider_environment, scope.entity_policy_id, scope.instrument_family) != (
-                provider, account, environment, self.provider_environment,
-                self.entity_policy_id, self.instrument_family):
-                raise AuthorityConflict("resolved RiskPolicy scope differs from financial cut")
+            raw_provider_environment = _authority_text(
+                self.provider_environment,
+                name="authoritative risk provider_environment",
+            )
+            raw_entity_policy_id = _authority_text(
+                self.entity_policy_id,
+                name="authoritative risk entity_policy_id",
+            )
+            raw_instrument_family = _authority_text(
+                self.instrument_family,
+                name="authoritative risk instrument_family",
+            )
+            if (
+                scope.provider_id,
+                scope.account_id,
+                scope.environment,
+                scope.provider_environment,
+                scope.entity_policy_id,
+                scope.instrument_family,
+            ) != (
+                provider,
+                account,
+                environment,
+                raw_provider_environment,
+                raw_entity_policy_id,
+                raw_instrument_family,
+            ):
+                raise AuthorityConflict(
+                    "resolved RiskPolicy scope differs from financial cut"
+                )
+            provider_environment = scope.provider_environment
+            entity_policy_id = scope.entity_policy_id
+            instrument_family = scope.instrument_family
             if resolved.resolved_journal_sequence_cut != self.journal_sequence_cut:
-                raise AuthorityConflict("resolved RiskPolicy journal cut differs from financial cut")
+                raise AuthorityConflict(
+                    "resolved RiskPolicy journal cut differs from financial cut"
+                )
         elif any(value is not None for value in (
             self.provider_environment, self.entity_policy_id, self.instrument_family)):
             raise AuthorityConflict("provider-domain dimensions require resolved RiskPolicy authority")
@@ -1617,13 +1704,13 @@ class AuthoritativeRiskSnapshot:
             or self.authority_policy_version < 1
         ):
             raise ValueError("authority_policy_version must be positive")
-        evaluated = _text(
+        evaluated = _authority_text(
             self.evaluated_at, name="authoritative risk evaluated_at"
         )
         evaluated_instant = _instant(
             evaluated, name="authoritative risk evaluated_at"
         )
-        valid_until = _text(
+        valid_until = _authority_text(
             self.valid_until, name="authoritative risk valid_until"
         )
         valid_until_instant = _instant(
@@ -1705,6 +1792,11 @@ class AuthoritativeRiskSnapshot:
         object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "provider_id", provider)
         object.__setattr__(
+            self, "provider_environment", provider_environment
+        )
+        object.__setattr__(self, "entity_policy_id", entity_policy_id)
+        object.__setattr__(self, "instrument_family", instrument_family)
+        object.__setattr__(
             self,
             "instrument_version",
             _instrument_identity(
@@ -1715,7 +1807,7 @@ class AuthoritativeRiskSnapshot:
         object.__setattr__(
             self,
             "capability_snapshot_id",
-            _text(
+            _authority_text(
                 self.capability_snapshot_id,
                 name="authoritative risk capability_snapshot_id",
             ),
@@ -1723,7 +1815,7 @@ class AuthoritativeRiskSnapshot:
         object.__setattr__(
             self,
             "reconciliation_checkpoint_event_id",
-            _text(
+            _authority_text(
                 self.reconciliation_checkpoint_event_id,
                 name="authoritative risk reconciliation_checkpoint_event_id",
             ),
@@ -1731,7 +1823,7 @@ class AuthoritativeRiskSnapshot:
         object.__setattr__(
             self,
             "reservation_state_digest",
-            _text(
+            _authority_text(
                 self.reservation_state_digest,
                 name="authoritative risk reservation_state_digest",
             ),
@@ -1739,7 +1831,7 @@ class AuthoritativeRiskSnapshot:
         object.__setattr__(
             self,
             "authority_policy_id",
-            _text(
+            _authority_text(
                 self.authority_policy_id,
                 name="authoritative risk policy_id",
             ),
@@ -1813,13 +1905,13 @@ def _authoritative_risk_provider_scope(
 ) -> tuple[str, str]:
     """Resolve the exact provider domain already bound by the risk snapshot."""
 
-    if not isinstance(authoritative_snapshot, Mapping):
+    if type(authoritative_snapshot) is not dict:
         raise AuthorityConflict("authoritative risk snapshot is malformed")
-    provider = _text(
+    provider = _authority_text(
         authoritative_snapshot.get("provider_id"),
         name="authoritative risk provider_id",
     ).upper()
-    runtime = _text(
+    runtime = _authority_text(
         authoritative_snapshot.get("environment"),
         name="authoritative risk environment",
     ).upper()
@@ -1833,7 +1925,7 @@ def _authoritative_risk_provider_scope(
             )
         provider_environment = runtime
     else:
-        provider_environment = _text(
+        provider_environment = _authority_text(
             raw_provider_environment,
             name="authoritative risk provider_environment",
         ).upper()
@@ -1863,25 +1955,25 @@ def _require_provider_scope_matches_authoritative_risk_snapshot(
     expected_provider, expected_provider_environment = (
         _authoritative_risk_provider_scope(authoritative_snapshot)
     )
-    expected_account = _text(
+    expected_account = _authority_text(
         authoritative_snapshot.get("account_id"),
         name="authoritative risk account_id",
     )
-    expected_runtime = _text(
+    expected_runtime = _authority_text(
         authoritative_snapshot.get("environment"),
         name="authoritative risk environment",
     ).upper()
-    if not isinstance(evidence, Mapping):
+    if type(evidence) is not dict:
         raise AuthorityConflict(f"{evidence_name} is malformed")
-    evidence_provider = _text(
+    evidence_provider = _authority_text(
         evidence.get("provider_id"),
         name=f"{evidence_name} provider_id",
     ).upper()
-    evidence_account = _text(
+    evidence_account = _authority_text(
         evidence.get("account_id"),
         name=f"{evidence_name} account_id",
     )
-    evidence_runtime = _text(
+    evidence_runtime = _authority_text(
         evidence.get("environment"),
         name=f"{evidence_name} environment",
     ).upper()
@@ -1893,7 +1985,7 @@ def _require_provider_scope_matches_authoritative_risk_snapshot(
             )
         evidence_provider_environment = evidence_runtime
     else:
-        evidence_provider_environment = _text(
+        evidence_provider_environment = _authority_text(
             raw_provider_environment,
             name=f"{evidence_name} provider_environment",
         ).upper()

@@ -378,5 +378,46 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 )
 
 
+    def test_public_integer_boundaries_reject_int_subclasses_without_executing_them(self):
+        class TrapInt(int):
+            def __lt__(self, other):
+                raise AssertionError("caller-controlled comparison executed")
+
+            def __str__(self):
+                raise AssertionError("caller-controlled string conversion executed")
+
+        with self.assertRaisesRegex(ValueError, "max_length must be an integer"):
+            stable_client_order_id(
+                "provider",
+                "intent",
+                environment="SIMULATION",
+                account_id="acct",
+                max_length=TrapInt(32),
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "UUID client-order identity requires max_length",
+        ):
+            stable_client_order_id(
+                "provider",
+                "intent",
+                environment="SIMULATION",
+                account_id="acct",
+                max_length=TrapInt(36),
+                client_id_format="UUID",
+            )
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(ValueError, "owner_epoch must be a positive integer"):
+                GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_epoch=TrapInt(1),
+                )
+
+
+
 if __name__ == "__main__":
     unittest.main()

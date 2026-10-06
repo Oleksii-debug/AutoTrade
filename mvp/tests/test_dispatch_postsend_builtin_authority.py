@@ -1019,6 +1019,150 @@ class PostSendBuiltinAuthorityTests(unittest.TestCase):
             self.assertEqual(probe, [])
             self.assertEqual(outbound, 1)
 
+    def test_post_send_dispatcher_staticmethod_code_mutation_is_restored_and_unknown(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            descriptor = GuardedDispatcher.__dict__["_outcome_from_terminal"]
+            original_outcome = descriptor.__func__
+            original_code = original_outcome.__code__
+            probe = []
+            outbound = 0
+            dispatch_module._dispatcher_staticmethod_executable_probe = probe
+
+            def forged_outcome(event, client_order_id):
+                _dispatcher_staticmethod_executable_probe.append(
+                    (event, client_order_id)
+                )
+                raise AssertionError("forged dispatcher staticmethod code executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                original_outcome.__code__ = forged_outcome.__code__
+                return response
+
+            try:
+                first = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-dispatcher-staticmethod-code-a1",
+                    transport=transport,
+                )
+                current_descriptor = GuardedDispatcher.__dict__[
+                    "_outcome_from_terminal"
+                ]
+                self.assertIs(current_descriptor, descriptor)
+                self.assertIs(current_descriptor.__func__, original_outcome)
+                self.assertIs(original_outcome.__code__, original_code)
+            finally:
+                original_outcome.__code__ = original_code
+                vars(dispatch_module).pop(
+                    "_dispatcher_staticmethod_executable_probe",
+                    None,
+                )
+
+            self.assertEqual(probe, [])
+            self.assertEqual(outbound, 1)
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(
+                first.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-dispatcher-staticmethod-code-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
+            restarted = GuardedDispatcher(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner-b",
+            )
+            replay = restarted.dispatch(
+                attempt_id="postsend-dispatcher-staticmethod-code-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T18:15:01Z",
+                authority_check=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not re-authorize")),
+                transport_send=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not resend")),
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(replay.status, "UNKNOWN")
+            self.assertEqual(
+                replay.reason,
+                "recovered_after_send_barrier_without_terminal_result",
+            )
+            self.assertEqual(probe, [])
+            self.assertEqual(outbound, 1)
+
+    def test_dispatcher_staticmethod_code_mutation_before_guard_is_zero_wire(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            descriptor = GuardedDispatcher.__dict__["_outcome_from_terminal"]
+            original_outcome = descriptor.__func__
+            original_code = original_outcome.__code__
+            probe = []
+            outbound = 0
+            dispatch_module._dispatcher_staticmethod_executable_probe = probe
+
+            def forged_outcome(event, client_order_id):
+                _dispatcher_staticmethod_executable_probe.append(
+                    (event, client_order_id)
+                )
+                raise AssertionError("forged dispatcher staticmethod code executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                original_outcome.__code__ = forged_outcome.__code__
+                final_guard()
+                outbound += 1
+                return ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+
+            try:
+                with self.assertRaises(PermissionError):
+                    self._dispatch(
+                        dispatcher,
+                        attempt_id="preguard-dispatcher-staticmethod-code-a1",
+                        transport=transport,
+                    )
+                self.assertIs(original_outcome.__code__, original_code)
+            finally:
+                original_outcome.__code__ = original_code
+                vars(dispatch_module).pop(
+                    "_dispatcher_staticmethod_executable_probe",
+                    None,
+                )
+
+            self.assertEqual(probe, [])
+            self.assertEqual(outbound, 0)
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "preguard-dispatcher-staticmethod-code-a1",
+            )
+            self.assertEqual(event_types, ["SubmissionPrepared"])
+
     def test_transport_helper_rebinding_before_final_guard_is_zero_wire(self):
         surfaces = (
             "_canonical_journal_authority_snapshot",

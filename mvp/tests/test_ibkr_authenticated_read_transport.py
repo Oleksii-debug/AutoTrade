@@ -200,6 +200,12 @@ class IbkrWebAuthenticatedReadTransportTests(unittest.TestCase):
             "trailing ",
             "contains space",
             "contains\nnewline",
+            "colon:token",
+            "question?token",
+            "quote\\\"token",
+            "backslash\\\\token",
+            "=leading-padding",
+            "middle=padding",
         ):
             with self.subTest(credential=credential):
                 with self.assertRaisesRegex(

@@ -683,6 +683,39 @@ def _require_physical_delivery_borrow_safety(
             )
 
 
+def _callback_financial_authority_fingerprint() -> tuple[object, ...]:
+    """Capture downstream financial code that an arbitrary resolver must not retarget."""
+
+    return (
+        InstrumentRegistry.exact,
+        InstrumentRegistry.at,
+        InstrumentVersion.to_contract_dict,
+        DurableProviderEconomicBook.read_cut,
+        DurableProviderEconomicBook.prepare_batch_mutation,
+        DurableProviderEconomicBook.refresh,
+        JournalStore.load_events,
+        JournalStore.commit_command,
+        canonical_option_lifecycle_observation,
+        _bind_version,
+        _require_consumable_option_position,
+        _require_physical_delivery_borrow_safety,
+        _economic_transaction,
+        _identity,
+        _utc_text,
+        payload_digest,
+        posting,
+        reverse_transaction,
+        exact_abs,
+        exact_add,
+        exact_multiply,
+        exact_subtract,
+        is_exact_decimal_multiple,
+        physical_exercise_obligation,
+        book_cash_option_settlement,
+        book_physical_option_settlement,
+    )
+
+
 class DurableOptionLifecycleAuthority:
     """Exactly-once lifecycle-to-economics bridge over canonical authorities."""
 
@@ -810,6 +843,8 @@ class DurableOptionLifecycleAuthority:
         require_scope_code = getattr(require_scope, "__code__", None)
         observation_parser = _canonical_observation_from_sealed_response
         observation_parser_code = getattr(observation_parser, "__code__", None)
+        financial_authority_fingerprint = _callback_financial_authority_fingerprint
+        expected_financial_authority = financial_authority_fingerprint()
 
         # Snapshot every caller-reachable lifecycle owner/config value locally.
         # Instance-level "_expected_*" fields are not sufficient across an
@@ -871,6 +906,14 @@ class DurableOptionLifecycleAuthority:
         ):
             raise OptionLifecycleError(
                 "provider lifecycle evidence authority changed during resolution"
+            )
+        if (
+            _callback_financial_authority_fingerprint
+            is not financial_authority_fingerprint
+            or financial_authority_fingerprint() != expected_financial_authority
+        ):
+            raise OptionLifecycleError(
+                "financial authority changed during evidence resolution"
             )
         if type(source) is not ProviderResponseObservation:
             raise OptionLifecycleError(

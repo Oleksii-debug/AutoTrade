@@ -1335,6 +1335,10 @@ def _prepare_provider_fill_correction_binding(
             payload.get("provider_id") != economic_book.provider_id
             or payload.get("account_id") != economic_book.account_id
             or payload.get("environment") != economic_book.environment
+            or payload.get(
+                "provider_environment",
+                economic_book.environment,
+            ) != economic_book.provider_environment
             or payload.get("provider_execution_id") != execution_id
         ):
             raise AccountingConflict(
@@ -1485,6 +1489,8 @@ def _prepare_provider_fill_correction_binding(
             or historical_provider.provider_id != economic_book.provider_id
             or historical_provider.account_id != economic_book.account_id
             or historical_provider.environment != economic_book.environment
+            or historical_provider.provider_environment
+            != economic_book.provider_environment
             or historical_provider.provider_execution_id != execution_id
             or historical_provider.client_order_id
             != historical_projected.client_order_id
@@ -1698,6 +1704,12 @@ def _prepare_provider_fill_correction_binding(
         "resulting_conservative_usage": _usage_payload(resulting_usage),
         "additional_usage": _usage_payload(additional_usage),
     }
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=economic_book.provider_environment,
+        environment=economic_book.environment,
+    )
+    if provider_scope_payload is not None:
+        request["provider_environment"] = provider_scope_payload
     request_digest = payload_digest(request)
     next_version = len(events) + 1
     event_id = str(
@@ -1718,6 +1730,8 @@ def _prepare_provider_fill_correction_binding(
         "request_digest": request_digest,
         "request": request,
     }
+    if provider_scope_payload is not None:
+        payload["provider_environment"] = provider_scope_payload
     envelope = {
         "event_id": event_id,
         "event_type": _PROVIDER_FILL_CORRECTION_BINDING_EVENT_TYPE,
@@ -4680,6 +4694,10 @@ def commit_provider_fill_bust_with_economic_reversal(
                 and payload.get("provider_id") == economic_book.provider_id
                 and payload.get("account_id") == economic_book.account_id
                 and payload.get("environment") == economic_book.environment
+                and payload.get(
+                    "provider_environment",
+                    economic_book.environment,
+                ) == economic_book.provider_environment
                 and payload.get("batch_digest") == economic_plan.batch_digest
                 and payload.get("transactions")
                 == [

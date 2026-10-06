@@ -705,6 +705,69 @@ class AblationTests(unittest.TestCase):
             )
         self.assertEqual(calls, [])
 
+    def test_qualification_authority_requires_exact_persistent_owner_types(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+
+            class DerivedRegistry(ScientificRegistry):
+                pass
+
+            derived = object.__new__(DerivedRegistry)
+            with self.assertRaisesRegex(TypeError, "exact ScientificRegistry"):
+                AblationQualificationAuthority(
+                    scientific_registry=derived,
+                    experience_memory=memory,
+                    artifact_store=artifacts,
+                    protocol_id="11111111-1111-4111-8111-111111111111",
+                    protocol_hash=FINGERPRINT_A,
+                    source_revision="9" * 40,
+                    causal_cutoff=CUT,
+                    granted_permissions={"RESEARCH"},
+                )
+
+    def test_qualification_authority_rejects_hostile_or_aliased_query_text(self):
+        calls = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("hostile strip executed")
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            science = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            common = {
+                "scientific_registry": science,
+                "experience_memory": memory,
+                "artifact_store": artifacts,
+                "protocol_hash": FINGERPRINT_A,
+                "source_revision": "9" * 40,
+                "causal_cutoff": CUT,
+                "granted_permissions": {"RESEARCH"},
+            }
+            with self.assertRaisesRegex(ValueError, "protocol_id must use canonical text"):
+                AblationQualificationAuthority(
+                    protocol_id=" 11111111-1111-4111-8111-111111111111 ",
+                    **common,
+                )
+            with self.assertRaisesRegex(ValueError, "task"):
+                AblationQualificationAuthority(
+                    protocol_id="11111111-1111-4111-8111-111111111111",
+                    task=HostileText("ablation-qualification"),
+                    **common,
+                )
+            with self.assertRaisesRegex(ValueError, "granted_permission"):
+                AblationQualificationAuthority(
+                    protocol_id="11111111-1111-4111-8111-111111111111",
+                    granted_permissions={HostileText("RESEARCH")},
+                    **{key: value for key, value in common.items() if key != "granted_permissions"},
+                )
+        self.assertEqual(calls, [])
+
     def test_pair_rejects_noncanonical_outcome_type_before_field_access(self):
         calls = []
 

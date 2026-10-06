@@ -217,6 +217,10 @@ def normalize_spdx_packages(sbom) -> dict[str, dict[str, object]]:
         version = _text(
             package.get("versionInfo"), name=f"SBOM package[{index}].versionInfo"
         )
+        license_concluded = _text(
+            package.get("licenseConcluded"),
+            name=f"SBOM package[{index}].licenseConcluded",
+        )
         refs = package.get("externalRefs", [])
         if type(refs) is not list:
             raise ReleaseScopeMappingError("SBOM externalRefs must be list")
@@ -271,6 +275,7 @@ def normalize_spdx_packages(sbom) -> dict[str, dict[str, object]]:
             "spdx_id": spdx_id,
             "name": name,
             "version": version,
+            "license_concluded": license_concluded,
             "checksums": normalized_checksums,
         }
     return by_purl
@@ -341,6 +346,14 @@ def build_mapping(
             raise ReleaseScopeMappingError(
                 f"SBOM package hash mismatch: {name}@{version}"
             )
+        reviewed_license = _text(
+            rights[key].get("license_id"),
+            name=f"{name}@{version} reviewed license",
+        )
+        if package["license_concluded"] != reviewed_license:
+            raise ReleaseScopeMappingError(
+                f"SBOM package license mismatch: {name}@{version}"
+            )
         packages.append({
             "ecosystem": "nuget",
             "name": name,
@@ -387,6 +400,14 @@ def build_mapping(
             raise ReleaseScopeMappingError(
                 f"external runtime artifact hash mismatch: {purl}"
             )
+        reviewed_license = _text(
+            rights.get("license_concluded"),
+            name=f"{purl} license_concluded",
+        )
+        if package["license_concluded"] != reviewed_license:
+            raise ReleaseScopeMappingError(
+                f"external runtime license mismatch: {purl}"
+            )
         state = _text(
             rights.get("release_distribution_state"),
             name=f"{purl} release_distribution_state",
@@ -396,10 +417,7 @@ def build_mapping(
             "name": name,
             "version": version,
             "artifact_sha256": artifact_sha256,
-            "license_concluded": _text(
-                rights.get("license_concluded"),
-                name=f"{purl} license_concluded",
-            ),
+            "license_concluded": reviewed_license,
             "release_distribution_state": state,
             "upstream_sbom_url": _text(
                 rights.get("upstream_sbom_url"),

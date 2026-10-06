@@ -20,6 +20,7 @@ def _sbom(*, extra=False, wrong_hash=False):
         "SPDXID": "SPDXRef-WebView2",
         "name": "Microsoft.Web.WebView2",
         "versionInfo": "1.0.4258.31",
+        "licenseConcluded": "BSD-3-Clause",
         "externalRefs": [{
             "referenceType": "purl",
             "referenceLocator":
@@ -98,6 +99,7 @@ RIGHTS = [{
     "name": "Microsoft.Web.WebView2",
     "version": "1.0.4258.31",
     "content_hash_sha512_base64": CONTENT_HASH,
+    "license_id": "BSD-3-Clause",
 }]
 REUSE = [{
     "schema_version": "1.0.0",
@@ -217,6 +219,19 @@ class ReleaseScopeMappingTests(unittest.TestCase):
         ):
             self._build(extra=True)
 
+
+    def test_locked_package_license_mismatch_fails(self):
+        document, raw = _sbom()
+        document["packages"][0]["licenseConcluded"] = "MIT"
+        raw = (
+            json.dumps(document, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError, "SBOM package license mismatch"
+        ):
+            self._build(sbom_override=(document, raw))
+
     def test_sbom_package_hash_mismatch_fails(self):
         with self.assertRaisesRegex(
             ReleaseScopeMappingError, "hash mismatch"
@@ -272,6 +287,7 @@ class ReleaseScopeMappingTests(unittest.TestCase):
             "SPDXID": "SPDXRef-Python",
             "name": "CPython",
             "versionInfo": "3.12.10",
+            "licenseConcluded": "PSF-2.0",
             "externalRefs": [{
                 "referenceType": "purl",
                 "referenceLocator":
@@ -300,12 +316,43 @@ class ReleaseScopeMappingTests(unittest.TestCase):
             result["unresolved_distribution_rights"],
         )
 
+
+    def test_external_runtime_license_mismatch_fails(self):
+        document, raw = _sbom()
+        document["packages"].append({
+            "SPDXID": "SPDXRef-Python",
+            "name": "CPython",
+            "versionInfo": "3.12.10",
+            "licenseConcluded": "MIT",
+            "externalRefs": [{
+                "referenceType": "purl",
+                "referenceLocator":
+                    "pkg:generic/cpython-embed@3.12.10",
+            }],
+            "checksums": [{
+                "algorithm": "SHA256",
+                "checksumValue": "2" * 64,
+            }],
+        })
+        raw = (
+            json.dumps(document, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError, "external runtime license mismatch"
+        ):
+            self._build(
+                sbom_override=(document, raw),
+                external_rights=EXTERNAL_RIGHTS,
+            )
+
     def test_external_runtime_without_rights_record_fails(self):
         document, raw = _sbom()
         document["packages"].append({
             "SPDXID": "SPDXRef-Python",
             "name": "CPython",
             "versionInfo": "3.12.10",
+            "licenseConcluded": "PSF-2.0",
             "externalRefs": [{
                 "referenceType": "purl",
                 "referenceLocator":

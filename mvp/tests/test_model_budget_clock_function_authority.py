@@ -23,6 +23,14 @@ def _poisoned_clock_text(_value):
     return NOW_TEXT
 
 
+def _poisoned_commit_command(*_args, **_kwargs):
+    raise AssertionError("poisoned journal commit executed")
+
+
+def _poisoned_budget_reserve(*_args, **_kwargs):
+    raise AssertionError("poisoned budget reserve executed")
+
+
 class DecoyBudget:
     pass
 
@@ -108,6 +116,90 @@ class ModelBudgetClockFunctionAuthorityTests(unittest.TestCase):
             self.assertIs(restore.__kwdefaults__, original_kwdefaults)
             self.assertEqual(
                 journal.load_events("model_budget", "clock-restore-defaults-budget"),
+                [],
+            )
+
+    def test_clock_cannot_replace_journal_commit_code_in_place(self):
+        commit = JournalStore.commit_command
+        original_code = commit.__code__
+        original_defaults = commit.__defaults__
+        original_kwdefaults = commit.__kwdefaults__
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            armed = False
+
+            def hostile_clock():
+                if armed:
+                    commit.__code__ = _poisoned_commit_command.__code__
+                return NOW_TEXT
+
+            budget = budget_module.DurableModelBudget(
+                journal=journal,
+                budget_id="clock-journal-commit-function-budget",
+                ceiling="5",
+                environment="PAPER",
+                clock=hostile_clock,
+            )
+            armed = True
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"model budget clock mutated authority:.*"
+                    r"JournalStore\.commit_command.*__code__",
+                ):
+                    budget.reserve("clock-journal-commit-request", "0.2")
+            finally:
+                commit.__code__ = original_code
+                commit.__defaults__ = original_defaults
+                commit.__kwdefaults__ = original_kwdefaults
+
+            self.assertIs(commit.__code__, original_code)
+            self.assertEqual(budget.snapshot().reserved, 0)
+            events = journal.load_events(
+                "model_budget",
+                "clock-journal-commit-function-budget",
+            )
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["event_type"], "ModelBudgetInitialized")
+
+    def test_clock_cannot_replace_budget_ledger_reserve_code_in_place(self):
+        reserve = budget_module.BudgetLedger.reserve
+        original_code = reserve.__code__
+        original_defaults = reserve.__defaults__
+        original_kwdefaults = reserve.__kwdefaults__
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+
+            def hostile_clock():
+                reserve.__code__ = _poisoned_budget_reserve.__code__
+                return NOW_TEXT
+
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"model budget clock mutated authority:.*"
+                    r"BudgetLedger\.reserve.*__code__",
+                ):
+                    budget_module.DurableModelBudget(
+                        journal=journal,
+                        budget_id="clock-budget-ledger-function-budget",
+                        ceiling="5",
+                        environment="PAPER",
+                        clock=hostile_clock,
+                    )
+            finally:
+                reserve.__code__ = original_code
+                reserve.__defaults__ = original_defaults
+                reserve.__kwdefaults__ = original_kwdefaults
+
+            self.assertIs(reserve.__code__, original_code)
+            self.assertEqual(
+                journal.load_events(
+                    "model_budget",
+                    "clock-budget-ledger-function-budget",
+                ),
                 [],
             )
 

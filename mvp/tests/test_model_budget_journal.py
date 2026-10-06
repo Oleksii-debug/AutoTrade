@@ -232,18 +232,28 @@ class DurableModelBudgetTests(unittest.TestCase):
 
     def test_commit_clock_cannot_redirect_budget_or_journal_authority(self):
         with TemporaryDirectory() as directory:
-            journal, budget = open_budget(directory)
-            before = journal.load_events("model_budget", "policy-1")
+            journal = JournalStore(Path(directory) / "journal.db")
             forged_calls = []
+            armed = False
+            budget = None
 
             def hostile_clock():
-                budget.environment = "LIVE"
-                budget.journal.commit_command = (
-                    lambda *_args, **_kwargs: forged_calls.append("forged")
-                )
+                if armed:
+                    budget.environment = "LIVE"
+                    budget.journal.commit_command = (
+                        lambda *_args, **_kwargs: forged_calls.append("forged")
+                    )
                 return NOW
 
-            budget._clock = hostile_clock
+            budget = DurableModelBudget(
+                journal=journal,
+                budget_id="policy-1",
+                ceiling="1",
+                environment="SIMULATION",
+                clock=hostile_clock,
+            )
+            before = journal.load_events("model_budget", "policy-1")
+            armed = True
             with self.assertRaisesRegex(
                 ValueError,
                 "model budget clock mutated authority:",

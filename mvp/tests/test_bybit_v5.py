@@ -1908,7 +1908,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                         qualified_fee_currencies={"BTCUSDT@v1": "USDT"},
                     )
 
-    def test_execution_metadata_inputs_require_exact_inert_snapshots(self):
+    def test_execution_metadata_inputs_require_exact_dict_snapshots(self):
         row = {
             "execId": "exec-metadata-snapshot",
             "orderLinkId": "",
@@ -1936,7 +1936,7 @@ class BybitV5AdapterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ProviderCoreError,
-            "instrument_versions must be an exact inert mapping",
+            "instrument_versions must be an exact dict snapshot",
         ):
             parse_executions(
                 observation,
@@ -1949,7 +1949,7 @@ class BybitV5AdapterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ProviderCoreError,
-            "qualified_fee_currencies must be an exact inert mapping",
+            "qualified_fee_currencies must be an exact dict snapshot",
         ):
             parse_executions(
                 observation,

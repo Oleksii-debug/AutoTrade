@@ -1438,18 +1438,18 @@ def parse_executions(
     rows = result.get("list")
     if not isinstance(rows, (list, tuple)):
         raise ProviderCoreError("result.list must be an array")
-    if type(instrument_versions) not in {dict, MappingProxyType}:
+    if type(instrument_versions) is not dict:
         raise ProviderCoreError(
-            "instrument_versions must be an exact inert mapping"
+            "instrument_versions must be an exact dict snapshot"
         )
-    instrument_versions = MappingProxyType(dict(instrument_versions))
+    instrument_versions = MappingProxyType(dict.copy(instrument_versions))
     if qualified_fee_currencies is not None:
-        if type(qualified_fee_currencies) not in {dict, MappingProxyType}:
+        if type(qualified_fee_currencies) is not dict:
             raise ProviderCoreError(
-                "qualified_fee_currencies must be an exact inert mapping"
+                "qualified_fee_currencies must be an exact dict snapshot"
             )
         qualified_fee_currencies = MappingProxyType(
-            dict(qualified_fee_currencies)
+            dict.copy(qualified_fee_currencies)
         )
 
     by_execution: dict[str, ProviderFillEvidence] = {}

@@ -10,6 +10,7 @@ from mvp.autotrade_mvp.provider_activity_accounting import (
     AccountingConflict,
     _activity_identity,
     _book_id,
+    _scoped_identity,
     book_external_provider_cash_activity,
     load_provider_account_economic_book,
 )
@@ -21,6 +22,7 @@ def activity(
     provider_id="ALPACA",
     account_id="paper-1",
     environment="PAPER",
+    provider_environment=None,
     activity_id="cash-1",
     activity_type="DEPOSIT",
     origin="EXTERNAL",
@@ -36,6 +38,7 @@ def activity(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         activity_id=activity_id,
         activity_type=activity_type,
         origin=origin,
@@ -103,6 +106,130 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 environment="LIVE",
             ),
         )
+
+    def test_bybit_external_cash_fails_closed_on_legacy_runtime_history(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            legacy_book_id = _scoped_identity(
+                "economic-book",
+                "BYBIT",
+                "bybit-account",
+                "PAPER",
+            )
+            payload = {"legacy": "ambiguous-provider-domain"}
+            store.append_event(
+                {
+                    "event_id": "legacy-bybit-direct-cash",
+                    "event_type": "EconomicTransactionBooked",
+                    "aggregate_type": "economic_book",
+                    "aggregate_id": legacy_book_id,
+                    "aggregate_version": "1",
+                    "committed_at": "2026-09-24T18:00:00Z",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                }
+            )
+            evidence = activity(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                provider_environment="TESTNET",
+                activity_id="new-domain-cash",
+                signed_amount="10",
+            )
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "ambiguous financial history",
+            ):
+                book_paper_activity(
+                    store,
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    activity=evidence,
+                    observed_at="2026-09-24T18:01:00Z",
+                )
+            scoped_book_id = paper_book_id(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                provider_environment="TESTNET",
+            )
+            self.assertEqual(
+                store.load_events("economic_book", scoped_book_id),
+                [],
+            )
+
+    def test_bybit_external_cash_isolated_by_provider_environment_and_restart(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            testnet_activity = activity(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                provider_environment="TESTNET",
+                activity_id="shared-cash-id",
+                signed_amount="10",
+            )
+            demo_activity = activity(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                provider_environment="DEMO",
+                activity_id="shared-cash-id",
+                signed_amount="20",
+            )
+            _, inserted_testnet = book_paper_activity(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                activity=testnet_activity,
+                observed_at="2026-09-24T18:01:00Z",
+            )
+            _, inserted_demo = book_paper_activity(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                activity=demo_activity,
+                observed_at="2026-09-24T18:02:00Z",
+            )
+            self.assertTrue(inserted_testnet)
+            self.assertTrue(inserted_demo)
+
+            testnet_book_id = paper_book_id(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                provider_environment="TESTNET",
+            )
+            demo_book_id = paper_book_id(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                provider_environment="DEMO",
+            )
+            self.assertNotEqual(testnet_book_id, demo_book_id)
+            self.assertEqual(len(store.load_events("economic_book", testnet_book_id)), 1)
+            self.assertEqual(len(store.load_events("economic_book", demo_book_id)), 1)
+
+            reopened = JournalStore(path)
+            testnet_book = load_paper_book(
+                reopened,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                provider_environment="TESTNET",
+            )
+            demo_book = load_paper_book(
+                reopened,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                provider_environment="DEMO",
+            )
+            self.assertEqual(testnet_book.cash("USD"), Decimal("10"))
+            self.assertEqual(demo_book.cash("USD"), Decimal("20"))
+
+            _, replay_inserted = book_paper_activity(
+                reopened,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                activity=testnet_activity,
+                observed_at="2026-09-24T18:01:00Z",
+            )
+            self.assertFalse(replay_inserted)
 
     def test_bridge_requires_canonical_environment_scope(self):
         with TemporaryDirectory() as directory:
@@ -652,8 +779,8 @@ class ProviderActivityAccountingTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             for candidate in (
-                activity(provider_id="BYBIT", account_id="acct", activity_id="unknown", origin="UNKNOWN"),
-                activity(provider_id="BYBIT", account_id="acct", activity_id="auto", origin="AUTOTRADE"),
+                activity(provider_id="BYBIT", account_id="acct", provider_environment="TESTNET", activity_id="unknown", origin="UNKNOWN"),
+                activity(provider_id="BYBIT", account_id="acct", provider_environment="TESTNET", activity_id="auto", origin="AUTOTRADE"),
             ):
                 with self.assertRaisesRegex(ValueError, "MANUAL or EXTERNAL"):
                     book_paper_activity(
@@ -673,6 +800,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                     activity=activity(
                         provider_id="BYBIT",
                         account_id="acct",
+                        provider_environment="TESTNET",
                         activity_id="adjustment",
                         activity_type="CASH_ADJUSTMENT",
                     ),
@@ -682,7 +810,11 @@ class ProviderActivityAccountingTests(unittest.TestCase):
             self.assertEqual(
                 store.load_events(
                     "economic_book",
-                    paper_book_id(provider_id="BYBIT", account_id="acct"),
+                    paper_book_id(
+                        provider_id="BYBIT",
+                        account_id="acct",
+                        provider_environment="TESTNET",
+                    ),
                 ),
                 [],
             )

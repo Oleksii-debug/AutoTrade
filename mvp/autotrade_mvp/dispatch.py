@@ -2523,6 +2523,8 @@ class GuardedDispatcher:
         snapshot_exception = Exception
         snapshot_value_error = ValueError
         snapshot_type_error = TypeError
+        snapshot_dispatch_blocked = DispatchBlocked
+        snapshot_dispatch_authority_changed = _DispatchAuthorityChanged
         snapshot_tuple = tuple
         snapshot_dict = dict
         snapshot_len = len
@@ -2561,6 +2563,16 @@ class GuardedDispatcher:
         snapshot_type_error_global = snapshot_module_globals_get(
             "TypeError",
             snapshot_builtin_missing,
+        )
+        snapshot_dispatch_blocked_global = snapshot_module_globals_get(
+            "DispatchBlocked",
+            snapshot_builtin_missing,
+        )
+        snapshot_dispatch_authority_changed_global = (
+            snapshot_module_globals_get(
+                "_DispatchAuthorityChanged",
+                snapshot_builtin_missing,
+            )
         )
         snapshot_code = snapshot_getattr(
             exact_response_snapshot,
@@ -3366,6 +3378,11 @@ class GuardedDispatcher:
                 ("Exception", snapshot_exception_global),
                 ("ValueError", snapshot_value_error_global),
                 ("TypeError", snapshot_type_error_global),
+                ("DispatchBlocked", snapshot_dispatch_blocked_global),
+                (
+                    "_DispatchAuthorityChanged",
+                    snapshot_dispatch_authority_changed_global,
+                ),
             ):
                 current = snapshot_module_globals_get(
                     name,
@@ -3393,11 +3410,11 @@ class GuardedDispatcher:
                 restore_postsend_builtin_globals()
             try:
                 require_dispatch_call_authority()
-            except _DispatchAuthorityChanged:
+            except snapshot_dispatch_authority_changed:
                 if barrier_passed:
                     return authority_change_after_send_outcome()
                 raise
-        except _DispatchAuthorityChanged:
+        except snapshot_dispatch_authority_changed:
             # The authority helper restores the invocation-selected cut before
             # raising. Once Sending is durable, preserve worst-case exposure as
             # UNKNOWN on that original journal rather than leaking a retryable
@@ -3405,10 +3422,10 @@ class GuardedDispatcher:
             if barrier_passed:
                 return authority_change_after_send_outcome()
             raise
-        except DispatchBlocked as error:
+        except snapshot_dispatch_blocked as error:
             try:
                 require_dispatch_call_authority()
-            except _DispatchAuthorityChanged:
+            except snapshot_dispatch_authority_changed:
                 if barrier_passed:
                     return authority_change_after_send_outcome()
                 raise
@@ -3437,7 +3454,7 @@ class GuardedDispatcher:
         except snapshot_exception as error:
             try:
                 require_dispatch_call_authority()
-            except _DispatchAuthorityChanged:
+            except snapshot_dispatch_authority_changed:
                 if barrier_passed:
                     return authority_change_after_send_outcome()
                 raise

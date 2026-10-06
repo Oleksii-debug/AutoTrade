@@ -959,10 +959,50 @@ def observe_submission_json_response(
     # therefore by this observation's evidence_ref; this neutral verifier owns
     # only the prepared-request axes plus cross-layer identities it can prove
     # from the durable response binding itself.
+    provider_extension_keys = {"provider_environment"}
+    financial_extension_keys = {
+        "provider_id",
+        "account_id",
+        "environment",
+        "capability_snapshot_id",
+    }
+    route_extension_keys = {
+        "provider_route_qualification_id",
+        "provider_route_capability_snapshot_id",
+        "provider_route_decision_journal_sequence_cut",
+        "provider_route_provider_environment",
+        "provider_route_adapter_code_sha",
+        "provider_route_packaged_artifact_digest",
+        "provider_route_protocol_id",
+        "provider_route_protocol_version",
+        "provider_route_entity_policy_id",
+        "provider_route_entity_id",
+    }
+    extension_keys = set(actual_scope) - set(expected_scope)
+    allowed_extension_keys = (
+        provider_extension_keys | financial_extension_keys | route_extension_keys
+    )
+    if not extension_keys <= allowed_extension_keys:
+        raise ProviderCoreError("durable submission scope has unknown authority axes")
+
+    route_shape_present = bool(
+        extension_keys & (financial_extension_keys | route_extension_keys)
+    )
+    if route_shape_present:
+        required_route_shape = (
+            provider_extension_keys | financial_extension_keys | route_extension_keys
+        )
+        if not required_route_shape <= set(actual_scope):
+            raise ProviderCoreError(
+                "durable financial route submission scope is incomplete"
+            )
+
     financial_scope = {
         "provider_id": provider,
         "account_id": binding["account_id"],
         "environment": binding["environment"],
+        "provider_environment": binding["provider_environment"],
+        "provider_route_provider_environment": binding["provider_environment"],
     }
     for key, value in financial_scope.items():
         if key in actual_scope and actual_scope[key] != value:

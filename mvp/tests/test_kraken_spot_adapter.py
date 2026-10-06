@@ -589,6 +589,30 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 observation={"error": [], "result": {"txid": ["forged"]}},
             )
 
+    def test_submission_consumer_rejects_prepared_subclass_before_virtual_callback(self):
+        callbacks = []
+
+        class HostilePrepared(KrakenSpotPreparedRequest):
+            def __getattribute__(self, _name):
+                callbacks.append(True)
+                raise AssertionError(
+                    "prepared-request virtual callback executed before type verification"
+                )
+
+        forged = object.__new__(HostilePrepared)
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact KrakenSpotPreparedRequest",
+        ):
+            parse_spot_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=forged,
+                source_uri="https://api.kraken.com/0/private/AddOrder",
+                observation=None,
+                transport_ambiguous=True,
+            )
+        self.assertEqual(callbacks, [])
+
     def test_submission_consumer_rejects_subclass_before_virtual_callback(self):
         attempt, prepared, _observation = self._durable_submission_observation(
             {"error": [], "result": {"txid": ["OABC-D123-E456"]}},

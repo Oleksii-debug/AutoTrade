@@ -294,6 +294,47 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self._evidence[source.evidence_ref] = source
         return source.evidence_ref
 
+    def test_provider_environment_rejects_text_subclasses_without_callbacks(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile provider_environment callback executed")
+
+        hostile = HostileText("TESTNET")
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "provider_environment must be canonical exact text",
+        ):
+            OptionLifecycleObservation(
+                provider_id="TEST_PROVIDER",
+                account_id="paper-1",
+                environment="SIMULATION",
+                venue_id="OPTIONS",
+                instrument_version=f"{OPTION_ID}@1",
+                external_event_id="hostile-provider-domain",
+                event_kind="EXERCISE",
+                signed_contracts=Decimal("1"),
+                effective_at=utc(12, 18, 19),
+                observed_at=utc(12, 18, 19, 1),
+                raw_evidence_digest="sha256:" + "e" * 64,
+                provider_revision="hostile-provider-domain-r1",
+                provider_environment=hostile,
+            )
+        self.assertEqual(HostileText.strip_calls, 0)
+
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "provider_environment must be canonical exact text",
+        ):
+            self._authority(
+                registry=self.registry,
+                economic_book=self.book,
+                provider_environment=hostile,
+            )
+        self.assertEqual(HostileText.strip_calls, 0)
+
     def test_lifecycle_financial_decimals_reject_subclasses_before_virtual_dispatch(self):
         class HostileDecimal(Decimal):
             def is_finite(self):

@@ -728,16 +728,40 @@ class GuardedDispatcher:
         # lease expires while no SubmissionSending exists, the journal proves
         # zero wire. Fence the stale owner as BLOCKED; UNKNOWN remains reserved
         # for states that may actually have crossed the provider boundary.
-        self._append(
-            attempt_id=attempt_id,
-            event_type="SubmissionBlocked",
-            version=last["aggregate_version"] + 1,
-            payload={
-                "client_order_id": client_order_id,
-                "reason": "prepared_owner_lease_expired_before_send",
-            },
-            now=now,
-        )
+        try:
+            self._append(
+                attempt_id=attempt_id,
+                event_type="SubmissionBlocked",
+                version=last["aggregate_version"] + 1,
+                payload={
+                    "client_order_id": client_order_id,
+                    "reason": "prepared_owner_lease_expired_before_send",
+                },
+                now=now,
+            )
+        except ValueError:
+            # The final send barrier may win the aggregate-version race after
+            # recovery observed Prepared but before it can commit Blocked.
+            # Re-read durable truth rather than leaking a CAS conflict or
+            # fabricating zero-wire safety.  Once Sending exists the outcome is
+            # ambiguous and must converge through the existing UNKNOWN path.
+            current = self._events(attempt_id)
+            if not current:
+                raise RuntimeError("submission attempt disappeared")
+            current_last = current[-1]
+            if current_last["event_type"] in {
+                "SubmissionSent",
+                "SubmissionBlocked",
+                "SubmissionUnknown",
+            }:
+                return self._outcome_from_terminal(current_last, client_order_id)
+            if current_last["event_type"] == "SubmissionSending":
+                return self._recover_existing(
+                    attempt_id=attempt_id,
+                    client_order_id=client_order_id,
+                    now=now,
+                )
+            raise
         return self._outcome_from_terminal(self._events(attempt_id)[-1], client_order_id)
 
     def dispatch(

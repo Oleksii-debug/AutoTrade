@@ -21,6 +21,7 @@ from mvp.autotrade_mvp.provider_transport import (
 
 NOW = datetime(2026, 10, 6, 0, 0, tzinfo=timezone.utc)
 ENDPOINT = "/v5/asset/delivery-record"
+_INSTRUMENT_VERSION = "95555555-5555-4555-8555-555555555555@1"
 _ARTIFACT_IDS = {
     "DOCUMENTED": "81111111-1111-4111-8111-111111111111",
     "API": "82222222-2222-4222-8222-222222222222",
@@ -44,7 +45,7 @@ def option_delivery_capability():
             entity_id="option-lifecycle-btc",
             environment="PAPER",
             provider_environment="TESTNET",
-            instrument_version="BTC-29DEC22-16000-P@1",
+            instrument_version=_INSTRUMENT_VERSION,
             observed_at=observed,
             expires_at=expires,
             supported_order_types=frozenset({"LIMIT"}),

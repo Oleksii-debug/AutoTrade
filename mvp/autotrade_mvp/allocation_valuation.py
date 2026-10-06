@@ -70,24 +70,31 @@ def _positive_int(value, *, name: str) -> int:
 
 
 def _text(value, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
         raise AllocationValuationError(f"{name} is required")
-    return value.strip()
+    normalized = str.strip(value)
+    if not normalized:
+        raise AllocationValuationError(f"{name} is required")
+    return normalized
 
 
 def _currency(value, *, name: str) -> str:
-    return _text(value, name=name).upper()
+    return str.upper(_text(value, name=name))
 
 
 def _instant(value, *, name: str) -> datetime:
     text = _text(value, name=name)
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str.replace(text, "Z", "+00:00"))
     except ValueError as error:
         raise AllocationValuationError(f"{name} must be an ISO timestamp") from error
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
+    if type(parsed) is not datetime or type(parsed.tzinfo) is not timezone:
+        raise AllocationValuationError(
+            f"{name} must resolve to an exact fixed-offset timestamp"
+        )
+    if datetime.utcoffset(parsed) is None:
         raise AllocationValuationError(f"{name} must include timezone")
-    return parsed.astimezone(timezone.utc)
+    return datetime.astimezone(parsed, timezone.utc)
 
 
 def _sha256(value, *, name: str) -> str:
@@ -104,9 +111,23 @@ def _sha256(value, *, name: str) -> str:
     return text
 
 
-def _mapping(value, *, name: str) -> dict[str, object]:
+def _mapping(value, *, name: str) -> Mapping[str, object]:
+    # This boundary consumes a detached snapshot from ImmutableAllocationEvidence
+    # or an exact built-in dictionary supplied by a direct caller.  Accepting a
+    # generic Mapping (including an arbitrary MappingProxyType) would execute
+    # caller-defined lookup/iteration code during financial normalization.
     if type(value) is not dict:
-        raise AllocationValuationError(f"{name} must be an exact built-in dict")
+        raise AllocationValuationError(
+            f"{name} must be an exact built-in dictionary"
+        )
+    # Iterating an exact dict is non-polymorphic, but hashing/equality on a
+    # caller-defined key subclass later (set(), membership, lookup) is not.
+    # Reject every non-exact key before any such operation can occur.
+    for key in dict.keys(value):
+        if type(key) is not str:
+            raise AllocationValuationError(
+                f"{name} keys must be exact built-in strings"
+            )
     return value
 
 
@@ -315,14 +336,18 @@ def normalize_allocation_valuation(
 
     if _text(valuation.get("symbol"), name=f"{symbol_text} valuation symbol") != symbol_text:
         raise AllocationValuationError(f"{symbol_text} valuation symbol mismatch")
-    asset_class = _text(
-        valuation["asset_class"],
-        name=f"{symbol_text} valuation asset_class",
-    ).upper()
-    payoff = _text(
-        valuation["payoff"],
-        name=f"{symbol_text} valuation payoff",
-    ).upper()
+    asset_class = str.upper(
+        _text(
+            valuation["asset_class"],
+            name=f"{symbol_text} valuation asset_class",
+        )
+    )
+    payoff = str.upper(
+        _text(
+            valuation["payoff"],
+            name=f"{symbol_text} valuation payoff",
+        )
+    )
     quantity_unit = _text(
         valuation["quantity_unit"],
         name=f"{symbol_text} valuation quantity_unit",
@@ -408,10 +433,15 @@ def normalize_allocation_valuation(
     liability_rate_denominator: int
 
     if quote_currency == base_currency:
-        if fx_quote_payload not in (None, {}):
-            raise AllocationValuationError(
-                f"{symbol_text} identity FX conversion must not carry a quote"
+        if fx_quote_payload is not None:
+            identity_quote_payload = _mapping(
+                fx_quote_payload,
+                name=f"{symbol_text} valuation fx_quote",
             )
+            if identity_quote_payload:
+                raise AllocationValuationError(
+                    f"{symbol_text} identity FX conversion must not carry a quote"
+                )
         if expected_fx_rate != Decimal("1") or fx_source_id != "IDENTITY":
             raise AllocationValuationError(
                 f"{symbol_text} identity FX conversion must use rate 1 and IDENTITY source"
@@ -445,11 +475,7 @@ def normalize_allocation_valuation(
             name=f"{symbol_text} valuation fx_quote",
         )
         max_age_seconds = quote_payload.get("max_age_seconds")
-        if (
-            not isinstance(max_age_seconds, int)
-            or isinstance(max_age_seconds, bool)
-            or max_age_seconds <= 0
-        ):
+        if type(max_age_seconds) is not int or max_age_seconds <= 0:
             raise AllocationValuationError(
                 f"{symbol_text} fx max_age_seconds must be a positive integer"
             )

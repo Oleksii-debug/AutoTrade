@@ -22,6 +22,7 @@ import threading
 from typing import Any, Mapping, Sequence
 
 from .persistence import JournalStore, payload_digest
+from .store_identity import JournalStoreIdentity, require_exact_journal_store_identity
 from .replay import (
     CausalReplay,
     CompositeReplayCheckpoint,
@@ -254,6 +255,24 @@ def _aggregate_events(
             aggregate_type,
         )
     ]
+
+
+def _journal_store_identity_document(
+    identity: JournalStoreIdentity,
+) -> dict[str, object]:
+    identity = require_exact_journal_store_identity(
+        identity,
+        subject="runtime checkpoint journal store identity",
+    )
+    return {
+        "canonical_path": identity.canonical_path,
+        "filesystem_device": identity.filesystem_device,
+        "filesystem_inode": identity.filesystem_inode,
+        "identity_source": identity.identity_source,
+        "windows_volume_serial": identity.windows_volume_serial,
+        "windows_file_index_high": identity.windows_file_index_high,
+        "windows_file_index_low": identity.windows_file_index_low,
+    }
 
 
 def _payload_scope_value(
@@ -652,6 +671,7 @@ def _stable_runtime_components(
     protocol: Mapping[str, object],
     completed: Sequence[Mapping[str, object]],
     completion_preimage: str | None = None,
+    journal_store_identity: JournalStoreIdentity | None = None,
 ) -> tuple[str, dict[str, str]]:
     if type(store) is not JournalStore:
         raise TypeError("runtime checkpoint requires the canonical JournalStore")
@@ -659,16 +679,15 @@ def _stable_runtime_components(
         raise TypeError("completed autonomous episodes must be a list or tuple")
 
     run_id, _build_sha, protocol_digest = _protocol_identity(protocol)
-    identity = store.store_identity
-    store_identity = {
-        "canonical_path": identity.canonical_path,
-        "filesystem_device": identity.filesystem_device,
-        "filesystem_inode": identity.filesystem_inode,
-        "identity_source": identity.identity_source,
-        "windows_volume_serial": identity.windows_volume_serial,
-        "windows_file_index_high": identity.windows_file_index_high,
-        "windows_file_index_low": identity.windows_file_index_low,
-    }
+    identity = (
+        store.store_identity
+        if journal_store_identity is None
+        else require_exact_journal_store_identity(
+            journal_store_identity,
+            subject="runtime checkpoint source journal identity",
+        )
+    )
+    store_identity = _journal_store_identity_document(identity)
     _require_checkpoint_outbox_state(
         store,
         run_id=run_id,
@@ -1191,6 +1210,177 @@ def checkpoint_path(root: str | Path) -> Path:
     if not isinstance(root, (str, Path)):
         raise TypeError("runtime checkpoint root must be a path")
     return _runtime_leaf(root, _CHECKPOINT_NAME)
+
+
+def verify_autonomous_runtime_checkpoint_backup_evidence(
+    source_root: str | Path,
+    snapshot_store: JournalStore,
+    *,
+    source_store_identity: JournalStoreIdentity,
+    checkpoint_document: str,
+) -> CompositeReplayCheckpoint:
+    """Bind quarantined checkpoint evidence to one copied JournalStore cut."""
+
+    if type(snapshot_store) is not JournalStore:
+        raise TypeError("backup checkpoint verification requires canonical JournalStore")
+    source_identity = require_exact_journal_store_identity(
+        source_store_identity,
+        subject="backup checkpoint source journal identity",
+    )
+    if type(checkpoint_document) is not str:
+        raise TypeError("backup checkpoint document must be exact text")
+
+    loop_events = JournalStore.load_events_by_aggregate_type(
+        snapshot_store,
+        "canonical_autonomous_simulation",
+    )
+    if not loop_events:
+        raise AutonomousRuntimeCheckpointError(
+            "backup checkpoint has no autonomous journal authority"
+        )
+
+    run_ids: set[str] = set()
+    for event in loop_events:
+        aggregate_id = event.get("aggregate_id")
+        if type(aggregate_id) is not str or not aggregate_id:
+            raise AutonomousRuntimeCheckpointError(
+                "backup autonomous journal aggregate identity is invalid"
+            )
+        run_ids.add(aggregate_id)
+    if len(run_ids) != 1:
+        raise AutonomousRuntimeCheckpointError(
+            "backup checkpoint spans multiple autonomous journal authorities"
+        )
+    run_id = next(iter(run_ids))
+    events = JournalStore.load_events(
+        snapshot_store,
+        "canonical_autonomous_simulation",
+        run_id,
+    )
+    if not events:
+        raise AutonomousRuntimeCheckpointError(
+            "backup checkpoint autonomous journal is empty"
+        )
+    first = events[0]
+    first_payload = first.get("payload")
+    if (
+        first.get("event_type") != "AutonomousSimulationStarted"
+        or type(first_payload) is not dict
+        or type(first_payload.get("protocol")) is not dict
+    ):
+        raise AutonomousRuntimeCheckpointError(
+            "backup checkpoint autonomous start authority is invalid"
+        )
+    protocol = first_payload["protocol"]
+    if protocol.get("run_id") != run_id:
+        raise AutonomousRuntimeCheckpointError(
+            "backup checkpoint run identity differs from journal authority"
+        )
+
+    completed: list[dict[str, object]] = []
+    active_episode: int | None = None
+    fill_observed = False
+    for event in events[1:]:
+        payload = event.get("payload")
+        if type(payload) is not dict:
+            raise AutonomousRuntimeCheckpointError(
+                "backup checkpoint autonomous event payload is invalid"
+            )
+        event_type = event.get("event_type")
+        episode = payload.get("episode")
+        if event_type == "AutonomousEpisodeStarted":
+            if (
+                active_episode is not None
+                or type(episode) is not int
+                or episode != len(completed) + 1
+            ):
+                raise AutonomousRuntimeCheckpointError(
+                    "backup checkpoint episode start chronology differs"
+                )
+            active_episode = episode
+            fill_observed = False
+        elif event_type == "AutonomousEpisodeFillObserved":
+            if (
+                active_episode is None
+                or episode != active_episode
+                or fill_observed
+            ):
+                raise AutonomousRuntimeCheckpointError(
+                    "backup checkpoint fill chronology differs"
+                )
+            fill_observed = True
+        elif event_type == "AutonomousEpisodeCompleted":
+            if active_episode is None or episode != active_episode:
+                raise AutonomousRuntimeCheckpointError(
+                    "backup checkpoint completion chronology differs"
+                )
+            result = dict(payload)
+            result.pop(COMPLETION_RECEIPT_FIELD, None)
+            completed.append(result)
+            active_episode = None
+            fill_observed = False
+        else:
+            raise AutonomousRuntimeCheckpointError(
+                "backup checkpoint autonomous journal contains unsupported event"
+            )
+    if active_episode is not None:
+        raise AutonomousRuntimeCheckpointError(
+            "backup checkpoint cannot bind an incomplete autonomous episode"
+        )
+    if not completed:
+        raise AutonomousRuntimeCheckpointError(
+            "backup checkpoint has no completed autonomous episode"
+        )
+
+    try:
+        checkpoint = CompositeReplayCheckpoint.from_canonical_json(
+            checkpoint_document
+        )
+    except (ReplayError, TypeError, ValueError) as error:
+        raise AutonomousRuntimeCheckpointError(
+            "backup autonomous runtime checkpoint is invalid"
+        ) from error
+
+    replay = _replay(protocol, completed_episodes=len(completed))
+    build_sha, protocol_ref = _expected_identity(protocol)
+    key_identity = protocol.get("runtime_authority_key_sha256")
+    expected_authority_id = _authority_id(protocol, key_identity)
+    if (
+        checkpoint.replay != replay.checkpoint()
+        or checkpoint.build_sha != build_sha
+        or checkpoint.protocol_ref != protocol_ref
+        or checkpoint.runtime_authority_id != expected_authority_id
+    ):
+        raise AutonomousRuntimeCheckpointError(
+            "backup autonomous runtime checkpoint identity differs from staged journal"
+        )
+
+    key = _require_autonomous_runtime_authority_key(
+        source_root,
+        key_identity,
+    )
+    verifier = _verifier(expected_authority_id, key)
+    try:
+        RuntimeStateVerifier.verify_checkpoint_binding(verifier, checkpoint)
+    except (ReplayError, TypeError, ValueError) as error:
+        raise AutonomousRuntimeCheckpointError(
+            "backup autonomous runtime checkpoint authority seal is invalid"
+        ) from error
+
+    cut_id, components = _stable_runtime_components(
+        snapshot_store,
+        protocol=protocol,
+        completed=completed,
+        journal_store_identity=source_identity,
+    )
+    if (
+        checkpoint.runtime_cut_id != cut_id
+        or dict(checkpoint.runtime_components) != components
+    ):
+        raise AutonomousRuntimeCheckpointError(
+            "backup autonomous runtime checkpoint does not match staged journal cut"
+        )
+    return checkpoint
 
 
 def build_autonomous_runtime_checkpoint(

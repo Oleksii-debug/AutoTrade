@@ -1,0 +1,6 @@
+{
+  "name": "autotrade-provider-free-browser-acceptance",
+  "private": true,
+  "scripts": {"test": "node provider-free-browser.cjs"},
+  "devDependencies": {"playwright": "1.62.1"}
+}

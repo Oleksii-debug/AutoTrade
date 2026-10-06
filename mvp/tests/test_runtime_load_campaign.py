@@ -1,14 +1,20 @@
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MappingProxyType
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from mvp.autotrade_mvp.performance_qualification import RuntimeBudgetSpec, evaluate_runtime_budget
+from mvp.autotrade_mvp.performance_qualification import (
+    RuntimeBudgetSpec,
+    RuntimeLoadObservation,
+    evaluate_runtime_budget,
+)
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.pipeline import run_vertical_slice as real_run_vertical_slice
 from mvp.autotrade_mvp.runtime_load_campaign import (
     _observed_source_sha,
+    RuntimeLoadCampaignEvidence,
     _sha256_identity,
     capture_runtime_host_identity,
     collect_vertical_slice_load_evidence,
@@ -33,6 +39,101 @@ class RuntimeLoadCampaignTests(unittest.TestCase):
             min_financial_samples=3,
             min_research_samples=1,
         )
+
+    def test_identity_hashing_rejects_polymorphic_containers_before_callbacks(self):
+        callbacks = []
+
+        class HostileMapping(dict):
+            def items(self):
+                callbacks.append("items")
+                raise AssertionError("identity mapping callback executed")
+
+            def __iter__(self):
+                callbacks.append("iter")
+                raise AssertionError("identity mapping callback executed")
+
+        class HostileList(list):
+            def __iter__(self):
+                callbacks.append("list-iter")
+                raise AssertionError("identity list callback executed")
+
+        for hostile in (
+            HostileMapping({"machine": "host"}),
+            MappingProxyType(HostileMapping({"machine": "host"})),
+            HostileList(["host"]),
+        ):
+            with self.subTest(type=type(hostile).__name__), self.assertRaisesRegex(
+                TypeError,
+                "unsupported non-JSON value",
+            ):
+                _sha256_identity(hostile)
+
+        self.assertEqual(callbacks, [])
+
+    def test_campaign_evidence_rejects_polymorphic_identity_and_tuple_carriers(self):
+        callbacks = []
+
+        class HostileMapping(dict):
+            def items(self):
+                callbacks.append("items")
+                raise AssertionError("host identity callback executed")
+
+        class HostileTuple(tuple):
+            def __len__(self):
+                callbacks.append("len")
+                raise AssertionError("tuple length callback executed")
+
+            def __iter__(self):
+                callbacks.append("iter")
+                raise AssertionError("tuple iteration callback executed")
+
+        observation = RuntimeLoadObservation.create(
+            scenario_id="ingress-regression",
+            spec_digest="sha256:" + ("b" * 64),
+            release_sha="a" * 40,
+            configuration_hash="sha256:" + ("c" * 64),
+            host_fingerprint="sha256:" + ("d" * 64),
+            expected_financial_events=1,
+            recovered_financial_events=1,
+            financial_latency_us=(1,),
+            financial_staleness_us=(),
+            research_interference_us=(),
+            recovered_financial_event_ids=("event-1",),
+            financial_latency_event_ids=("event-1",),
+            financial_staleness_event_ids=(),
+            reconnect_backlog_remaining=0,
+            declared_duration_us=10,
+            observed_duration_us=1,
+        )
+
+        with self.assertRaisesRegex(TypeError, "unsupported non-JSON value"):
+            RuntimeLoadCampaignEvidence(
+                observation=observation,
+                journal_sequence_before=0,
+                journal_sequence_after=1,
+                recovered_event_ids=("event-1",),
+                recovered_journal_sequences=(1,),
+                host_identity=HostileMapping({"machine": "host"}),
+            )
+
+        with self.assertRaisesRegex(ValueError, "exact non-empty strings"):
+            RuntimeLoadCampaignEvidence(
+                observation=observation,
+                journal_sequence_before=0,
+                journal_sequence_after=1,
+                recovered_event_ids=HostileTuple(("event-1",)),
+                recovered_journal_sequences=(1,),
+                host_identity={"machine": "host"},
+            )
+
+        self.assertEqual(callbacks, [])
+
+    def test_runtime_host_capture_returns_detached_exact_dict(self):
+        identity = capture_runtime_host_identity()
+        self.assertIs(type(identity), dict)
+        self.assertIn("system", identity)
+        self.assertIn("python_version", identity)
+        self.assertIn("cpu_count", identity)
 
     def test_campaign_rejects_release_sha_not_matching_actual_checkout(self):
         configuration = {"mode": "SIMULATION", "symbol": "SIM"}
@@ -106,7 +207,13 @@ class RuntimeLoadCampaignTests(unittest.TestCase):
             self.assertEqual(observation.financial_staleness_us, ())
             self.assertEqual(observation.research_interference_us, ())
             decision = evaluate_runtime_budget(spec, observation)
-            self.assertEqual(decision.status, "INCONCLUSIVE")
+            # The vertical slice leaves its canonical outbox undelivered.  The
+            # hardened collector now derives that backlog from JournalStore
+            # instead of inventing zero, so the campaign must FAIL rather than
+            # merely remain inconclusive.
+            self.assertGreater(observation.reconnect_backlog_remaining, 0)
+            self.assertEqual(decision.status, "FAIL")
+            self.assertIn("reconnect_backlog_not_drained", decision.reasons)
             self.assertIn("insufficient_staleness_samples", decision.reasons)
             self.assertIn("insufficient_research_interference_samples", decision.reasons)
 

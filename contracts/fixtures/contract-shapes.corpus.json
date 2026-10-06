@@ -1,0 +1,3525 @@
+{
+  "case_count": 201,
+  "cases": [
+    {
+      "contract": "authority.schema.json#/$defs/AdmissionRecord",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-001-valid-minimal",
+      "value": {
+        "admission_id": null,
+        "authority_ref": null,
+        "expires_at": null,
+        "intent_hash": null,
+        "owner_epoch": null,
+        "policy_revocation_epoch": null,
+        "reservation_id": null,
+        "risk_decision_id": null,
+        "status": "ACTIVE"
+      }
+    },
+    {
+      "contract": "authority.schema.json#/$defs/AdmissionRecord",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-001-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "admission_id": null,
+        "authority_ref": null,
+        "expires_at": null,
+        "intent_hash": null,
+        "owner_epoch": null,
+        "policy_revocation_epoch": null,
+        "reservation_id": null,
+        "risk_decision_id": null,
+        "status": "ACTIVE"
+      }
+    },
+    {
+      "contract": "authority.schema.json#/$defs/AdmissionRecord",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-001-missing-required",
+      "value": {
+        "authority_ref": null,
+        "expires_at": null,
+        "intent_hash": null,
+        "owner_epoch": null,
+        "policy_revocation_epoch": null,
+        "reservation_id": null,
+        "risk_decision_id": null,
+        "status": "ACTIVE"
+      }
+    },
+    {
+      "contract": "authority.schema.json#/$defs/AdmissionRecord",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-001-enum-01-valid",
+      "value": {
+        "admission_id": null,
+        "authority_ref": null,
+        "expires_at": null,
+        "intent_hash": null,
+        "owner_epoch": null,
+        "policy_revocation_epoch": null,
+        "reservation_id": null,
+        "risk_decision_id": null,
+        "status": "ACTIVE"
+      }
+    },
+    {
+      "contract": "authority.schema.json#/$defs/AdmissionRecord",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-001-enum-01-invalid",
+      "value": {
+        "admission_id": null,
+        "authority_ref": null,
+        "expires_at": null,
+        "intent_hash": null,
+        "owner_epoch": null,
+        "policy_revocation_epoch": null,
+        "reservation_id": null,
+        "risk_decision_id": null,
+        "status": "__AUTOTRADE_INVALID_ENUM__"
+      }
+    },
+    {
+      "contract": "authority.schema.json#/$defs/AuthorityPolicy",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-002-valid-minimal",
+      "value": {
+        "account_scope": null,
+        "actor_id": null,
+        "allowed_actions": null,
+        "allowed_assets": null,
+        "capital_bounds": null,
+        "compute_budget": null,
+        "environments": null,
+        "mode": "CONFIRMATION",
+        "model_allowlist": null,
+        "policy_id": null,
+        "protective_action_policy": null,
+        "revocation_epoch": null,
+        "risk_policy_id": null,
+        "valid_from": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "authority.schema.json#/$defs/AuthorityPolicy",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-002-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "account_scope": null,
+        "actor_id": null,
+        "allowed_actions": null,
+        "allowed_assets": null,
+        "capital_bounds": null,
+        "compute_budget": null,
+        "environments": null,
+        "mode": "CONFIRMATION",
+        "model_allowlist": null,
+        "policy_id": null,
+        "protective_action_policy": null,
+        "revocation_epoch": null,
+        "risk_policy_id": null,
+        "valid_from": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "authority.schema.json#/$defs/AuthorityPolicy",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-002-missing-required",
+      "value": {
+        "actor_id": null,
+        "allowed_actions": null,
+        "allowed_assets": null,
+        "capital_bounds": null,
+        "compute_budget": null,
+        "environments": null,
+        "mode": "CONFIRMATION",
+        "model_allowlist": null,
+        "policy_id": null,
+        "protective_action_policy": null,
+        "revocation_epoch": null,
+        "risk_policy_id": null,
+        "valid_from": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "authority.schema.json#/$defs/AuthorityPolicy",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-002-enum-01-valid",
+      "value": {
+        "account_scope": null,
+        "actor_id": null,
+        "allowed_actions": null,
+        "allowed_assets": null,
+        "capital_bounds": null,
+        "compute_budget": null,
+        "environments": null,
+        "mode": "CONFIRMATION",
+        "model_allowlist": null,
+        "policy_id": null,
+        "protective_action_policy": null,
+        "revocation_epoch": null,
+        "risk_policy_id": null,
+        "valid_from": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "authority.schema.json#/$defs/AuthorityPolicy",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-002-enum-01-invalid",
+      "value": {
+        "account_scope": null,
+        "actor_id": null,
+        "allowed_actions": null,
+        "allowed_assets": null,
+        "capital_bounds": null,
+        "compute_budget": null,
+        "environments": null,
+        "mode": "__AUTOTRADE_INVALID_ENUM__",
+        "model_allowlist": null,
+        "policy_id": null,
+        "protective_action_policy": null,
+        "revocation_epoch": null,
+        "risk_policy_id": null,
+        "valid_from": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "authority.schema.json#/$defs/Confirmation",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-003-valid-minimal",
+      "value": {
+        "account_id": null,
+        "actor_id": null,
+        "confirmation_id": null,
+        "environment": null,
+        "expires_at": null,
+        "intent_hash": null,
+        "max_quantity": null,
+        "max_total_cost": null,
+        "policy_version": null
+      }
+    },
+    {
+      "contract": "authority.schema.json#/$defs/Confirmation",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-003-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "account_id": null,
+        "actor_id": null,
+        "confirmation_id": null,
+        "environment": null,
+        "expires_at": null,
+        "intent_hash": null,
+        "max_quantity": null,
+        "max_total_cost": null,
+        "policy_version": null
+      }
+    },
+    {
+      "contract": "authority.schema.json#/$defs/Confirmation",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-003-missing-required",
+      "value": {
+        "actor_id": null,
+        "confirmation_id": null,
+        "environment": null,
+        "expires_at": null,
+        "intent_hash": null,
+        "max_quantity": null,
+        "max_total_cost": null,
+        "policy_version": null
+      }
+    },
+    {
+      "contract": "authority.schema.json#/$defs/RiskDecision",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-004-valid-minimal",
+      "value": {
+        "capability_snapshot_id": null,
+        "checks": null,
+        "decision_id": null,
+        "evaluated_at": null,
+        "intent_hash": null,
+        "policy_version": null,
+        "reason_codes": null,
+        "reservation_delta": null,
+        "state_version": null,
+        "valid_until": null,
+        "verdict": "ALLOW"
+      }
+    },
+    {
+      "contract": "authority.schema.json#/$defs/RiskDecision",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-004-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "capability_snapshot_id": null,
+        "checks": null,
+        "decision_id": null,
+        "evaluated_at": null,
+        "intent_hash": null,
+        "policy_version": null,
+        "reason_codes": null,
+        "reservation_delta": null,
+        "state_version": null,
+        "valid_until": null,
+        "verdict": "ALLOW"
+      }
+    },
+    {
+      "contract": "authority.schema.json#/$defs/RiskDecision",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-004-missing-required",
+      "value": {
+        "checks": null,
+        "decision_id": null,
+        "evaluated_at": null,
+        "intent_hash": null,
+        "policy_version": null,
+        "reason_codes": null,
+        "reservation_delta": null,
+        "state_version": null,
+        "valid_until": null,
+        "verdict": "ALLOW"
+      }
+    },
+    {
+      "contract": "authority.schema.json#/$defs/RiskDecision",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-004-enum-01-valid",
+      "value": {
+        "capability_snapshot_id": null,
+        "checks": null,
+        "decision_id": null,
+        "evaluated_at": null,
+        "intent_hash": null,
+        "policy_version": null,
+        "reason_codes": null,
+        "reservation_delta": null,
+        "state_version": null,
+        "valid_until": null,
+        "verdict": "ALLOW"
+      }
+    },
+    {
+      "contract": "authority.schema.json#/$defs/RiskDecision",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-004-enum-01-invalid",
+      "value": {
+        "capability_snapshot_id": null,
+        "checks": null,
+        "decision_id": null,
+        "evaluated_at": null,
+        "intent_hash": null,
+        "policy_version": null,
+        "reason_codes": null,
+        "reservation_delta": null,
+        "state_version": null,
+        "valid_until": null,
+        "verdict": "__AUTOTRADE_INVALID_ENUM__"
+      }
+    },
+    {
+      "contract": "common.schema.json#/$defs/EvidenceRef",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-005-valid-minimal",
+      "value": {
+        "artifact_id": null,
+        "observed_at": null,
+        "sha256": null
+      }
+    },
+    {
+      "contract": "common.schema.json#/$defs/EvidenceRef",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-005-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "artifact_id": null,
+        "observed_at": null,
+        "sha256": null
+      }
+    },
+    {
+      "contract": "common.schema.json#/$defs/EvidenceRef",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-005-missing-required",
+      "value": {
+        "observed_at": null,
+        "sha256": null
+      }
+    },
+    {
+      "contract": "common.schema.json#/$defs/Money",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-006-valid-minimal",
+      "value": {
+        "amount": null,
+        "currency": null
+      }
+    },
+    {
+      "contract": "common.schema.json#/$defs/Money",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-006-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "amount": null,
+        "currency": null
+      }
+    },
+    {
+      "contract": "common.schema.json#/$defs/Money",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-006-missing-required",
+      "value": {
+        "currency": null
+      }
+    },
+    {
+      "contract": "common.schema.json#/$defs/Quantity",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-007-valid-minimal",
+      "value": {
+        "unit": null,
+        "value": null
+      }
+    },
+    {
+      "contract": "common.schema.json#/$defs/Quantity",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-007-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "unit": null,
+        "value": null
+      }
+    },
+    {
+      "contract": "common.schema.json#/$defs/Quantity",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-007-missing-required",
+      "value": {
+        "value": null
+      }
+    },
+    {
+      "contract": "data.schema.json#/$defs/DatasetManifest",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-008-valid-minimal",
+      "value": {
+        "adjustment_policy": null,
+        "availability_policy": null,
+        "calendar_version": null,
+        "content_hashes": null,
+        "coverage": null,
+        "created_at": null,
+        "dataset_id": null,
+        "instrument_universe_version": null,
+        "missingness_report": null,
+        "normalization_version": null,
+        "revision_policy": null,
+        "rights": null,
+        "source_evidence": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "data.schema.json#/$defs/DatasetManifest",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-008-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "adjustment_policy": null,
+        "availability_policy": null,
+        "calendar_version": null,
+        "content_hashes": null,
+        "coverage": null,
+        "created_at": null,
+        "dataset_id": null,
+        "instrument_universe_version": null,
+        "missingness_report": null,
+        "normalization_version": null,
+        "revision_policy": null,
+        "rights": null,
+        "source_evidence": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "data.schema.json#/$defs/DatasetManifest",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-008-missing-required",
+      "value": {
+        "availability_policy": null,
+        "calendar_version": null,
+        "content_hashes": null,
+        "coverage": null,
+        "created_at": null,
+        "dataset_id": null,
+        "instrument_universe_version": null,
+        "missingness_report": null,
+        "normalization_version": null,
+        "revision_policy": null,
+        "rights": null,
+        "source_evidence": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "data.schema.json#/$defs/InformationClaim",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-009-valid-minimal",
+      "value": {
+        "claim_id": null,
+        "confidence": null,
+        "kind": null,
+        "text": null
+      }
+    },
+    {
+      "contract": "data.schema.json#/$defs/InformationClaim",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-009-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "claim_id": null,
+        "confidence": null,
+        "kind": null,
+        "text": null
+      }
+    },
+    {
+      "contract": "data.schema.json#/$defs/InformationClaim",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-009-missing-required",
+      "value": {
+        "confidence": null,
+        "kind": null,
+        "text": null
+      }
+    },
+    {
+      "contract": "data.schema.json#/$defs/InformationEvent",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-010-valid-minimal",
+      "value": {
+        "available_at": null,
+        "claims": null,
+        "content_hash": null,
+        "entities": null,
+        "evidence": null,
+        "information_id": null,
+        "ingested_at": null,
+        "language": null,
+        "published_at": null,
+        "revision": null,
+        "rights_id": null,
+        "source_id": null,
+        "trust_features": null
+      }
+    },
+    {
+      "contract": "data.schema.json#/$defs/InformationEvent",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-010-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "available_at": null,
+        "claims": null,
+        "content_hash": null,
+        "entities": null,
+        "evidence": null,
+        "information_id": null,
+        "ingested_at": null,
+        "language": null,
+        "published_at": null,
+        "revision": null,
+        "rights_id": null,
+        "source_id": null,
+        "trust_features": null
+      }
+    },
+    {
+      "contract": "data.schema.json#/$defs/InformationEvent",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-010-missing-required",
+      "value": {
+        "claims": null,
+        "content_hash": null,
+        "entities": null,
+        "evidence": null,
+        "information_id": null,
+        "ingested_at": null,
+        "language": null,
+        "published_at": null,
+        "revision": null,
+        "rights_id": null,
+        "source_id": null,
+        "trust_features": null
+      }
+    },
+    {
+      "contract": "decision.schema.json#/$defs/DecisionProposal",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-011-valid-minimal",
+      "value": {
+        "candidate_instruments": null,
+        "confidence_basis": null,
+        "counterarguments": null,
+        "decision_at": null,
+        "estimated_compute_cost": null,
+        "exit_policy_ref": null,
+        "expected_return_distribution_ref": null,
+        "expiry": null,
+        "horizon": null,
+        "information_cutoff": null,
+        "input_manifest_refs": null,
+        "proposal_id": null,
+        "strategy_version": null,
+        "thesis": null
+      }
+    },
+    {
+      "contract": "decision.schema.json#/$defs/DecisionProposal",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-011-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "candidate_instruments": null,
+        "confidence_basis": null,
+        "counterarguments": null,
+        "decision_at": null,
+        "estimated_compute_cost": null,
+        "exit_policy_ref": null,
+        "expected_return_distribution_ref": null,
+        "expiry": null,
+        "horizon": null,
+        "information_cutoff": null,
+        "input_manifest_refs": null,
+        "proposal_id": null,
+        "strategy_version": null,
+        "thesis": null
+      }
+    },
+    {
+      "contract": "decision.schema.json#/$defs/DecisionProposal",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-011-missing-required",
+      "value": {
+        "confidence_basis": null,
+        "counterarguments": null,
+        "decision_at": null,
+        "estimated_compute_cost": null,
+        "exit_policy_ref": null,
+        "expected_return_distribution_ref": null,
+        "expiry": null,
+        "horizon": null,
+        "information_cutoff": null,
+        "input_manifest_refs": null,
+        "proposal_id": null,
+        "strategy_version": null,
+        "thesis": null
+      }
+    },
+    {
+      "contract": "decision.schema.json#/$defs/PortfolioTarget",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-012-valid-minimal",
+      "value": {
+        "account_scope": null,
+        "as_of_state_version": null,
+        "base_currency": null,
+        "cash_reserve": null,
+        "constraint_set_id": null,
+        "estimated_costs": null,
+        "objective_version": null,
+        "proposal_refs": null,
+        "solver_status": "OPTIMAL",
+        "target_exposures": null,
+        "target_id": null,
+        "turnover_limit": null
+      }
+    },
+    {
+      "contract": "decision.schema.json#/$defs/PortfolioTarget",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-012-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "account_scope": null,
+        "as_of_state_version": null,
+        "base_currency": null,
+        "cash_reserve": null,
+        "constraint_set_id": null,
+        "estimated_costs": null,
+        "objective_version": null,
+        "proposal_refs": null,
+        "solver_status": "OPTIMAL",
+        "target_exposures": null,
+        "target_id": null,
+        "turnover_limit": null
+      }
+    },
+    {
+      "contract": "decision.schema.json#/$defs/PortfolioTarget",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-012-missing-required",
+      "value": {
+        "as_of_state_version": null,
+        "base_currency": null,
+        "cash_reserve": null,
+        "constraint_set_id": null,
+        "estimated_costs": null,
+        "objective_version": null,
+        "proposal_refs": null,
+        "solver_status": "OPTIMAL",
+        "target_exposures": null,
+        "target_id": null,
+        "turnover_limit": null
+      }
+    },
+    {
+      "contract": "decision.schema.json#/$defs/PortfolioTarget",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-012-enum-01-valid",
+      "value": {
+        "account_scope": null,
+        "as_of_state_version": null,
+        "base_currency": null,
+        "cash_reserve": null,
+        "constraint_set_id": null,
+        "estimated_costs": null,
+        "objective_version": null,
+        "proposal_refs": null,
+        "solver_status": "OPTIMAL",
+        "target_exposures": null,
+        "target_id": null,
+        "turnover_limit": null
+      }
+    },
+    {
+      "contract": "decision.schema.json#/$defs/PortfolioTarget",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-012-enum-01-invalid",
+      "value": {
+        "account_scope": null,
+        "as_of_state_version": null,
+        "base_currency": null,
+        "cash_reserve": null,
+        "constraint_set_id": null,
+        "estimated_costs": null,
+        "objective_version": null,
+        "proposal_refs": null,
+        "solver_status": "__AUTOTRADE_INVALID_ENUM__",
+        "target_exposures": null,
+        "target_id": null,
+        "turnover_limit": null
+      }
+    },
+    {
+      "contract": "decision.schema.json#/$defs/TargetExposure",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-013-valid-minimal",
+      "value": {
+        "instrument_version": null,
+        "quantity": null
+      }
+    },
+    {
+      "contract": "decision.schema.json#/$defs/TargetExposure",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-013-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "instrument_version": null,
+        "quantity": null
+      }
+    },
+    {
+      "contract": "decision.schema.json#/$defs/TargetExposure",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-013-missing-required",
+      "value": {
+        "quantity": null
+      }
+    },
+    {
+      "contract": "event.schema.json#/$defs/EventEnvelope",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-014-valid-minimal",
+      "value": {
+        "aggregate_id": null,
+        "aggregate_type": null,
+        "aggregate_version": null,
+        "committed_at": null,
+        "correlation_id": null,
+        "environment": null,
+        "event_id": null,
+        "event_type": null,
+        "evidence_refs": null,
+        "host_id": null,
+        "observed_at": null,
+        "occurred_at": null,
+        "owner_epoch": null,
+        "payload": null,
+        "payload_hash": null,
+        "schema_version": null
+      }
+    },
+    {
+      "contract": "event.schema.json#/$defs/EventEnvelope",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-014-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "aggregate_id": null,
+        "aggregate_type": null,
+        "aggregate_version": null,
+        "committed_at": null,
+        "correlation_id": null,
+        "environment": null,
+        "event_id": null,
+        "event_type": null,
+        "evidence_refs": null,
+        "host_id": null,
+        "observed_at": null,
+        "occurred_at": null,
+        "owner_epoch": null,
+        "payload": null,
+        "payload_hash": null,
+        "schema_version": null
+      }
+    },
+    {
+      "contract": "event.schema.json#/$defs/EventEnvelope",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-014-missing-required",
+      "value": {
+        "aggregate_type": null,
+        "aggregate_version": null,
+        "committed_at": null,
+        "correlation_id": null,
+        "environment": null,
+        "event_id": null,
+        "event_type": null,
+        "evidence_refs": null,
+        "host_id": null,
+        "observed_at": null,
+        "occurred_at": null,
+        "owner_epoch": null,
+        "payload": null,
+        "payload_hash": null,
+        "schema_version": null
+      }
+    },
+    {
+      "contract": "execution.schema.json#/$defs/ExecutionFill",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-015-valid-minimal",
+      "value": {
+        "evidence": null,
+        "fees": null,
+        "fill_id": null,
+        "instrument_version": null,
+        "last_price": null,
+        "last_quantity": null,
+        "provider_execution_id": null,
+        "receipt_time": null,
+        "settlement_date": null,
+        "side": "BUY",
+        "trade_time": null
+      }
+    },
+    {
+      "contract": "execution.schema.json#/$defs/ExecutionFill",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-015-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "evidence": null,
+        "fees": null,
+        "fill_id": null,
+        "instrument_version": null,
+        "last_price": null,
+        "last_quantity": null,
+        "provider_execution_id": null,
+        "receipt_time": null,
+        "settlement_date": null,
+        "side": "BUY",
+        "trade_time": null
+      }
+    },
+    {
+      "contract": "execution.schema.json#/$defs/ExecutionFill",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-015-missing-required",
+      "value": {
+        "fees": null,
+        "fill_id": null,
+        "instrument_version": null,
+        "last_price": null,
+        "last_quantity": null,
+        "provider_execution_id": null,
+        "receipt_time": null,
+        "settlement_date": null,
+        "side": "BUY",
+        "trade_time": null
+      }
+    },
+    {
+      "contract": "execution.schema.json#/$defs/ExecutionFill",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-015-enum-01-valid",
+      "value": {
+        "evidence": null,
+        "fees": null,
+        "fill_id": null,
+        "instrument_version": null,
+        "last_price": null,
+        "last_quantity": null,
+        "provider_execution_id": null,
+        "receipt_time": null,
+        "settlement_date": null,
+        "side": "BUY",
+        "trade_time": null
+      }
+    },
+    {
+      "contract": "execution.schema.json#/$defs/ExecutionFill",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-015-enum-01-invalid",
+      "value": {
+        "evidence": null,
+        "fees": null,
+        "fill_id": null,
+        "instrument_version": null,
+        "last_price": null,
+        "last_quantity": null,
+        "provider_execution_id": null,
+        "receipt_time": null,
+        "settlement_date": null,
+        "side": "__AUTOTRADE_INVALID_ENUM__",
+        "trade_time": null
+      }
+    },
+    {
+      "contract": "execution.schema.json#/$defs/OrderIntent",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-016-valid-minimal",
+      "value": {
+        "account_id": null,
+        "capability_snapshot_id": null,
+        "client_order_id": null,
+        "decision_ref": null,
+        "environment": null,
+        "expected_state_version": null,
+        "expires_at": null,
+        "instrument_version": null,
+        "intent_hash": null,
+        "intent_id": null,
+        "intent_version": null,
+        "maximum_cost": null,
+        "maximum_slippage": null,
+        "order_type": null,
+        "portfolio_target_ref": null,
+        "quantity": null,
+        "reduce_only": null,
+        "side": "BUY",
+        "time_in_force": null
+      }
+    },
+    {
+      "contract": "execution.schema.json#/$defs/OrderIntent",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-016-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "account_id": null,
+        "capability_snapshot_id": null,
+        "client_order_id": null,
+        "decision_ref": null,
+        "environment": null,
+        "expected_state_version": null,
+        "expires_at": null,
+        "instrument_version": null,
+        "intent_hash": null,
+        "intent_id": null,
+        "intent_version": null,
+        "maximum_cost": null,
+        "maximum_slippage": null,
+        "order_type": null,
+        "portfolio_target_ref": null,
+        "quantity": null,
+        "reduce_only": null,
+        "side": "BUY",
+        "time_in_force": null
+      }
+    },
+    {
+      "contract": "execution.schema.json#/$defs/OrderIntent",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-016-missing-required",
+      "value": {
+        "capability_snapshot_id": null,
+        "client_order_id": null,
+        "decision_ref": null,
+        "environment": null,
+        "expected_state_version": null,
+        "expires_at": null,
+        "instrument_version": null,
+        "intent_hash": null,
+        "intent_id": null,
+        "intent_version": null,
+        "maximum_cost": null,
+        "maximum_slippage": null,
+        "order_type": null,
+        "portfolio_target_ref": null,
+        "quantity": null,
+        "reduce_only": null,
+        "side": "BUY",
+        "time_in_force": null
+      }
+    },
+    {
+      "contract": "execution.schema.json#/$defs/OrderIntent",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-016-enum-01-valid",
+      "value": {
+        "account_id": null,
+        "capability_snapshot_id": null,
+        "client_order_id": null,
+        "decision_ref": null,
+        "environment": null,
+        "expected_state_version": null,
+        "expires_at": null,
+        "instrument_version": null,
+        "intent_hash": null,
+        "intent_id": null,
+        "intent_version": null,
+        "maximum_cost": null,
+        "maximum_slippage": null,
+        "order_type": null,
+        "portfolio_target_ref": null,
+        "quantity": null,
+        "reduce_only": null,
+        "side": "BUY",
+        "time_in_force": null
+      }
+    },
+    {
+      "contract": "execution.schema.json#/$defs/OrderIntent",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-016-enum-01-invalid",
+      "value": {
+        "account_id": null,
+        "capability_snapshot_id": null,
+        "client_order_id": null,
+        "decision_ref": null,
+        "environment": null,
+        "expected_state_version": null,
+        "expires_at": null,
+        "instrument_version": null,
+        "intent_hash": null,
+        "intent_id": null,
+        "intent_version": null,
+        "maximum_cost": null,
+        "maximum_slippage": null,
+        "order_type": null,
+        "portfolio_target_ref": null,
+        "quantity": null,
+        "reduce_only": null,
+        "side": "__AUTOTRADE_INVALID_ENUM__",
+        "time_in_force": null
+      }
+    },
+    {
+      "contract": "execution.schema.json#/$defs/SubmissionAttempt",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-017-valid-minimal",
+      "value": {
+        "attempt_id": null,
+        "intent_ref": null,
+        "outcome": "ACKNOWLEDGED",
+        "owner_epoch": null,
+        "policy_epoch": null,
+        "send_started_at": null,
+        "transport_request_fingerprint": null
+      }
+    },
+    {
+      "contract": "execution.schema.json#/$defs/SubmissionAttempt",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-017-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "attempt_id": null,
+        "intent_ref": null,
+        "outcome": "ACKNOWLEDGED",
+        "owner_epoch": null,
+        "policy_epoch": null,
+        "send_started_at": null,
+        "transport_request_fingerprint": null
+      }
+    },
+    {
+      "contract": "execution.schema.json#/$defs/SubmissionAttempt",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-017-missing-required",
+      "value": {
+        "intent_ref": null,
+        "outcome": "ACKNOWLEDGED",
+        "owner_epoch": null,
+        "policy_epoch": null,
+        "send_started_at": null,
+        "transport_request_fingerprint": null
+      }
+    },
+    {
+      "contract": "execution.schema.json#/$defs/SubmissionAttempt",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-017-enum-01-valid",
+      "value": {
+        "attempt_id": null,
+        "intent_ref": null,
+        "outcome": "ACKNOWLEDGED",
+        "owner_epoch": null,
+        "policy_epoch": null,
+        "send_started_at": null,
+        "transport_request_fingerprint": null
+      }
+    },
+    {
+      "contract": "execution.schema.json#/$defs/SubmissionAttempt",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-017-enum-01-invalid",
+      "value": {
+        "attempt_id": null,
+        "intent_ref": null,
+        "outcome": "__AUTOTRADE_INVALID_ENUM__",
+        "owner_epoch": null,
+        "policy_epoch": null,
+        "send_started_at": null,
+        "transport_request_fingerprint": null
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/EvaluationResult",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-018-valid-minimal",
+      "value": {
+        "cost": null,
+        "failed_checks": null,
+        "latency": null,
+        "metrics": null,
+        "protocol_digest": null,
+        "result_id": null,
+        "retention_regression": null,
+        "run_hashes": null,
+        "selection_accounting": null,
+        "verdict": "PASS"
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/EvaluationResult",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-018-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "cost": null,
+        "failed_checks": null,
+        "latency": null,
+        "metrics": null,
+        "protocol_digest": null,
+        "result_id": null,
+        "retention_regression": null,
+        "run_hashes": null,
+        "selection_accounting": null,
+        "verdict": "PASS"
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/EvaluationResult",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-018-missing-required",
+      "value": {
+        "failed_checks": null,
+        "latency": null,
+        "metrics": null,
+        "protocol_digest": null,
+        "result_id": null,
+        "retention_regression": null,
+        "run_hashes": null,
+        "selection_accounting": null,
+        "verdict": "PASS"
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/EvaluationResult",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-018-enum-01-valid",
+      "value": {
+        "cost": null,
+        "failed_checks": null,
+        "latency": null,
+        "metrics": null,
+        "protocol_digest": null,
+        "result_id": null,
+        "retention_regression": null,
+        "run_hashes": null,
+        "selection_accounting": null,
+        "verdict": "PASS"
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/EvaluationResult",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-018-enum-01-invalid",
+      "value": {
+        "cost": null,
+        "failed_checks": null,
+        "latency": null,
+        "metrics": null,
+        "protocol_digest": null,
+        "result_id": null,
+        "retention_regression": null,
+        "run_hashes": null,
+        "selection_accounting": null,
+        "verdict": "__AUTOTRADE_INVALID_ENUM__"
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/ExperienceEpisode",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-019-valid-minimal",
+      "value": {
+        "cost_attribution": null,
+        "episode_id": null,
+        "evidence": null,
+        "failure_tags": null,
+        "information_cutoff": null,
+        "input_hashes": null,
+        "intended_action": null,
+        "observed_execution": null,
+        "realized_outcome_window": null,
+        "regime_tags": null,
+        "revision": null,
+        "strategy_version": null,
+        "uncertainty": null
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/ExperienceEpisode",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-019-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "cost_attribution": null,
+        "episode_id": null,
+        "evidence": null,
+        "failure_tags": null,
+        "information_cutoff": null,
+        "input_hashes": null,
+        "intended_action": null,
+        "observed_execution": null,
+        "realized_outcome_window": null,
+        "regime_tags": null,
+        "revision": null,
+        "strategy_version": null,
+        "uncertainty": null
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/ExperienceEpisode",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-019-missing-required",
+      "value": {
+        "episode_id": null,
+        "evidence": null,
+        "failure_tags": null,
+        "information_cutoff": null,
+        "input_hashes": null,
+        "intended_action": null,
+        "observed_execution": null,
+        "realized_outcome_window": null,
+        "regime_tags": null,
+        "revision": null,
+        "strategy_version": null,
+        "uncertainty": null
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/ExperimentProtocol",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-020-valid-minimal",
+      "value": {
+        "acceptance_thresholds": null,
+        "comparison_baselines": null,
+        "cost_model": null,
+        "digest": null,
+        "forward_window": null,
+        "holdout_access_policy": null,
+        "hypothesis": null,
+        "metric_directions": null,
+        "protocol_id": null,
+        "purge_embargo_rule": null,
+        "stopping_rule": null,
+        "test_window": null,
+        "train_window": null,
+        "trial_budget": null,
+        "validation_window": null
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/ExperimentProtocol",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-020-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "acceptance_thresholds": null,
+        "comparison_baselines": null,
+        "cost_model": null,
+        "digest": null,
+        "forward_window": null,
+        "holdout_access_policy": null,
+        "hypothesis": null,
+        "metric_directions": null,
+        "protocol_id": null,
+        "purge_embargo_rule": null,
+        "stopping_rule": null,
+        "test_window": null,
+        "train_window": null,
+        "trial_budget": null,
+        "validation_window": null
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/ExperimentProtocol",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-020-missing-required",
+      "value": {
+        "comparison_baselines": null,
+        "cost_model": null,
+        "digest": null,
+        "forward_window": null,
+        "holdout_access_policy": null,
+        "hypothesis": null,
+        "metric_directions": null,
+        "protocol_id": null,
+        "purge_embargo_rule": null,
+        "stopping_rule": null,
+        "test_window": null,
+        "train_window": null,
+        "trial_budget": null,
+        "validation_window": null
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/GateProfile",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-021-valid-minimal",
+      "value": {
+        "baseline": null,
+        "confidence_level": null,
+        "cost_model_ref": null,
+        "digest": null,
+        "direction": "MAXIMIZE",
+        "minimum_practical_effect": null,
+        "power_or_precision_plan": null,
+        "primary_metric": null,
+        "profile_id": null,
+        "registered_at": null,
+        "required_regime_coverage": null,
+        "retention_limits": null,
+        "risk_limits": null,
+        "selection_correction": null,
+        "stopping_rule": null,
+        "uncertainty_method": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/GateProfile",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-021-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "baseline": null,
+        "confidence_level": null,
+        "cost_model_ref": null,
+        "digest": null,
+        "direction": "MAXIMIZE",
+        "minimum_practical_effect": null,
+        "power_or_precision_plan": null,
+        "primary_metric": null,
+        "profile_id": null,
+        "registered_at": null,
+        "required_regime_coverage": null,
+        "retention_limits": null,
+        "risk_limits": null,
+        "selection_correction": null,
+        "stopping_rule": null,
+        "uncertainty_method": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/GateProfile",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-021-missing-required",
+      "value": {
+        "confidence_level": null,
+        "cost_model_ref": null,
+        "digest": null,
+        "direction": "MAXIMIZE",
+        "minimum_practical_effect": null,
+        "power_or_precision_plan": null,
+        "primary_metric": null,
+        "profile_id": null,
+        "registered_at": null,
+        "required_regime_coverage": null,
+        "retention_limits": null,
+        "risk_limits": null,
+        "selection_correction": null,
+        "stopping_rule": null,
+        "uncertainty_method": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/GateProfile",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-021-enum-01-valid",
+      "value": {
+        "baseline": null,
+        "confidence_level": null,
+        "cost_model_ref": null,
+        "digest": null,
+        "direction": "MAXIMIZE",
+        "minimum_practical_effect": null,
+        "power_or_precision_plan": null,
+        "primary_metric": null,
+        "profile_id": null,
+        "registered_at": null,
+        "required_regime_coverage": null,
+        "retention_limits": null,
+        "risk_limits": null,
+        "selection_correction": null,
+        "stopping_rule": null,
+        "uncertainty_method": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/GateProfile",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-021-enum-01-invalid",
+      "value": {
+        "baseline": null,
+        "confidence_level": null,
+        "cost_model_ref": null,
+        "digest": null,
+        "direction": "__AUTOTRADE_INVALID_ENUM__",
+        "minimum_practical_effect": null,
+        "power_or_precision_plan": null,
+        "primary_metric": null,
+        "profile_id": null,
+        "registered_at": null,
+        "required_regime_coverage": null,
+        "retention_limits": null,
+        "risk_limits": null,
+        "selection_correction": null,
+        "stopping_rule": null,
+        "uncertainty_method": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/JobRecord",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-022-valid-minimal",
+      "value": {
+        "attempt": null,
+        "dedupe_key": null,
+        "generation": null,
+        "input_hashes": null,
+        "job_id": null,
+        "kind": null,
+        "output_refs": null,
+        "resource_budget": null,
+        "state": "QUEUED"
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/JobRecord",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-022-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "attempt": null,
+        "dedupe_key": null,
+        "generation": null,
+        "input_hashes": null,
+        "job_id": null,
+        "kind": null,
+        "output_refs": null,
+        "resource_budget": null,
+        "state": "QUEUED"
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/JobRecord",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-022-missing-required",
+      "value": {
+        "dedupe_key": null,
+        "generation": null,
+        "input_hashes": null,
+        "job_id": null,
+        "kind": null,
+        "output_refs": null,
+        "resource_budget": null,
+        "state": "QUEUED"
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/JobRecord",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-022-enum-01-valid",
+      "value": {
+        "attempt": null,
+        "dedupe_key": null,
+        "generation": null,
+        "input_hashes": null,
+        "job_id": null,
+        "kind": null,
+        "output_refs": null,
+        "resource_budget": null,
+        "state": "QUEUED"
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/JobRecord",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-022-enum-01-invalid",
+      "value": {
+        "attempt": null,
+        "dedupe_key": null,
+        "generation": null,
+        "input_hashes": null,
+        "job_id": null,
+        "kind": null,
+        "output_refs": null,
+        "resource_budget": null,
+        "state": "__AUTOTRADE_INVALID_ENUM__"
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/ModelArtifact",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-023-valid-minimal",
+      "value": {
+        "algorithm_version": null,
+        "artifact_digest": null,
+        "environment_lock": null,
+        "feature_schema": null,
+        "format": null,
+        "inference_resource_profile": null,
+        "license": null,
+        "risk_classification": null,
+        "seeds": null,
+        "training_cutoffs": null,
+        "training_data_hashes": null
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/ModelArtifact",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-023-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "algorithm_version": null,
+        "artifact_digest": null,
+        "environment_lock": null,
+        "feature_schema": null,
+        "format": null,
+        "inference_resource_profile": null,
+        "license": null,
+        "risk_classification": null,
+        "seeds": null,
+        "training_cutoffs": null,
+        "training_data_hashes": null
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/ModelArtifact",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-023-missing-required",
+      "value": {
+        "artifact_digest": null,
+        "environment_lock": null,
+        "feature_schema": null,
+        "format": null,
+        "inference_resource_profile": null,
+        "license": null,
+        "risk_classification": null,
+        "seeds": null,
+        "training_cutoffs": null,
+        "training_data_hashes": null
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/PromotionDecision",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-024-valid-minimal",
+      "value": {
+        "candidate_version": null,
+        "effective_version": null,
+        "envelope": null,
+        "independent_gate_signer": null,
+        "prior_version": null,
+        "promotion_id": null,
+        "result_refs": null,
+        "rollback_target": null,
+        "scope": null,
+        "verdict": "PROMOTE"
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/PromotionDecision",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-024-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "candidate_version": null,
+        "effective_version": null,
+        "envelope": null,
+        "independent_gate_signer": null,
+        "prior_version": null,
+        "promotion_id": null,
+        "result_refs": null,
+        "rollback_target": null,
+        "scope": null,
+        "verdict": "PROMOTE"
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/PromotionDecision",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-024-missing-required",
+      "value": {
+        "effective_version": null,
+        "envelope": null,
+        "independent_gate_signer": null,
+        "prior_version": null,
+        "promotion_id": null,
+        "result_refs": null,
+        "rollback_target": null,
+        "scope": null,
+        "verdict": "PROMOTE"
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/PromotionDecision",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-024-enum-01-valid",
+      "value": {
+        "candidate_version": null,
+        "effective_version": null,
+        "envelope": null,
+        "independent_gate_signer": null,
+        "prior_version": null,
+        "promotion_id": null,
+        "result_refs": null,
+        "rollback_target": null,
+        "scope": null,
+        "verdict": "PROMOTE"
+      }
+    },
+    {
+      "contract": "learning.schema.json#/$defs/PromotionDecision",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-024-enum-01-invalid",
+      "value": {
+        "candidate_version": null,
+        "effective_version": null,
+        "envelope": null,
+        "independent_gate_signer": null,
+        "prior_version": null,
+        "promotion_id": null,
+        "result_refs": null,
+        "rollback_target": null,
+        "scope": null,
+        "verdict": "__AUTOTRADE_INVALID_ENUM__"
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/CapabilitySnapshot",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-025-valid-minimal",
+      "value": {
+        "account_id": null,
+        "data_entitlements": null,
+        "entity_id": null,
+        "environment": null,
+        "evidence": null,
+        "expires_at": null,
+        "native_protection": null,
+        "observed_at": null,
+        "permission_scopes": null,
+        "position_mode": null,
+        "provider_id": null,
+        "rate_limit_policy_id": null,
+        "snapshot_id": null,
+        "status": "VERIFIED",
+        "supported_order_types": null,
+        "time_in_force": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/CapabilitySnapshot",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-025-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "account_id": null,
+        "data_entitlements": null,
+        "entity_id": null,
+        "environment": null,
+        "evidence": null,
+        "expires_at": null,
+        "native_protection": null,
+        "observed_at": null,
+        "permission_scopes": null,
+        "position_mode": null,
+        "provider_id": null,
+        "rate_limit_policy_id": null,
+        "snapshot_id": null,
+        "status": "VERIFIED",
+        "supported_order_types": null,
+        "time_in_force": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/CapabilitySnapshot",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-025-missing-required",
+      "value": {
+        "data_entitlements": null,
+        "entity_id": null,
+        "environment": null,
+        "evidence": null,
+        "expires_at": null,
+        "native_protection": null,
+        "observed_at": null,
+        "permission_scopes": null,
+        "position_mode": null,
+        "provider_id": null,
+        "rate_limit_policy_id": null,
+        "snapshot_id": null,
+        "status": "VERIFIED",
+        "supported_order_types": null,
+        "time_in_force": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/CapabilitySnapshot",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-025-enum-01-valid",
+      "value": {
+        "account_id": null,
+        "data_entitlements": null,
+        "entity_id": null,
+        "environment": null,
+        "evidence": null,
+        "expires_at": null,
+        "native_protection": null,
+        "observed_at": null,
+        "permission_scopes": null,
+        "position_mode": null,
+        "provider_id": null,
+        "rate_limit_policy_id": null,
+        "snapshot_id": null,
+        "status": "VERIFIED",
+        "supported_order_types": null,
+        "time_in_force": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/CapabilitySnapshot",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-025-enum-01-invalid",
+      "value": {
+        "account_id": null,
+        "data_entitlements": null,
+        "entity_id": null,
+        "environment": null,
+        "evidence": null,
+        "expires_at": null,
+        "native_protection": null,
+        "observed_at": null,
+        "permission_scopes": null,
+        "position_mode": null,
+        "provider_id": null,
+        "rate_limit_policy_id": null,
+        "snapshot_id": null,
+        "status": "__AUTOTRADE_INVALID_ENUM__",
+        "supported_order_types": null,
+        "time_in_force": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/InstrumentVersion",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-026-valid-minimal",
+      "value": {
+        "asset_class": "CASH_EQUITY",
+        "base_currency": null,
+        "calendar_id": null,
+        "contract_multiplier": null,
+        "effective_from": null,
+        "instrument_id": null,
+        "metadata_evidence": null,
+        "minimum_quantity": null,
+        "price_tick": null,
+        "provider_id": null,
+        "provider_symbol": null,
+        "quantity_step": null,
+        "quantity_unit": null,
+        "quote_currency": null,
+        "settlement_currency": null,
+        "status": "ACTIVE",
+        "timezone_id": null,
+        "venue_id": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/InstrumentVersion",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-026-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "asset_class": "CASH_EQUITY",
+        "base_currency": null,
+        "calendar_id": null,
+        "contract_multiplier": null,
+        "effective_from": null,
+        "instrument_id": null,
+        "metadata_evidence": null,
+        "minimum_quantity": null,
+        "price_tick": null,
+        "provider_id": null,
+        "provider_symbol": null,
+        "quantity_step": null,
+        "quantity_unit": null,
+        "quote_currency": null,
+        "settlement_currency": null,
+        "status": "ACTIVE",
+        "timezone_id": null,
+        "venue_id": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/InstrumentVersion",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-026-missing-required",
+      "value": {
+        "base_currency": null,
+        "calendar_id": null,
+        "contract_multiplier": null,
+        "effective_from": null,
+        "instrument_id": null,
+        "metadata_evidence": null,
+        "minimum_quantity": null,
+        "price_tick": null,
+        "provider_id": null,
+        "provider_symbol": null,
+        "quantity_step": null,
+        "quantity_unit": null,
+        "quote_currency": null,
+        "settlement_currency": null,
+        "status": "ACTIVE",
+        "timezone_id": null,
+        "venue_id": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/InstrumentVersion",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-026-enum-01-valid",
+      "value": {
+        "asset_class": "CASH_EQUITY",
+        "base_currency": null,
+        "calendar_id": null,
+        "contract_multiplier": null,
+        "effective_from": null,
+        "instrument_id": null,
+        "metadata_evidence": null,
+        "minimum_quantity": null,
+        "price_tick": null,
+        "provider_id": null,
+        "provider_symbol": null,
+        "quantity_step": null,
+        "quantity_unit": null,
+        "quote_currency": null,
+        "settlement_currency": null,
+        "status": "ACTIVE",
+        "timezone_id": null,
+        "venue_id": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/InstrumentVersion",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-026-enum-01-invalid",
+      "value": {
+        "asset_class": "__AUTOTRADE_INVALID_ENUM__",
+        "base_currency": null,
+        "calendar_id": null,
+        "contract_multiplier": null,
+        "effective_from": null,
+        "instrument_id": null,
+        "metadata_evidence": null,
+        "minimum_quantity": null,
+        "price_tick": null,
+        "provider_id": null,
+        "provider_symbol": null,
+        "quantity_step": null,
+        "quantity_unit": null,
+        "quote_currency": null,
+        "settlement_currency": null,
+        "status": "ACTIVE",
+        "timezone_id": null,
+        "venue_id": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/InstrumentVersion",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-026-enum-02-valid",
+      "value": {
+        "asset_class": "CASH_EQUITY",
+        "base_currency": null,
+        "calendar_id": null,
+        "contract_multiplier": null,
+        "effective_from": null,
+        "instrument_id": null,
+        "metadata_evidence": null,
+        "minimum_quantity": null,
+        "option_right": "CALL",
+        "price_tick": null,
+        "provider_id": null,
+        "provider_symbol": null,
+        "quantity_step": null,
+        "quantity_unit": null,
+        "quote_currency": null,
+        "settlement_currency": null,
+        "status": "ACTIVE",
+        "timezone_id": null,
+        "venue_id": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/InstrumentVersion",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-026-enum-02-invalid",
+      "value": {
+        "asset_class": "CASH_EQUITY",
+        "base_currency": null,
+        "calendar_id": null,
+        "contract_multiplier": null,
+        "effective_from": null,
+        "instrument_id": null,
+        "metadata_evidence": null,
+        "minimum_quantity": null,
+        "option_right": "__AUTOTRADE_INVALID_ENUM__",
+        "price_tick": null,
+        "provider_id": null,
+        "provider_symbol": null,
+        "quantity_step": null,
+        "quantity_unit": null,
+        "quote_currency": null,
+        "settlement_currency": null,
+        "status": "ACTIVE",
+        "timezone_id": null,
+        "venue_id": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/InstrumentVersion",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-026-enum-03-valid",
+      "value": {
+        "asset_class": "CASH_EQUITY",
+        "base_currency": null,
+        "calendar_id": null,
+        "contract_multiplier": null,
+        "effective_from": null,
+        "instrument_id": null,
+        "metadata_evidence": null,
+        "minimum_quantity": null,
+        "payoff": "LINEAR",
+        "price_tick": null,
+        "provider_id": null,
+        "provider_symbol": null,
+        "quantity_step": null,
+        "quantity_unit": null,
+        "quote_currency": null,
+        "settlement_currency": null,
+        "status": "ACTIVE",
+        "timezone_id": null,
+        "venue_id": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/InstrumentVersion",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-026-enum-03-invalid",
+      "value": {
+        "asset_class": "CASH_EQUITY",
+        "base_currency": null,
+        "calendar_id": null,
+        "contract_multiplier": null,
+        "effective_from": null,
+        "instrument_id": null,
+        "metadata_evidence": null,
+        "minimum_quantity": null,
+        "payoff": "__AUTOTRADE_INVALID_ENUM__",
+        "price_tick": null,
+        "provider_id": null,
+        "provider_symbol": null,
+        "quantity_step": null,
+        "quantity_unit": null,
+        "quote_currency": null,
+        "settlement_currency": null,
+        "status": "ACTIVE",
+        "timezone_id": null,
+        "venue_id": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/InstrumentVersion",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-026-enum-04-valid",
+      "value": {
+        "asset_class": "CASH_EQUITY",
+        "base_currency": null,
+        "calendar_id": null,
+        "contract_multiplier": null,
+        "effective_from": null,
+        "instrument_id": null,
+        "metadata_evidence": null,
+        "minimum_quantity": null,
+        "price_tick": null,
+        "provider_id": null,
+        "provider_symbol": null,
+        "quantity_step": null,
+        "quantity_unit": null,
+        "quote_currency": null,
+        "settlement_currency": null,
+        "status": "ACTIVE",
+        "timezone_id": null,
+        "venue_id": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/InstrumentVersion",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-026-enum-04-invalid",
+      "value": {
+        "asset_class": "CASH_EQUITY",
+        "base_currency": null,
+        "calendar_id": null,
+        "contract_multiplier": null,
+        "effective_from": null,
+        "instrument_id": null,
+        "metadata_evidence": null,
+        "minimum_quantity": null,
+        "price_tick": null,
+        "provider_id": null,
+        "provider_symbol": null,
+        "quantity_step": null,
+        "quantity_unit": null,
+        "quote_currency": null,
+        "settlement_currency": null,
+        "status": "__AUTOTRADE_INVALID_ENUM__",
+        "timezone_id": null,
+        "venue_id": null,
+        "version": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/MarketEvent",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-027-valid-minimal",
+      "value": {
+        "adapter_version": null,
+        "availability_basis": null,
+        "available_at": null,
+        "event_id": null,
+        "ingested_at": null,
+        "instrument_version": null,
+        "kind": "TRADE",
+        "payload": null,
+        "quality_flags": null,
+        "raw_evidence_ref": null,
+        "revision": null,
+        "source_event_at": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/MarketEvent",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-027-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "adapter_version": null,
+        "availability_basis": null,
+        "available_at": null,
+        "event_id": null,
+        "ingested_at": null,
+        "instrument_version": null,
+        "kind": "TRADE",
+        "payload": null,
+        "quality_flags": null,
+        "raw_evidence_ref": null,
+        "revision": null,
+        "source_event_at": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/MarketEvent",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-027-missing-required",
+      "value": {
+        "availability_basis": null,
+        "available_at": null,
+        "event_id": null,
+        "ingested_at": null,
+        "instrument_version": null,
+        "kind": "TRADE",
+        "payload": null,
+        "quality_flags": null,
+        "raw_evidence_ref": null,
+        "revision": null,
+        "source_event_at": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/MarketEvent",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-027-enum-01-valid",
+      "value": {
+        "adapter_version": null,
+        "availability_basis": null,
+        "available_at": null,
+        "event_id": null,
+        "ingested_at": null,
+        "instrument_version": null,
+        "kind": "TRADE",
+        "payload": null,
+        "quality_flags": null,
+        "raw_evidence_ref": null,
+        "revision": null,
+        "source_event_at": null
+      }
+    },
+    {
+      "contract": "market.schema.json#/$defs/MarketEvent",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-027-enum-01-invalid",
+      "value": {
+        "adapter_version": null,
+        "availability_basis": null,
+        "available_at": null,
+        "event_id": null,
+        "ingested_at": null,
+        "instrument_version": null,
+        "kind": "__AUTOTRADE_INVALID_ENUM__",
+        "payload": null,
+        "quality_flags": null,
+        "raw_evidence_ref": null,
+        "revision": null,
+        "source_event_at": null
+      }
+    },
+    {
+      "contract": "model.schema.json#/$defs/ModelDownloadAuthorization",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-028-valid-minimal",
+      "value": {
+        "authorization_id": null,
+        "license_reference": null,
+        "model": null,
+        "provider_id": null
+      }
+    },
+    {
+      "contract": "model.schema.json#/$defs/ModelDownloadAuthorization",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-028-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "authorization_id": null,
+        "license_reference": null,
+        "model": null,
+        "provider_id": null
+      }
+    },
+    {
+      "contract": "model.schema.json#/$defs/ModelDownloadAuthorization",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-028-missing-required",
+      "value": {
+        "license_reference": null,
+        "model": null,
+        "provider_id": null
+      }
+    },
+    {
+      "contract": "model.schema.json#/$defs/ModelRequest",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-029-valid-minimal",
+      "value": {
+        "allowed_model_ids": null,
+        "allowed_tools": null,
+        "budget_reservation": null,
+        "data_classification": null,
+        "deadline": null,
+        "evidence_refs": null,
+        "privacy": null,
+        "request_id": null,
+        "role": null,
+        "task_schema": null
+      }
+    },
+    {
+      "contract": "model.schema.json#/$defs/ModelRequest",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-029-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "allowed_model_ids": null,
+        "allowed_tools": null,
+        "budget_reservation": null,
+        "data_classification": null,
+        "deadline": null,
+        "evidence_refs": null,
+        "privacy": null,
+        "request_id": null,
+        "role": null,
+        "task_schema": null
+      }
+    },
+    {
+      "contract": "model.schema.json#/$defs/ModelRequest",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-029-missing-required",
+      "value": {
+        "allowed_tools": null,
+        "budget_reservation": null,
+        "data_classification": null,
+        "deadline": null,
+        "evidence_refs": null,
+        "privacy": null,
+        "request_id": null,
+        "role": null,
+        "task_schema": null
+      }
+    },
+    {
+      "contract": "model.schema.json#/$defs/ModelResourcePolicy",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-030-valid-minimal",
+      "value": {}
+    },
+    {
+      "contract": "model.schema.json#/$defs/ModelResourcePolicy",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-030-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null
+      }
+    },
+    {
+      "contract": "model.schema.json#/$defs/ModelResponse",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-031-valid-minimal",
+      "value": {
+        "latency_ms": null,
+        "model": null,
+        "provider_id": null,
+        "provider_kind": null,
+        "request_id": null,
+        "result": null,
+        "usage": null,
+        "validation_verdict": "VALID"
+      }
+    },
+    {
+      "contract": "model.schema.json#/$defs/ModelResponse",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-031-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "latency_ms": null,
+        "model": null,
+        "provider_id": null,
+        "provider_kind": null,
+        "request_id": null,
+        "result": null,
+        "usage": null,
+        "validation_verdict": "VALID"
+      }
+    },
+    {
+      "contract": "model.schema.json#/$defs/ModelResponse",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-031-missing-required",
+      "value": {
+        "model": null,
+        "provider_id": null,
+        "provider_kind": null,
+        "request_id": null,
+        "result": null,
+        "usage": null,
+        "validation_verdict": "VALID"
+      }
+    },
+    {
+      "contract": "model.schema.json#/$defs/ModelResponse",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-031-enum-01-valid",
+      "value": {
+        "latency_ms": null,
+        "model": null,
+        "provider_id": null,
+        "provider_kind": null,
+        "request_id": null,
+        "result": null,
+        "usage": null,
+        "validation_verdict": "VALID"
+      }
+    },
+    {
+      "contract": "model.schema.json#/$defs/ModelResponse",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-031-enum-01-invalid",
+      "value": {
+        "latency_ms": null,
+        "model": null,
+        "provider_id": null,
+        "provider_kind": null,
+        "request_id": null,
+        "result": null,
+        "usage": null,
+        "validation_verdict": "__AUTOTRADE_INVALID_ENUM__"
+      }
+    },
+    {
+      "contract": "model.schema.json#/$defs/ProviderCapabilities",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-032-valid-minimal",
+      "value": {
+        "kind": null,
+        "provider_id": null,
+        "supports_hard_cancellation": null,
+        "supports_private_data": null,
+        "supports_streaming": null,
+        "supports_tools": null
+      }
+    },
+    {
+      "contract": "model.schema.json#/$defs/ProviderCapabilities",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-032-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "kind": null,
+        "provider_id": null,
+        "supports_hard_cancellation": null,
+        "supports_private_data": null,
+        "supports_streaming": null,
+        "supports_tools": null
+      }
+    },
+    {
+      "contract": "model.schema.json#/$defs/ProviderCapabilities",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-032-missing-required",
+      "value": {
+        "provider_id": null,
+        "supports_hard_cancellation": null,
+        "supports_private_data": null,
+        "supports_streaming": null,
+        "supports_tools": null
+      }
+    },
+    {
+      "contract": "persistence.schema.json#/$defs/JournalPosting",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-033-valid-minimal",
+      "value": {
+        "asset_or_currency": null,
+        "ledger_account": null,
+        "signed_amount": null
+      }
+    },
+    {
+      "contract": "persistence.schema.json#/$defs/JournalPosting",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-033-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "asset_or_currency": null,
+        "ledger_account": null,
+        "signed_amount": null
+      }
+    },
+    {
+      "contract": "persistence.schema.json#/$defs/JournalPosting",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-033-missing-required",
+      "value": {
+        "ledger_account": null,
+        "signed_amount": null
+      }
+    },
+    {
+      "contract": "persistence.schema.json#/$defs/JournalTransaction",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-034-valid-minimal",
+      "value": {
+        "booking_date": null,
+        "cause_event_id": null,
+        "effective_date": null,
+        "evidence": null,
+        "postings": null,
+        "transaction_id": null
+      }
+    },
+    {
+      "contract": "persistence.schema.json#/$defs/JournalTransaction",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-034-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "booking_date": null,
+        "cause_event_id": null,
+        "effective_date": null,
+        "evidence": null,
+        "postings": null,
+        "transaction_id": null
+      }
+    },
+    {
+      "contract": "persistence.schema.json#/$defs/JournalTransaction",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-034-missing-required",
+      "value": {
+        "cause_event_id": null,
+        "effective_date": null,
+        "evidence": null,
+        "postings": null,
+        "transaction_id": null
+      }
+    },
+    {
+      "contract": "persistence.schema.json#/$defs/ReconciliationDifference",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-035-valid-minimal",
+      "value": {
+        "kind": null,
+        "local_ref": null,
+        "provider_ref": null,
+        "status": "MATCHED"
+      }
+    },
+    {
+      "contract": "persistence.schema.json#/$defs/ReconciliationDifference",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-035-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "kind": null,
+        "local_ref": null,
+        "provider_ref": null,
+        "status": "MATCHED"
+      }
+    },
+    {
+      "contract": "persistence.schema.json#/$defs/ReconciliationDifference",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-035-missing-required",
+      "value": {
+        "local_ref": null,
+        "provider_ref": null,
+        "status": "MATCHED"
+      }
+    },
+    {
+      "contract": "persistence.schema.json#/$defs/ReconciliationDifference",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-035-enum-01-valid",
+      "value": {
+        "kind": null,
+        "local_ref": null,
+        "provider_ref": null,
+        "status": "MATCHED"
+      }
+    },
+    {
+      "contract": "persistence.schema.json#/$defs/ReconciliationDifference",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-035-enum-01-invalid",
+      "value": {
+        "kind": null,
+        "local_ref": null,
+        "provider_ref": null,
+        "status": "__AUTOTRADE_INVALID_ENUM__"
+      }
+    },
+    {
+      "contract": "persistence.schema.json#/$defs/ReconciliationRun",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-036-valid-minimal",
+      "value": {
+        "actions": null,
+        "closing_version": null,
+        "differences": null,
+        "inspected_windows": null,
+        "matched_items": null,
+        "opening_local_version": null,
+        "provider_watermarks": null,
+        "run_id": null,
+        "scope": null,
+        "unmatched_items": null,
+        "verdict": "CONSISTENT"
+      }
+    },
+    {
+      "contract": "persistence.schema.json#/$defs/ReconciliationRun",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-036-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "actions": null,
+        "closing_version": null,
+        "differences": null,
+        "inspected_windows": null,
+        "matched_items": null,
+        "opening_local_version": null,
+        "provider_watermarks": null,
+        "run_id": null,
+        "scope": null,
+        "unmatched_items": null,
+        "verdict": "CONSISTENT"
+      }
+    },
+    {
+      "contract": "persistence.schema.json#/$defs/ReconciliationRun",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-036-missing-required",
+      "value": {
+        "closing_version": null,
+        "differences": null,
+        "inspected_windows": null,
+        "matched_items": null,
+        "opening_local_version": null,
+        "provider_watermarks": null,
+        "run_id": null,
+        "scope": null,
+        "unmatched_items": null,
+        "verdict": "CONSISTENT"
+      }
+    },
+    {
+      "contract": "persistence.schema.json#/$defs/ReconciliationRun",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-036-enum-01-valid",
+      "value": {
+        "actions": null,
+        "closing_version": null,
+        "differences": null,
+        "inspected_windows": null,
+        "matched_items": null,
+        "opening_local_version": null,
+        "provider_watermarks": null,
+        "run_id": null,
+        "scope": null,
+        "unmatched_items": null,
+        "verdict": "CONSISTENT"
+      }
+    },
+    {
+      "contract": "persistence.schema.json#/$defs/ReconciliationRun",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-036-enum-01-invalid",
+      "value": {
+        "actions": null,
+        "closing_version": null,
+        "differences": null,
+        "inspected_windows": null,
+        "matched_items": null,
+        "opening_local_version": null,
+        "provider_watermarks": null,
+        "run_id": null,
+        "scope": null,
+        "unmatched_items": null,
+        "verdict": "__AUTOTRADE_INVALID_ENUM__"
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/AccountSnapshot",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-037-valid-minimal",
+      "value": {
+        "account_id": null,
+        "balances": null,
+        "consistency": "ATOMIC",
+        "environment": null,
+        "evidence": null,
+        "margin": null,
+        "open_orders": null,
+        "positions": null,
+        "query_completed_at": null,
+        "query_started_at": null,
+        "snapshot_id": null
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/AccountSnapshot",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-037-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "account_id": null,
+        "balances": null,
+        "consistency": "ATOMIC",
+        "environment": null,
+        "evidence": null,
+        "margin": null,
+        "open_orders": null,
+        "positions": null,
+        "query_completed_at": null,
+        "query_started_at": null,
+        "snapshot_id": null
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/AccountSnapshot",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-037-missing-required",
+      "value": {
+        "balances": null,
+        "consistency": "ATOMIC",
+        "environment": null,
+        "evidence": null,
+        "margin": null,
+        "open_orders": null,
+        "positions": null,
+        "query_completed_at": null,
+        "query_started_at": null,
+        "snapshot_id": null
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/AccountSnapshot",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-037-enum-01-valid",
+      "value": {
+        "account_id": null,
+        "balances": null,
+        "consistency": "ATOMIC",
+        "environment": null,
+        "evidence": null,
+        "margin": null,
+        "open_orders": null,
+        "positions": null,
+        "query_completed_at": null,
+        "query_started_at": null,
+        "snapshot_id": null
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/AccountSnapshot",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-037-enum-01-invalid",
+      "value": {
+        "account_id": null,
+        "balances": null,
+        "consistency": "__AUTOTRADE_INVALID_ENUM__",
+        "environment": null,
+        "evidence": null,
+        "margin": null,
+        "open_orders": null,
+        "positions": null,
+        "query_completed_at": null,
+        "query_started_at": null,
+        "snapshot_id": null
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/Balance",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-038-valid-minimal",
+      "value": {
+        "as_of": null,
+        "available": null,
+        "currency": null,
+        "total": null
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/Balance",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-038-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "as_of": null,
+        "available": null,
+        "currency": null,
+        "total": null
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/Balance",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-038-missing-required",
+      "value": {
+        "available": null,
+        "currency": null,
+        "total": null
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/HealthResult",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-039-valid-minimal",
+      "value": {
+        "affected_scope": null,
+        "as_of": null,
+        "component": null,
+        "reason_codes": null,
+        "status": "READY"
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/HealthResult",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-039-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "affected_scope": null,
+        "as_of": null,
+        "component": null,
+        "reason_codes": null,
+        "status": "READY"
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/HealthResult",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-039-missing-required",
+      "value": {
+        "as_of": null,
+        "component": null,
+        "reason_codes": null,
+        "status": "READY"
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/HealthResult",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-039-enum-01-valid",
+      "value": {
+        "affected_scope": null,
+        "as_of": null,
+        "component": null,
+        "reason_codes": null,
+        "status": "READY"
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/HealthResult",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-039-enum-01-invalid",
+      "value": {
+        "affected_scope": null,
+        "as_of": null,
+        "component": null,
+        "reason_codes": null,
+        "status": "__AUTOTRADE_INVALID_ENUM__"
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/MarginSnapshot",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-040-valid-minimal",
+      "value": {
+        "account_id": null,
+        "as_of": null,
+        "model_id": null,
+        "quality": null,
+        "source": null
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/MarginSnapshot",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-040-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "account_id": null,
+        "as_of": null,
+        "model_id": null,
+        "quality": null,
+        "source": null
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/MarginSnapshot",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-040-missing-required",
+      "value": {
+        "as_of": null,
+        "model_id": null,
+        "quality": null,
+        "source": null
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/Position",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-041-valid-minimal",
+      "value": {
+        "as_of": null,
+        "instrument_version": null,
+        "position_side": "NET",
+        "quantity": null,
+        "source": null
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/Position",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-041-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "as_of": null,
+        "instrument_version": null,
+        "position_side": "NET",
+        "quantity": null,
+        "source": null
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/Position",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-041-missing-required",
+      "value": {
+        "instrument_version": null,
+        "position_side": "NET",
+        "quantity": null,
+        "source": null
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/Position",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-041-enum-01-valid",
+      "value": {
+        "as_of": null,
+        "instrument_version": null,
+        "position_side": "NET",
+        "quantity": null,
+        "source": null
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/Position",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-041-enum-01-invalid",
+      "value": {
+        "as_of": null,
+        "instrument_version": null,
+        "position_side": "__AUTOTRADE_INVALID_ENUM__",
+        "quantity": null,
+        "source": null
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/QueryOrderResult",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-042-valid-minimal",
+      "value": {
+        "consistency_horizon": null,
+        "evidence": null,
+        "pagination_complete": null,
+        "searched_surfaces": null,
+        "time_window": null,
+        "verdict": "FOUND"
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/QueryOrderResult",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-042-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "consistency_horizon": null,
+        "evidence": null,
+        "pagination_complete": null,
+        "searched_surfaces": null,
+        "time_window": null,
+        "verdict": "FOUND"
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/QueryOrderResult",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-042-missing-required",
+      "value": {
+        "evidence": null,
+        "pagination_complete": null,
+        "searched_surfaces": null,
+        "time_window": null,
+        "verdict": "FOUND"
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/QueryOrderResult",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-042-enum-01-valid",
+      "value": {
+        "consistency_horizon": null,
+        "evidence": null,
+        "pagination_complete": null,
+        "searched_surfaces": null,
+        "time_window": null,
+        "verdict": "FOUND"
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/QueryOrderResult",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-042-enum-01-invalid",
+      "value": {
+        "consistency_horizon": null,
+        "evidence": null,
+        "pagination_complete": null,
+        "searched_surfaces": null,
+        "time_window": null,
+        "verdict": "__AUTOTRADE_INVALID_ENUM__"
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/SubmissionResult",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-043-valid-minimal",
+      "value": {
+        "attempt_id": null,
+        "client_order_id": null,
+        "evidence": null,
+        "outcome": "ACKNOWLEDGED",
+        "retry_disposition": "NEVER"
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/SubmissionResult",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-043-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "attempt_id": null,
+        "client_order_id": null,
+        "evidence": null,
+        "outcome": "ACKNOWLEDGED",
+        "retry_disposition": "NEVER"
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/SubmissionResult",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-043-missing-required",
+      "value": {
+        "client_order_id": null,
+        "evidence": null,
+        "outcome": "ACKNOWLEDGED",
+        "retry_disposition": "NEVER"
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/SubmissionResult",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-043-enum-01-valid",
+      "value": {
+        "attempt_id": null,
+        "client_order_id": null,
+        "evidence": null,
+        "outcome": "ACKNOWLEDGED",
+        "retry_disposition": "NEVER"
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/SubmissionResult",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-043-enum-01-invalid",
+      "value": {
+        "attempt_id": null,
+        "client_order_id": null,
+        "evidence": null,
+        "outcome": "__AUTOTRADE_INVALID_ENUM__",
+        "retry_disposition": "NEVER"
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/SubmissionResult",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-043-enum-02-valid",
+      "value": {
+        "attempt_id": null,
+        "client_order_id": null,
+        "evidence": null,
+        "outcome": "ACKNOWLEDGED",
+        "retry_disposition": "NEVER"
+      }
+    },
+    {
+      "contract": "provider.schema.json#/$defs/SubmissionResult",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-043-enum-02-invalid",
+      "value": {
+        "attempt_id": null,
+        "client_order_id": null,
+        "evidence": null,
+        "outcome": "ACKNOWLEDGED",
+        "retry_disposition": "__AUTOTRADE_INVALID_ENUM__"
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/CommandResult",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-044-valid-minimal",
+      "value": {
+        "command_id": null,
+        "field_errors": null,
+        "reason_codes": null,
+        "state_version": null,
+        "status": "ACCEPTED"
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/CommandResult",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-044-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "command_id": null,
+        "field_errors": null,
+        "reason_codes": null,
+        "state_version": null,
+        "status": "ACCEPTED"
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/CommandResult",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-044-missing-required",
+      "value": {
+        "field_errors": null,
+        "reason_codes": null,
+        "state_version": null,
+        "status": "ACCEPTED"
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/CommandResult",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-044-enum-01-valid",
+      "value": {
+        "command_id": null,
+        "field_errors": null,
+        "reason_codes": null,
+        "state_version": null,
+        "status": "ACCEPTED"
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/CommandResult",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-044-enum-01-invalid",
+      "value": {
+        "command_id": null,
+        "field_errors": null,
+        "reason_codes": null,
+        "state_version": null,
+        "status": "__AUTOTRADE_INVALID_ENUM__"
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/OperationResult",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-045-valid-minimal",
+      "value": {
+        "affected_refs": null,
+        "evidence": null,
+        "operation_id": null,
+        "phase": "QUEUED",
+        "remaining_uncertainty": null,
+        "started_at": null,
+        "updated_at": null
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/OperationResult",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-045-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "affected_refs": null,
+        "evidence": null,
+        "operation_id": null,
+        "phase": "QUEUED",
+        "remaining_uncertainty": null,
+        "started_at": null,
+        "updated_at": null
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/OperationResult",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-045-missing-required",
+      "value": {
+        "evidence": null,
+        "operation_id": null,
+        "phase": "QUEUED",
+        "remaining_uncertainty": null,
+        "started_at": null,
+        "updated_at": null
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/OperationResult",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-045-enum-01-valid",
+      "value": {
+        "affected_refs": null,
+        "evidence": null,
+        "operation_id": null,
+        "phase": "QUEUED",
+        "remaining_uncertainty": null,
+        "started_at": null,
+        "updated_at": null
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/OperationResult",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-045-enum-01-invalid",
+      "value": {
+        "affected_refs": null,
+        "evidence": null,
+        "operation_id": null,
+        "phase": "__AUTOTRADE_INVALID_ENUM__",
+        "remaining_uncertainty": null,
+        "started_at": null,
+        "updated_at": null
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/PermissionSummary",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-046-valid-minimal",
+      "value": {
+        "actor": null,
+        "role": null,
+        "session": null
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/PermissionSummary",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-046-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "actor": null,
+        "role": null,
+        "session": null
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/PermissionSummary",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-046-missing-required",
+      "value": {
+        "role": null,
+        "session": null
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/UiCommand",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-047-valid-minimal",
+      "value": {
+        "account_id": null,
+        "action": "BLOCK_NEW_EXPOSURE",
+        "actor": null,
+        "command_id": null,
+        "environment": null,
+        "expected_state_version": null,
+        "idempotency_key": null,
+        "payload": null,
+        "session": null
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/UiCommand",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-047-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "account_id": null,
+        "action": "BLOCK_NEW_EXPOSURE",
+        "actor": null,
+        "command_id": null,
+        "environment": null,
+        "expected_state_version": null,
+        "idempotency_key": null,
+        "payload": null,
+        "session": null
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/UiCommand",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-047-missing-required",
+      "value": {
+        "action": "BLOCK_NEW_EXPOSURE",
+        "actor": null,
+        "command_id": null,
+        "environment": null,
+        "expected_state_version": null,
+        "idempotency_key": null,
+        "payload": null,
+        "session": null
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/UiCommand",
+      "dimension": "enum",
+      "expected": true,
+      "name": "shape-047-enum-01-valid",
+      "value": {
+        "account_id": null,
+        "action": "BLOCK_NEW_EXPOSURE",
+        "actor": null,
+        "command_id": null,
+        "environment": null,
+        "expected_state_version": null,
+        "idempotency_key": null,
+        "payload": null,
+        "session": null
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/UiCommand",
+      "dimension": "enum",
+      "expected": false,
+      "name": "shape-047-enum-01-invalid",
+      "value": {
+        "account_id": null,
+        "action": "__AUTOTRADE_INVALID_ENUM__",
+        "actor": null,
+        "command_id": null,
+        "environment": null,
+        "expected_state_version": null,
+        "idempotency_key": null,
+        "payload": null,
+        "session": null
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/UiSnapshot",
+      "dimension": "shape",
+      "expected": true,
+      "name": "shape-048-valid-minimal",
+      "value": {
+        "account_id": null,
+        "connection_freshness": null,
+        "environment": null,
+        "event_cursor": null,
+        "host_id": null,
+        "jobs": null,
+        "permission_summary": null,
+        "portfolio": null,
+        "reason_codes": null,
+        "risk": null,
+        "server_time": null,
+        "state_version": null,
+        "strategy": null
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/UiSnapshot",
+      "dimension": "unknown-field",
+      "expected": false,
+      "name": "shape-048-unknown-field",
+      "value": {
+        "__autotrade_unknown__": null,
+        "account_id": null,
+        "connection_freshness": null,
+        "environment": null,
+        "event_cursor": null,
+        "host_id": null,
+        "jobs": null,
+        "permission_summary": null,
+        "portfolio": null,
+        "reason_codes": null,
+        "risk": null,
+        "server_time": null,
+        "state_version": null,
+        "strategy": null
+      }
+    },
+    {
+      "contract": "ui.schema.json#/$defs/UiSnapshot",
+      "dimension": "required-field",
+      "expected": false,
+      "name": "shape-048-missing-required",
+      "value": {
+        "connection_freshness": null,
+        "environment": null,
+        "event_cursor": null,
+        "host_id": null,
+        "jobs": null,
+        "permission_summary": null,
+        "portfolio": null,
+        "reason_codes": null,
+        "risk": null,
+        "server_time": null,
+        "state_version": null,
+        "strategy": null
+      }
+    }
+  ],
+  "contract_version": "6.0.0",
+  "definition_count": 48,
+  "scope": "closed-object-shape-subset"
+}

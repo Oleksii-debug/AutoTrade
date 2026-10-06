@@ -25,11 +25,13 @@ import binascii
 import hmac
 import json
 import os
+import re
 from threading import Lock
 from types import MappingProxyType
 from typing import Any, Callable, ContextManager, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
+from weakref import ref as weakref_ref
 from urllib.request import (
     HTTPRedirectHandler,
     Request,
@@ -38,6 +40,7 @@ from urllib.request import (
 )
 
 from .capabilities import CapabilityRegistry, CapabilitySnapshot
+from .bybit_v5 import _AMBIGUOUS_RESPONSE_CODES as _BYBIT_AMBIGUOUS_RESPONSE_CODES
 from .dispatch import ExactJsonTransportResponse
 from .exact_decimal import ExactDecimalError, parse_canonical_decimal_text
 from .persistence import JournalStore, payload_digest
@@ -53,6 +56,7 @@ from .whitebit import (
 )
 from .provider_core import (
     AuthenticatedReadQueryBinding,
+    _require_authenticated_read_query_binding_authority,
     ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
@@ -85,6 +89,7 @@ class ProviderSecretResolver(Protocol):
         provider: str,
         environment: str,
         purpose: str,
+        provider_environment: str | None = None,
     ) -> ContextManager[str]: ...
 
 
@@ -388,6 +393,28 @@ ALPACA_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
 )
 
 
+# OAuth2 direct Web API policy only. The local Client Portal Gateway has a
+# different host/TLS deployment model and requires separate qualification.
+IBKR_WEB_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
+    MappingProxyType(
+        {
+            "PAPER": ProviderEndpointPolicy(
+                provider_id="IBKR",
+                environment="PAPER",
+                base_url="https://api.ibkr.com",
+                allowed_hosts=frozenset({"api.ibkr.com"}),
+            ),
+            "LIVE": ProviderEndpointPolicy(
+                provider_id="IBKR",
+                environment="LIVE",
+                base_url="https://api.ibkr.com",
+                allowed_hosts=frozenset({"api.ibkr.com"}),
+            ),
+        }
+    )
+)
+
+
 @dataclass(frozen=True)
 class AuthenticatedReadEndpointRule:
     surface: Surface
@@ -530,8 +557,189 @@ BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS: Mapping[
             data_entitlement="ACTIVITIES",
             success_statuses=frozenset({200}),
         ),
+        "/v5/asset/delivery-record": AuthenticatedReadEndpointRule(
+            surface=Surface.ACTIVITIES,
+            permission_scope="ACCOUNT.READ",
+            data_entitlement="ACTIVITIES",
+            success_statuses=frozenset({200}),
+        ),
     }
 )
+
+
+IBKR_WEB_AUTHENTICATED_READ_ENDPOINTS: Mapping[
+    str, AuthenticatedReadEndpointRule
+] = MappingProxyType(
+    {
+        "/iserver/auth/status": AuthenticatedReadEndpointRule(
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="ORDER.READ",
+            data_entitlement="SESSION",
+            success_statuses=frozenset({200}),
+        ),
+        "/iserver/accounts": AuthenticatedReadEndpointRule(
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="ORDER.READ",
+            data_entitlement="ACCOUNT",
+            success_statuses=frozenset({200}),
+        ),
+    }
+)
+
+
+IBKR_WEB_AUTHENTICATED_READ_METHODS: Mapping[str, str] = MappingProxyType(
+    {
+        "/iserver/auth/status": "POST",
+        "/iserver/accounts": "GET",
+    }
+)
+
+
+_BYBIT_OPTION_DELIVERY_ENDPOINT = "/v5/asset/delivery-record"
+_BYBIT_OPTION_DELIVERY_QUERY_FIELDS = frozenset(
+    {"category", "symbol", "startTime", "endTime", "expDate", "limit", "cursor"}
+)
+_BYBIT_OPTION_DELIVERY_CURSOR_RE = re.compile(
+    r"^(?:[A-Za-z0-9._~-]|%[0-9A-F]{2})+$"
+)
+_BYBIT_OPTION_DELIVERY_MONTH_NUMBER = MappingProxyType(
+    {
+        "JAN": 1,
+        "FEB": 2,
+        "MAR": 3,
+        "APR": 4,
+        "MAY": 5,
+        "JUN": 6,
+        "JUL": 7,
+        "AUG": 8,
+        "SEP": 9,
+        "OCT": 10,
+        "NOV": 11,
+        "DEC": 12,
+    }
+)
+_BYBIT_OPTION_DELIVERY_MAX_RANGE_MS = 30 * 24 * 60 * 60 * 1000
+
+
+def _bybit_delivery_query_integer(
+    value: object,
+    *,
+    name: str,
+    minimum: int = 0,
+    maximum: int | None = None,
+) -> int:
+    if (
+        type(value) is not str
+        or not value
+        or len(value) > 20
+        or not value.isascii()
+        or not value.isdigit()
+    ):
+        raise ProviderTransportScopeError(
+            f"Bybit option delivery {name} must be canonical integer text"
+        )
+    parsed = int(value, 10)
+    if str(parsed) != value or parsed < minimum:
+        raise ProviderTransportScopeError(
+            f"Bybit option delivery {name} must be canonical integer text"
+        )
+    if maximum is not None and parsed > maximum:
+        raise ProviderTransportScopeError(
+            f"Bybit option delivery {name} is outside the documented range"
+        )
+    return parsed
+
+
+def _validate_bybit_option_delivery_query(
+    binding: AuthenticatedReadQueryBinding,
+) -> None:
+    if binding.endpoint != _BYBIT_OPTION_DELIVERY_ENDPOINT:
+        return
+    query = binding.query
+    unsupported = set(query) - _BYBIT_OPTION_DELIVERY_QUERY_FIELDS
+    if unsupported:
+        raise ProviderTransportScopeError(
+            "Bybit option delivery query contains unsupported fields: "
+            + ",".join(sorted(unsupported))
+        )
+    category = query.get("category")
+    if type(category) is not str or category != "option":
+        raise ProviderTransportScopeError(
+            "Bybit option delivery query requires category=option"
+        )
+
+    symbol = query.get("symbol")
+    if symbol is not None:
+        if (
+            type(symbol) is not str
+            or not symbol
+            or len(symbol) > 160
+            or re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", symbol) is None
+        ):
+            raise ProviderTransportScopeError(
+                "Bybit option delivery symbol must be uppercase canonical provider text"
+            )
+
+    start_ms = None
+    end_ms = None
+    if "startTime" in query:
+        start_ms = _bybit_delivery_query_integer(
+            query["startTime"],
+            name="startTime",
+        )
+    if "endTime" in query:
+        end_ms = _bybit_delivery_query_integer(
+            query["endTime"],
+            name="endTime",
+        )
+    if start_ms is not None and end_ms is not None:
+        if end_ms < start_ms:
+            raise ProviderTransportScopeError(
+                "Bybit option delivery endTime cannot precede startTime"
+            )
+        if end_ms - start_ms > _BYBIT_OPTION_DELIVERY_MAX_RANGE_MS:
+            raise ProviderTransportScopeError(
+                "Bybit option delivery time range exceeds 30 days"
+            )
+
+    exp_date = query.get("expDate")
+    if exp_date is not None:
+        if type(exp_date) is not str or re.fullmatch(r"[0-3][0-9][A-Z]{3}[0-9]{2}", exp_date) is None:
+            raise ProviderTransportScopeError(
+                "Bybit option delivery expDate must use DDMMMYY"
+            )
+        day = int(exp_date[:2], 10)
+        month = exp_date[2:5]
+        year = 2000 + int(exp_date[5:7], 10)
+        month_number = _BYBIT_OPTION_DELIVERY_MONTH_NUMBER.get(month)
+        if day < 1 or month_number is None:
+            raise ProviderTransportScopeError(
+                "Bybit option delivery expDate must use DDMMMYY"
+            )
+        try:
+            datetime(year, month_number, day, tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise ProviderTransportScopeError(
+                "Bybit option delivery expDate must use DDMMMYY"
+            ) from exc
+
+    if "limit" in query:
+        _bybit_delivery_query_integer(
+            query["limit"],
+            name="limit",
+            minimum=1,
+            maximum=50,
+        )
+
+    cursor = query.get("cursor")
+    if cursor is not None:
+        if (
+            type(cursor) is not str
+            or _BYBIT_OPTION_DELIVERY_CURSOR_RE.fullmatch(cursor) is None
+        ):
+            raise ProviderTransportScopeError(
+                "Bybit option delivery cursor must be canonical opaque percent-encoded text"
+            )
 
 
 def _bybit_authenticated_read_rule(
@@ -549,6 +757,39 @@ def _bybit_authenticated_read_rule(
     if binding.permission_scope != rule.permission_scope:
         raise ProviderTransportScopeError(
             "authenticated-read permission scope does not match Bybit endpoint policy"
+        )
+    _validate_bybit_option_delivery_query(binding)
+    return rule
+
+
+def _ibkr_authenticated_read_rule(
+    binding: AuthenticatedReadQueryBinding,
+) -> AuthenticatedReadEndpointRule:
+    if type(binding) is not AuthenticatedReadQueryBinding:
+        raise TypeError(
+            "IBKR authenticated-read binding must be exact AuthenticatedReadQueryBinding"
+        )
+    _require_authenticated_read_query_binding_authority(binding)
+    if binding.provider_id != "IBKR":
+        raise ProviderTransportScopeError(
+            "IBKR authenticated-read binding provider mismatch"
+        )
+    rule = IBKR_WEB_AUTHENTICATED_READ_ENDPOINTS.get(binding.endpoint)
+    if rule is None:
+        raise ProviderTransportScopeError(
+            "IBKR authenticated-read endpoint is not explicitly allowed"
+        )
+    if binding.surface != rule.surface:
+        raise ProviderTransportScopeError(
+            "authenticated-read endpoint surface does not match IBKR policy"
+        )
+    if binding.permission_scope != rule.permission_scope:
+        raise ProviderTransportScopeError(
+            "authenticated-read permission scope does not match IBKR endpoint policy"
+        )
+    if binding.query:
+        raise ProviderTransportScopeError(
+            "IBKR status/accounts authenticated reads require an empty query"
         )
     return rule
 
@@ -845,12 +1086,38 @@ class SignedHttpRequest:
     timeout_seconds: int
 
     def __post_init__(self) -> None:
-        method = _text(self.method, name="method").upper()
+        raw_method = self.method
+        if (
+            type(raw_method) is not str
+            or not raw_method
+            or raw_method != raw_method.strip()
+        ):
+            raise ProviderTransportScopeError(
+                "signed request method must be canonical text"
+            )
+        method = raw_method.upper()
         if method != "POST":
             raise ProviderTransportScopeError(
                 "trade transport currently permits only POST"
             )
-        parsed = urlsplit(_text(self.url, name="url"))
+
+        raw_url = self.url
+        if (
+            type(raw_url) is not str
+            or not raw_url
+            or raw_url != raw_url.strip()
+        ):
+            raise ProviderTransportScopeError("signed request URL is invalid")
+        if (
+            not raw_url.isascii()
+            or any(
+                character <= " " or character == "\x7f"
+                for character in raw_url
+            )
+            or "\\" in raw_url
+        ):
+            raise ProviderTransportScopeError("signed request URL is invalid")
+        parsed = urlsplit(raw_url)
         if (
             parsed.scheme != "https"
             or not parsed.hostname
@@ -869,37 +1136,189 @@ class SignedHttpRequest:
             raise ProviderTransportScopeError(
                 "signed POST requires exactly one payload channel: URL query or body"
             )
-        if not isinstance(self.headers, Mapping):
-            raise ProviderTransportScopeError("headers must be a mapping")
+
+        if type(self.headers) not in {dict, MappingProxyType}:
+            raise ProviderTransportScopeError(
+                "signed request headers must be an exact inert mapping"
+            )
         normalized_headers: dict[str, str] = {}
+        normalized_header_names: set[str] = set()
         for raw_key, raw_value in self.headers.items():
-            key = _text(raw_key, name="header name")
-            value = _text(raw_value, name=f"header {key}")
-            if "\r" in key or "\n" in key or "\r" in value or "\n" in value:
+            if (
+                type(raw_key) is not str
+                or not raw_key
+                or raw_key != raw_key.strip()
+            ):
+                raise ProviderTransportScopeError(
+                    "signed request header names must be canonical text"
+                )
+            if (
+                type(raw_value) is not str
+                or not raw_value
+                or raw_value != raw_value.strip()
+            ):
+                raise ProviderTransportScopeError(
+                    "signed request header values must be canonical text"
+                )
+            if (
+                "\r" in raw_key
+                or "\n" in raw_key
+                or "\r" in raw_value
+                or "\n" in raw_value
+            ):
                 raise ProviderTransportScopeError(
                     "header values must not contain line breaks"
                 )
-            normalized_headers[key] = value
+            if (
+                not raw_key.isascii()
+                or any(
+                    not (
+                        character.isalnum()
+                        or character in "!#$%&'*+-.^_|~"
+                        or character == "\x60"
+                    )
+                    for character in raw_key
+                )
+            ):
+                raise ProviderTransportScopeError(
+                    "signed request header names must be canonical text"
+                )
+            if (
+                not raw_value.isascii()
+                or any(
+                    character < " " or character == "\x7f"
+                    for character in raw_value
+                )
+            ):
+                raise ProviderTransportScopeError(
+                    "signed request header values must be canonical text"
+                )
+            canonical_name = raw_key.lower()
+            if canonical_name in normalized_header_names:
+                raise ProviderTransportScopeError(
+                    "signed request header names must be unique case-insensitively"
+                )
+            normalized_header_names.add(canonical_name)
+            normalized_headers[raw_key] = raw_value
+
         if (
-            isinstance(self.timeout_seconds, bool)
-            or not isinstance(self.timeout_seconds, int)
+            type(self.timeout_seconds) is not int
             or self.timeout_seconds < 1
             or self.timeout_seconds > 120
         ):
             raise ProviderTransportScopeError("invalid request timeout")
+        object.__setattr__(self, "url", raw_url)
         object.__setattr__(self, "method", method)
         object.__setattr__(
             self, "headers", MappingProxyType(dict(normalized_headers))
         )
+        _register_signed_http_request(self)
+
+
+def _install_signed_http_request_integrity():
+    """Seal one exact write envelope against post-construction mutation."""
+
+    request_type = SignedHttpRequest
+    object_getattribute = object.__getattribute__
+    canonical_type = type
+    canonical_id = id
+    mapping_proxy_type = canonical_type(MappingProxyType({}))
+    weakref = weakref_ref
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+    def prune() -> None:
+        for object_id, (value_ref, _snapshot) in tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def register(value: SignedHttpRequest) -> None:
+        if canonical_type(value) is not request_type:
+            return
+        method = object_getattribute(value, "method")
+        url = object_getattribute(value, "url")
+        headers = object_getattribute(value, "headers")
+        body = object_getattribute(value, "body")
+        timeout_seconds = object_getattribute(value, "timeout_seconds")
+        if (
+            canonical_type(method) is not str
+            or canonical_type(url) is not str
+            or canonical_type(headers) is not mapping_proxy_type
+            or canonical_type(body) is not bytes
+            or canonical_type(timeout_seconds) is not int
+        ):
+            raise ProviderTransportScopeError(
+                "signed request must contain exact canonical fields"
+            )
+        if any(
+            canonical_type(key) is not str or canonical_type(item) is not str
+            for key, item in headers.items()
+        ):
+            raise ProviderTransportScopeError(
+                "signed request headers must contain exact text"
+            )
+        prune()
+        object_id = canonical_id(value)
+        current = states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise ProviderTransportScopeError(
+                "signed request identity collision"
+            )
+        states[object_id] = (
+            weakref(value),
+            (method, url, headers, body, timeout_seconds),
+        )
+
+    def require(
+        value: SignedHttpRequest,
+    ) -> tuple[str, str, Mapping[str, str], bytes, int]:
+        if canonical_type(value) is not request_type:
+            raise TypeError("request must be exact SignedHttpRequest")
+        prune()
+        state = states.get(canonical_id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderTransportScopeError(
+                "signed request lacks construction authority"
+            )
+        method, url, headers, body, timeout_seconds = state[1]
+        current_method = object_getattribute(value, "method")
+        current_url = object_getattribute(value, "url")
+        current_headers = object_getattribute(value, "headers")
+        current_body = object_getattribute(value, "body")
+        current_timeout = object_getattribute(value, "timeout_seconds")
+        if (
+            canonical_type(current_method) is not str
+            or canonical_type(current_url) is not str
+            or canonical_type(current_body) is not bytes
+            or canonical_type(current_timeout) is not int
+            or current_method != method
+            or current_url != url
+            or current_headers is not headers
+            or current_body != body
+            or current_timeout != timeout_seconds
+        ):
+            raise ProviderTransportScopeError(
+                "signed request changed after construction"
+            )
+        return method, url, headers, body, timeout_seconds
+
+    return register, require
+
+
+(
+    _register_signed_http_request,
+    _require_signed_http_request,
+) = _install_signed_http_request_integrity()
+del _install_signed_http_request_integrity
 
 
 @dataclass(frozen=True)
 class AuthenticatedReadHttpRequest:
     """One immutable authenticated provider read request.
 
-    GET keeps the exact signed-query contract used by Binance. POST supports
-    providers such as Kraken whose private read APIs authenticate a form body.
-    The envelope remains separate from SignedHttpRequest so read responses keep
+    GET supports both exact signed-query reads and session-authenticated
+    queryless reads. POST supports both signed form bodies and exact empty-body
+    session reads. Provider route/capability authority remains outside this
+    envelope, which stays separate from SignedHttpRequest so read responses keep
     their typed observation lifecycle and never acquire write authority.
     """
 
@@ -910,12 +1329,42 @@ class AuthenticatedReadHttpRequest:
     body: bytes = b""
 
     def __post_init__(self) -> None:
-        method = _text(self.method, name="method").upper()
+        raw_method = self.method
+        if (
+            type(raw_method) is not str
+            or not raw_method
+            or raw_method != raw_method.strip()
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read method must be canonical text"
+            )
+        method = raw_method.upper()
         if method not in {"GET", "POST"}:
             raise ProviderTransportScopeError(
                 "authenticated-read method must be GET or POST"
             )
-        parsed = urlsplit(_text(self.url, name="url"))
+
+        raw_url = self.url
+        if (
+            type(raw_url) is not str
+            or not raw_url
+            or raw_url != raw_url.strip()
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read URL must be canonical HTTPS"
+            )
+        if (
+            not raw_url.isascii()
+            or any(
+                character <= " " or character == "\x7f"
+                for character in raw_url
+            )
+            or "\\" in raw_url
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read URL must be canonical HTTPS"
+            )
+        parsed = urlsplit(raw_url)
         if (
             parsed.scheme != "https"
             or not parsed.hostname
@@ -931,38 +1380,200 @@ class AuthenticatedReadHttpRequest:
                 "authenticated-read body must be exact bytes"
             )
         if method == "GET":
-            if not parsed.query or self.body:
+            if self.body:
                 raise ProviderTransportScopeError(
-                    "authenticated GET requires an exact signed query and no body"
+                    "authenticated GET requires no body"
                 )
-        elif parsed.query or not self.body:
+        elif parsed.query:
             raise ProviderTransportScopeError(
-                "authenticated POST requires an exact body and no URL query"
+                "authenticated POST requires no URL query"
             )
-        if not isinstance(self.headers, Mapping):
-            raise ProviderTransportScopeError("headers must be a mapping")
+
+        if type(self.headers) not in {dict, MappingProxyType}:
+            raise ProviderTransportScopeError(
+                "authenticated-read headers must be an exact inert mapping"
+            )
         normalized_headers: dict[str, str] = {}
+        normalized_header_names: set[str] = set()
         for raw_key, raw_value in self.headers.items():
-            key = _text(raw_key, name="header name")
-            value = _text(raw_value, name=f"header {key}")
-            if "\r" in key or "\n" in key or "\r" in value or "\n" in value:
+            if (
+                type(raw_key) is not str
+                or not raw_key
+                or raw_key != raw_key.strip()
+            ):
+                raise ProviderTransportScopeError(
+                    "authenticated-read header names must be canonical text"
+                )
+            if (
+                type(raw_value) is not str
+                or not raw_value
+                or raw_value != raw_value.strip()
+            ):
+                raise ProviderTransportScopeError(
+                    "authenticated-read header values must be canonical text"
+                )
+            if (
+                "\r" in raw_key
+                or "\n" in raw_key
+                or "\r" in raw_value
+                or "\n" in raw_value
+            ):
                 raise ProviderTransportScopeError(
                     "header values must not contain line breaks"
                 )
-            normalized_headers[key] = value
+            if (
+                not raw_key.isascii()
+                or any(
+                    not (
+                        character.isalnum()
+                        or character in "!#$%&'*+-.^_|~"
+                        or character == "\x60"
+                    )
+                    for character in raw_key
+                )
+            ):
+                raise ProviderTransportScopeError(
+                    "authenticated-read header names must be canonical text"
+                )
+            if (
+                not raw_value.isascii()
+                or any(
+                    character < " " or character == "\x7f"
+                    for character in raw_value
+                )
+            ):
+                raise ProviderTransportScopeError(
+                    "authenticated-read header values must be canonical text"
+                )
+            canonical_name = raw_key.lower()
+            if canonical_name in normalized_header_names:
+                raise ProviderTransportScopeError(
+                    "authenticated-read header names must be unique case-insensitively"
+                )
+            normalized_header_names.add(canonical_name)
+            normalized_headers[raw_key] = raw_value
+
         if (
-            isinstance(self.timeout_seconds, bool)
-            or not isinstance(self.timeout_seconds, int)
+            type(self.timeout_seconds) is not int
             or self.timeout_seconds < 1
             or self.timeout_seconds > 120
         ):
             raise ProviderTransportScopeError("invalid request timeout")
+        object.__setattr__(self, "url", raw_url)
         object.__setattr__(self, "method", method)
         object.__setattr__(
             self,
             "headers",
             MappingProxyType(dict(normalized_headers)),
         )
+        _register_authenticated_read_http_request(self)
+
+
+def _install_authenticated_read_http_request_integrity():
+    """Seal one exact read envelope against post-construction mutation.
+
+    Frozen dataclasses can still be changed through object.__setattr__.  The
+    wire boundary therefore keeps a closure-private construction snapshot and
+    requires the exact request object to still match that snapshot before any
+    outbound field is consumed.  Header identity is retained deliberately: the
+    constructor replaces caller mappings with a fresh mappingproxy, so identity
+    proves the later mapping is still that detached canonical copy without
+    invoking an attacker-supplied mapping implementation.
+    """
+
+    request_type = AuthenticatedReadHttpRequest
+    object_getattribute = object.__getattribute__
+    canonical_type = type
+    canonical_id = id
+    mapping_proxy_type = canonical_type(MappingProxyType({}))
+    weakref = weakref_ref
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+    def prune() -> None:
+        for object_id, (value_ref, _snapshot) in tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def register(value: AuthenticatedReadHttpRequest) -> None:
+        if canonical_type(value) is not request_type:
+            return
+        method = object_getattribute(value, "method")
+        url = object_getattribute(value, "url")
+        headers = object_getattribute(value, "headers")
+        body = object_getattribute(value, "body")
+        timeout_seconds = object_getattribute(value, "timeout_seconds")
+        if (
+            canonical_type(method) is not str
+            or canonical_type(url) is not str
+            or canonical_type(headers) is not mapping_proxy_type
+            or canonical_type(body) is not bytes
+            or canonical_type(timeout_seconds) is not int
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read request must contain exact canonical fields"
+            )
+        if any(
+            canonical_type(key) is not str or canonical_type(item) is not str
+            for key, item in headers.items()
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read headers must contain exact text"
+            )
+        prune()
+        object_id = canonical_id(value)
+        current = states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise ProviderTransportScopeError(
+                "authenticated-read request identity collision"
+            )
+        states[object_id] = (
+            weakref(value),
+            (method, url, headers, body, timeout_seconds),
+        )
+
+    def require(
+        value: AuthenticatedReadHttpRequest,
+    ) -> tuple[str, str, Mapping[str, str], bytes, int]:
+        if canonical_type(value) is not request_type:
+            raise TypeError(
+                "request must be exact AuthenticatedReadHttpRequest"
+            )
+        prune()
+        state = states.get(canonical_id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderTransportScopeError(
+                "authenticated-read request lacks construction authority"
+            )
+        method, url, headers, body, timeout_seconds = state[1]
+        current_method = object_getattribute(value, "method")
+        current_url = object_getattribute(value, "url")
+        current_headers = object_getattribute(value, "headers")
+        current_body = object_getattribute(value, "body")
+        current_timeout = object_getattribute(value, "timeout_seconds")
+        if (
+            canonical_type(current_method) is not str
+            or canonical_type(current_url) is not str
+            or canonical_type(current_body) is not bytes
+            or canonical_type(current_timeout) is not int
+            or current_method != method
+            or current_url != url
+            or current_headers is not headers
+            or current_body != body
+            or current_timeout != timeout_seconds
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read request changed after construction"
+            )
+        return method, url, headers, body, timeout_seconds
+
+    return register, require
+
+
+(
+    _register_authenticated_read_http_request,
+    _require_authenticated_read_http_request,
+) = _install_authenticated_read_http_request_integrity()
+del _install_authenticated_read_http_request_integrity
 
 
 @dataclass(frozen=True)
@@ -980,7 +1591,11 @@ class TradingWireResponse:
         ):
             raise ProviderTransportScopeError("HTTP status must be an integer 100..599")
         try:
-            require_provider_response_bytes(self.body, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+            require_provider_response_bytes(
+                self.body,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
+            )
         except (TypeError, ValueError) as error:
             raise ProviderTransportError("invalid or oversized trading response") from error
 
@@ -1033,132 +1648,175 @@ class UrllibJsonWireClient:
 
     def _bounded_body(self, raw: bytes, *, max_bytes: int) -> bytes:
         try:
-            return require_provider_response_bytes(raw, max_bytes=max_bytes)
+            return require_provider_response_bytes(
+                raw,
+                max_bytes=max_bytes,
+                allow_empty=True,
+            )
         except (TypeError, ValueError) as error:
             raise ProviderTransportError("invalid or oversized provider HTTP response") from error
 
-    def send(
-        self,
-        request: SignedHttpRequest | AuthenticatedReadHttpRequest,
-    ) -> bytes | TradingWireResponse | AuthenticatedReadWireResponse:
-        if not isinstance(
-            request,
-            (SignedHttpRequest, AuthenticatedReadHttpRequest),
-        ):
-            raise TypeError(
-                "request must be SignedHttpRequest or AuthenticatedReadHttpRequest"
-            )
-        if isinstance(request, SignedHttpRequest):
-            data = request.body or None
-            method = request.method
-        else:
-            data = request.body or None
-            method = request.method
-        outbound = Request(
-            request.url,
-            data=data,
-            headers=dict(request.headers),
-            method=method,
-        )
-        is_authenticated_read = isinstance(
-            request,
-            AuthenticatedReadHttpRequest,
-        )
-        # Capture one exact validated budget before any response-body read.
-        # Mutating the client during I/O cannot widen this send's read envelope.
-        response_budget = self._response_budget()
-        http_status: int | None = None
-        http_error_status: int | None = None
-        http_error_invalid_status = False
-        http_error_read_failed = False
-        transport_unavailable = False
-        try:
-            with self._opener.open(
-                outbound,
-                timeout=request.timeout_seconds,
-            ) as response:
-                http_status = int(response.status)
-                raw = self._bounded_body(
-                    response.read(response_budget + 1),
-                    max_bytes=response_budget,
-                )
-        except HTTPError as error:
-            # An HTTPError retains its request URL and sometimes provider
-            # headers, including signed read-query/credential material.
-            # Read at most one bounded body here, but NEVER raise or construct
-            # typed responses while the secret-bearing exception is active:
-            # implicit __context__/explicit __cause__ would expose it later.
-            try:
-                observed_status = error.code
-                if type(observed_status) is int and 100 <= observed_status <= 599:
-                    http_error_status = observed_status
-                else:
-                    http_error_invalid_status = True
-            except Exception:
-                http_error_invalid_status = True
-            if http_error_status is not None and not 300 <= http_error_status < 400:
-                try:
-                    raw = error.read(response_budget + 1)
-                except Exception:
-                    http_error_read_failed = True
-        except URLError:
-            # urllib's transport exception can retain request metadata too.
-            # The guarded caller already handles uncertainty after SEND.
-            transport_unavailable = True
+    def _install_send_authority():
+        canonical_type = type
+        canonical_int = int
+        canonical_bytes = bytes
+        signed_request_type = SignedHttpRequest
+        authenticated_read_request_type = AuthenticatedReadHttpRequest
+        require_signed_request = _require_signed_http_request
+        require_authenticated_read_request = _require_authenticated_read_http_request
+        request_constructor = Request
+        mapping_copy = dict
+        type_error = TypeError
+        base_exception = Exception
+        provider_transport_error = ProviderTransportError
+        http_error_type = HTTPError
+        url_error_type = URLError
+        authenticated_response_type = AuthenticatedReadWireResponse
+        trading_response_type = TradingWireResponse
 
-        # Only primitive, detached status/bytes/flags cross the exception
-        # boundary. New failures are generated OUTSIDE urllib exception scope,
-        # so their public context chain cannot contain the signed HTTPError.
-        if transport_unavailable:
-            raise ProviderTransportError("provider HTTP transport response unavailable")
-        if http_error_invalid_status:
-            raise ProviderTransportError("provider HTTP error status invalid")
-        if http_error_status is not None:
-            if 300 <= http_error_status < 400:
-                raise ProviderTransportError("provider redirect is prohibited")
-            if http_error_read_failed:
-                raise ProviderTransportError("provider HTTP error body unavailable")
-            raw = self._bounded_body(raw, max_bytes=response_budget)
-            if is_authenticated_read:
-                return AuthenticatedReadWireResponse(
+        def send(
+            self,
+            request: SignedHttpRequest | AuthenticatedReadHttpRequest,
+        ) -> bytes | TradingWireResponse | AuthenticatedReadWireResponse:
+            request_type = canonical_type(request)
+            if request_type is authenticated_read_request_type:
+                method, url, headers, body, timeout_seconds = (
+                    require_authenticated_read_request(request)
+                )
+                is_authenticated_read = True
+            elif request_type is signed_request_type:
+                method, url, headers, body, timeout_seconds = require_signed_request(
+                    request
+                )
+                is_authenticated_read = False
+            else:
+                raise type_error(
+                    "request must be exact SignedHttpRequest or exact AuthenticatedReadHttpRequest"
+                )
+            data = body or None
+            outbound = request_constructor(
+                url,
+                data=data,
+                headers=mapping_copy(headers),
+                method=method,
+            )
+            # Capture one exact validated budget before any response-body read.
+            # Mutating the client during I/O cannot widen this send's read envelope.
+            response_budget = self._response_budget()
+            http_status: int | None = None
+            http_error_status: int | None = None
+            http_error_invalid_status = False
+            http_error_read_failed = False
+            transport_unavailable = False
+            try:
+                with self._opener.open(
+                    outbound,
+                    timeout=timeout_seconds,
+                ) as response:
+                    http_status = canonical_int(response.status)
+                    raw = self._bounded_body(
+                        response.read(response_budget + 1),
+                        max_bytes=response_budget,
+                    )
+            except http_error_type as error:
+                # An HTTPError retains its request URL and sometimes provider
+                # headers, including signed read-query/credential material.
+                # Read at most one bounded body here, but NEVER raise or construct
+                # typed responses while the secret-bearing exception is active:
+                # implicit __context__/explicit __cause__ would expose it later.
+                try:
+                    observed_status = error.code
+                    if (
+                        canonical_type(observed_status) is canonical_int
+                        and 100 <= observed_status <= 599
+                    ):
+                        http_error_status = observed_status
+                    else:
+                        http_error_invalid_status = True
+                except base_exception:
+                    http_error_invalid_status = True
+                if (
+                    http_error_status is not None
+                    and not 300 <= http_error_status < 400
+                ):
+                    try:
+                        raw = error.read(response_budget + 1)
+                    except base_exception:
+                        http_error_read_failed = True
+            except url_error_type:
+                # urllib's transport exception can retain request metadata too.
+                # The guarded caller already handles uncertainty after SEND.
+                transport_unavailable = True
+
+            # Only primitive, detached status/bytes/flags cross the exception
+            # boundary. New failures are generated OUTSIDE urllib exception scope,
+            # so their public context chain cannot contain the signed HTTPError.
+            if transport_unavailable:
+                raise provider_transport_error(
+                    "provider HTTP transport response unavailable"
+                )
+            if http_error_invalid_status:
+                raise provider_transport_error("provider HTTP error status invalid")
+            if http_error_status is not None:
+                if 300 <= http_error_status < 400:
+                    raise provider_transport_error("provider redirect is prohibited")
+                if http_error_read_failed:
+                    raise provider_transport_error(
+                        "provider HTTP error body unavailable"
+                    )
+                raw = self._bounded_body(raw, max_bytes=response_budget)
+                if is_authenticated_read:
+                    return authenticated_response_type(
+                        http_status=http_error_status,
+                        body=raw,
+                    )
+                return trading_response_type(
                     http_status=http_error_status,
                     body=raw,
                 )
-            return TradingWireResponse(
-                http_status=http_error_status,
-                body=raw,
-            )
-        if type(raw) is not bytes or not raw:
-            raise ProviderTransportError(
-                "provider returned an empty or non-byte response"
-            )
-        if is_authenticated_read:
-            if http_status is None:
-                raise ProviderTransportError(
-                    "authenticated-read HTTP status is unavailable"
+            if canonical_type(raw) is not canonical_bytes:
+                raise provider_transport_error(
+                    "provider returned a non-byte response"
                 )
-            return AuthenticatedReadWireResponse(
+            if is_authenticated_read and not raw:
+                raise provider_transport_error(
+                    "authenticated-read provider returned an empty response"
+                )
+            if is_authenticated_read:
+                if http_status is None:
+                    raise provider_transport_error(
+                        "authenticated-read HTTP status is unavailable"
+                    )
+                return authenticated_response_type(
+                    http_status=http_status,
+                    body=raw,
+                )
+            if http_status is None:
+                raise provider_transport_error(
+                    "trading HTTP status is unavailable"
+                )
+            return trading_response_type(
                 http_status=http_status,
                 body=raw,
             )
-        if http_status is None:
-            raise ProviderTransportError(
-                "trading HTTP status is unavailable"
-            )
-        return TradingWireResponse(
-            http_status=http_status,
-            body=raw,
-        )
+
+        return send
+
+    send = _install_send_authority()
+    del _install_send_authority
 
 
-def _exact_trading_response(
+def _trading_response_evidence(
     value: object,
-) -> ExactJsonTransportResponse:
-    """Preserve HTTP status when the wire client can prove a definitive response.
+) -> tuple[bytes, int | None]:
+    """Validate exact post-SEND bytes/status without assuming a JSON body.
 
-    Raw bytes remain accepted for injected legacy/test wire clients. Production
-    UrllibJsonWireClient always returns TradingWireResponse for guarded writes.
+    Provider-specific classifiers must be able to preserve an already observed
+    ambiguous HTTP result even when a gateway or upstream proxy returned HTML
+    or arbitrary opaque bytes. Definitive responses still pass through the
+    strict ExactJsonTransportResponse JSON contract below.
     """
+
     if type(value) is TradingWireResponse:
         # Frozen dataclasses can still be built without __init__ or modified
         # through object.__setattr__. Revalidate the nested HTTP status at
@@ -1167,22 +1825,142 @@ def _exact_trading_response(
         if type(status) is not int or not 100 <= status <= 599:
             raise ProviderTransportError("invalid trading HTTP response status")
         try:
-            raw = require_provider_response_bytes(value.body, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+            raw = require_provider_response_bytes(
+                value.body,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
+            )
         except (TypeError, ValueError) as error:
-            raise ProviderTransportError("invalid or oversized trading response") from error
-        return ExactJsonTransportResponse(
-            raw,
-            http_status=status,
-        )
+            raise ProviderTransportError(
+                "invalid or oversized trading response"
+            ) from error
+        return raw, status
     if type(value) is bytes:
         try:
-            raw = require_provider_response_bytes(value, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+            raw = require_provider_response_bytes(
+                value,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+            )
         except (TypeError, ValueError) as error:
-            raise ProviderTransportError("invalid or oversized trading response") from error
-        return ExactJsonTransportResponse(raw)
+            raise ProviderTransportError(
+                "invalid or oversized trading response"
+            ) from error
+        return raw, None
     raise ProviderTransportError(
         "trading wire client returned an unsupported response contract"
     )
+
+
+def _exact_trading_response(
+    value: object,
+) -> ExactJsonTransportResponse:
+    """Preserve HTTP status for a definitive exact JSON provider response.
+
+    Raw bytes remain accepted for injected legacy/test wire clients. Production
+    UrllibJsonWireClient always returns TradingWireResponse for guarded writes.
+    """
+
+    raw, status = _trading_response_evidence(value)
+    return ExactJsonTransportResponse(raw, http_status=status)
+
+
+def _bybit_exact_trading_response(
+    value: object,
+) -> ExactJsonTransportResponse:
+    """Preserve Bybit post-send uncertainty for reconciliation.
+
+    Durable dispatch must agree with the canonical Bybit response parser:
+    every HTTP non-2xx write result is reconciliation-first, and documented
+    ambiguous business codes remain UNKNOWN even when the HTTP layer is 2xx.
+    """
+
+    raw, status = _trading_response_evidence(value)
+    if status is None:
+        return ExactJsonTransportResponse(
+            raw,
+            requires_reconciliation=True,
+            ambiguity_reason="bybit_http_status_unavailable_execution_unknown",
+        )
+    if 500 <= status <= 599:
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="bybit_http_5xx_execution_unknown",
+        )
+    if status < 200 or status > 299:
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="bybit_http_non_2xx_execution_unknown",
+        )
+    exact = ExactJsonTransportResponse(raw, http_status=status)
+    parsed = exact.payload
+    if (
+        type(parsed) is dict
+        and type(parsed.get("retCode")) is int
+        and parsed["retCode"] in _BYBIT_AMBIGUOUS_RESPONSE_CODES
+    ):
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="bybit_ambiguous_ret_code_execution_unknown",
+        )
+    return exact
+
+
+def _kraken_spot_exact_trading_response(
+    value: object,
+) -> ExactJsonTransportResponse:
+    """Keep post-send Kraken Spot transport ambiguity reconciliation-first."""
+
+    raw, status = _trading_response_evidence(value)
+    if status is None:
+        return ExactJsonTransportResponse(
+            raw,
+            requires_reconciliation=True,
+            ambiguity_reason="kraken_spot_http_status_unavailable_execution_unknown",
+        )
+    if 500 <= status <= 599:
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="kraken_spot_http_5xx_execution_unknown",
+        )
+    exact = ExactJsonTransportResponse(raw, http_status=status)
+    if spot_submission_requires_reconciliation(exact.payload):
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="kraken_spot_deadline_elapsed",
+        )
+    return exact
+
+
+def _alpaca_exact_trading_response(
+    value: object,
+) -> ExactJsonTransportResponse:
+    """Keep post-send Alpaca transport ambiguity reconciliation-first."""
+
+    raw, status = _trading_response_evidence(value)
+    if status is None:
+        return ExactJsonTransportResponse(
+            raw,
+            requires_reconciliation=True,
+            ambiguity_reason="alpaca_http_status_unavailable_execution_unknown",
+        )
+    if 500 <= status <= 599:
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="alpaca_http_5xx_execution_unknown",
+        )
+    return ExactJsonTransportResponse(raw, http_status=status)
 
 
 def _binance_exact_trading_response(
@@ -1197,19 +1975,30 @@ def _binance_exact_trading_response(
     4xx denials and successful responses retain their existing semantics.
     This classification is no substitute for qualified provider-origin truth.
     """
-    exact = _exact_trading_response(value)
-    status = exact.http_status
-    parsed = exact.payload
-    if status is not None and 500 <= status <= 599:
+
+    raw, status = _trading_response_evidence(value)
+    if status is None:
         return ExactJsonTransportResponse(
-            exact.response_bytes,
+            raw,
+            requires_reconciliation=True,
+            ambiguity_reason="binance_spot_http_status_unavailable_execution_unknown",
+        )
+    if 500 <= status <= 599:
+        return ExactJsonTransportResponse(
+            raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="binance_spot_http_5xx_execution_unknown",
         )
-    if type(parsed) is dict and type(parsed.get("code")) is int and parsed["code"] == -1007:
+    exact = ExactJsonTransportResponse(raw, http_status=status)
+    parsed = exact.payload
+    if (
+        type(parsed) is dict
+        and type(parsed.get("code")) is int
+        and parsed["code"] == -1007
+    ):
         return ExactJsonTransportResponse(
-            exact.response_bytes,
+            raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="binance_spot_backend_timeout_execution_unknown",
@@ -1227,22 +2016,26 @@ def _whitebit_exact_trading_response(
     reconciliation, rather than becoming a retry-safe SubmissionSent terminal.
     """
 
-    exact = _exact_trading_response(value)
-    if exact.http_status is None:
-        return exact
+    raw, status = _trading_response_evidence(value)
+    if status is None:
+        return ExactJsonTransportResponse(
+            raw,
+            requires_reconciliation=True,
+            ambiguity_reason="whitebit_http_status_unavailable_execution_unknown",
+        )
     decision = classify_whitebit_http_retry(
-        status_code=exact.http_status,
+        status_code=status,
         attempt=1,
         request_class="WRITE",
     )
-    if not decision.requires_reconciliation:
-        return exact
-    return ExactJsonTransportResponse(
-        exact.response_bytes,
-        http_status=exact.http_status,
-        requires_reconciliation=True,
-        ambiguity_reason="whitebit_" + decision.classification.lower(),
-    )
+    if decision.requires_reconciliation:
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="whitebit_" + decision.classification.lower(),
+        )
+    return ExactJsonTransportResponse(raw, http_status=status)
 
 
 @dataclass(frozen=True)
@@ -2480,6 +3273,7 @@ class KrakenSpotAuthenticatedReadSigner:
             raise TypeError(
                 "query_binding must be AuthenticatedReadQueryBinding"
             )
+        _require_authenticated_read_query_binding_authority(query_binding)
         if policy.provider_id != "KRAKEN" or policy.environment != "LIVE":
             raise ProviderTransportScopeError(
                 "Kraken Spot authenticated-read signer requires KRAKEN LIVE policy"
@@ -2781,15 +3575,7 @@ class KrakenSpotHttpTransport:
 
                     final_guard()
                     wire_response = self.wire_client.send(signed)
-                    exact = _exact_trading_response(wire_response)
-                    if spot_submission_requires_reconciliation(exact.payload):
-                        return ExactJsonTransportResponse(
-                            exact.response_bytes,
-                            http_status=exact.http_status,
-                            requires_reconciliation=True,
-                            ambiguity_reason="kraken_spot_deadline_elapsed",
-                        )
-                    return exact
+                    return _kraken_spot_exact_trading_response(wire_response)
             finally:
                 provider_api_key = None
                 credential_plaintext = None
@@ -3310,7 +4096,7 @@ class AlpacaTradingHttpTransport:
 
             final_guard()
             wire_response = self.wire_client.send(signed)
-            return _exact_trading_response(wire_response)
+            return _alpaca_exact_trading_response(wire_response)
 
 
 @dataclass(frozen=True)
@@ -3468,6 +4254,7 @@ class BybitV5HttpTransport:
         if (
             credential_handle.provider != "BYBIT"
             or credential_handle.environment != policy.environment
+            or credential_handle.provider_environment != provider_env
             or credential_handle.purpose != "TRADE"
         ):
             raise ProviderTransportScopeError(
@@ -3648,6 +4435,7 @@ class BybitV5HttpTransport:
                 account_id=self.account_id,
                 entity_id=entity_id,
                 environment=self.policy.environment,
+                provider_environment=self.provider_environment,
                 instrument_version=instrument_version,
                 at=point,
             )
@@ -3737,6 +4525,7 @@ class BybitV5HttpTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="TRADE",
+            provider_environment=self.provider_environment,
         ) as credential_plaintext:
             try:
                 signed = BybitV5Signer.sign(
@@ -3758,7 +4547,7 @@ class BybitV5HttpTransport:
             # Shared production urllib returns typed status+body, while legacy
             # injected diagnostic wire clients may return exact raw bytes.
             wire_response = self.wire_client.send(signed)
-            return _exact_trading_response(wire_response)
+            return _bybit_exact_trading_response(wire_response)
 
 
 class BybitV5AuthenticatedReadSigner:
@@ -3777,6 +4566,7 @@ class BybitV5AuthenticatedReadSigner:
             raise TypeError(
                 "query_binding must be AuthenticatedReadQueryBinding"
             )
+        _require_authenticated_read_query_binding_authority(query_binding)
         if policy.provider_id != "BYBIT":
             raise ProviderTransportScopeError(
                 "Bybit authenticated-read signer requires BYBIT policy"
@@ -3825,7 +4615,22 @@ class BybitV5AuthenticatedReadSigner:
             )
 
         credential = BybitV5Credential.parse(credential_plaintext)
-        exact_query = urlencode(sorted(query.items()))
+        if query_binding.endpoint == _BYBIT_OPTION_DELIVERY_ENDPOINT:
+            # Bybit returns nextPageCursor as an already percent-encoded opaque
+            # token and instructs callers to feed that exact token back. Encoding
+            # '%' again would turn %3A/%2C into %253A/%252C and change both the
+            # signed bytes and pagination meaning. Other fields retain the
+            # existing urlencode contract; the cursor validator above limits the
+            # raw token to RFC3986 unreserved bytes plus canonical %XX escapes.
+            exact_parts = []
+            for key, value in sorted(query.items()):
+                if key == "cursor":
+                    exact_parts.append("cursor=" + value)
+                else:
+                    exact_parts.append(urlencode(((key, value),)))
+            exact_query = "&".join(exact_parts)
+        else:
+            exact_query = urlencode(sorted(query.items()))
         signing_material = (
             str(timestamp_ms)
             + credential.api_key
@@ -3891,6 +4696,7 @@ class BybitV5AuthenticatedReadTransport:
         if (
             credential_handle.provider != "BYBIT"
             or credential_handle.environment != policy.environment
+            or credential_handle.provider_environment != provider_env
             or credential_handle.purpose != "READ"
         ):
             raise ProviderTransportScopeError(
@@ -3966,6 +4772,7 @@ class BybitV5AuthenticatedReadTransport:
                 account_id=self.account_id,
                 entity_id=query_binding.entity_id,
                 environment=self.policy.environment,
+                provider_environment=self.provider_environment,
                 instrument_version=query_binding.instrument_version,
                 at=point,
             )
@@ -4029,6 +4836,7 @@ class BybitV5AuthenticatedReadTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="READ",
+            provider_environment=self.provider_environment,
         ) as credential_plaintext:
             try:
                 signed = BybitV5AuthenticatedReadSigner.sign(
@@ -4050,6 +4858,295 @@ class BybitV5AuthenticatedReadTransport:
             if wire_response.http_status not in rule.success_statuses:
                 raise ProviderTransportError(
                     "Bybit authenticated read returned unexpected HTTP status "
+                    + str(wire_response.http_status)
+                )
+            return observe_authenticated_json_response(
+                query_binding=query_binding,
+                http_status=wire_response.http_status,
+                response_bytes=wire_response.body,
+                observed_at=self.clock_utc(),
+            )
+
+
+@dataclass(frozen=True)
+class IbkrWebBearerCredential:
+    """Exact OAuth2 SSO bearer token used only inside one credential lease."""
+
+    bearer_token: str
+
+    @classmethod
+    def parse(cls, plaintext: object) -> "IbkrWebBearerCredential":
+        if type(plaintext) is not str or not plaintext:
+            raise ProviderTransportScopeError(
+                "IBKR OAuth2 bearer credential material is unavailable"
+            )
+        if (
+            plaintext != plaintext.strip()
+            or len(plaintext) > 16384
+            or plaintext.lower().startswith("bearer ")
+            or re.fullmatch(r"[A-Za-z0-9._~+/-]+={0,}", plaintext) is None
+        ):
+            raise ProviderTransportScopeError(
+                "IBKR OAuth2 bearer credential is not canonical token text"
+            )
+        return cls(bearer_token=plaintext)
+
+
+class IbkrWebAuthenticatedReadSigner:
+    """Pure OAuth2 direct-Web-API request builder for qualified read endpoints."""
+
+    _API_PREFIX = "/v1/api"
+
+    @staticmethod
+    def sign(
+        *,
+        policy: ProviderEndpointPolicy,
+        query_binding: AuthenticatedReadQueryBinding,
+        credential_plaintext: object,
+    ) -> AuthenticatedReadHttpRequest:
+        if type(policy) is not ProviderEndpointPolicy:
+            raise TypeError("policy must be exact ProviderEndpointPolicy")
+        if type(query_binding) is not AuthenticatedReadQueryBinding:
+            raise TypeError(
+                "query_binding must be exact AuthenticatedReadQueryBinding"
+            )
+        _require_authenticated_read_query_binding_authority(query_binding)
+        if query_binding.provider_id != "IBKR":
+            raise ProviderTransportScopeError(
+                "IBKR authenticated-read signer requires IBKR binding"
+            )
+        canonical_policy = IBKR_WEB_ENDPOINT_POLICIES.get(
+            query_binding.environment
+        )
+        if canonical_policy is None or policy != canonical_policy:
+            raise ProviderTransportScopeError(
+                "IBKR authenticated-read policy does not match exact environment"
+            )
+        _ibkr_authenticated_read_rule(query_binding)
+        method = IBKR_WEB_AUTHENTICATED_READ_METHODS.get(
+            query_binding.endpoint
+        )
+        if method is None:
+            raise ProviderTransportScopeError(
+                "IBKR authenticated-read method is not defined"
+            )
+        credential = IbkrWebBearerCredential.parse(credential_plaintext)
+        headers = {
+            "Accept": "application/json",
+            "Authorization": "Bearer " + credential.bearer_token,
+        }
+        if method == "POST":
+            # IBKR requires Content-Length on POST. Status carries no body.
+            headers["Content-Length"] = "0"
+            headers["Content-Type"] = "application/json"
+        return AuthenticatedReadHttpRequest(
+            url=policy.absolute_url(
+                IbkrWebAuthenticatedReadSigner._API_PREFIX
+                + query_binding.endpoint
+            ),
+            headers=MappingProxyType(headers),
+            timeout_seconds=policy.timeout_seconds,
+            method=method,
+            body=b"",
+        )
+
+
+class IbkrWebAuthenticatedReadTransport:
+    """One-shot OAuth2 direct IBKR read over existing capability authority.
+
+    This transport owns no brokerage-session generation, retries, provider
+    qualification, order submission, or reconciliation. It only carries the
+    already-authorized status/accounts read to the pinned OAuth2 Web API host
+    and mints the canonical exact-byte ProviderResponseObservation.
+    """
+
+    def __init__(
+        self,
+        *,
+        policy: ProviderEndpointPolicy,
+        account_id: str,
+        capability_snapshot_id: str,
+        capability_registry: CapabilityRegistry,
+        secret_resolver: ProviderSecretResolver,
+        credential_handle: PersistentCredentialHandle,
+        session_token: str,
+        origin: str,
+        execution_identity: str,
+        clock_utc: ClockUtc,
+        quota_gate: QuotaGate | None = None,
+        wire_client: ProviderWireClient | None = None,
+    ) -> None:
+        if type(policy) is not ProviderEndpointPolicy:
+            raise TypeError("policy must be exact ProviderEndpointPolicy")
+        canonical_policy = IBKR_WEB_ENDPOINT_POLICIES.get(policy.environment)
+        if (
+            policy.provider_id != "IBKR"
+            or canonical_policy is None
+            or policy != canonical_policy
+        ):
+            raise ProviderTransportScopeError(
+                "IBKR read policy must be exact OAuth2 direct Web API policy"
+            )
+        if type(credential_handle) is not PersistentCredentialHandle:
+            raise TypeError(
+                "credential_handle must be exact PersistentCredentialHandle"
+            )
+        if (
+            credential_handle.provider != "IBKR"
+            or credential_handle.environment != policy.environment
+            or credential_handle.provider_environment != policy.environment
+            or credential_handle.purpose != "READ"
+        ):
+            raise ProviderTransportScopeError(
+                "IBKR READ credential handle scope mismatch"
+            )
+        account = _canonical_text(account_id, name="account_id")
+        if credential_handle.account_id != account:
+            raise ProviderTransportScopeError(
+                "IBKR credential handle account mismatch"
+            )
+        if not isinstance(capability_registry, CapabilityRegistry):
+            raise TypeError("capability_registry must be CapabilityRegistry")
+        if not hasattr(secret_resolver, "lease_for_execution"):
+            raise TypeError(
+                "secret_resolver must implement lease_for_execution"
+            )
+        if not callable(clock_utc):
+            raise TypeError("clock_utc must be callable")
+        if quota_gate is not None and not callable(quota_gate):
+            raise TypeError("quota_gate must be callable or None")
+        if wire_client is not None and not hasattr(wire_client, "send"):
+            raise TypeError("wire_client must implement send")
+
+        self.policy = policy
+        self.account_id = account
+        self.capability_snapshot_id = _canonical_text(
+            capability_snapshot_id,
+            name="capability_snapshot_id",
+        )
+        self.capability_registry = capability_registry
+        self.secret_resolver = secret_resolver
+        self.credential_handle = credential_handle
+        self.session_token = _canonical_text(
+            session_token,
+            name="session_token",
+        )
+        self.origin = _canonical_text(origin, name="origin")
+        self.execution_identity = _canonical_text(
+            execution_identity,
+            name="execution_identity",
+        )
+        self.clock_utc = clock_utc
+        self.quota_gate = quota_gate
+        self.wire_client = wire_client or UrllibJsonWireClient()
+
+    def _require_current_capability(
+        self,
+        query_binding: AuthenticatedReadQueryBinding,
+        rule: AuthenticatedReadEndpointRule,
+    ) -> CapabilitySnapshot:
+        point = self.clock_utc()
+        if (
+            type(point) is not datetime
+            or point.tzinfo is None
+            or point.utcoffset() is None
+        ):
+            raise ProviderTransportScopeError(
+                "clock_utc must return a timezone-aware datetime"
+            )
+        point = point.astimezone(timezone.utc)
+        try:
+            current = self.capability_registry.require_verified(
+                provider_id="IBKR",
+                account_id=self.account_id,
+                entity_id=query_binding.entity_id,
+                environment=self.policy.environment,
+                instrument_version=query_binding.instrument_version,
+                at=point,
+            )
+        except Exception as error:
+            raise ProviderTransportScopeError(
+                "IBKR authenticated-read current capability cannot be verified"
+            ) from error
+        if (
+            type(current) is not CapabilitySnapshot
+            or current.snapshot_id != self.capability_snapshot_id
+            or current.provider_id != "IBKR"
+            or current.account_id != self.account_id
+            or current.entity_id != query_binding.entity_id
+            or current.environment != self.policy.environment
+            or current.instrument_version != query_binding.instrument_version
+            or current.status != "VERIFIED"
+            or not (current.observed_at <= point < current.expires_at)
+            or query_binding.permission_scope not in current.permission_scopes
+            or rule.data_entitlement not in current.data_entitlements
+        ):
+            raise ProviderTransportScopeError(
+                "IBKR authenticated-read capability is no longer valid for exact binding"
+            )
+        return current
+
+    def __call__(
+        self,
+        query_binding: AuthenticatedReadQueryBinding,
+    ) -> ProviderResponseObservation:
+        if type(query_binding) is not AuthenticatedReadQueryBinding:
+            raise TypeError(
+                "query_binding must be exact AuthenticatedReadQueryBinding"
+            )
+        _require_authenticated_read_query_binding_authority(query_binding)
+        if (
+            query_binding.provider_id != "IBKR"
+            or query_binding.account_id != self.account_id
+            or query_binding.environment != self.policy.environment
+            or query_binding.capability_snapshot_id
+            != self.capability_snapshot_id
+        ):
+            raise ProviderTransportScopeError(
+                "IBKR authenticated-read query scope mismatch"
+            )
+        rule = _ibkr_authenticated_read_rule(query_binding)
+
+        if self.quota_gate is not None:
+            self.quota_gate(
+                "IBKR",
+                self.account_id,
+                self.policy.environment,
+                "AUTHENTICATED_READ",
+            )
+
+        self._require_current_capability(query_binding, rule)
+        with self.secret_resolver.lease_for_execution(
+            self.session_token,
+            origin=self.origin,
+            handle=self.credential_handle,
+            execution_identity=self.execution_identity,
+            account_id=self.account_id,
+            provider="IBKR",
+            environment=self.policy.environment,
+            purpose="READ",
+            provider_environment=self.policy.environment,
+        ) as credential_plaintext:
+            try:
+                request = IbkrWebAuthenticatedReadSigner.sign(
+                    policy=self.policy,
+                    query_binding=query_binding,
+                    credential_plaintext=credential_plaintext,
+                )
+            finally:
+                credential_plaintext = None
+
+            # Credential access can race revocation/expiry; re-check immediately
+            # before the one outbound read.
+            self._require_current_capability(query_binding, rule)
+            wire_response = self.wire_client.send(request)
+            if type(wire_response) is not AuthenticatedReadWireResponse:
+                raise ProviderTransportError(
+                    "IBKR authenticated-read wire client must preserve HTTP status"
+                )
+            if wire_response.http_status not in rule.success_statuses:
+                raise ProviderTransportError(
+                    "IBKR authenticated read returned unexpected HTTP status "
                     + str(wire_response.http_status)
                 )
             return observe_authenticated_json_response(
@@ -4378,6 +5475,7 @@ class BinanceSpotAuthenticatedReadSigner:
             raise TypeError(
                 "query_binding must be AuthenticatedReadQueryBinding"
             )
+        _require_authenticated_read_query_binding_authority(query_binding)
         if policy.provider_id != "BINANCE":
             raise ProviderTransportScopeError(
                 "Binance authenticated-read signer requires BINANCE policy"

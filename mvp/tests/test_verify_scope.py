@@ -65,6 +65,54 @@ class VerifyScopeTests(unittest.TestCase):
         self.assertIn("tests/Integration/LeanAdoption", text)
         self.assertIn("ref: ${{ env.AUTOTRADE_SOURCE_SHA }}", text)
 
+    def test_recovery_qualification_has_dedicated_exact_head_workflow(self):
+        workflow = verify.ROOT / ".github" / "workflows" / "recovery-qualification.yml"
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn("os: [ubuntu-latest, windows-latest]", text)
+        self.assertIn(
+            "AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}",
+            text,
+        )
+        self.assertIn(
+            "AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}",
+            text,
+        )
+        self.assertIn("ref: ${{ env.AUTOTRADE_SOURCE_SHA }}", text)
+        focused_command = (
+            "python -m unittest "
+            "mvp.tests.test_recovery_qualification "
+            "mvp.tests.test_recovery_qualification_authority_ingress "
+            "mvp.tests.test_qualification_attestation "
+            "mvp.tests.test_qualification_attestation_authority_ingress "
+            "mvp.tests.test_verify_scope -v"
+        )
+        normalized_workflow = " ".join(text.split())
+        self.assertIn(focused_command, normalized_workflow)
+        self.assertIn("tools/write_ci_evidence.py", text)
+        self.assertIn("--suite recovery-qualification-foundation", text)
+
+        critical_trigger_paths = (
+            "docs/qualification/recovery/WP59_PROTOCOL_EVIDENCE.md",
+            "mvp/autotrade_mvp/recovery_qualification.py",
+            "mvp/autotrade_mvp/qualification_attestation.py",
+            "mvp/autotrade_mvp/qualification_trust_policy.json",
+            "mvp/tests/test_recovery_qualification.py",
+            "mvp/tests/test_recovery_qualification_authority_ingress.py",
+            "mvp/tests/test_qualification_attestation.py",
+            "mvp/tests/test_qualification_attestation_authority_ingress.py",
+            "mvp/tests/test_verify_scope.py",
+            "autotrade_runtime/artifacts/**",
+            "research/autotrade_research/artifacts/**",
+            "tools/write_ci_evidence.py",
+            ".github/workflows/recovery-qualification.yml",
+        )
+        for path in critical_trigger_paths:
+            self.assertGreaterEqual(
+                text.count(f'- "{path}"'),
+                2,
+                f"recovery qualification must rerun on pull_request and push changes to {path}",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

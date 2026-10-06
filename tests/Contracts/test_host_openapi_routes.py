@@ -49,5 +49,21 @@ class HostOpenApiRouteTests(unittest.TestCase):
             self.assertNotIn("security: []", section)
 
 
+    def test_event_resume_cursor_uses_canonical_sequence_contract(self):
+        text = OPENAPI.read_text(encoding="utf-8")
+        events = text.split("  /api/v1/events:", 1)[1].split(
+            "\n  /api/v1/health:",
+            1,
+        )[0]
+        after = events.split("          name: after", 1)[1].split(
+            "      responses:",
+            1,
+        )[0]
+        self.assertIn(
+            "$ref: ../jsonschema/common.schema.json#/$defs/Sequence",
+            after,
+        )
+        self.assertNotIn("type: string", after)
+
 if __name__ == "__main__":
     unittest.main()

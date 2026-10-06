@@ -14,12 +14,13 @@ from typing import Mapping
 from mvp.autotrade_mvp.durable_financing import (
     DurableFinancingBook,
     _event_payload,
+    _milliseconds_instant,
     _revision_book_digest,
     authenticated_financing_event,
 )
 from mvp.autotrade_mvp.financing import FinancingConflict, FinancingError
 from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
@@ -239,6 +240,45 @@ class RejectingArtifactStore:
 
 
 class DurableFinancingTests(unittest.TestCase):
+    def test_provider_epoch_milliseconds_are_platform_independent(self):
+        class HostileDateTime:
+            calls = 0
+
+            @classmethod
+            def fromtimestamp(cls, *_args, **_kwargs):
+                cls.calls += 1
+                raise AssertionError("host time_t conversion executed")
+
+        with patch(
+            "mvp.autotrade_mvp.durable_financing.datetime",
+            HostileDateTime,
+        ):
+            self.assertEqual(
+                _milliseconds_instant("0", name="transactionTime"),
+                datetime(1970, 1, 1, tzinfo=timezone.utc),
+            )
+            self.assertEqual(
+                _milliseconds_instant(1_000, name="transactionTime"),
+                datetime(1970, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
+            )
+        self.assertEqual(HostileDateTime.calls, 0)
+
+    def test_provider_epoch_milliseconds_preserve_exact_upper_utc_boundary(self):
+        self.assertEqual(
+            _milliseconds_instant(
+                "253402300799999",
+                name="transactionTime",
+            ),
+            datetime(9999, 12, 31, 23, 59, 59, 999000, tzinfo=timezone.utc),
+        )
+        with self.assertRaisesRegex(FinancingError, "outside supported UTC range"):
+            _milliseconds_instant(
+                "253402300800000",
+                name="transactionTime",
+            )
+        with self.assertRaisesRegex(FinancingError, "must be non-negative"):
+            _milliseconds_instant("-1", name="transactionTime")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.store = JournalStore(Path(self.temp.name) / "journal.sqlite3")
@@ -259,6 +299,153 @@ class DurableFinancingTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_authority_state_rejects_normal_retarget_after_construction(self):
+        other_store = JournalStore(Path(self.temp.name) / "normal-retarget.sqlite3")
+
+        with self.assertRaisesRegex(
+            FinancingConflict,
+            "authority state is immutable",
+        ):
+            self.financing.store = other_store
+        self.assertIs(self.financing.store, self.store)
+
+    def test_authority_rejects_instance_method_shadow_after_construction(self):
+        with self.assertRaisesRegex(
+            FinancingConflict,
+            "authority state is immutable",
+        ):
+            self.financing.latest = lambda _charge_id: None
+
+    def test_store_retarget_fails_closed_before_financing_read(self):
+        other_store = JournalStore(Path(self.temp.name) / "other.sqlite3")
+        object.__setattr__(self.financing, "store", other_store)
+
+        with self.assertRaisesRegex(
+            FinancingConflict,
+            "authority state changed after construction",
+        ):
+            self.financing.latest("borrow-btc-2026-09-28")
+
+    def test_economic_book_retarget_fails_before_artifact_callback(self):
+        alternate_economic = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="SIMULATION",
+        )
+        object.__setattr__(self.financing, "economic_book", alternate_economic)
+
+        class HostileArtifacts:
+            calls = 0
+
+            def read_authenticated_snapshot(self, _artifact_id):
+                self.calls += 1
+                raise AssertionError("artifact callback executed before authority check")
+
+        hostile = HostileArtifacts()
+        with self.assertRaisesRegex(
+            FinancingConflict,
+            "authority state changed after construction",
+        ):
+            self.financing.record_authenticated_artifact(
+                hostile,
+                artifact_id="00000000-0000-0000-0000-000000000099",
+                committed_at=BASE.isoformat(),
+            )
+        self.assertEqual(hostile.calls, 0)
+
+    def test_reinitialization_cannot_replace_financing_authority(self):
+        other_store = JournalStore(Path(self.temp.name) / "reinit.sqlite3")
+        other_economic = DurableProviderEconomicBook(
+            other_store,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="SIMULATION",
+        )
+
+        with self.assertRaisesRegex(
+            FinancingConflict,
+            "authority is already established",
+        ):
+            self.financing.__init__(
+                other_store,
+                other_economic,
+                provider_id="BYBIT",
+                account_id="acct-1",
+                environment="SIMULATION",
+            )
+        self.assertIs(self.financing.store, self.store)
+        self.assertIs(self.financing.economic_book, self.economic)
+
+    def _append_unrelated_race_event(self, ordinal: int) -> None:
+        payload = {"marker": f"stable-cut-race-{ordinal}"}
+        self.store.append_event(
+            {
+                "event_id": f"stable-cut-race-event-{ordinal}",
+                "event_type": "IndependentStableCutRace.v1",
+                "aggregate_type": "independent_stable_cut_race",
+                "aggregate_id": f"stable-cut-race-{ordinal}",
+                "aggregate_version": "1",
+                "committed_at": (BASE + timedelta(seconds=ordinal)).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+            }
+        )
+
+    def test_stable_replay_cut_does_not_refresh_mutable_economic_facade(self):
+        with patch.object(
+            DurableProviderEconomicBook,
+            "refresh",
+            side_effect=AssertionError("mutable economic refresh must not be used by stable cut"),
+        ):
+            self.assertIsNone(self.financing.latest("stable-cut-missing-charge"))
+
+    def test_stable_replay_cut_retries_after_journal_mutation_between_reads(self):
+        original_events = DurableFinancingBook._events
+        calls = {"count": 0}
+
+        def raced_events(book, charge_id):
+            result = original_events(book, charge_id)
+            if calls["count"] == 0:
+                calls["count"] += 1
+                self._append_unrelated_race_event(1)
+            return result
+
+        with patch.object(DurableFinancingBook, "_events", raced_events):
+            self.assertIsNone(self.financing.latest("stable-cut-race-retry"))
+        self.assertEqual(calls["count"], 1)
+        self.assertEqual(
+            self.store.current_journal_sequence(),
+            1,
+            "only the deliberate unrelated race event should have been committed",
+        )
+
+    def test_stable_replay_cut_fails_closed_when_global_cursor_never_stabilizes(self):
+        original_events = DurableFinancingBook._events
+        calls = {"count": 0}
+
+        def constantly_raced_events(book, charge_id):
+            result = original_events(book, charge_id)
+            calls["count"] += 1
+            self._append_unrelated_race_event(calls["count"])
+            return result
+
+        with patch.object(DurableFinancingBook, "_events", constantly_raced_events):
+            with self.assertRaisesRegex(
+                FinancingConflict,
+                "could not obtain a stable JournalStore cut",
+            ):
+                self.financing.latest("stable-cut-never-stable")
+
+        self.assertEqual(calls["count"], 4)
+        self.assertEqual(
+            self.store.current_journal_sequence(),
+            4,
+            "the fail-closed test must not mutate financing/economic aggregates",
+        )
 
     def test_final_revision_and_economics_commit_atomically_and_restart(self):
         self.artifacts.put("00000000-0000-0000-0000-000000000001", revision=1)
@@ -1751,7 +1938,101 @@ class DurableFinancingTests(unittest.TestCase):
             0,
         )
 
-    def test_bybit_funding_transaction_must_be_inside_authenticated_query_window(self):
+    def test_bybit_settlement_requires_complete_financing_only_economics(self):
+        transaction_time = int(BASE.timestamp() * 1000)
+        base_row = {
+            "id": "funding-complete-economics",
+            "symbol": "XRPUSDT",
+            "category": "linear",
+            "side": "Buy",
+            "transactionTime": str(transaction_time),
+            "type": "SETTLEMENT",
+            "funding": "-0.003676",
+            "currency": "USDT",
+            "fee": "0",
+            "cashFlow": "0",
+            "change": "-0.003676",
+        }
+        cases = (
+            ("missing_cash_flow", {"cashFlow": None}, "missing or noncanonical"),
+            ("missing_fee", {"fee": None}, "missing or noncanonical"),
+            ("missing_change", {"change": None}, "missing or noncanonical"),
+            ("nonzero_fee", {"fee": "0.10", "change": "-0.103676"}, "companion economics"),
+            ("nonzero_cash_flow", {"cashFlow": "1.25", "change": "1.246324"}, "companion economics"),
+            ("inconsistent_change", {"change": "-0.003675"}, "does not equal cashFlow + funding - fee"),
+        )
+        for suffix, changes, expected in cases:
+            with self.subTest(case=suffix):
+                row = dict(base_row)
+                for key, value in changes.items():
+                    if value is None:
+                        row.pop(key, None)
+                    else:
+                        row[key] = value
+                response = {
+                    "retCode": 0,
+                    "retMsg": "OK",
+                    "result": {
+                        "nextPageCursor": "",
+                        "list": [row],
+                    },
+                    "time": transaction_time + 1000,
+                }
+                raw = json.dumps(
+                    response,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ).encode("utf-8")
+                observed_at = BASE + timedelta(seconds=2)
+                observation = bybit_activity_observation(
+                    raw,
+                    observed_at=observed_at,
+                )
+                artifact = f"00000000-0000-0000-0000-0000000001{suffix[-2:]}"
+                raw_store = ArtifactStore(
+                    Path(self.temp.name) / f"bybit-complete-{suffix}"
+                )
+                raw_store.publish_bytes(
+                    artifact_id=artifact,
+                    data=raw,
+                    media_type="application/json",
+                    rights={"storage": True, "export": False},
+                    source_refs=[observation.evidence_ref],
+                    metadata={"evidence_class": "provider_response"},
+                )
+                economic = DurableProviderEconomicBook(
+                    self.store,
+                    provider_id="BYBIT",
+                    account_id="acct-1",
+                    environment="SIMULATION",
+                )
+                financing = DurableFinancingBook(
+                    self.store,
+                    economic,
+                    provider_id="BYBIT",
+                    account_id="acct-1",
+                    environment="SIMULATION",
+                )
+                with self.assertRaisesRegex(FinancingError, expected):
+                    financing.record_bybit_funding_observation(
+                        observation,
+                        raw_store,
+                        artifact_id=artifact,
+                        row_id="funding-complete-economics",
+                        instrument_registry=bybit_instrument_registry()[0],
+                        instrument_versions={
+                            "XRPUSDT": f"{BYBIT_XRP_INSTRUMENT_ID}@1"
+                        },
+                        committed_at=observed_at.isoformat(),
+                    )
+                self.assertEqual(
+                    economic.balance("FINANCING_EXPENSE:USDT", "USDT"),
+                    0,
+                )
+
+    def test_bybit_reobservation_same_provider_fact_preserves_first_receipt(self):
         transaction_time = int(BASE.timestamp() * 1000)
         response = {
             "retCode": 0,
@@ -1760,7 +2041,7 @@ class DurableFinancingTests(unittest.TestCase):
                 "nextPageCursor": "",
                 "list": [
                     {
-                        "id": "funding-outside-window",
+                        "id": "funding-fact-reobserve",
                         "symbol": "XRPUSDT",
                         "category": "linear",
                         "side": "Buy",
@@ -1783,53 +2064,200 @@ class DurableFinancingTests(unittest.TestCase):
             ensure_ascii=False,
             allow_nan=False,
         ).encode("utf-8")
-        observed_at = BASE + timedelta(seconds=2)
-        observation = bybit_activity_observation(
-            raw,
-            observed_at=observed_at,
-            extra_query={
-                "startTime": str(transaction_time + 1),
-                "endTime": str(transaction_time + 60000),
+        first_seen = BASE + timedelta(seconds=2)
+        second_seen = BASE + timedelta(minutes=10)
+        first_observation = bybit_activity_observation(raw, observed_at=first_seen)
+        second_observation = bybit_activity_observation(raw, observed_at=second_seen)
+
+        with TemporaryDirectory() as directory:
+            first_store = ArtifactStore(Path(directory) / "first")
+            second_store = ArtifactStore(Path(directory) / "second")
+            first_artifact = "00000000-0000-0000-0000-000000000111"
+            second_artifact = "00000000-0000-0000-0000-000000000112"
+            for artifacts, artifact_id, observation in (
+                (first_store, first_artifact, first_observation),
+                (second_store, second_artifact, second_observation),
+            ):
+                artifacts.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=raw,
+                    media_type="application/json",
+                    rights={"storage": True, "export": False},
+                    source_refs=[observation.evidence_ref],
+                    metadata={"evidence_class": "provider_response"},
+                )
+
+            economic = DurableProviderEconomicBook(
+                self.store,
+                provider_id="BYBIT",
+                account_id="acct-1",
+                environment="SIMULATION",
+            )
+            financing = DurableFinancingBook(
+                self.store,
+                economic,
+                provider_id="BYBIT",
+                account_id="acct-1",
+                environment="SIMULATION",
+            )
+            first = financing.record_bybit_funding_observation(
+                first_observation,
+                first_store,
+                artifact_id=first_artifact,
+                row_id="funding-fact-reobserve",
+                instrument_registry=bybit_instrument_registry()[0],
+                instrument_versions={
+                    "XRPUSDT": f"{BYBIT_XRP_INSTRUMENT_ID}@1"
+                },
+                committed_at=first_seen.isoformat(),
+            )
+            second = financing.record_bybit_funding_observation(
+                second_observation,
+                second_store,
+                artifact_id=second_artifact,
+                row_id="funding-fact-reobserve",
+                instrument_registry=bybit_instrument_registry()[0],
+                instrument_versions={
+                    "XRPUSDT": f"{BYBIT_XRP_INSTRUMENT_ID}@1"
+                },
+                committed_at=second_seen.isoformat(),
+            )
+
+            self.assertTrue(first.inserted)
+            self.assertFalse(second.inserted)
+            self.assertEqual(second.event, first.event)
+            self.assertEqual(second.event.available_at, first_seen)
+            self.assertEqual(
+                economic.balance("FINANCING_EXPENSE:USDT", "USDT"),
+                Decimal("0.003676"),
+            )
+            self.assertEqual(
+                len(
+                    self.store.load_events(
+                        "provider_financing_charge",
+                        financing._aggregate_id("BYBIT:TRANSACTION:funding-fact-reobserve:FUNDING"),
+                    )
+                ),
+                1,
+            )
+
+    def test_bybit_reobservation_changed_fact_conflicts_without_mutation(self):
+        transaction_time = int(BASE.timestamp() * 1000)
+        response = {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "nextPageCursor": "",
+                "list": [
+                    {
+                        "id": "funding-fact-conflict",
+                        "symbol": "XRPUSDT",
+                        "category": "linear",
+                        "side": "Buy",
+                        "transactionTime": str(transaction_time),
+                        "type": "SETTLEMENT",
+                        "funding": "-0.003676",
+                        "currency": "USDT",
+                        "fee": "0",
+                        "cashFlow": "0",
+                        "change": "-0.003676",
+                    }
+                ],
             },
-        )
-        artifact = "00000000-0000-0000-0000-000000000094"
-        raw_store = ArtifactStore(Path(self.temp.name) / "bybit-window-artifacts")
-        raw_store.publish_bytes(
-            artifact_id=artifact,
-            data=raw,
-            media_type="application/json",
-            rights={"storage": True, "export": False},
-            source_refs=[observation.evidence_ref],
-            metadata={"evidence_class": "provider_response"},
-        )
-        paper_economic = DurableProviderEconomicBook(
-            self.store,
-            provider_id="BYBIT",
-            account_id="acct-1",
-            environment="SIMULATION",
-        )
-        paper_financing = DurableFinancingBook(
-            self.store,
-            paper_economic,
-            provider_id="BYBIT",
-            account_id="acct-1",
-            environment="SIMULATION",
-        )
-        with self.assertRaisesRegex(FinancingError, "precedes authenticated query"):
-            paper_financing.record_bybit_funding_observation(
-                observation,
-                raw_store,
-                artifact_id=artifact,
-                row_id="funding-outside-window",
+            "time": transaction_time + 1000,
+        }
+        raw = json.dumps(response, sort_keys=True, separators=(",", ":")).encode()
+        response["result"]["list"][0]["funding"] = "-0.004000"
+        response["result"]["list"][0]["change"] = "-0.004000"
+        altered_raw = json.dumps(response, sort_keys=True, separators=(",", ":")).encode()
+        first_seen = BASE + timedelta(seconds=2)
+        altered_seen = BASE + timedelta(minutes=20)
+        first_observation = bybit_activity_observation(raw, observed_at=first_seen)
+        altered_observation = bybit_activity_observation(altered_raw, observed_at=altered_seen)
+
+        with TemporaryDirectory() as directory:
+            first_store = ArtifactStore(Path(directory) / "first")
+            altered_store = ArtifactStore(Path(directory) / "altered")
+            first_artifact = "00000000-0000-0000-0000-000000000114"
+            altered_artifact = "00000000-0000-0000-0000-000000000115"
+            first_store.publish_bytes(
+                artifact_id=first_artifact,
+                data=raw,
+                media_type="application/json",
+                rights={"storage": True, "export": False},
+                source_refs=[first_observation.evidence_ref],
+                metadata={"evidence_class": "provider_response"},
+            )
+            altered_store.publish_bytes(
+                artifact_id=altered_artifact,
+                data=altered_raw,
+                media_type="application/json",
+                rights={"storage": True, "export": False},
+                source_refs=[altered_observation.evidence_ref],
+                metadata={"evidence_class": "provider_response"},
+            )
+            economic = DurableProviderEconomicBook(
+                self.store,
+                provider_id="BYBIT",
+                account_id="acct-1",
+                environment="SIMULATION",
+            )
+            financing = DurableFinancingBook(
+                self.store,
+                economic,
+                provider_id="BYBIT",
+                account_id="acct-1",
+                environment="SIMULATION",
+            )
+            financing.record_bybit_funding_observation(
+                first_observation,
+                first_store,
+                artifact_id=first_artifact,
+                row_id="funding-fact-conflict",
                 instrument_registry=bybit_instrument_registry()[0],
                 instrument_versions={"XRPUSDT": f"{BYBIT_XRP_INSTRUMENT_ID}@1"},
-                committed_at=observed_at.isoformat(),
+                committed_at=first_seen.isoformat(),
             )
-        self.assertEqual(
-            paper_economic.balance("FINANCING_EXPENSE:USDT", "USDT"),
-            0,
-        )
+            with self.assertRaisesRegex(
+                FinancingConflict,
+                "same financing revision has conflicting content",
+            ):
+                financing.record_bybit_funding_observation(
+                    altered_observation,
+                    altered_store,
+                    artifact_id=altered_artifact,
+                    row_id="funding-fact-conflict",
+                    instrument_registry=bybit_instrument_registry()[0],
+                    instrument_versions={"XRPUSDT": f"{BYBIT_XRP_INSTRUMENT_ID}@1"},
+                    committed_at=altered_seen.isoformat(),
+                )
+            self.assertEqual(
+                economic.balance("FINANCING_EXPENSE:USDT", "USDT"),
+                Decimal("0.003676"),
+            )
+            self.assertEqual(
+                len(
+                    self.store.load_events(
+                        "provider_financing_charge",
+                        financing._aggregate_id("BYBIT:TRANSACTION:funding-fact-conflict:FUNDING"),
+                    )
+                ),
+                1,
+            )
 
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_bybit_funding_transaction_must_be_inside_authenticated_query_window(self):
+        transaction_time = int(BASE.timestamp() * 1000)
+        response = {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "nextPageCursor": "",
+                "list": [
+                    {
+                        "id": "funding-outside-window",
+                        "symbol": "XRPUSDT",
+                        "category": "linear",
+                        "side": "Buy",
+                        "transactionTime": str(transaction_time),
+                        "type": "SETTLEMENT",
+                        "funding": "-0.003676",

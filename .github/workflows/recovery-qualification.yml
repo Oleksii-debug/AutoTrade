@@ -1,0 +1,85 @@
+name: recovery-qualification
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "docs/qualification/recovery/WP59_PROTOCOL_EVIDENCE.md"
+      - "mvp/autotrade_mvp/recovery_qualification.py"
+      - "mvp/autotrade_mvp/qualification_attestation.py"
+      - "mvp/autotrade_mvp/qualification_trust_policy.json"
+      - "mvp/tests/test_recovery_qualification.py"
+      - "mvp/tests/test_recovery_qualification_authority_ingress.py"
+      - "mvp/tests/test_qualification_attestation.py"
+      - "mvp/tests/test_qualification_attestation_authority_ingress.py"
+      - "mvp/tests/test_verify_scope.py"
+      - "autotrade_runtime/artifacts/**"
+      - "research/autotrade_research/artifacts/**"
+      - "tools/write_ci_evidence.py"
+      - ".github/workflows/recovery-qualification.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docs/qualification/recovery/WP59_PROTOCOL_EVIDENCE.md"
+      - "mvp/autotrade_mvp/recovery_qualification.py"
+      - "mvp/autotrade_mvp/qualification_attestation.py"
+      - "mvp/autotrade_mvp/qualification_trust_policy.json"
+      - "mvp/tests/test_recovery_qualification.py"
+      - "mvp/tests/test_recovery_qualification_authority_ingress.py"
+      - "mvp/tests/test_qualification_attestation.py"
+      - "mvp/tests/test_qualification_attestation_authority_ingress.py"
+      - "mvp/tests/test_verify_scope.py"
+      - "autotrade_runtime/artifacts/**"
+      - "research/autotrade_research/artifacts/**"
+      - "tools/write_ci_evidence.py"
+      - ".github/workflows/recovery-qualification.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  foundation:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    env:
+      AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+      PYTHONPATH: ${{ github.workspace }}/research
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12.10"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Run WP-59 recovery qualification foundation
+        run: >-
+          python -m unittest
+          mvp.tests.test_recovery_qualification
+          mvp.tests.test_recovery_qualification_authority_ingress
+          mvp.tests.test_qualification_attestation
+          mvp.tests.test_qualification_attestation_authority_ingress
+          mvp.tests.test_verify_scope
+          -v
+      - name: Write exact-head recovery qualification evidence
+        run: >-
+          python tools/write_ci_evidence.py
+          --suite recovery-qualification-foundation
+          --command "python -m unittest mvp.tests.test_recovery_qualification mvp.tests.test_recovery_qualification_authority_ingress mvp.tests.test_qualification_attestation mvp.tests.test_qualification_attestation_authority_ingress mvp.tests.test_verify_scope -v"
+          --output "artifacts/recovery-qualification-${{ runner.os }}.json"
+      - name: Upload exact-head recovery qualification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-qualification-evidence-${{ runner.os }}
+          path: artifacts/recovery-qualification-${{ runner.os }}.json
+          if-no-files-found: error

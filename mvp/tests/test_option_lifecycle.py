@@ -350,7 +350,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                 self.authority._observation_from_evidence("qualified-lifecycle")
             )
 
-        self.assertIs(observation.provider_id, "BYBIT")
+        self.assertEqual(observation.provider_id, "BYBIT")
         self.assertIs(provider_evidence, neutral_source)
         self.assertIs(qualified, forged)
         self.assertEqual(observation.raw_evidence_digest, neutral_source.response_sha256)

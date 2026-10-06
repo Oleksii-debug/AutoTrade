@@ -427,6 +427,7 @@ def load_latest_reconciliation_checkpoint(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> dict[str, Any] | None:
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
@@ -436,6 +437,7 @@ def load_latest_reconciliation_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     events = store.load_events("account_reconciliation", aggregate_id)
     if not events:
@@ -446,6 +448,7 @@ def load_latest_reconciliation_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     _require_negative_resolution_authority(payload)
     return event
@@ -457,6 +460,7 @@ def load_latest_reconciliation_checkpoint_for_scope(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest durably recorded reconciliation fact for one scope.
 
@@ -471,10 +475,11 @@ def load_latest_reconciliation_checkpoint_for_scope(
 
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
-    provider, account, scope = _scope(
+    provider, account, scope, provider_scope = _scope(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     latest: dict[str, Any] | None = None
     latest_sequence = 0
@@ -488,6 +493,7 @@ def load_latest_reconciliation_checkpoint_for_scope(
             payload.get("provider_id") != provider
             or payload.get("account_id") != account
             or payload.get("environment") != scope
+            or payload.get("provider_environment", scope) != provider_scope
         ):
             continue
         _require_negative_resolution_authority(payload)
@@ -522,6 +528,7 @@ def require_current_reconciliation_checkpoint(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> dict[str, Any]:
     """Fail closed unless an exact checkpoint is current scope-wide truth."""
 
@@ -531,6 +538,7 @@ def require_current_reconciliation_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     if latest is None:
         raise ValueError("no reconciliation checkpoint exists for account scope")
@@ -548,6 +556,7 @@ def load_reconciliation_checkpoint_for_readiness(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
     host_id: str,
     owner_epoch: str,
 ) -> dict[str, Any] | None:
@@ -564,6 +573,7 @@ def load_reconciliation_checkpoint_for_readiness(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     if checkpoint is None:
         return None
@@ -572,12 +582,14 @@ def load_reconciliation_checkpoint_for_readiness(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     latest_scope_checkpoint = load_latest_reconciliation_checkpoint_for_scope(
         store,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     if (
         latest_scope_checkpoint is None
@@ -602,6 +614,7 @@ def load_submission_resolution_evidence(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
     attempt_id: str,
     intent_id: str,
     client_order_id: str,
@@ -634,6 +647,7 @@ def load_submission_resolution_evidence(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     _require_negative_resolution_authority(payload)
     resolutions = payload.get("submission_resolutions")
@@ -710,6 +724,10 @@ def load_submission_resolution_evidence(
         "provider_id": _text(payload.get("provider_id"), name="provider_id").upper(),
         "account_id": _text(payload.get("account_id"), name="account_id"),
         "environment": _text(payload.get("environment"), name="environment").upper(),
+        "provider_environment": _text(
+            payload.get("provider_environment", payload.get("environment")),
+            name="provider_environment",
+        ).upper(),
         "attempt_id": expected_attempt,
         "intent_id": item_intent,
         "client_order_id": item_client,
@@ -728,6 +746,7 @@ def load_account_resource_availability_evidence(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
     resources: Iterable[str],
     now: str,
     max_age_seconds: Decimal | str | int,
@@ -762,6 +781,7 @@ def load_account_resource_availability_evidence(
             provider_id=provider_id,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         )
     checkpoint = store.get_event(event_id)
     if checkpoint is None:
@@ -781,6 +801,7 @@ def load_account_resource_availability_evidence(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     _require_negative_resolution_authority(payload)
     if (
@@ -841,15 +862,17 @@ def load_account_resource_availability_evidence(
         raise ValueError(
             "availability checkpoint lacks explicit provider resource availability"
         )
-    provider, account, scope = _scope(
+    provider, account, scope, provider_scope = _scope(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     if (
         resource_evidence.get("provider_id") != provider
         or resource_evidence.get("account_id") != account
         or resource_evidence.get("environment") != scope
+        or resource_evidence.get("provider_environment", scope) != provider_scope
     ):
         raise ValueError("resource availability evidence scope mismatch")
 
@@ -956,6 +979,26 @@ def load_account_resource_availability_evidence(
                 or settlement_scope.get("account_id") != account
                 or settlement_scope.get("environment") != scope
             ):
+                continue
+            settlement_provider_environment = settlement_scope.get("provider_environment")
+            if settlement_provider_environment is None:
+                if provider == "BYBIT":
+                    raise ValueError(
+                        "BYBIT settlement financial truth lacks provider_environment"
+                    )
+                settlement_provider_environment = settlement_scope.get("environment")
+            if settlement_provider_environment != provider_scope:
+                continue
+            settlement_provider_environment = settlement_scope.get(
+                "provider_environment"
+            )
+            if settlement_provider_environment is None:
+                if provider == "BYBIT":
+                    raise ValueError(
+                        "BYBIT settlement financial truth lacks provider_environment"
+                    )
+                settlement_provider_environment = settlement_scope.get("environment")
+            if settlement_provider_environment != provider_scope:
                 continue
             if settlement_sequence >= checkpoint_sequence:
                 raise ValueError(
@@ -1113,6 +1156,10 @@ def load_account_resource_availability_evidence(
         "provider_id": _text(payload.get("provider_id"), name="provider_id").upper(),
         "account_id": _text(payload.get("account_id"), name="account_id"),
         "environment": _text(payload.get("environment"), name="environment").upper(),
+        "provider_environment": _text(
+            payload.get("provider_environment", payload.get("environment")),
+            name="provider_environment",
+        ).upper(),
         "snapshot_mode": _text(snapshot.get("mode"), name="snapshot.mode").upper(),
         "snapshot_query_completed_at": completed_text,
         "resource_snapshot_id": _text(
@@ -1172,6 +1219,7 @@ def unresolved_attempt_ids_from_checkpoint(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> tuple[str, ...]:
     if checkpoint is None:
         return ()
@@ -1180,6 +1228,7 @@ def unresolved_attempt_ids_from_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     _require_negative_resolution_authority(payload)
     resolutions = payload.get("submission_resolutions")
@@ -1202,6 +1251,7 @@ def unresolved_provider_activity_ids_from_checkpoint(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> tuple[str, ...]:
     if checkpoint is None:
         return ()
@@ -1210,6 +1260,7 @@ def unresolved_provider_activity_ids_from_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     _require_negative_resolution_authority(payload)
     unexpected = payload.get("unexpected_provider_activity_ids", [])

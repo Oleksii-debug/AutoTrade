@@ -57,6 +57,19 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn('text("server-time", parsed.serverTime)', js)
         self.assertNotIn("Not loaded.", html)
 
+    def test_table_filters_clear_with_escape_without_moving_focus(self):
+        js = APP.read_text(encoding="utf-8")
+        bind = js[
+            js.index("function bindTableTools()"):
+            js.index("function announceLiveText")
+        ]
+        self.assertIn('filter.addEventListener("keydown", (event) => {', bind)
+        self.assertIn('event.key !== "Escape" || filter.value === ""', bind)
+        self.assertIn("event.preventDefault()", bind)
+        self.assertIn('filter.value = ""', bind)
+        self.assertIn("applyTableFilter(tool, {resetPage: true})", bind)
+        self.assertNotIn("filter.blur()", bind)
+
     def test_projection_rendering_is_text_only_deterministic_and_focusable(self):
         html = INDEX.read_text(encoding="utf-8")
         js = APP.read_text(encoding="utf-8")

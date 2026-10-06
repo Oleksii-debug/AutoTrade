@@ -976,6 +976,48 @@ def parse_submission_response(
     }
 
 
+def _validate_bybit_fee_currency_authority_binding(
+    authority: BybitFeeCurrencyAuthority,
+    *,
+    observation: ProviderResponseObservation,
+    product_category: object,
+    instrument_version: str,
+    trade_time: str,
+) -> str:
+    _require_bybit_fee_currency_authority(authority)
+    if authority.account_id != observation.account_id:
+        raise ProviderCoreError(
+            "Bybit fee-currency authority account does not match execution evidence"
+        )
+    expected_runtime_environment = (
+        "LIVE" if authority.provider_environment == "MAINNET" else "PAPER"
+    )
+    if expected_runtime_environment != observation.environment:
+        raise ProviderCoreError(
+            "Bybit fee-currency authority environment does not match execution evidence"
+        )
+    query_category = observation.query_binding.query.get("category")
+    if (
+        type(product_category) is not str
+        or query_category != authority.product_category
+        or product_category != authority.product_category
+    ):
+        raise ProviderCoreError(
+            "Bybit fee-currency authority product category does not match execution query"
+        )
+    if authority.instrument_version != instrument_version:
+        raise ProviderCoreError(
+            "Bybit fee-currency authority instrument does not match execution evidence"
+        )
+    if trade_time < authority.valid_from or (
+        authority.valid_to is not None and trade_time >= authority.valid_to
+    ):
+        raise ProviderCoreError(
+            "Bybit fee-currency authority is outside its validity interval"
+        )
+    return authority.fee_currency
+
+
 def parse_executions(
     observation: ProviderResponseObservation,
     *,
@@ -1031,39 +1073,35 @@ def parse_executions(
                 "in canonical fill economics"
             )
 
+        trade_time = _millis_to_utc(row.get("execTime"), name="execTime")
         provider_fee_currency = row.get("feeCurrency")
         if isinstance(provider_fee_currency, str) and provider_fee_currency.strip():
             fee_currency = provider_fee_currency.strip()
+            if qualified_fee_currency is not None:
+                qualified_currency = _validate_bybit_fee_currency_authority_binding(
+                    qualified_fee_currency,
+                    observation=observation,
+                    product_category=observation.query_binding.query.get("category"),
+                    instrument_version=instrument,
+                    trade_time=trade_time,
+                )
+                if fee_currency != qualified_currency:
+                    raise ProviderCoreError(
+                        "Bybit provider feeCurrency disagrees with qualified fee-currency authority"
+                    )
         else:
             if qualified_fee_currency is None:
                 raise ProviderCoreError(
                     "Bybit execution fee currency is unresolved; canonical "
                     "typed fee-currency authority is required"
                 )
-            expected_runtime_environment = (
-                "LIVE" if qualified_fee_currency.provider_environment == "MAINNET" else "PAPER"
+            fee_currency = _validate_bybit_fee_currency_authority_binding(
+                qualified_fee_currency,
+                observation=observation,
+                product_category=observation.query_binding.query.get("category"),
+                instrument_version=instrument,
+                trade_time=trade_time,
             )
-            if expected_runtime_environment != environment:
-                raise ProviderCoreError(
-                    "Bybit fee-currency authority environment does not match execution evidence"
-                )
-            query_category = observation.query_binding.query.get("category")
-            if (
-                type(query_category) is not str
-                or query_category != qualified_fee_currency.product_category
-            ):
-                raise ProviderCoreError(
-                    "Bybit fee-currency authority product category does not match execution query"
-                )
-            if qualified_fee_currency.account_id != observation.account_id:
-                raise ProviderCoreError(
-                    "Bybit fee-currency authority account does not match execution evidence"
-                )
-            if qualified_fee_currency.instrument_version != instrument:
-                raise ProviderCoreError(
-                    "Bybit fee-currency authority instrument does not match execution evidence"
-                )
-            fee_currency = qualified_fee_currency.fee_currency
 
         side = _text(row.get("side"), name="side").upper()
         if side not in {"BUY", "SELL"}:
@@ -1080,7 +1118,7 @@ def parse_executions(
             price=row.get("execPrice"),
             fee_amount=row.get("execFee"),
             fee_currency=fee_currency,
-            trade_time=_millis_to_utc(row.get("execTime"), name="execTime"),
+            trade_time=trade_time,
             evidence_refs=(observation.evidence_ref,),
         )
         previous = by_execution.get(execution_id)

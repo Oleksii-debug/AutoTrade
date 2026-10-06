@@ -43,6 +43,7 @@ from mvp.autotrade_mvp._provider_activity_accounting_impl import (
     _cash_leg_totals,
     _cash_outflow_usage,
     _exact_usage_increase,
+    _provider_fill_correction_binding_aggregate_id,
     _projected_fill_binding_payload,
     _provider_fill_binding_aggregate_id,
     _provider_fill_binding_payload,
@@ -931,6 +932,22 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             self.assertNotEqual(
                 prepared["TESTNET"][1].request["provider_fill_digest"],
                 prepared["DEMO"][1].request["provider_fill_digest"],
+            )
+            self.assertNotEqual(
+                _provider_fill_correction_binding_aggregate_id(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    provider_execution_id="provider-execution-1",
+                ),
+                _provider_fill_correction_binding_aggregate_id(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                    provider_execution_id="provider-execution-1",
+                ),
             )
 
     def test_financial_plan_usage_and_digest_ignore_ambient_decimal_context(self):

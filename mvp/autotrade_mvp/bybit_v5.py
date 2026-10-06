@@ -1437,6 +1437,17 @@ def parse_executions(
         raise ProviderCoreError(
             "Bybit execution query requires exact documented category"
         )
+    query_exec_type = query.get("execType")
+    if (
+        query_exec_type is not None
+        and (
+            type(query_exec_type) is not str
+            or query_exec_type != "Trade"
+        )
+    ):
+        raise ProviderCoreError(
+            "Bybit canonical fill evidence requires query execType to be exact Trade"
+        )
 
     execution_filter = None
     for filter_name in ("orderId", "orderLinkId", "symbol", "baseCoin"):
@@ -1578,6 +1589,12 @@ def parse_executions(
                     "Bybit execution row does not match exact symbol query"
                 )
 
+        provider_exec_type = row.get("execType")
+        if type(provider_exec_type) is not str or provider_exec_type != "Trade":
+            raise ProviderCoreError(
+                "Bybit canonical fill evidence requires row execType to be exact Trade"
+            )
+
         extra_fees = row.get("extraFees")
         if extra_fees not in (None, "", [], {}, ()):
             raise ProviderCoreError(
@@ -1717,6 +1734,13 @@ BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST = (
                     "permission_scope": "ORDER.READ",
                     "query_category": ["spot", "linear", "inverse", "option"],
                     "response_category": "EXACT_MATCH_QUERY_CATEGORY",
+                },
+                "exec_type": {
+                    "query": "ABSENT_OR_EXACT_Trade",
+                    "row": (
+                        "EXACT_Trade_ONLY_OTHER_TYPES_REQUIRE_SPECIALIZED_"
+                        "ECONOMIC_MODEL"
+                    ),
                 },
                 "query_filter": {
                     "priority": ["orderId", "orderLinkId", "symbol", "baseCoin"],

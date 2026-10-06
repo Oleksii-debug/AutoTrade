@@ -74,6 +74,29 @@ def _xml_elements(tree: ET.ElementTree, local_name: str):
     )
 
 
+def _workflow_block_scalar_content_lines(workflow_text: str) -> set[int]:
+    """Return physical lines that are YAML block-scalar content."""
+
+    lines = workflow_text.splitlines()
+    content_lines: set[int] = set()
+    scalar_indent: int | None = None
+    scalar_header = re.compile(r":\s*[|>][+-]?\s*(?:#.*)?$")
+    for index, raw in enumerate(lines, start=1):
+        stripped = raw.strip()
+        indent = len(raw) - len(raw.lstrip(" "))
+        if scalar_indent is not None:
+            if not stripped:
+                content_lines.add(index)
+                continue
+            if indent > scalar_indent:
+                content_lines.add(index)
+                continue
+            scalar_indent = None
+        if stripped and scalar_header.search(stripped):
+            scalar_indent = indent
+    return content_lines
+
+
 def dotnet_restore_workflow_commands(
     workflow_text: str,
 ) -> tuple[list[str], list[int]]:
@@ -88,6 +111,7 @@ def dotnet_restore_workflow_commands(
 
     commands: list[str] = []
     unscoped_lines: list[int] = []
+    block_scalar_lines = _workflow_block_scalar_content_lines(workflow_text)
     unscoped_line_set: set[int] = set()
     for line_number, raw in enumerate(workflow_text.splitlines(), start=1):
         command = raw.strip()
@@ -99,7 +123,10 @@ def dotnet_restore_workflow_commands(
             or _DOTNET_RESTORE_TEXT.search(command) is None
         ):
             continue
-        if command.startswith("run: dotnet restore "):
+        if (
+            line_number not in block_scalar_lines
+            and command.startswith("run: dotnet restore ")
+        ):
             commands.append(command)
         else:
             unscoped_lines.append(line_number)

@@ -189,6 +189,27 @@ class NugetLockGateCandidateTests(unittest.TestCase):
         self.assertEqual(commands, [])
         self.assertEqual(unscoped_lines, [3])
 
+
+    def test_canonical_looking_restore_inside_block_scalar_is_unscoped(self):
+        commands, unscoped_lines = dotnet_restore_workflow_commands(
+            "steps:\n"
+            "  - run: |\n"
+            "      printf '%s\\n' fake\n"
+            "      - run: dotnet restore src/App/App.csproj --locked-mode\n"
+        )
+        self.assertEqual(commands, [])
+        self.assertEqual(unscoped_lines, [4])
+
+    def test_nested_fake_steps_inside_block_scalar_cannot_mint_restore(self):
+        commands, unscoped_lines = dotnet_restore_workflow_commands(
+            "steps:\n"
+            "  - run: |\n"
+            "      steps:\n"
+            "        - run: dotnet restore src/App/App.csproj --locked-mode\n"
+        )
+        self.assertEqual(commands, [])
+        self.assertEqual(unscoped_lines, [4])
+
     def test_case_and_spacing_cannot_hide_unscoped_restore(self):
         commands, unscoped_lines = dotnet_restore_workflow_commands(
             "steps:\n"

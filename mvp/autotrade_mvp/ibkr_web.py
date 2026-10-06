@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Mapping
+from weakref import ref as weakref_ref
 import hashlib
 import json
 import re
@@ -33,6 +34,9 @@ from .reconciliation import ProviderFillEvidence
 
 class IbkrWebAdapterError(ValueError):
     """Raised when IBKR Web API state or order input cannot be used safely."""
+
+
+IBKR_WEB_BROKERAGE_STATUS_ENDPOINT = "/iserver/auth/status"
 
 
 IBKR_WEB_DOCS = MappingProxyType(
@@ -218,6 +222,235 @@ class IbkrBrokerageSessionStatus:
             raise IbkrWebAdapterError("brokerage session is not established")
         if self.competing:
             raise IbkrWebAdapterError("another competing brokerage session is active")
+
+
+def _install_ibkr_brokerage_session_observation_authority():
+    """Bind trade-ready session state to one authenticated provider observation.
+
+    The provider-neutral authenticated-read authority remains the source of
+    response-byte, endpoint, account, environment and chronology truth. This
+    local registry only prevents a caller-constructed or post-mint-mutated
+    session DTO from being used as financial preparation authority.
+    """
+
+    session_type = IbkrBrokerageSessionStatus
+    observation_type = ProviderResponseObservation
+    canonical_require_scope = observation_type.require_scope
+    canonical_instant = _instant
+    canonical_text = _text
+    mapping_proxy_type = MappingProxyType
+    surface = Surface.AUTHENTICATED_READ
+    object_getattribute = object.__getattribute__
+    canonical_type = type
+    canonical_id = id
+    weakref = weakref_ref
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+    def authority_changed() -> None:
+        raise IbkrWebAdapterError(
+            "IBKR brokerage session observation authority changed"
+        )
+
+    def implementation_changed() -> None:
+        if (
+            IbkrBrokerageSessionStatus is not session_type
+            or ProviderResponseObservation is not observation_type
+            or observation_type.require_scope is not canonical_require_scope
+            or _instant is not canonical_instant
+            or _text is not canonical_text
+        ):
+            authority_changed()
+
+    def prune() -> None:
+        for object_id, (value_ref, _snapshot) in tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def from_observation(
+        observation: ProviderResponseObservation,
+    ) -> IbkrBrokerageSessionStatus:
+        implementation_changed()
+        if canonical_type(observation) is not observation_type:
+            raise TypeError(
+                "observation must be exact ProviderResponseObservation"
+            )
+        canonical_require_scope(
+            observation,
+            provider_id="IBKR",
+            surface=surface,
+            endpoint=IBKR_WEB_BROKERAGE_STATUS_ENDPOINT,
+        )
+        payload = object_getattribute(observation, "payload")
+        if canonical_type(payload) is not mapping_proxy_type:
+            raise IbkrWebAdapterError(
+                "brokerage session status payload must be an exact provider object"
+            )
+
+        flags: dict[str, bool] = {}
+        for name in ("connected", "authenticated", "established", "competing"):
+            if name not in payload:
+                raise IbkrWebAdapterError(
+                    f"brokerage session status is missing {name}"
+                )
+            value = payload[name]
+            if canonical_type(value) is not bool:
+                raise IbkrWebAdapterError(
+                    f"brokerage session status {name} must be exact boolean"
+                )
+            flags[name] = value
+
+        if "fail" in payload:
+            failure = payload["fail"]
+            if failure is not None:
+                if (
+                    canonical_type(failure) is not str
+                    or failure != failure.strip()
+                ):
+                    raise IbkrWebAdapterError(
+                        "brokerage session status fail must be canonical provider text"
+                    )
+                if failure:
+                    raise IbkrWebAdapterError(
+                        "brokerage session status reports provider failure"
+                    )
+
+        observed_text = object_getattribute(observation, "observed_at")
+        if (
+            canonical_type(observed_text) is not str
+            or not observed_text.endswith("Z")
+        ):
+            raise IbkrWebAdapterError(
+                "brokerage session observation time must be canonical UTC text"
+            )
+        try:
+            observed_at = datetime.fromisoformat(
+                observed_text[:-1] + "+00:00"
+            )
+        except ValueError as error:
+            raise IbkrWebAdapterError(
+                "brokerage session observation time must be canonical UTC text"
+            ) from error
+        observed_at = canonical_instant(
+            observed_at,
+            name="brokerage session observed_at",
+        )
+
+        query_binding = object_getattribute(observation, "query_binding")
+        account_id = object_getattribute(query_binding, "account_id")
+        environment = object_getattribute(query_binding, "environment")
+        evidence_ref = object_getattribute(observation, "evidence_ref")
+        response_sha256 = object_getattribute(observation, "response_sha256")
+        if (
+            canonical_type(account_id) is not str
+            or canonical_type(environment) is not str
+            or canonical_type(evidence_ref) is not str
+            or canonical_type(response_sha256) is not str
+        ):
+            authority_changed()
+
+        value = session_type(
+            connected=flags["connected"],
+            authenticated=flags["authenticated"],
+            established=flags["established"],
+            competing=flags["competing"],
+            observed_at=observed_at,
+        )
+        prune()
+        object_id = canonical_id(value)
+        current = states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise IbkrWebAdapterError(
+                "brokerage session observation identity collision"
+            )
+        states[object_id] = (
+            weakref(value),
+            (
+                flags["connected"],
+                flags["authenticated"],
+                flags["established"],
+                flags["competing"],
+                observed_at,
+                account_id,
+                environment,
+                evidence_ref,
+                response_sha256,
+            ),
+        )
+        return value
+
+    def require(
+        value: IbkrBrokerageSessionStatus,
+        *,
+        account_id: str,
+        environment: str,
+    ) -> tuple[str, str]:
+        implementation_changed()
+        if canonical_type(value) is not session_type:
+            raise TypeError("session must be exact IbkrBrokerageSessionStatus")
+
+        current_flags: list[bool] = []
+        for name in ("connected", "authenticated", "established", "competing"):
+            current = object_getattribute(value, name)
+            if canonical_type(current) is not bool:
+                raise TypeError(
+                    f"session {name} must remain exact boolean"
+                )
+            current_flags.append(current)
+        current_observed_at = canonical_instant(
+            object_getattribute(value, "observed_at"),
+            name="session.observed_at",
+        )
+
+        prune()
+        state = states.get(canonical_id(value))
+        if state is None or state[0]() is not value:
+            raise IbkrWebAdapterError(
+                "brokerage session must come from authenticated "
+                "/iserver/auth/status provider observation"
+            )
+        (
+            connected,
+            authenticated,
+            established,
+            competing,
+            observed_at,
+            bound_account_id,
+            bound_environment,
+            evidence_ref,
+            response_sha256,
+        ) = state[1]
+        if (
+            tuple(current_flags)
+            != (connected, authenticated, established, competing)
+            or current_observed_at != observed_at
+        ):
+            raise IbkrWebAdapterError(
+                "brokerage session changed after authenticated provider observation"
+            )
+
+        expected_account = canonical_text(account_id, name="account_id")
+        expected_environment = canonical_text(
+            environment,
+            name="environment",
+        ).upper()
+        if bound_account_id != expected_account:
+            raise IbkrWebAdapterError(
+                "brokerage session account does not match order authority"
+            )
+        if bound_environment != expected_environment:
+            raise IbkrWebAdapterError(
+                "brokerage session environment does not match order authority"
+            )
+        return evidence_ref, response_sha256
+
+    return from_observation, require
+
+
+(
+    brokerage_session_status_from_observation,
+    _require_ibkr_brokerage_session_observation,
+) = _install_ibkr_brokerage_session_observation_authority()
+del _install_ibkr_brokerage_session_observation_authority
 
 
 @dataclass(frozen=True)
@@ -617,8 +850,6 @@ def prepare_normalized_order(
         seconds=maximum_session_age_seconds
     ):
         raise IbkrWebAdapterError("brokerage session evidence is stale")
-    IbkrBrokerageSessionStatus.require_trade_ready(session)
-
     capability_provider_id = _text(
         capability.provider_id,
         name="capability.provider_id",
@@ -627,6 +858,10 @@ def prepare_normalized_order(
         capability.account_id,
         name="capability.account_id",
     )
+    capability_environment = _text(
+        capability.environment,
+        name="capability.environment",
+    ).upper()
     capability_instrument_version = _text(
         capability.instrument_version,
         name="capability.instrument_version",
@@ -643,6 +878,12 @@ def prepare_normalized_order(
         raise IbkrWebAdapterError("capability account does not match intent account")
     if capability_instrument_version != sealed_intent.instrument_version:
         raise IbkrWebAdapterError("capability instrument version does not match intent")
+    _require_ibkr_brokerage_session_observation(
+        session,
+        account_id=sealed_intent.account_id,
+        environment=capability_environment,
+    )
+    IbkrBrokerageSessionStatus.require_trade_ready(session)
     if not CapabilitySnapshot.admits(
         capability,
         at=point,

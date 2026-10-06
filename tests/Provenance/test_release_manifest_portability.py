@@ -72,17 +72,14 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
         original = root_pyproject.read_text(encoding="utf-8")
         mutated = original.replace('version = "0.0.1"', "version = 1", 1)
         self.assertNotEqual(mutated, original)
-        with patch.object(
-            Path,
-            "read_text",
-            side_effect=lambda *args, **kwargs: (
-                mutated
-                if args and args[0] == root_pyproject
-                else original
-                if args and args[0] == ROOT / "research" / "pyproject.toml"
-                else Path.read_text(*args, **kwargs)
-            ),
-        ):
+        original_read_text = Path.read_text
+
+        def read_text(candidate: Path, *args, **kwargs):
+            if candidate == root_pyproject:
+                return mutated
+            return original_read_text(candidate, *args, **kwargs)
+
+        with patch.object(Path, "read_text", read_text):
             with self.assertRaisesRegex(ValueError, "identity is not exact"):
                 python_runtime_dependencies()
 

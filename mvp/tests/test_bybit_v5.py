@@ -1129,7 +1129,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 observation=forged,
             )
 
-    def test_submission_consumer_ignores_rebound_projection_alias_for_forgery(self):
+    def test_submission_consumer_rejects_rebound_projection_alias_before_forgery(self):
         attempt, prepared, _observation = self._durable_write_observation(
             {
                 "retCode": 0,
@@ -1167,7 +1167,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 ProviderCoreError,
-                "provider submission observation authority is unavailable",
+                "submission response parser authority changed",
             ):
                 parse_submission_response(
                     attempt_id=attempt,

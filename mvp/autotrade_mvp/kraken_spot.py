@@ -1014,7 +1014,7 @@ def _install_spot_submission_response_parser_authority(parser):
             or getattr is not canonical_getattr
         ):
             raise error_type(
-                "Kraken Spot submission response parser authority changed"
+                "Kraken Spot prepared response authority is unavailable"
             )
         return parser(
             attempt_id=attempt_id,

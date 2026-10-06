@@ -8,16 +8,23 @@ exact Decimal-compatible values; binary floats are rejected.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
-from fractions import Fraction
+from decimal import Decimal
 from hashlib import sha256
+from fractions import Fraction
 import json
 from typing import Literal
 
-from .exact_decimal import as_fraction, bounded_fraction, exact_multiply, is_exact_decimal_multiple, round_fraction_to_quantum
-from .instruments import InstrumentRegistry, InstrumentVersion
+from .exact_decimal import (
+    ExactDecimalError,
+    as_fraction,
+    bounded_fraction,
+    exact_multiply,
+    is_exact_decimal_multiple,
+    parse_bounded_exact_decimal,
+    round_fraction_to_quantum,
+)
 
 
 class ExecutionRealismError(ValueError):
@@ -25,15 +32,12 @@ class ExecutionRealismError(ValueError):
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
+    if isinstance(value, (bool, float)):
         raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
+        return parse_bounded_exact_decimal(value)
+    except (TypeError, ValueError) as error:
         raise ExecutionRealismError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ExecutionRealismError(f"{name} must be a finite decimal")
-    return result
 
 
 def _non_negative(value, *, name: str) -> Decimal:
@@ -51,7 +55,7 @@ def _positive(value, *, name: str) -> Decimal:
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ExecutionRealismError(f"{name} is required")
     return value.strip()
 
@@ -93,146 +97,62 @@ def _digest(value: str, *, name: str) -> str:
     return text
 
 
-MARKET_PRICE_PROJECTION_POLICY_ID = "ADVERSE_PRICE_GRID"
-MARKET_PRICE_PROJECTION_POLICY_VERSION = 1
+_PRICE_PROJECTION_POLICY_ID = "ADVERSE_INSTRUMENT_TICK"
+_PRICE_PROJECTION_POLICY_VERSION = "1"
 
-_PRICE_GRID_AUTHORITY_TOKEN = object()
-_PRICE_GRID_REGISTRY_TOKEN = object()
 
-@dataclass(frozen=True, init=False)
-class ExecutionPriceGrid:
-    """Immutable MARKET price-grid authority issued from canonical instrument evidence."""
+@dataclass(frozen=True)
+class ExecutionPriceProjectionPolicy:
+    """Versioned adverse price-grid projection bound to instrument metadata facts."""
 
+    policy_id: str
+    policy_version: str
     instrument_version: str
     price_quantum: Decimal
-    projection_policy_id: str
-    projection_policy_version: int
-    source_sha256: str
     instrument_metadata_binding: str
-    _authority_token: object
 
-    def __init__(
-        self,
-        *,
-        instrument_version: str,
-        price_quantum: Decimal,
-        projection_policy_id: str,
-        projection_policy_version: int,
-        source_sha256: str,
-        instrument_metadata_binding: str,
-        _authority_token: object | None = None,
-    ) -> None:
-        if _authority_token is not _PRICE_GRID_AUTHORITY_TOKEN:
-            raise TypeError(
-                "ExecutionPriceGrid must be issued by the canonical instrument registry"
-            )
-        object.__setattr__(self,"instrument_version",_text(instrument_version,name="price_grid_instrument_version"))
-        object.__setattr__(self,"price_quantum",_positive(price_quantum,name="price_quantum"))
-        normalized_policy_id = _text(
-            projection_policy_id,
-            name="price_projection_policy_id",
+    def __post_init__(self) -> None:
+        policy_id = _text(self.policy_id, name="projection policy_id")
+        policy_version = _text(self.policy_version, name="projection policy_version")
+        if policy_id != _PRICE_PROJECTION_POLICY_ID or policy_version != _PRICE_PROJECTION_POLICY_VERSION:
+            raise ExecutionRealismError("unsupported execution price projection policy")
+        object.__setattr__(self, "policy_id", policy_id)
+        object.__setattr__(self, "policy_version", policy_version)
+        object.__setattr__(
+            self,
+            "instrument_version",
+            _text(self.instrument_version, name="projection instrument_version"),
         )
-        if (
-            normalized_policy_id != MARKET_PRICE_PROJECTION_POLICY_ID
-            or type(projection_policy_version) is not int
-            or projection_policy_version != MARKET_PRICE_PROJECTION_POLICY_VERSION
-        ):
-            raise ExecutionRealismError(
-                "unsupported MARKET price projection policy identity"
-            )
-        object.__setattr__(self,"projection_policy_id",normalized_policy_id)
-        object.__setattr__(self,"projection_policy_version",projection_policy_version)
-        object.__setattr__(self,"source_sha256",_digest(source_sha256,name="price_grid source_sha256"))
-        object.__setattr__(self,"instrument_metadata_binding",_digest(instrument_metadata_binding,name="price_grid instrument_metadata_binding"))
-        object.__setattr__(self,"_authority_token",_PRICE_GRID_AUTHORITY_TOKEN)
-
-    @classmethod
-    def from_registry(
-        cls,
-        registry,
-        instrument_version: str,
-        *,
-        projection_policy_id: str = "ADVERSE_PRICE_GRID",
-        projection_policy_version: int = 1,
-    ) -> "ExecutionPriceGrid":
-        if type(registry) is not InstrumentRegistry:
-            raise TypeError("registry must be exact InstrumentRegistry")
-        instrument = registry.exact(instrument_version)
-        return cls._from_instrument(
-            instrument,
-            projection_policy_id=projection_policy_id,
-            projection_policy_version=projection_policy_version,
-            _registry_token=_PRICE_GRID_REGISTRY_TOKEN,
+        object.__setattr__(
+            self,
+            "price_quantum",
+            _positive(self.price_quantum, name="projection price_quantum"),
+        )
+        object.__setattr__(
+            self,
+            "instrument_metadata_binding",
+            _digest(
+                self.instrument_metadata_binding,
+                name="projection instrument_metadata_binding",
+            ),
         )
 
     @classmethod
-    def _from_instrument(
-        cls,
-        instrument: InstrumentVersion,
-        *,
-        projection_policy_id: str,
-        projection_policy_version: int,
-        _registry_token: object | None = None,
-    ) -> "ExecutionPriceGrid":
-        if _registry_token is not _PRICE_GRID_REGISTRY_TOKEN:
-            raise TypeError("instrument price grid issuance requires InstrumentRegistry")
+    def from_instrument(cls, instrument) -> "ExecutionPriceProjectionPolicy":
+        """Issue projection semantics from one detached canonical InstrumentVersion."""
+
+        from .instruments import InstrumentVersion, _detached_instrument_version
+
         if type(instrument) is not InstrumentVersion:
             raise TypeError("instrument must be exact InstrumentVersion")
-        if not instrument.metadata_evidence:
-            raise ExecutionRealismError("canonical instrument price grid requires metadata evidence")
-        source = instrument.metadata_evidence[0]
-        try:
-            source_sha256 = source["sha256"]
-        except (KeyError, TypeError) as error:
-            raise ExecutionRealismError("instrument metadata evidence lacks sha256") from error
+        detached = _detached_instrument_version(instrument)
         return cls(
-            instrument_version=f"{instrument.instrument_id}@{instrument.version}",
-            price_quantum=instrument.price_tick,
-            projection_policy_id=projection_policy_id,
-            projection_policy_version=projection_policy_version,
-            source_sha256=source_sha256,
-            instrument_metadata_binding=instrument.metadata_evidence_binding(),
-            _authority_token=_PRICE_GRID_AUTHORITY_TOKEN,
+            policy_id=_PRICE_PROJECTION_POLICY_ID,
+            policy_version=_PRICE_PROJECTION_POLICY_VERSION,
+            instrument_version=f"{detached.instrument_id}@{detached.version}",
+            price_quantum=detached.price_tick,
+            instrument_metadata_binding=detached.metadata_evidence_binding(),
         )
-
-    def validate(self) -> None:
-        if self._authority_token is not _PRICE_GRID_AUTHORITY_TOKEN:
-            raise ExecutionRealismError("price grid authority token is invalid")
-        if type(self.instrument_version) is not str:
-            raise TypeError("price_grid instrument_version must be exact text")
-        if type(self.price_quantum) is not Decimal:
-            raise TypeError("price_grid price_quantum must be exact Decimal")
-        if type(self.projection_policy_id) is not str:
-            raise TypeError("price_grid projection_policy_id must be exact text")
-        if type(self.projection_policy_version) is not int:
-            raise TypeError("price_grid projection_policy_version must be exact int")
-        if type(self.source_sha256) is not str:
-            raise TypeError("price_grid source_sha256 must be exact text")
-        if type(self.instrument_metadata_binding) is not str:
-            raise TypeError("price_grid instrument_metadata_binding must be exact text")
-        if type(self._authority_token) is not object:
-            raise TypeError("price grid authority token is not canonical")
-        _text(self.instrument_version,name="price_grid_instrument_version")
-        _positive(self.price_quantum,name="price_quantum")
-        policy_id = _text(
-            self.projection_policy_id,
-            name="price_projection_policy_id",
-        )
-        _digest(self.source_sha256,name="price_grid source_sha256")
-        _digest(self.instrument_metadata_binding,name="price_grid instrument_metadata_binding")
-        if (
-            policy_id != MARKET_PRICE_PROJECTION_POLICY_ID
-            or self.projection_policy_version != MARKET_PRICE_PROJECTION_POLICY_VERSION
-        ):
-            raise ExecutionRealismError(
-                "unsupported MARKET price projection policy identity"
-            )
-
-    @property
-    def fingerprint(self) -> str:
-        self.validate()
-        payload={"instrument_version":self.instrument_version,"price_quantum":_decimal_text(self.price_quantum),"projection_policy_id":self.projection_policy_id,"projection_policy_version":self.projection_policy_version,"source_sha256":self.source_sha256,"instrument_metadata_binding":self.instrument_metadata_binding,"rounding":{"BUY":"CEILING","SELL":"FLOOR"}}
-        return sha256(json.dumps(payload,sort_keys=True,separators=(",",":")).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -249,18 +169,10 @@ class ExecutionModel:
     impact_bps_at_max_participation: Decimal
     bar_half_spread_bps: Decimal
     scenario_cost_multiplier: Decimal
-    price_quantum: Decimal | None = None
-    price_projection_policy_id: str | None = None
-    price_projection_policy_version: int | None = None
-    price_grid_instrument_version: str | None = None
-    price_grid: ExecutionPriceGrid | None = None
+    price_projection: ExecutionPriceProjectionPolicy | None = None
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.latency_ms, bool)
-            or not isinstance(self.latency_ms, int)
-            or self.latency_ms < 0
-        ):
+        if type(self.latency_ms) is not int or self.latency_ms < 0:
             raise ExecutionRealismError("latency_ms must be a non-negative integer")
         fidelity = _text(self.data_fidelity, name="data_fidelity").upper()
         if fidelity not in {"BAR", "TOP_OF_BOOK", "BOOK"}:
@@ -310,56 +222,13 @@ class ExecutionModel:
             _non_negative(self.bar_half_spread_bps, name="bar_half_spread_bps"),
         )
         object.__setattr__(self, "scenario_cost_multiplier", multiplier)
-        if self.price_quantum is not None:
-            quantum = _positive(self.price_quantum, name="price_quantum")
-            as_fraction(quantum)
-            object.__setattr__(self, "price_quantum", quantum)
-        if self.price_projection_policy_id is not None:
-            object.__setattr__(
-                self,
-                "price_projection_policy_id",
-                _text(
-                    self.price_projection_policy_id,
-                    name="price_projection_policy_id",
-                ),
+        if self.price_projection is not None:
+            projection = _detached_dataclass_input(
+                self.price_projection,
+                ExecutionPriceProjectionPolicy,
+                name="price_projection",
             )
-        if self.price_grid_instrument_version is not None:
-            object.__setattr__(
-                self,
-                "price_grid_instrument_version",
-                _text(
-                    self.price_grid_instrument_version,
-                    name="price_grid_instrument_version",
-                ),
-            )
-        if self.price_projection_policy_version is not None:
-            if (
-                type(self.price_projection_policy_version) is not int
-                or self.price_projection_policy_version != MARKET_PRICE_PROJECTION_POLICY_VERSION
-            ):
-                raise ExecutionRealismError(
-                    "unsupported MARKET price projection policy identity"
-                )
-        if (
-            self.price_projection_policy_id is not None
-            and self.price_projection_policy_id != MARKET_PRICE_PROJECTION_POLICY_ID
-        ):
-            raise ExecutionRealismError(
-                "unsupported MARKET price projection policy identity"
-            )
-
-        if self.price_grid is not None:
-            if type(self.price_grid) is not ExecutionPriceGrid:
-                raise TypeError("price_grid must be exact ExecutionPriceGrid")
-            self.price_grid.validate()
-            if self.price_grid.instrument_version != self.price_grid_instrument_version:
-                raise ExecutionRealismError("price grid instrument_version must match model price-grid instrument_version")
-            if self.price_grid.price_quantum != self.price_quantum:
-                raise ExecutionRealismError("price grid quantum must match model price_quantum")
-            if self.price_grid.projection_policy_id != self.price_projection_policy_id:
-                raise ExecutionRealismError("price grid policy id must match model projection policy")
-            if self.price_grid.projection_policy_version != self.price_projection_policy_version:
-                raise ExecutionRealismError("price grid policy version must match model projection policy")
+            object.__setattr__(self, "price_projection", projection)
 
     @classmethod
     def create(
@@ -377,13 +246,9 @@ class ExecutionModel:
         impact_bps_at_max_participation,
         bar_half_spread_bps=0,
         scenario_cost_multiplier=1,
-        price_quantum=None,
-        price_projection_policy_id=None,
-        price_projection_policy_version=None,
-        price_grid_instrument_version=None,
-        price_grid=None,
+        price_projection: ExecutionPriceProjectionPolicy | None = None,
     ) -> "ExecutionModel":
-        if isinstance(latency_ms, bool) or not isinstance(latency_ms, int) or latency_ms < 0:
+        if type(latency_ms) is not int or latency_ms < 0:
             raise ExecutionRealismError("latency_ms must be a non-negative integer")
         fidelity = _text(data_fidelity, name="data_fidelity").upper()
         if fidelity not in {"BAR", "TOP_OF_BOOK", "BOOK"}:
@@ -424,29 +289,7 @@ class ExecutionModel:
                 name="bar_half_spread_bps",
             ),
             scenario_cost_multiplier=multiplier,
-            price_quantum=(
-                None
-                if price_quantum is None
-                else _positive(price_quantum, name="price_quantum")
-            ),
-            price_projection_policy_id=(
-                None
-                if price_projection_policy_id is None
-                else _text(
-                    price_projection_policy_id,
-                    name="price_projection_policy_id",
-                )
-            ),
-            price_projection_policy_version=price_projection_policy_version,
-            price_grid_instrument_version=(
-                None
-                if price_grid_instrument_version is None
-                else _text(
-                    price_grid_instrument_version,
-                    name="price_grid_instrument_version",
-                )
-            ),
-            price_grid=price_grid,
+            price_projection=price_projection,
         )
 
     @property
@@ -468,17 +311,18 @@ class ExecutionModel:
             "scenario_cost_multiplier": _decimal_text(
                 self.scenario_cost_multiplier
             ),
+            "price_projection": (
+                None
+                if self.price_projection is None
+                else {
+                    "policy_id": self.price_projection.policy_id,
+                    "policy_version": self.price_projection.policy_version,
+                    "instrument_version": self.price_projection.instrument_version,
+                    "price_quantum": _decimal_text(self.price_projection.price_quantum),
+                    "instrument_metadata_binding": self.price_projection.instrument_metadata_binding,
+                }
+            ),
         }
-        if self.price_quantum is not None:
-            payload["price_quantum"] = _decimal_text(self.price_quantum)
-        if self.price_projection_policy_id is not None:
-            payload["price_projection_policy_id"] = self.price_projection_policy_id
-        if self.price_projection_policy_version is not None:
-            payload["price_projection_policy_version"] = self.price_projection_policy_version
-        if self.price_grid_instrument_version is not None:
-            payload["price_grid_instrument_version"] = self.price_grid_instrument_version
-        if self.price_grid is not None:
-            payload["price_grid_fingerprint"] = self.price_grid.fingerprint
         encoded = json.dumps(
             payload,
             sort_keys=True,
@@ -509,9 +353,19 @@ class SimulatedOrder:
             raise ExecutionRealismError("unsupported order_type")
         if type(self.already_triggered) is not bool:
             raise TypeError("already_triggered must be boolean")
+        if self.already_triggered and order_type != "STOP_LIMIT":
+            raise ExecutionRealismError(
+                "already_triggered is only valid for STOP_LIMIT orders"
+            )
         quantity = _positive(self.quantity, name="quantity")
         lot_size = _positive(self.lot_size, name="lot_size")
-        if quantity % lot_size != 0:
+        try:
+            quantity_is_multiple = is_exact_decimal_multiple(quantity, lot_size)
+        except ExactDecimalError as error:
+            raise ExecutionRealismError(
+                "quantity multiple check exceeds exact arithmetic resource envelope"
+            ) from error
+        if not quantity_is_multiple:
             raise ExecutionRealismError("quantity must be an exact multiple of lot_size")
         limit = None if self.limit_price is None else _positive(
             self.limit_price, name="limit_price"
@@ -565,6 +419,10 @@ class SimulatedOrder:
             raise ExecutionRealismError("unsupported order_type")
         if type(already_triggered) is not bool:
             raise TypeError("already_triggered must be boolean")
+        if already_triggered and normalized_type != "STOP_LIMIT":
+            raise ExecutionRealismError(
+                "already_triggered is only valid for STOP_LIMIT orders"
+            )
         limit = (
             _positive(limit_price, name="limit_price")
             if limit_price is not None
@@ -586,7 +444,16 @@ class SimulatedOrder:
         submitted = _instant(submitted_at, name="submitted_at")
         normalized_quantity = _positive(quantity, name="quantity")
         normalized_lot_size = _positive(lot_size, name="lot_size")
-        if normalized_quantity % normalized_lot_size != 0:
+        try:
+            quantity_is_multiple = is_exact_decimal_multiple(
+                normalized_quantity,
+                normalized_lot_size,
+            )
+        except ExactDecimalError as error:
+            raise ExecutionRealismError(
+                "quantity multiple check exceeds exact arithmetic resource envelope"
+            ) from error
+        if not quantity_is_multiple:
             raise ExecutionRealismError("quantity must be an exact multiple of lot_size")
         return cls(
             order_id=_text(order_id, name="order_id"),
@@ -759,12 +626,152 @@ class SimulatedExecution:
         return self.scenario == "OPTIMISTIC"
 
 
-def _round_down(quantity: Decimal, lot_size: Decimal) -> Decimal:
-    return round_fraction_to_quantum(
-        as_fraction(quantity),
-        lot_size,
-        mode="FLOOR",
+def _detached_dataclass_input(value, expected_type, *, name: str):
+    """Take one held canonical snapshot of a caller-owned execution DTO."""
+
+    if type(value) is not expected_type:
+        raise TypeError(f"{name} must be exact {expected_type.__name__}")
+    state = object.__getattribute__(value, "__dict__")
+    if type(state) is not dict:
+        raise TypeError(f"{name} must expose canonical dataclass state")
+    snapshot = dict(state)
+    state_keys = tuple(snapshot)
+    if any(type(field_name) is not str for field_name in state_keys):
+        raise TypeError(f"{name} has non-canonical state field names")
+    expected_fields = tuple(field.name for field in fields(expected_type))
+    if set(state_keys) != set(expected_fields):
+        raise TypeError(f"{name} has unexpected state fields")
+    return expected_type(
+        **{field_name: snapshot[field_name] for field_name in expected_fields}
     )
+
+
+def _exact_product(*values: Decimal, name: str) -> Decimal:
+    try:
+        return exact_multiply(*values)
+    except ExactDecimalError as error:
+        raise ExecutionRealismError(
+            f"{name} exceeds exact arithmetic resource envelope"
+        ) from error
+
+
+def _bounded_rational(value: Fraction, *, name: str) -> Fraction:
+    try:
+        return bounded_fraction(value)
+    except (ExactDecimalError, TypeError) as error:
+        raise ExecutionRealismError(
+            f"{name} exceeds exact rational resource envelope"
+        ) from error
+
+
+def _require_market_projection_authority(
+    order: SimulatedOrder,
+    model: ExecutionModel,
+) -> ExecutionPriceProjectionPolicy:
+    projection = model.price_projection
+    if projection is None:
+        raise ExecutionRealismError(
+            "MARKET execution requires authoritative price projection policy"
+        )
+    if projection.instrument_version != order.instrument_version:
+        raise ExecutionRealismError(
+            "price projection instrument_version must match order instrument_version"
+        )
+    return projection
+
+
+def _market_projected_price(
+    *,
+    order: SimulatedOrder,
+    observation: LiquidityObservation,
+    model: ExecutionModel,
+    capacity: Decimal,
+    base_price: Decimal,
+    additional_spread_bps: Decimal,
+) -> Decimal:
+    projection = _require_market_projection_authority(order, model)
+    try:
+        reference_is_on_grid = is_exact_decimal_multiple(
+            base_price,
+            projection.price_quantum,
+        )
+    except ExactDecimalError as error:
+        raise ExecutionRealismError(
+            "market reference price grid check exceeds exact arithmetic resource envelope"
+        ) from error
+    if not reference_is_on_grid:
+        raise ExecutionRealismError(
+            "market reference price is not aligned to authoritative price quantum"
+        )
+
+    available = as_fraction(observation.available_volume)
+    participation = (
+        _bounded_rational(as_fraction(capacity) / available, name="market participation")
+        if available > 0
+        else Fraction(0, 1)
+    )
+    maximum_participation = as_fraction(model.max_participation)
+    impact_fraction = (
+        _bounded_rational(
+            participation / maximum_participation,
+            name="market impact fraction",
+        )
+        if maximum_participation > 0
+        else Fraction(0, 1)
+    )
+    impact_fraction = min(impact_fraction, Fraction(1, 1))
+    impact_bps = _bounded_rational(
+        as_fraction(model.impact_bps_at_max_participation) * impact_fraction,
+        name="market impact bps",
+    )
+    total_bps = _bounded_rational(
+        _bounded_rational(
+            as_fraction(additional_spread_bps)
+            + as_fraction(model.slippage_bps)
+            + impact_bps,
+            name="market total bps before scenario",
+        )
+        * as_fraction(model.scenario_cost_multiplier),
+        name="market total bps",
+    )
+    price_delta = _bounded_rational(
+        as_fraction(base_price) * total_bps / Fraction(10000, 1),
+        name="market price delta",
+    )
+    unrounded = _bounded_rational(
+        as_fraction(base_price) + price_delta
+        if order.side == "BUY"
+        else as_fraction(base_price) - price_delta,
+        name="market projected price",
+    )
+    try:
+        fill_price = round_fraction_to_quantum(
+            unrounded,
+            projection.price_quantum,
+            mode="CEILING" if order.side == "BUY" else "FLOOR",
+        )
+    except ExactDecimalError as error:
+        raise ExecutionRealismError(
+            "market price projection exceeds exact arithmetic resource envelope"
+        ) from error
+    if fill_price <= 0:
+        raise ExecutionRealismError(
+            "configured adverse costs produce non-positive execution price"
+        )
+    return fill_price
+
+
+def _round_down(quantity: Decimal, lot_size: Decimal) -> Decimal:
+    try:
+        return round_fraction_to_quantum(
+            as_fraction(quantity),
+            lot_size,
+            mode="FLOOR",
+        )
+    except ExactDecimalError as error:
+        raise ExecutionRealismError(
+            "quantity rounding exceeds exact arithmetic resource envelope"
+        ) from error
 
 
 def _capacity_quantity(
@@ -774,10 +781,12 @@ def _capacity_quantity(
     model: ExecutionModel,
     lot_size: Decimal,
 ) -> Decimal:
-    raw = min(
-        order_quantity,
-        exact_multiply(observation.available_volume, model.max_participation),
+    participating_volume = _exact_product(
+        observation.available_volume,
+        model.max_participation,
+        name="participation capacity",
     )
+    raw = min(order_quantity, participating_volume)
     return _round_down(raw, lot_size)
 
 
@@ -864,43 +873,19 @@ def simulate_execution(
     that same or earlier liquidity by default.
     """
 
-    if not isinstance(order, SimulatedOrder):
-        raise TypeError("order must be SimulatedOrder")
-    if not isinstance(observation, LiquidityObservation):
-        raise TypeError("observation must be LiquidityObservation")
-    if not isinstance(model, ExecutionModel):
-        raise TypeError("model must be ExecutionModel")
+    order = _detached_dataclass_input(order, SimulatedOrder, name="order")
+    observation = _detached_dataclass_input(
+        observation,
+        LiquidityObservation,
+        name="observation",
+    )
+    model = _detached_dataclass_input(model, ExecutionModel, name="model")
     if observation.instrument_version != order.instrument_version:
         raise ExecutionRealismError(
             "liquidity instrument_version must exactly match order instrument_version"
         )
-
-    if order.order_type == "MARKET" and (
-        model.price_grid is None
-        or model.price_quantum is None
-        or model.price_projection_policy_id is None
-        or model.price_projection_policy_version is None
-        or model.price_grid_instrument_version is None
-    ):
-        raise ExecutionRealismError(
-            "MARKET execution requires complete price projection policy evidence"
-        )
     if order.order_type == "MARKET":
-        assert model.price_grid is not None
-        model.price_grid.validate()
-        if model.price_grid.instrument_version != order.instrument_version:
-            raise ExecutionRealismError(
-                "MARKET price grid is not bound to the order instrument_version"
-            )
-        if (
-            model.price_grid.instrument_version != model.price_grid_instrument_version
-            or model.price_grid.price_quantum != model.price_quantum
-            or model.price_grid.projection_policy_id != model.price_projection_policy_id
-            or model.price_grid.projection_policy_version != model.price_projection_policy_version
-        ):
-            raise ExecutionRealismError(
-                "MARKET model/grid authority mismatch"
-            )
+        _require_market_projection_authority(order, model)
 
     submitted = _instant(order.submitted_at, name="submitted_at")
     arrival = submitted + timedelta(milliseconds=model.latency_ms)
@@ -973,22 +958,6 @@ def simulate_execution(
         model=model,
         lot_size=order.lot_size,
     )
-    if capacity <= 0:
-        return SimulatedExecution(
-            status="NO_FILL",
-            filled_quantity=Decimal("0"),
-            fill_price=None,
-            fee=Decimal("0"),
-            arrival_at=arrival_text,
-            trade_time=None,
-            evidence_available_at=observation.available_at,
-            triggered=order.already_triggered,
-            model_fingerprint=model.fingerprint,
-            scenario=model.scenario,
-            data_fidelity=model.data_fidelity,
-            reason="qualified participation capacity is below one lot",
-            warnings=tuple(warnings),
-        )
 
     triggered = order.already_triggered
     if order.order_type == "STOP_LIMIT" and not triggered:
@@ -1010,6 +979,25 @@ def simulate_execution(
                 warnings=tuple(warnings),
             )
         triggered = True
+        if capacity <= 0:
+            return SimulatedExecution(
+                status="NO_FILL",
+                filled_quantity=Decimal("0"),
+                fill_price=None,
+                fee=Decimal("0"),
+                arrival_at=arrival_text,
+                trade_time=None,
+                evidence_available_at=observation.available_at,
+                triggered=True,
+                model_fingerprint=model.fingerprint,
+                scenario=model.scenario,
+                data_fidelity=model.data_fidelity,
+                reason=(
+                    "stop triggered but qualified participation capacity "
+                    "is below one lot"
+                ),
+                warnings=tuple(warnings),
+            )
         if model.data_fidelity == "BAR" and _limit_touched(order, observation, model):
             # With OHLC only, seeing both trigger and limit prices inside one
             # candle does not prove that executable limit liquidity occurred
@@ -1053,6 +1041,23 @@ def simulate_execution(
             warnings=tuple(warnings),
         )
 
+    if capacity <= 0:
+        return SimulatedExecution(
+            status="NO_FILL",
+            filled_quantity=Decimal("0"),
+            fill_price=None,
+            fee=Decimal("0"),
+            arrival_at=arrival_text,
+            trade_time=None,
+            evidence_available_at=observation.available_at,
+            triggered=triggered,
+            model_fingerprint=model.fingerprint,
+            scenario=model.scenario,
+            data_fidelity=model.data_fidelity,
+            reason="qualified participation capacity is below one lot",
+            warnings=tuple(warnings),
+        )
+
     if order.order_type in {"LIMIT", "STOP_LIMIT"}:
         if not _limit_touched(order, observation, model):
             return SimulatedExecution(
@@ -1078,54 +1083,26 @@ def simulate_execution(
             observation,
             model,
         )
-        # Keep all MARKET price arithmetic exact until the explicit instrument
-        # price-grid projection. The ambient Decimal context must not affect it.
-        participation = bounded_fraction(
-            as_fraction(capacity) / as_fraction(observation.available_volume)
+        fill_price = _market_projected_price(
+            order=order,
+            observation=observation,
+            model=model,
+            capacity=capacity,
+            base_price=base_price,
+            additional_spread_bps=additional_spread_bps,
         )
-        max_participation = as_fraction(model.max_participation)
-        impact_fraction = bounded_fraction(
-            min(
-                bounded_fraction(participation / max_participation),
-                Fraction(1, 1),
-            )
-        )
-        impact_bps = bounded_fraction(
-            as_fraction(model.impact_bps_at_max_participation) * impact_fraction
-        )
-        total_bps = bounded_fraction(
-            (
-                as_fraction(additional_spread_bps)
-                + as_fraction(model.slippage_bps)
-                + impact_bps
-            ) * as_fraction(model.scenario_cost_multiplier)
-        )
-        reference = as_fraction(base_price)
-        price_delta = bounded_fraction(reference * total_bps / 10000)
-        target = bounded_fraction(
-            reference + price_delta
-            if order.side == "BUY"
-            else reference - price_delta
-        )
-        if target <= 0:
-            raise ExecutionRealismError(
-                "configured adverse costs produce non-positive execution price"
-            )
-        fill_price = round_fraction_to_quantum(
-            target,
-            model.price_grid.price_quantum,
-            mode="CEILING" if order.side == "BUY" else "FLOOR",
-        )
-        if fill_price <= 0:
-            raise ExecutionRealismError(
-                "configured adverse costs produce non-positive execution price"
-            )
 
-    notional = exact_multiply(capacity, fill_price)
-    fee = max(
-        exact_multiply(notional, model.fee_rate),
-        model.minimum_fee,
+    notional = _exact_product(
+        capacity,
+        fill_price,
+        name="execution notional",
     )
+    proportional_fee = _exact_product(
+        notional,
+        model.fee_rate,
+        name="execution fee",
+    )
+    fee = max(proportional_fee, model.minimum_fee)
     status = "FILLED" if capacity == order.quantity else "PARTIAL"
     return SimulatedExecution(
         status=status,

@@ -33,18 +33,7 @@
       "detail": "Exact release dependency graph has no qualified vulnerability/advisory review."
     }
   ],
-  "dotnet_package_dependencies": [
-    {
-      "content_hash_sha512_base64": "sHVZ2MQrHT1J3q5/6csn0fIP27rzpTO/RRC+wPQDrZheB7T4t2n+vVbY6SdCKr4WRV9s/gmBM3PPMWWJtoDzMg==",
-      "dependencies": [],
-      "name": "Microsoft.Web.WebView2",
-      "project": "src/AutoTrade.Desktop/AutoTrade.Desktop.csproj",
-      "requested": "[1.0.4258.31, )",
-      "target": "net10.0-windows7.0",
-      "type": "Direct",
-      "version": "1.0.4258.31"
-    }
-  ],
+  "dotnet_package_dependencies": [],
   "dotnet_sdk": "10.0.100",
   "inspected_components": [
     {
@@ -160,6 +149,6 @@
     "components_blob_sha": "cba907e56f9442e2be0073955d97c5b52fbeac60",
     "global_json_blob_sha": "b4ffa1877d371d285f4a7ddf850071845a8dfe27",
     "requirements_dev_blob_sha": "76f5d233cc243db2e17262533de69e75f66163ef",
-    "research_pyproject_blob_sha": "e880fdd1211f066262a012f9be5be694b4573b4b"
+    "research_pyproject_blob_sha": "dbd409f7ab882e44cb9afb4b664da8a6aea7a86e"
   }
 }

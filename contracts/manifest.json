@@ -40,5 +40,14 @@
         "python": "autotrade_numeric/dataset_manifest.py"
       }
     }
-  ]
+  ],
+  "shape_conformance": {
+    "scope": "closed-object-shape-subset",
+    "corpus": "contracts/fixtures/contract-shapes.corpus.json",
+    "bindings": {
+      "python": "contracts/bindings/python/contract_shapes.py",
+      "csharp": "src/AutoTrade.Contracts/ContractShapeContracts.cs",
+      "typescript": "contracts/bindings/typescript/contractShapes.js"
+    }
+  }
 }

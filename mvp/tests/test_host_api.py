@@ -354,6 +354,14 @@ class HostCommandStateTests(unittest.TestCase):
                 callbacks.append("strip")
                 raise AssertionError("command identity strip callback must not run")
 
+            def __eq__(self, other):
+                callbacks.append("eq")
+                raise AssertionError("command identity equality callback must not run")
+
+            def __hash__(self):
+                callbacks.append("hash")
+                raise AssertionError("command identity hash callback must not run")
+
         store = self.store
         cases = (
             ("command_id", "command_id", "11111111-1111-1111-1111-111111111111"),
@@ -362,6 +370,7 @@ class HostCommandStateTests(unittest.TestCase):
             ("session", "session", "session-a"),
             ("account_id", "account_id", "paper-account-1"),
             ("environment", "environment", "PAPER"),
+            ("action", "action", "BLOCK_NEW_EXPOSURE"),
         )
         for field, parameter, raw_value in cases:
             with self.subTest(field=field):

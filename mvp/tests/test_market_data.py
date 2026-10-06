@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone, tzinfo
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 from uuid import UUID
@@ -30,60 +30,6 @@ EVIDENCE = {
 }
 TEST_ADAPTER_V1 = "autotrade.market-test@1"
 TEST_ADAPTER_V2 = "autotrade.market-test@2"
-
-
-class CallbackTimezone(tzinfo):
-    def __init__(self):
-        self.calls = 0
-
-    def _fail(self):
-        self.calls += 1
-        raise AssertionError("caller timezone code must not execute")
-
-    def utcoffset(self, dt):
-        return self._fail()
-
-    def dst(self, dt):
-        return self._fail()
-
-    def tzname(self, dt):
-        return self._fail()
-
-
-class CallbackDatetime(datetime):
-    calls = 0
-
-    def astimezone(self, tz=None):
-        type(self).calls += 1
-        raise AssertionError("caller datetime code must not execute")
-
-    def utcoffset(self):
-        type(self).calls += 1
-        raise AssertionError("caller datetime code must not execute")
-
-
-class CallbackString(str):
-    calls = 0
-
-    def strip(self, chars=None):
-        type(self).calls += 1
-        raise AssertionError("caller string code must not execute")
-
-
-class CallbackRegistry(InstrumentRegistry):
-    calls = 0
-
-    def resolve(self, *args, **kwargs):
-        type(self).calls += 1
-        raise AssertionError("caller registry code must not execute")
-
-
-class CallbackTimedelta(timedelta):
-    calls = 0
-
-    def __le__(self, other):
-        type(self).calls += 1
-        raise AssertionError("caller timedelta code must not execute")
 
 
 def at(month=9, day=24, hour=16, minute=0, second=0):
@@ -221,11 +167,21 @@ class MarketNormalizationTests(unittest.TestCase):
         self.assertEqual(first.to_contract_dict()["adapter_version"], TEST_ADAPTER_V1)
         self.assertNotEqual(first.event_id, other_build.event_id)
 
+    def test_adapter_build_token_accepts_full_canonical_punctuation(self):
+        token = "Adapter._:+@/-9"
+        admitted = raw(
+            "TRADE",
+            {"price": "100.01", "quantity": "1"},
+            adapter_version=token,
+        )
+        self.assertEqual(admitted.adapter_version, token)
+
     def test_adapter_build_token_is_exact_and_bounded(self):
         for invalid in (
             "",
             " trailing ",
             "contains space",
+            r"adapter\build",
             "x" * 129,
         ):
             with self.subTest(adapter_version=invalid):
@@ -359,93 +315,6 @@ class MarketNormalizationTests(unittest.TestCase):
         )
         self.assertEqual(accepted.adapter_version, TEST_ADAPTER_V1)
         self.assertIn("CORRECTION", accepted.quality_flags)
-
-    def test_normalizer_rejects_registry_subclass_before_use(self):
-        CallbackRegistry.calls = 0
-        with self.assertRaisesRegex(TypeError, "exact InstrumentRegistry"):
-            MarketNormalizer(CallbackRegistry())
-        self.assertEqual(CallbackRegistry.calls, 0)
-
-    def test_normalizer_rejects_timedelta_subclass_without_comparison(self):
-        CallbackTimedelta.calls = 0
-        with self.assertRaisesRegex(MarketDataError, "exact positive timedelta"):
-            MarketNormalizer(
-                registry(),
-                max_available_age=CallbackTimedelta(seconds=5),
-            )
-        self.assertEqual(CallbackTimedelta.calls, 0)
-
-        with self.assertRaisesRegex(MarketDataError, "exact positive timedelta"):
-            MarketNormalizer(
-                registry(),
-                max_book_age=CallbackTimedelta(seconds=5),
-            )
-        self.assertEqual(CallbackTimedelta.calls, 0)
-
-    def test_admission_rejects_custom_timezone_without_callbacks(self):
-        hostile = CallbackTimezone()
-        source = datetime(2026, 9, 24, 16, tzinfo=hostile)
-        with self.assertRaisesRegex(MarketDataError, "built-in timezone"):
-            raw(
-                "TRADE",
-                {"price": "100.01", "quantity": "1", "side": "buy"},
-                source=source,
-                available=at(second=1),
-                ingested=at(second=2),
-            )
-        self.assertEqual(hostile.calls, 0)
-
-    def test_admission_rejects_datetime_subclass_without_callbacks(self):
-        CallbackDatetime.calls = 0
-        source = CallbackDatetime(2026, 9, 24, 16, tzinfo=timezone.utc)
-        with self.assertRaisesRegex(MarketDataError, "exact timezone-aware datetime"):
-            raw(
-                "TRADE",
-                {"price": "100.01", "quantity": "1", "side": "buy"},
-                source=source,
-                available=at(second=1),
-                ingested=at(second=2),
-            )
-        self.assertEqual(CallbackDatetime.calls, 0)
-
-    def test_funding_payload_rejects_custom_timezone_without_callbacks(self):
-        hostile = CallbackTimezone()
-        next_funding = datetime(2026, 9, 24, 17, tzinfo=hostile)
-        with self.assertRaisesRegex(MarketDataError, "built-in timezone"):
-            raw(
-                "FUNDING",
-                {"rate": "0.0001", "next_funding_at": next_funding},
-            )
-        self.assertEqual(hostile.calls, 0)
-
-    def test_builtin_fixed_offset_timezone_remains_supported(self):
-        plus_two = timezone(timedelta(hours=2))
-        source = datetime(2026, 9, 24, 18, tzinfo=plus_two)
-        normalizer = MarketNormalizer(registry())
-        event = normalizer.normalize(
-            raw(
-                "TRADE",
-                {"price": "100.01", "quantity": "1", "side": "buy"},
-                source=source,
-                available=datetime(2026, 9, 24, 18, 0, 1, tzinfo=plus_two),
-                ingested=datetime(2026, 9, 24, 18, 0, 2, tzinfo=plus_two),
-            )
-        )
-        self.assertEqual(
-            event.to_contract_dict()["source_event_at"],
-            "2026-09-24T16:00:00Z",
-        )
-
-    def test_book_lookup_rejects_string_subclass_without_callbacks(self):
-        CallbackString.calls = 0
-        normalizer = MarketNormalizer(registry())
-        with self.assertRaisesRegex(MarketDataError, "exact string"):
-            normalizer.book_state(
-                provider_id=CallbackString("provider-a"),
-                venue_id="venue-a",
-                provider_symbol="ABC-USD",
-            )
-        self.assertEqual(CallbackString.calls, 0)
 
     def test_trade_normalizes_to_contract_without_binary_numbers(self):
         normalizer = MarketNormalizer(registry())

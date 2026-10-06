@@ -8,7 +8,7 @@ Contract baseline `autotrade.contracts/6.0.0`. Normative design, not production 
 
 `Money = {amount: Decimal, currency: CurrencyId}`; `Quantity = {value: Decimal, unit: UnitId}`. Units distinguish base units, shares and contracts. Currency is not inferred from a symbol. `Environment = REPLAY | SIMULATION | PAPER | LIVE`; credentials and IDs are environment-separated. `EvidenceRef = {artifact_id, sha256, source_uri?, observed_at, rights_id?}`. Payloads cannot contain credentials or credential-shaped provider headers.
 
-Major versions change meaning/required structure. Minor versions add optional fields with fixed defaults. Financial commands reject unknown fields and unknown enum values; observations preserve unknown provider data in the raw evidence object and quarantine unrecognized economically material events. Schema upgrades have forward/backward fixtures and a journal migration plan. No silent float coercion.
+Major versions change meaning, required structure, or versioned semantic-validator accept/reject authority. Adding, removing, or changing a declared semantic validator or its shared conformance corpus requires a new major version. Minor versions add optional fields with fixed defaults. Financial commands reject unknown fields and unknown enum values; observations preserve unknown provider data in the raw evidence object and quarantine unrecognized economically material events. Schema upgrades have forward/backward fixtures and a journal migration plan. No silent float coercion.
 
 ## 2. Durable event envelope
 
@@ -30,7 +30,7 @@ Only VERIFIED and unexpired evidence can authorize the relevant action. Refresh 
 
 ## 4. Data contracts
 
-`MarketEvent`: envelope + `instrument_version`, `kind = TRADE | QUOTE | BOOK_SNAPSHOT | BOOK_DELTA | BAR | FUNDING | MARK | INDEX | STATUS`, `source_event_at`, `available_at`, `availability_basis`, `ingested_at`, `source_sequence?`, `revision`, typed payload, `quality_flags[]`, `raw_evidence_ref`. A bar contains start/end, OHLCV, finalized flag and first availability; finalized close cannot be known at bar start. Book deltas contain predecessor/range IDs and checksum when supplied; a gap invalidates executable book state.
+`MarketEvent`: envelope + required bounded `adapter_version`, `instrument_version`, `kind = TRADE | QUOTE | BOOK_SNAPSHOT | BOOK_DELTA | BAR | FUNDING | MARK | INDEX | STATUS`, `source_event_at`, `available_at`, `availability_basis`, `ingested_at`, `source_sequence?`, `revision`, typed payload, `quality_flags[]`, `raw_evidence_ref`. `adapter_version` is the exact product-owned parser/adapter build identity that produced the normalized observation; it is provenance, not provider qualification by possession. A bar contains start/end, OHLCV, finalized flag and first availability; finalized close cannot be known at bar start. Book deltas contain predecessor/range IDs and checksum when supplied; a gap invalidates executable book state.
 
 `InformationEvent`: `information_id`, `source_id`, `source_event_at?`, `published_at`, `available_at`, `ingested_at`, `revision`, `supersedes?`, `entities[]`, `claims[]`, `content_hash`, `rights_id`, `trust_features`, `language`, `evidence[]`. Store disagreements as claims from separate sources. A revised macro series does not replace its historical vintages.
 

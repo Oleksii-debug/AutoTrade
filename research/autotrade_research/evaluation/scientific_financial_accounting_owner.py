@@ -258,6 +258,10 @@ def _require_clean_reconciliation(
     for field in ("cash_differences", "position_differences", "borrow_differences"):
         _require_zero_differences(payload, field)
 
+    if payload.get("settlement_reconciliation_performed") is not True:
+        raise ScientificFinancialOwnerConflict(
+            "financial accounting owner requires performed settlement reconciliation"
+        )
     if payload.get("settlement_activity_complete") is not True:
         raise ScientificFinancialOwnerConflict(
             "financial accounting owner requires complete settlement activity"
@@ -316,6 +320,7 @@ def _require_clean_reconciliation(
         )
 
     settlement_authority = {
+        "settlement_reconciliation_performed": True,
         "settlement_activity_complete": True,
         "settlement_differences": settlement_differences,
     }

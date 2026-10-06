@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+from hashlib import sha512
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -394,20 +395,64 @@ def verify_restored_package_rights(
             raise ValueError(
                 f"NuGet package rights are missing for {artifact['name']}@{artifact['version']}"
             )
-        package_dir = packages_root / artifact["name"].casefold() / artifact["version"].casefold()
+        package_name = artifact["name"]
+        package_version = artifact["version"]
+        for value, label in (
+            (package_name, "name"),
+            (package_version, "version"),
+        ):
+            if (
+                value in {".", ".."}
+                or "/" in value
+                or "\\" in value
+                or ":" in value
+                or any(ord(character) < 32 or ord(character) == 127 for character in value)
+            ):
+                raise ValueError(
+                    f"restored NuGet package {label} is not path-safe: "
+                    f"{package_name}@{package_version}"
+                )
+
+        packages_root_resolved = packages_root.resolve(strict=True)
+        name_dir = packages_root / package_name.casefold()
+        package_dir = name_dir / package_version.casefold()
+        if name_dir.is_symlink() or package_dir.is_symlink():
+            raise ValueError(
+                f"restored NuGet package path must not traverse a symlink: "
+                f"{package_name}@{package_version}"
+            )
         if not package_dir.is_dir():
             raise ValueError(
-                f"restored NuGet package is unavailable: {artifact['name']}@{artifact['version']}"
+                f"restored NuGet package is unavailable: {package_name}@{package_version}"
             )
+        package_dir_resolved = package_dir.resolve(strict=True)
+        if not package_dir_resolved.is_relative_to(packages_root_resolved):
+            raise ValueError(
+                f"restored NuGet package path escapes packages root: "
+                f"{package_name}@{package_version}"
+            )
+
         sha_files = tuple(package_dir.glob("*.nupkg.sha512"))
+        nupkg_files = tuple(package_dir.glob("*.nupkg"))
         if len(sha_files) != 1:
             raise ValueError(
-                f"restored NuGet package lacks one SHA-512 authority: {artifact['name']}@{artifact['version']}"
+                f"restored NuGet package lacks one SHA-512 authority: {package_name}@{package_version}"
+            )
+        if len(nupkg_files) != 1:
+            raise ValueError(
+                f"restored NuGet package lacks one nupkg payload: {package_name}@{package_version}"
             )
         restored_hash = sha_files[0].read_text(encoding="ascii").strip()
         if restored_hash != artifact["content_hash_sha512_base64"]:
             raise ValueError(
-                f"restored NuGet package content hash mismatch: {artifact['name']}@{artifact['version']}"
+                f"restored NuGet package content hash mismatch: {package_name}@{package_version}"
+            )
+        actual_nupkg_hash = base64.b64encode(
+            sha512(nupkg_files[0].read_bytes()).digest()
+        ).decode("ascii")
+        if actual_nupkg_hash != artifact["content_hash_sha512_base64"]:
+            raise ValueError(
+                f"restored NuGet package payload hash mismatch: {package_name}@{package_version}"
             )
         license_path = package_dir / record["license_file"]
         notice_path = package_dir / record["notice_file"]
@@ -434,19 +479,51 @@ def verify_restored_package_rights(
             tree = ET.parse(nuspecs[0])
         except (OSError, ET.ParseError) as error:
             raise ValueError("restored NuGet nuspec is invalid") from error
-        licenses = [
+        metadata_nodes = [
             node
             for node in tree.iter()
+            if isinstance(node.tag, str)
+            and node.tag.rsplit("}", 1)[-1] == "metadata"
+        ]
+        if len(metadata_nodes) != 1:
+            raise ValueError(
+                f"restored NuGet package lacks one metadata declaration: "
+                f"{package_name}@{package_version}"
+            )
+        metadata = metadata_nodes[0]
+        ids = [
+            node
+            for node in metadata
+            if isinstance(node.tag, str) and node.tag.rsplit("}", 1)[-1] == "id"
+        ]
+        versions = [
+            node
+            for node in metadata
+            if isinstance(node.tag, str) and node.tag.rsplit("}", 1)[-1] == "version"
+        ]
+        if len(ids) != 1 or (ids[0].text or "").strip() != package_name:
+            raise ValueError(
+                f"restored NuGet package nuspec id mismatch: "
+                f"{package_name}@{package_version}"
+            )
+        if len(versions) != 1 or (versions[0].text or "").strip() != package_version:
+            raise ValueError(
+                f"restored NuGet package nuspec version mismatch: "
+                f"{package_name}@{package_version}"
+            )
+        licenses = [
+            node
+            for node in metadata
             if isinstance(node.tag, str) and node.tag.rsplit("}", 1)[-1] == "license"
         ]
         if len(licenses) != 1:
             raise ValueError(
-                f"restored NuGet package lacks one license declaration: {artifact['name']}@{artifact['version']}"
+                f"restored NuGet package lacks one license declaration: {package_name}@{package_version}"
             )
         license_node = licenses[0]
         if license_node.attrib.get("type") != "file" or (license_node.text or "").strip() != record["license_file"]:
             raise ValueError(
-                f"restored NuGet package license declaration mismatch: {artifact['name']}@{artifact['version']}"
+                f"restored NuGet package license declaration mismatch: {package_name}@{package_version}"
             )
 
 

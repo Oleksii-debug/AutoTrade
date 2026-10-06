@@ -1967,6 +1967,132 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                     + expected_error.__name__,
                 )
 
+    def test_post_send_response_class_rebind_never_executes_hostile_instancecheck(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        callbacks = 0
+
+        class HostileMeta(type):
+            def __instancecheck__(cls, _instance):
+                nonlocal callbacks
+                callbacks += 1
+                raise AssertionError("rebound response class __instancecheck__ executed")
+
+        class HostileResponse(metaclass=HostileMeta):
+            pass
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            response = ExactJsonTransportResponse(b'{"accepted":true}')
+            original_response_type = dispatch_module.ExactJsonTransportResponse
+
+            def transport(_client_order_id, _request, guard):
+                guard()
+                dispatch_module.ExactJsonTransportResponse = HostileResponse
+                return response
+
+            try:
+                result = dispatcher.dispatch(
+                    attempt_id="post-send-response-class-rebind-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T14:00:00Z",
+                    authority_check=lambda *_args: (True, "allowed"),
+                    transport_send=transport,
+                )
+            finally:
+                dispatch_module.ExactJsonTransportResponse = original_response_type
+
+            self.assertEqual(callbacks, 0)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("post-send-response-class-rebind-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:ValueError",
+            )
+
+    def test_post_send_legacy_response_uses_pretransport_isinstance_builtin(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        callbacks = 0
+
+        def hostile_isinstance(*_args):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("rebound isinstance executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            original_isinstance = getattr(dispatch_module, "isinstance", None)
+            had_global_isinstance = "isinstance" in vars(dispatch_module)
+
+            def transport(_client_order_id, _request, guard):
+                guard()
+                dispatch_module.isinstance = hostile_isinstance
+                return {"accepted": True}
+
+            try:
+                result = dispatcher.dispatch(
+                    attempt_id="post-send-isinstance-rebind-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T14:00:00Z",
+                    authority_check=lambda *_args: (True, "allowed"),
+                    transport_send=transport,
+                )
+            finally:
+                if had_global_isinstance:
+                    dispatch_module.isinstance = original_isinstance
+                else:
+                    del dispatch_module.isinstance
+
+            self.assertEqual(callbacks, 0)
+            self.assertEqual(result.status, "SENT")
+            self.assertEqual(result.reason, "sent_confirmed")
+            self.assertEqual(result.response, {"accepted": True})
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("post-send-isinstance-rebind-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionSent",
+                ],
+            )
+
     def test_legacy_response_subclass_is_rejected_without_callback_execution(self):
         class TrapDict(dict):
             callbacks = 0

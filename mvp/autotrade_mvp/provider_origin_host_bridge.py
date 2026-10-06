@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Mapping
 
@@ -359,8 +360,6 @@ def _host_key_from_journal_utc(value: object) -> tuple[int, ...]:
         raise ProviderOriginHostBridgeError(
             "provider-origin journal timestamp is non-canonical"
         )
-    from datetime import datetime
-
     try:
         point = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as error:
@@ -371,7 +370,7 @@ def _host_key_from_journal_utc(value: object) -> tuple[int, ...]:
         raise ProviderOriginHostBridgeError(
             "provider-origin journal timestamp lacks timezone"
         )
-    point = point.astimezone(__import__("datetime").timezone.utc)
+    point = point.astimezone(timezone.utc)
     return (
         point.year,
         point.month,

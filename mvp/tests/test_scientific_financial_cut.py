@@ -367,6 +367,15 @@ class ScientificFinancialCutTests(unittest.TestCase):
                 first.reconciliation_journal_sequence,
                 first_checkpoint["journal_sequence"],
             )
+            expected_population = JournalStore.load_events_after_journal_sequence(
+                store,
+                0,
+                limit=first.journal_sequence,
+            )
+            self.assertEqual(
+                first.journal_population_digest,
+                payload_digest(expected_population),
+            )
             self.assertTrue(first.journal_population_digest.startswith("sha256:"))
             self.assertTrue(
                 first.reconciliation_checkpoint_digest.startswith("sha256:")

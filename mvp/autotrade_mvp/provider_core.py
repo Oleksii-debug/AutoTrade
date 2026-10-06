@@ -845,7 +845,7 @@ def observe_submission_json_response(
             "aggregate_id": binding["aggregate_id"],
             "provider_id": provider,
             "request_sha256": binding["request_hash"],
-            "submission_scope_hash": binding["submission_scope"]_hash,
+            "submission_scope_hash": binding["submission_scope_hash"],
             "response_sha256": binding["response_sha256"],
             "sent_at": binding["sent_at"],
             "endpoint": normalized_endpoint,

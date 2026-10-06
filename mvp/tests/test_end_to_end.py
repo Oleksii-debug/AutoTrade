@@ -1466,6 +1466,31 @@ class VerticalSliceTests(unittest.TestCase):
 
             self.assertFalse(verify_replay(directory))
 
+    def test_replay_rejects_journal_state_cut_drift(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            original = JournalStore.whole_store_state_cut
+            calls = {"count": 0}
+
+            def drifting_cut(store):
+                cut = original(store)
+                calls["count"] += 1
+                if calls["count"] > 1:
+                    cut = {
+                        "journal_sequence": cut["journal_sequence"] + 1,
+                        "counts": dict(cut["counts"]),
+                    }
+                return cut
+
+            with patch.object(
+                JournalStore,
+                "whole_store_state_cut",
+                new=drifting_cut,
+            ):
+                self.assertFalse(verify_replay(directory))
+
+            self.assertGreaterEqual(calls["count"], 2)
+
     def test_replay_and_resume_reject_corrupt_simulation_outbox(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

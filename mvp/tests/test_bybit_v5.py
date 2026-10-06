@@ -1811,6 +1811,31 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertIsNone(fill.position_side)
         self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
 
+    def test_execution_success_code_requires_exact_json_integer(self):
+        row = {
+            "execId": "exec-ret-code-type",
+            "orderLinkId": "",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.01",
+            "execPrice": "65000",
+            "execFee": "0",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+        for malformed in ("0", False):
+            with self.subTest(retCode=malformed):
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "retCode must be exact integer",
+                ):
+                    parse_executions(
+                        bound_execution_response(
+                            {"retCode": malformed, "result": {"list": [row]}}
+                        ),
+                        instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                    )
+
     def test_execution_direction_is_evidenced_without_inventing_hedge_leg(self):
         base = {
             "execId": "exec-direction",
@@ -1881,6 +1906,114 @@ class BybitV5AdapterTests(unittest.TestCase):
                         ),
                         instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
                         qualified_fee_currencies={"BTCUSDT@v1": "USDT"},
+                    )
+
+    def test_execution_rejects_noncanonical_provider_identity_text(self):
+        base = {
+            "execId": "exec-identity-canonical",
+            "orderLinkId": "client-identity-canonical",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.01",
+            "execPrice": "65000",
+            "execFee": "0.5",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+        cases = (
+            ("execId", " exec-identity-canonical ", "execution id"),
+            ("execId", 123, "execution id"),
+            ("symbol", " BTCUSDT ", "execution symbol"),
+            ("symbol", 123, "execution symbol"),
+            ("orderLinkId", " client-identity-canonical ", "orderLinkId"),
+            ("orderLinkId", 123, "orderLinkId"),
+            ("side", "BUY", "execution side"),
+            ("side", " Buy ", "execution side"),
+            ("side", 123, "execution side"),
+        )
+        for field, malformed, message in cases:
+            with self.subTest(field=field, value=malformed):
+                row = dict(base, **{field: malformed})
+                with self.assertRaisesRegex(ProviderCoreError, message):
+                    parse_executions(
+                        bound_execution_response(
+                            {"retCode": 0, "result": {"list": [row]}}
+                        ),
+                        instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                    )
+
+    def test_execution_rejects_noncanonical_economic_field_types(self):
+        base = {
+            "execId": "exec-economics-canonical",
+            "orderLinkId": "",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.01",
+            "execPrice": "65000.10",
+            "execFee": "0.5",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+        cases = (
+            ("execQty", " 0.01 "),
+            ("execQty", 1),
+            ("execPrice", " 65000.10 "),
+            ("execPrice", 65000),
+            ("execFee", " 0.5 "),
+            ("execFee", 1),
+            ("execTime", " 1790280000000 "),
+            ("execTime", 1790280000000),
+        )
+        for field, malformed in cases:
+            with self.subTest(field=field, value=malformed):
+                row = dict(base, **{field: malformed})
+                with self.assertRaisesRegex(ProviderCoreError, field):
+                    parse_executions(
+                        bound_execution_response(
+                            {"retCode": 0, "result": {"list": [row]}}
+                        ),
+                        instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                    )
+
+    def test_execution_numeric_fields_use_bounded_financial_envelope(self):
+        base = {
+            "execId": "exec-bounded-economics",
+            "orderLinkId": "",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.01",
+            "execPrice": "65000.10",
+            "execFee": "0.5",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+        oversized_decimal = "1" * 260
+        for field in ("execQty", "execPrice", "execFee"):
+            with self.subTest(field=field):
+                row = dict(base, **{field: oversized_decimal})
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "exact numeric envelope",
+                ):
+                    parse_executions(
+                        bound_execution_response(
+                            {"retCode": 0, "result": {"list": [row]}}
+                        ),
+                        instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                    )
+
+        for malformed_time, message in (
+            ("1" * 260, "bounded integer string"),
+            ("999999999999999999999999999999999999", "supported UTC range"),
+        ):
+            with self.subTest(execTime=malformed_time):
+                row = dict(base, execTime=malformed_time)
+                with self.assertRaisesRegex(ProviderCoreError, message):
+                    parse_executions(
+                        bound_execution_response(
+                            {"retCode": 0, "result": {"list": [row]}}
+                        ),
+                        instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
                     )
 
     def test_documented_linear_execution_requires_qualified_fee_currency(self):

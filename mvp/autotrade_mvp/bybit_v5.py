@@ -26,6 +26,11 @@ from .instruments import (
     InstrumentRegistryError,
     InstrumentVersion,
 )
+from .exact_decimal import (
+    ExactDecimalError,
+    parse_bounded_exact_decimal,
+    parse_bounded_json_integer_token,
+)
 from .provider_core import (
     ProviderCoreError,
     ProviderResponseObservation,
@@ -1422,7 +1427,12 @@ def parse_executions(
     account_id = observation.account_id
     environment = observation.environment
     envelope = _mapping(response, name="response")
-    if _integer(envelope.get("retCode"), name="retCode") != 0:
+    ret_code = envelope.get("retCode")
+    if type(ret_code) is not int:
+        raise ProviderCoreError(
+            "Bybit execution retCode must be exact integer"
+        )
+    if ret_code != 0:
         raise ProviderCoreError("Bybit execution response was not successful")
     result = _mapping(envelope.get("result"), name="result")
     rows = result.get("list")
@@ -1438,8 +1448,27 @@ def parse_executions(
     by_execution: dict[str, ProviderFillEvidence] = {}
     for index, value in enumerate(rows):
         row = _mapping(value, name=f"result.list[{index}]")
-        execution_id = _text(row.get("execId"), name="execId")
-        symbol = _text(row.get("symbol"), name="symbol")
+        raw_execution_id = row.get("execId")
+        if (
+            type(raw_execution_id) is not str
+            or not raw_execution_id
+            or raw_execution_id != raw_execution_id.strip()
+        ):
+            raise ProviderCoreError(
+                "Bybit execution id must be canonical exact text"
+            )
+        execution_id = raw_execution_id
+
+        raw_symbol = row.get("symbol")
+        if (
+            type(raw_symbol) is not str
+            or not raw_symbol
+            or raw_symbol != raw_symbol.strip()
+        ):
+            raise ProviderCoreError(
+                "Bybit execution symbol must be canonical exact text"
+            )
+        symbol = raw_symbol
         try:
             instrument = instrument_versions[symbol]
         except KeyError as error:
@@ -1451,6 +1480,10 @@ def parse_executions(
         link = row.get("orderLinkId")
         client_id = None
         if link not in (None, ""):
+            if type(link) is not str or link != link.strip():
+                raise ProviderCoreError(
+                    "Bybit execution orderLinkId must be canonical exact text"
+                )
             client_id = _client_order_id(link)
 
         extra_fees = row.get("extraFees")
@@ -1494,9 +1527,62 @@ def parse_executions(
                 )
             fee_currency = provider_fee_currency
 
-        side = _text(row.get("side"), name="side").upper()
-        if side not in {"BUY", "SELL"}:
-            raise ProviderCoreError("execution side must be BUY or SELL")
+        provider_side = row.get("side")
+        if (
+            type(provider_side) is not str
+            or provider_side not in {"Buy", "Sell"}
+        ):
+            raise ProviderCoreError(
+                "Bybit execution side must be exact Buy or Sell"
+            )
+        side = "BUY" if provider_side == "Buy" else "SELL"
+
+        exec_qty = row.get("execQty")
+        exec_price = row.get("execPrice")
+        exec_fee = row.get("execFee")
+        exec_time = row.get("execTime")
+        for field_name, field_value in (
+            ("execQty", exec_qty),
+            ("execPrice", exec_price),
+            ("execFee", exec_fee),
+            ("execTime", exec_time),
+        ):
+            if (
+                type(field_value) is not str
+                or not field_value
+                or field_value != field_value.strip()
+            ):
+                raise ProviderCoreError(
+                    f"Bybit execution {field_name} must be canonical exact text"
+                )
+
+        bounded_economics: dict[str, Decimal] = {}
+        for field_name, field_value in (
+            ("execQty", exec_qty),
+            ("execPrice", exec_price),
+            ("execFee", exec_fee),
+        ):
+            try:
+                bounded_economics[field_name] = parse_bounded_exact_decimal(
+                    field_value
+                )
+            except ExactDecimalError as error:
+                raise ProviderCoreError(
+                    f"Bybit execution {field_name} exceeds exact numeric envelope"
+                ) from error
+        try:
+            exec_time_millis = parse_bounded_json_integer_token(exec_time)
+        except ExactDecimalError as error:
+            raise ProviderCoreError(
+                "Bybit execution execTime must be a bounded integer string"
+            ) from error
+        try:
+            trade_time = _millis_to_utc(exec_time_millis, name="execTime")
+        except (OverflowError, OSError, ValueError) as error:
+            raise ProviderCoreError(
+                "Bybit execution execTime is outside supported UTC range"
+            ) from error
+
         fill = ProviderFillEvidence.create(
             provider_id="BYBIT",
             account_id=account_id,
@@ -1505,11 +1591,11 @@ def parse_executions(
             client_order_id=client_id,
             instrument=instrument,
             side=side,
-            quantity=row.get("execQty"),
-            price=row.get("execPrice"),
-            fee_amount=row.get("execFee"),
+            quantity=bounded_economics["execQty"],
+            price=bounded_economics["execPrice"],
+            fee_amount=bounded_economics["execFee"],
             fee_currency=fee_currency,
-            trade_time=_millis_to_utc(row.get("execTime"), name="execTime"),
+            trade_time=trade_time,
             evidence_refs=(observation.evidence_ref,),
         )
         previous = by_execution.get(execution_id)

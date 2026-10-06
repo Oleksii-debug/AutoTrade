@@ -131,13 +131,17 @@ class CallbackUserDict(UserDict):
         type(self).calls += 1
         raise AssertionError("caller UserDict code must not execute")
 
-    @property
-    def data(self):
+    def __len__(self):
         return self._fail()
 
-    @data.setter
-    def data(self, value):
-        self.__dict__["_hostile_data"] = value
+    def __iter__(self):
+        return self._fail()
+
+    def __getitem__(self, key):
+        return self._fail()
+
+    def items(self):
+        return self._fail()
 
 
 def at(month=9, day=24, hour=16, minute=0, second=0):

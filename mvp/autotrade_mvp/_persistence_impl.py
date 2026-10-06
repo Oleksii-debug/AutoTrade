@@ -11,36 +11,49 @@ import sqlite3
 from typing import Any, Mapping
 
 
-_MAX_JSON_NESTING = 128
-
-
-def _detach_json_value(value: Any, *, _depth: int = 0) -> Any:
-    """Freeze caller JSON into an inert exact-builtin graph before authority use.
+def _detach_json_value(
+    value: Any,
+    *,
+    _active_containers: set[int] | None = None,
+) -> Any:
+    """Freeze caller JSON into one inert exact-builtin graph before authority use.
 
     Persistence hashes and bytes must be derived from one callback-free value graph.
     Exact tuples retain the historical json.dumps array compatibility by becoming
-    exact lists.  Dict keys are JSON object member names and therefore exact text.
+    exact lists. Dict keys are JSON object member names and therefore exact text.
+    Cycles fail closed without inventing a WP-05-local nesting/resource policy.
     """
 
-    if _depth > _MAX_JSON_NESTING:
-        raise ValueError("JSON value exceeds maximum supported nesting")
     if value is None or type(value) in (str, int, float, bool):
         return value
-    if type(value) in (list, tuple):
-        return [
-            _detach_json_value(item, _depth=_depth + 1)
-            for item in value
-        ]
-    if type(value) is dict:
+    if type(value) not in (list, tuple, dict):
+        raise TypeError(
+            "persistent JSON values must use exact built-in JSON containers and scalars"
+        )
+
+    active = set() if _active_containers is None else _active_containers
+    identity = id(value)
+    if identity in active:
+        raise ValueError("persistent JSON value contains a circular reference")
+    active.add(identity)
+    try:
+        if type(value) in (list, tuple):
+            return [
+                _detach_json_value(item, _active_containers=active)
+                for item in value
+            ]
+
         detached: dict[str, Any] = {}
         for key, item in value.items():
             if type(key) is not str:
                 raise TypeError("JSON object keys must be exact strings")
-            detached[key] = _detach_json_value(item, _depth=_depth + 1)
+            detached[key] = _detach_json_value(
+                item,
+                _active_containers=active,
+            )
         return detached
-    raise TypeError(
-        "persistent JSON values must use exact built-in JSON containers and scalars"
-    )
+    finally:
+        active.remove(identity)
 
 
 def canonical_json(value: Any) -> str:

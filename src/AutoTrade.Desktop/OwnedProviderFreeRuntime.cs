@@ -46,15 +46,30 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
         catch (ObjectDisposedException) { }
     }
 
-    public static async Task<OwnedProviderFreeRuntime> StartAsync()
+    public static Task<OwnedProviderFreeRuntime> StartAsync()
     {
-        string installed = AppContext.BaseDirectory;
+        string data = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "AutoTrade-ZERO");
+        return StartAsync(AppContext.BaseDirectory, data);
+    }
+
+    // The installed-candidate gate invokes this exact production bootstrap with
+    // an isolated data directory. No alternate host/pairing implementation exists
+    // for qualification.
+    internal static async Task<OwnedProviderFreeRuntime> StartAsync(
+        string installed,
+        string data)
+    {
+        installed = Path.GetFullPath(
+            installed ?? throw new ArgumentNullException(nameof(installed)));
+        data = Path.GetFullPath(
+            data ?? throw new ArgumentNullException(nameof(data)));
         string product = Path.Combine(installed, "product");
         InstalledCandidateInventory.Verify(installed);
         string python = Path.Combine(installed, "runtime", "python", "python.exe");
         if (!File.Exists(python) || !File.Exists(Path.Combine(product, "SOURCE_REVISION")))
             throw new InvalidOperationException("Installed Python runtime or frozen product files are missing. Repair the AutoTrade package.");
-        string data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AutoTrade-ZERO");
         Directory.CreateDirectory(data);
         ProcessStartInfo start = new(python)
         {

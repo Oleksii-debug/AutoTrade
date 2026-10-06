@@ -53,7 +53,7 @@ _SIDES = frozenset({"BUY", "SELL"})
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise IbkrWebAdapterError(f"{name} is required")
     return value.strip()
 

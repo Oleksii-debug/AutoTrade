@@ -604,6 +604,106 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                     "durable_submission_history_invalid",
                 )
 
+    def test_hash_consistent_unknown_to_sent_retarget_fails_event_identity(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            result = dispatcher.dispatch(
+                attempt_id="terminal-retarget-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(
+                        b'{"accepted":false}',
+                        http_status=503,
+                        requires_reconciliation=True,
+                        ambiguity_reason="provider_execution_unknown",
+                    ),
+                )[1],
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+
+            connection = sqlite3.connect(path)
+            try:
+                row = connection.execute(
+                    "SELECT event_id, envelope_json "
+                    "FROM events WHERE event_type = 'SubmissionUnknown'"
+                ).fetchone()
+                self.assertIsNotNone(row)
+                event_id, envelope_json = row
+                envelope = json.loads(envelope_json)
+                envelope["event_type"] = "SubmissionSent"
+                new_envelope_json = canonical_json(envelope)
+                new_envelope_hash = (
+                    "sha256:"
+                    + sha256(new_envelope_json.encode("utf-8")).hexdigest()
+                )
+                connection.execute(
+                    "UPDATE events SET event_type = ?, envelope_json = ?, "
+                    "envelope_hash = ? WHERE event_id = ?",
+                    (
+                        "SubmissionSent",
+                        new_envelope_json,
+                        new_envelope_hash,
+                        event_id,
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            restarted = GuardedDispatcher(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="restart-owner",
+            )
+
+            def unexpected_authority(_intent_hash, _now):
+                raise AssertionError("corrupt terminal history must not rerun authority")
+
+            def unexpected_transport(_client_order_id, _request, _guard):
+                raise AssertionError("corrupt terminal history must not resend")
+
+            recovered = restarted.dispatch(
+                attempt_id="terminal-retarget-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:02Z",
+                authority_check=unexpected_authority,
+                transport_send=unexpected_transport,
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(recovered.status, "UNKNOWN")
+            self.assertEqual(
+                recovered.reason,
+                "durable_submission_history_invalid",
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "event_id mismatches canonical submission event identity",
+            ):
+                load_submission_response_binding(
+                    JournalStore(path),
+                    environment="SIMULATION",
+                    account_id="acct",
+                    attempt_id="terminal-retarget-a1",
+                )
+
     def test_runtime_redispatch_rejects_submission_scope_retargeting(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

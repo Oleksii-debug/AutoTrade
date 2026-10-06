@@ -499,11 +499,24 @@ def load_submission_response_binding(
             "durable SubmissionPrepared account_id mismatches selected submission identity"
         )
 
+    expected_scope_key = _identity_digest(
+        expected_environment,
+        expected_account_id,
+    )
     for event_name, event in (
         ("SubmissionPrepared", prepared),
         ("SubmissionSending", sending),
         ("terminal", sent),
     ):
+        if event.get("event_id") != _event_id(
+            expected_scope_key,
+            durable_text["attempt_id"],
+            event["event_type"],
+            event["aggregate_version"],
+        ):
+            raise ValueError(
+                f"durable {event_name} event_id mismatches canonical submission event identity"
+            )
         if event.get("aggregate_type") != "submission_attempt":
             raise ValueError(
                 f"durable {event_name} aggregate_type mismatches submission authority"
@@ -880,6 +893,13 @@ class GuardedDispatcher:
             event_type = event.get("event_type")
             payload = event.get("payload")
             if type(version) is not int or type(event_type) is not str:
+                return False
+            if event.get("event_id") != _event_id(
+                self.scope_key,
+                attempt_id,
+                event_type,
+                version,
+            ):
                 return False
             if (
                 event.get("aggregate_type") != "submission_attempt"

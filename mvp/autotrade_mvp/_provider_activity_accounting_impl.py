@@ -2004,6 +2004,26 @@ def _install_durable_provider_economic_book_authority():
                 provider_environment=provider_environment_value,
             ),
         )
+        if object.__getattribute__(value, "provider_id") == "BYBIT":
+            legacy_book_id = _scoped_identity(
+                "economic-book",
+                object.__getattribute__(value, "provider_id"),
+                object.__getattribute__(value, "account_id"),
+                object.__getattribute__(value, "environment"),
+            )
+            if legacy_book_id != object.__getattribute__(value, "book_id"):
+                with journal_store_authority_scope(store, identity):
+                    legacy_events = JournalStore.load_events(
+                        store,
+                        "economic_book",
+                        legacy_book_id,
+                    )
+                if legacy_events:
+                    raise AccountingConflict(
+                        "BYBIT durable economic-book legacy runtime scope contains "
+                        "ambiguous financial history; explicit provider-environment "
+                        "migration/reconciliation is required"
+                    )
         state = object.__getattribute__(value, "__dict__")
         object_id = id(value)
         authorities[object_id] = (

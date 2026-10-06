@@ -8,9 +8,10 @@ from mvp.autotrade_mvp.accounting import (
     book_external_cash_flow,
 )
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
+    _scoped_identity,
     commit_economic_batch_with_reservation_consumption,
 )
 
@@ -79,6 +80,48 @@ class DurableProviderEconomicBookAuthorityTests(unittest.TestCase):
                 ),
                 [],
             )
+
+    def test_bybit_legacy_runtime_only_economic_history_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            legacy_book_id = _scoped_identity(
+                "economic-book",
+                "BYBIT",
+                "acct-authority",
+                "PAPER",
+            )
+            payload = {
+                "provider_id": "BYBIT",
+                "account_id": "acct-authority",
+                "environment": "PAPER",
+                "transaction": {"legacy": "ambiguous-provider-domain"},
+            }
+            store.append_event(
+                {
+                    "event_id": "legacy-bybit-economic-event",
+                    "event_type": "EconomicTransactionBooked",
+                    "aggregate_type": "economic_book",
+                    "aggregate_id": legacy_book_id,
+                    "aggregate_version": "1",
+                    "committed_at": "2026-09-24T18:00:00Z",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                }
+            )
+
+            for provider_environment in ("TESTNET", "DEMO"):
+                with self.subTest(provider_environment=provider_environment):
+                    with self.assertRaisesRegex(
+                        AccountingConflict,
+                        "ambiguous financial history",
+                    ):
+                        DurableProviderEconomicBook(
+                            store,
+                            provider_id="BYBIT",
+                            account_id="acct-authority",
+                            environment="PAPER",
+                            provider_environment=provider_environment,
+                        )
 
     def test_bybit_durable_book_requires_explicit_provider_environment(self):
         with TemporaryDirectory() as directory:

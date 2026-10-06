@@ -3,14 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.reconciliation import (
     ProviderFillEvidence,
     SnapshotConsistencyEvidence,
     reconcile_account,
 )
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
+from mvp.autotrade_mvp import scientific_financial_cut as cut_module
 from mvp.autotrade_mvp.scientific_financial_cut import (
     FinancialCutConflict,
     FinancialCutUnavailable,
@@ -164,6 +166,76 @@ class ScientificFinancialCutTests(unittest.TestCase):
                 journal_population_digest=_SHA,
                 reconciliation_checkpoint_digest=_SHA,
             )
+
+    def test_cut_distinguishes_reconciliation_sequence_from_later_journal_truth(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.db")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="science-cut-ordering",
+                result=_reconciliation(),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            payload = {"fact": "later non-reconciliation financial journal fact"}
+            store.append_event(
+                {
+                    "event_id": "later-scientific-cut-fact",
+                    "event_type": "ScientificCutOrderingFact",
+                    "aggregate_type": "scientific_cut_ordering",
+                    "aggregate_id": "ordering-1",
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-09-24T19:00:30Z",
+                }
+            )
+
+            cut = _capture(
+                store,
+                reconciliation_event_id=checkpoint["event_id"],
+            )
+            self.assertEqual(
+                cut.reconciliation_journal_sequence,
+                checkpoint["journal_sequence"],
+            )
+            self.assertGreater(
+                cut.journal_sequence,
+                cut.reconciliation_journal_sequence,
+            )
+
+    def test_checkpoint_must_equal_exact_event_at_bound_population_sequence(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.db")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="science-cut-bound-slot",
+                result=_reconciliation(),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            original = cut_module.require_current_reconciliation_checkpoint
+
+            def forged_checkpoint(*args, **kwargs):
+                result = dict(original(*args, **kwargs))
+                result["event_id"] = "forged-current-checkpoint"
+                return result
+
+            with patch.object(
+                cut_module,
+                "require_current_reconciliation_checkpoint",
+                side_effect=forged_checkpoint,
+            ):
+                with self.assertRaisesRegex(
+                    FinancialCutConflict,
+                    "does not match the frozen journal population",
+                ):
+                    _capture(
+                        store,
+                        reconciliation_event_id=checkpoint["event_id"],
+                    )
 
     def test_exact_journal_population_cut_rejects_superseded_provider_truth(self):
         with TemporaryDirectory() as directory:

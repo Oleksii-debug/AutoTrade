@@ -2,6 +2,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp import dispatch as dispatch_module
+from mvp.autotrade_mvp import persistence as persistence_module
 from mvp.autotrade_mvp.dispatch import ExactJsonTransportResponse, GuardedDispatcher
 from mvp.autotrade_mvp.persistence import JournalStore
 
@@ -1605,6 +1606,134 @@ class PostSendBuiltinAuthorityTests(unittest.TestCase):
                 path,
                 dispatcher,
                 "preguard-dispatcher-staticmethod-code-a1",
+            )
+            self.assertEqual(event_types, ["SubmissionPrepared"])
+
+
+    def test_post_send_persistence_sqlite_global_rebinding_is_restored_unknown(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original_sqlite3 = persistence_module.sqlite3
+            hostile_calls = []
+            outbound = 0
+
+            class HostileSqlite:
+                def __getattr__(self, name):
+                    hostile_calls.append(name)
+                    raise AssertionError(
+                        "rebound persistence sqlite3 authority executed"
+                    )
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                persistence_module.sqlite3 = HostileSqlite()
+                return response
+
+            try:
+                first = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-persistence-sqlite-global-a1",
+                    transport=transport,
+                )
+                self.assertIs(persistence_module.sqlite3, original_sqlite3)
+            finally:
+                persistence_module.sqlite3 = original_sqlite3
+
+            self.assertEqual(hostile_calls, [])
+            self.assertEqual(outbound, 1)
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(
+                first.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-persistence-sqlite-global-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
+            restarted = GuardedDispatcher(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner-b",
+            )
+            replay = restarted.dispatch(
+                attempt_id="postsend-persistence-sqlite-global-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T19:52:01Z",
+                authority_check=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not re-authorize")),
+                transport_send=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not resend")),
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(replay.status, "UNKNOWN")
+            self.assertEqual(
+                replay.reason,
+                "recovered_after_send_barrier_without_terminal_result",
+            )
+            self.assertEqual(hostile_calls, [])
+            self.assertEqual(outbound, 1)
+
+    def test_persistence_sqlite_global_rebinding_before_guard_is_zero_wire(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original_sqlite3 = persistence_module.sqlite3
+            hostile_calls = []
+            outbound = 0
+
+            class HostileSqlite:
+                def __getattr__(self, name):
+                    hostile_calls.append(name)
+                    raise AssertionError(
+                        "rebound persistence sqlite3 authority executed"
+                    )
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                persistence_module.sqlite3 = HostileSqlite()
+                final_guard()
+                outbound += 1
+                return ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+
+            try:
+                with self.assertRaises(PermissionError):
+                    self._dispatch(
+                        dispatcher,
+                        attempt_id="preguard-persistence-sqlite-global-a1",
+                        transport=transport,
+                    )
+                self.assertIs(persistence_module.sqlite3, original_sqlite3)
+            finally:
+                persistence_module.sqlite3 = original_sqlite3
+
+            self.assertEqual(hostile_calls, [])
+            self.assertEqual(outbound, 0)
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "preguard-persistence-sqlite-global-a1",
             )
             self.assertEqual(event_types, ["SubmissionPrepared"])
 

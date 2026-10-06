@@ -687,6 +687,9 @@ def _install_journal_store_authority():
 
     executable_states = []
     seen_executables = set()
+    global_binding_states = []
+    seen_global_bindings = set()
+    global_missing = object()
     for _base, members in class_surfaces:
         for _member_name, member in members:
             pending = [member]
@@ -709,6 +712,36 @@ def _install_journal_store_authority():
                 candidate_code = canonical_getattr(candidate, "__code__", None)
                 if candidate_code is None:
                     continue
+                candidate_globals = canonical_getattr(
+                    candidate,
+                    "__globals__",
+                    None,
+                )
+                candidate_names = canonical_getattr(
+                    candidate_code,
+                    "co_names",
+                    (),
+                )
+                if canonical_type(candidate_globals) is canonical_dict:
+                    for global_name in candidate_names:
+                        binding_key = (
+                            canonical_id(candidate_globals),
+                            global_name,
+                        )
+                        if binding_key in seen_global_bindings:
+                            continue
+                        seen_global_bindings.add(binding_key)
+                        global_binding_states.append(
+                            (
+                                candidate_globals,
+                                global_name,
+                                canonical_dict.get(
+                                    candidate_globals,
+                                    global_name,
+                                    global_missing,
+                                ),
+                            )
+                        )
                 candidate_kwdefaults = canonical_getattr(
                     candidate,
                     "__kwdefaults__",
@@ -747,6 +780,26 @@ def _install_journal_store_authority():
                     )
                 )
     executable_states = canonical_tuple(executable_states)
+    global_binding_states = canonical_tuple(global_binding_states)
+
+    def global_binding_state_is_unchanged() -> bool:
+        for namespace, name, expected in global_binding_states:
+            if (
+                canonical_dict.get(namespace, name, global_missing)
+                is not expected
+            ):
+                return False
+        return True
+
+    def restore_global_binding_state() -> None:
+        for namespace, name, expected in global_binding_states:
+            current = canonical_dict.get(namespace, name, global_missing)
+            if current is expected:
+                continue
+            if expected is global_missing:
+                canonical_dict.pop(namespace, name, None)
+            else:
+                canonical_dict.__setitem__(namespace, name, expected)
 
     def executable_state_is_unchanged() -> bool:
         for (
@@ -835,6 +888,9 @@ def _install_journal_store_authority():
                     or current[member_name] is not member
                 ):
                     raise RuntimeError("submission journal class authority changed")
+        if not global_binding_state_is_unchanged():
+            restore_global_binding_state()
+            raise RuntimeError("submission journal module authority changed")
         if not executable_state_is_unchanged():
             restore_executable_state()
             raise RuntimeError("submission journal executable authority changed")

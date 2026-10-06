@@ -58,7 +58,19 @@ class DatasetManifestSemanticContractTests(unittest.TestCase):
         self.assertEqual(schema["x-autotrade-semantic-validator"], VALIDATOR_ID)
         declarations = contract_manifest["semantic_validators"]
         self.assertEqual([item["id"] for item in declarations], [VALIDATOR_ID])
-        self.assertEqual(declarations[0]["definition"], "DatasetManifest")
+        declaration = declarations[0]
+        self.assertEqual(declaration["schema"], "data.schema.json")
+        self.assertEqual(declaration["definition"], "DatasetManifest")
+        self.assertEqual(
+            set(declaration["bindings"]),
+            {"python", "csharp", "typescript"},
+        )
+        for relative in declaration["bindings"].values():
+            with self.subTest(binding=relative):
+                self.assertTrue((ROOT / relative).is_file())
+        for relative in declaration.get("installed_bindings", {}).values():
+            with self.subTest(installed_binding=relative):
+                self.assertTrue((ROOT / relative).is_file())
         self.assertEqual(INSTALLED_CONTRACT_VERSION, CONTRACT_VERSION)
         self.assertEqual(INSTALLED_VALIDATOR_ID, VALIDATOR_ID)
         self.assertEqual(

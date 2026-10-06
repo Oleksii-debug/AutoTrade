@@ -412,6 +412,43 @@ class SelectedRouteAuthorityCompositionTests(unittest.TestCase):
                 financial_send_authority.compose_selected_provider_route_authority = original
             self.assertEqual(calls, [])
 
+    def test_financial_route_scope_builder_rebinding_fails_before_use(self):
+        with TemporaryDirectory() as directory:
+            journal, capabilities, qualifications, route, _dispatcher, _q1, _harness = (
+                self._fixture(directory)
+            )
+            runtime = self._runtime(directory, journal)
+            issuer = build_financial_send_authority_issuer(
+                AuthorityService(journal),
+                runtime,
+                selected_route=route,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            original = (
+                financial_send_authority.build_selected_provider_route_financial_submission_scope
+            )
+            calls = []
+
+            def forged(*_args, **_kwargs):
+                calls.append("forged")
+                raise AssertionError("forged financial route scope builder executed")
+
+            financial_send_authority.build_selected_provider_route_financial_submission_scope = (
+                forged
+            )
+            try:
+                with self.assertRaisesRegex(
+                    FinancialSendAuthorityError,
+                    "financial provider-route scope authority changed",
+                ):
+                    _ = issuer.provider_route_bound
+            finally:
+                financial_send_authority.build_selected_provider_route_financial_submission_scope = (
+                    original
+                )
+            self.assertEqual(calls, [])
+
     def test_route_submission_scope_rebinding_fails_before_use(self):
         with TemporaryDirectory() as directory:
             journal, capabilities, qualifications, route, _dispatcher, _q1, _harness = (

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import json
@@ -29,7 +30,7 @@ from mvp.autotrade_mvp.dispatch import (
     load_submission_response_binding,
     stable_client_order_id,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
     ProviderSubmissionObservation,
@@ -574,9 +575,12 @@ class BybitV5AdapterTests(unittest.TestCase):
         *,
         provider_environment="MAINNET",
         submission_scope_provider_environment=None,
+        submission_scope_capability_snapshot_id=None,
+        submission_scope_route_provider_environment=None,
         http_status=200,
         intent_id="bybit-write-intent",
         attempt_id=None,
+        return_binding=False,
     ):
         runtime_environment = (
             "LIVE" if provider_environment == "MAINNET" else "PAPER"
@@ -645,17 +649,51 @@ class BybitV5AdapterTests(unittest.TestCase):
                 )[1],
                 sender_check=lambda _owner, _epoch: None,
                 submission_scope={
-                    "endpoint": prepared.endpoint,
+                    "provider_id": "BYBIT",
+                    "account_id": account_id,
+                    "environment": runtime_environment,
                     "provider_environment": (
                         submission_scope_provider_environment
                         if submission_scope_provider_environment is not None
                         else provider_environment
                     ),
+                    "capability_snapshot_id": (
+                        submission_scope_capability_snapshot_id
+                        if submission_scope_capability_snapshot_id is not None
+                        else prepared.capability_snapshot_id
+                    ),
+                    "endpoint": prepared.endpoint,
                     "prepared_request_sha256": prepared.body_sha256,
                     "capability_snapshot_ids": list(
                         prepared.capability_snapshot_ids
                     ),
                     "instrument_versions": list(prepared.instrument_versions),
+                    "provider_route_qualification_id": (
+                        "provider-qualification:sha256:" + "7" * 64
+                    ),
+                    "provider_route_capability_snapshot_id": (
+                        submission_scope_capability_snapshot_id
+                        if submission_scope_capability_snapshot_id is not None
+                        else prepared.capability_snapshot_id
+                    ),
+                    "provider_route_decision_journal_sequence_cut": 41,
+                    "provider_route_provider_environment": (
+                        submission_scope_route_provider_environment
+                        if submission_scope_route_provider_environment is not None
+                        else (
+                            submission_scope_provider_environment
+                            if submission_scope_provider_environment is not None
+                            else provider_environment
+                        )
+                    ),
+                    "provider_route_adapter_code_sha": "adapter-code-sha",
+                    "provider_route_packaged_artifact_digest": (
+                        "sha256:" + "8" * 64
+                    ),
+                    "provider_route_protocol_id": "bybit-v5",
+                    "provider_route_protocol_version": "1",
+                    "provider_route_entity_policy_id": "linear-order-v1",
+                    "provider_route_entity_id": "BTCUSDT",
                 },
             )
             self.assertEqual(outcome.status, "SENT")
@@ -665,6 +703,8 @@ class BybitV5AdapterTests(unittest.TestCase):
                 account_id=account_id,
                 attempt_id=attempt,
             )
+            if return_binding:
+                return prepared, binding
             observation = observe_submission_json_response(
                 response_binding=binding,
                 provider_id="BYBIT",
@@ -800,6 +840,98 @@ class BybitV5AdapterTests(unittest.TestCase):
                 attempt_id=attempt,
                 prepared_request=prepared,
                 observation=observation,
+            )
+
+    def test_submission_observation_rejects_partial_financial_route_scope(self):
+        prepared, response_binding = self._durable_write_observation(
+            {"retCode": 0, "retMsg": "OK", "result": {}},
+            provider_environment="TESTNET",
+            intent_id="bybit-partial-route-scope",
+            return_binding=True,
+        )
+        partial_scope = dict(response_binding.submission_scope)
+        partial_scope.pop("provider_route_protocol_version")
+        rebound = replace(
+            response_binding,
+            submission_scope=partial_scope,
+            submission_scope_hash=payload_digest(partial_scope),
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "financial route submission scope is incomplete",
+        ):
+            observe_submission_json_response(
+                response_binding=rebound,
+                provider_id="BYBIT",
+                endpoint=prepared.endpoint,
+                prepared_request_sha256=prepared.body_sha256,
+                capability_snapshot_ids=prepared.capability_snapshot_ids,
+                instrument_versions=prepared.instrument_versions,
+            )
+
+    def test_submission_observation_rejects_unknown_scope_axis(self):
+        prepared, response_binding = self._durable_write_observation(
+            {"retCode": 0, "retMsg": "OK", "result": {}},
+            provider_environment="TESTNET",
+            intent_id="bybit-unknown-scope-axis",
+            return_binding=True,
+        )
+        expanded_scope = dict(response_binding.submission_scope)
+        expanded_scope["caller_extension"] = "forged"
+        rebound = replace(
+            response_binding,
+            submission_scope=expanded_scope,
+            submission_scope_hash=payload_digest(expanded_scope),
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "unknown authority axes",
+        ):
+            observe_submission_json_response(
+                response_binding=rebound,
+                provider_id="BYBIT",
+                endpoint=prepared.endpoint,
+                prepared_request_sha256=prepared.body_sha256,
+                capability_snapshot_ids=prepared.capability_snapshot_ids,
+                instrument_versions=prepared.instrument_versions,
+            )
+
+    def test_submission_observation_rejects_route_capability_retarget(self):
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "capability scope does not match prepared request",
+        ):
+            self._durable_write_observation(
+                {
+                    "retCode": 0,
+                    "retMsg": "OK",
+                    "result": {
+                        "orderId": "provider-capability-retarget",
+                        "orderLinkId": "__CLIENT__",
+                    },
+                },
+                provider_environment="TESTNET",
+                submission_scope_capability_snapshot_id="other-capability",
+                intent_id="bybit-route-capability-retarget",
+            )
+
+    def test_submission_observation_rejects_route_provider_environment_retarget(self):
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "provider-route environment scope mismatch",
+        ):
+            self._durable_write_observation(
+                {
+                    "retCode": 0,
+                    "retMsg": "OK",
+                    "result": {
+                        "orderId": "provider-environment-retarget",
+                        "orderLinkId": "__CLIENT__",
+                    },
+                },
+                provider_environment="TESTNET",
+                submission_scope_route_provider_environment="MAINNET",
+                intent_id="bybit-route-provider-environment-retarget",
             )
 
     def test_submission_response_rejects_missing_http_status_sent_binding(self):

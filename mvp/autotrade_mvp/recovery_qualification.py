@@ -37,6 +37,7 @@ _GIT_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RELEASE_ARTIFACT_MEDIA_TYPE = "application/vnd.autotrade.release-artifact"
 _RECOVERY_EVIDENCE_MEDIA_TYPE = "application/vnd.autotrade.recovery-evidence"
+_RECOVERY_RAW_EVIDENCE_MEDIA_TYPE = "application/vnd.autotrade.recovery-raw-evidence"
 _QUALIFICATION_DOMAIN = "RECOVERY"
 _QUALIFICATION_GATE = "RELEASE"
 _QUALIFICATION_PACKAGE = "WP-59"
@@ -726,6 +727,10 @@ def _raw_universe_blockers(
                 blockers.append(f"{prefix}:raw_evidence_scenario_mismatch")
             if ref.artifact_ref.source_sha != item.source_sha:
                 blockers.append(f"{prefix}:raw_evidence_source_mismatch")
+            if ref.artifact_ref.media_type != _RECOVERY_RAW_EVIDENCE_MEDIA_TYPE:
+                blockers.append(f"{prefix}:raw_evidence_media_type_mismatch")
+            if ref.artifact_ref.evidence_kind != "RECOVERY_" + ref.role.value:
+                blockers.append(f"{prefix}:raw_evidence_kind_mismatch")
             if ref.release_artifact_id != item.release_artifact_id:
                 blockers.append(f"{prefix}:raw_evidence_release_id_mismatch")
             if ref.release_artifact_sha256 != item.release_artifact_sha256:

@@ -23,6 +23,7 @@ from .provider_core import (
     ProviderResponseObservation,
     ProviderSubmissionObservation,
     Surface,
+    provider_submission_observation_projection,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
@@ -376,7 +377,7 @@ def guarded_order_projection(
     retarget or rewrite an adapter decision before the final send guard.
     """
 
-    if not isinstance(prepared_request, AlpacaPreparedRequest):
+    if type(prepared_request) is not AlpacaPreparedRequest:
         raise TypeError("prepared_request must be AlpacaPreparedRequest")
     return MappingProxyType(
         {
@@ -507,14 +508,14 @@ def _uuid_text(value: object, *, name: str) -> str:
     return text
 
 
-def _response_evidence(
+def _submission_projection(
     observation: ProviderSubmissionObservation,
     *,
     prepared_request: AlpacaPreparedRequest,
-) -> dict[str, str]:
-    if not isinstance(observation, ProviderSubmissionObservation):
+) -> Mapping[str, object]:
+    if type(observation) is not ProviderSubmissionObservation:
         raise TypeError("observation must be ProviderSubmissionObservation")
-    if not isinstance(prepared_request, AlpacaPreparedRequest):
+    if type(prepared_request) is not AlpacaPreparedRequest:
         raise TypeError("prepared_request must be AlpacaPreparedRequest")
     cid = validate_client_order_id(
         _text(
@@ -522,16 +523,38 @@ def _response_evidence(
             name="prepared_request.client_order_id",
         )
     )
-    observation.require_scope(
-        provider_id="ALPACA",
-        endpoint=prepared_request.endpoint,
-        prepared_request_sha256=prepared_request.body_sha256,
-        capability_snapshot_ids=prepared_request.capability_snapshot_ids,
-        instrument_versions=prepared_request.instrument_versions,
-        account_id=prepared_request.account_id,
-        environment=prepared_request.environment,
-        client_order_id=cid,
+    projected = provider_submission_observation_projection(observation)
+    expected = (
+        ("provider_id", "ALPACA", "provider"),
+        ("endpoint", prepared_request.endpoint, "endpoint"),
+        ("request_sha256", prepared_request.body_sha256, "request digest"),
+        (
+            "capability_snapshot_ids",
+            prepared_request.capability_snapshot_ids,
+            "capability",
+        ),
+        (
+            "instrument_versions",
+            prepared_request.instrument_versions,
+            "instrument",
+        ),
+        ("account_id", prepared_request.account_id, "account"),
+        ("environment", prepared_request.environment, "environment"),
+        ("client_order_id", cid, "client-order"),
     )
+    for key, expected_value, label in expected:
+        if projected[key] != expected_value:
+            raise AlpacaAdapterError(
+                f"provider-write provenance {label} mismatch"
+            )
+    return projected
+
+
+def _response_evidence(
+    projection: Mapping[str, object],
+    *,
+    prepared_request: AlpacaPreparedRequest,
+) -> dict[str, str]:
     env = prepared_request.environment
     if env == "PAPER":
         host = "paper-api.alpaca.markets"
@@ -544,12 +567,12 @@ def _response_evidence(
         "artifact_id": str(
             uuid5(
                 NAMESPACE_URL,
-                f"{source}#{observation.evidence_ref}",
+                f"{source}#{projection['evidence_ref']}",
             )
         ),
-        "sha256": observation.response_sha256,
+        "sha256": projection["response_sha256"],
         "source_uri": source,
-        "observed_at": observation.observed_at,
+        "observed_at": projection["sent_at"],
         "rights_id": "provider-observation-alpaca",
     }
 
@@ -592,17 +615,17 @@ def parse_submission_response(
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",
         }
-    if not isinstance(observation, ProviderSubmissionObservation):
-        raise TypeError(
-            "observation must be durable ProviderSubmissionObservation"
-        )
-    if observation.response_binding.attempt_id != aid:
-        raise AlpacaAdapterError("submission observation attempt_id mismatch")
-    evidence = _response_evidence(
+    projection = _submission_projection(
         observation,
         prepared_request=prepared_request,
     )
-    response = observation.payload
+    if projection["attempt_id"] != aid:
+        raise AlpacaAdapterError("submission observation attempt_id mismatch")
+    evidence = _response_evidence(
+        projection,
+        prepared_request=prepared_request,
+    )
+    response = projection["payload"]
     if not isinstance(response, Mapping):
         raise AlpacaAdapterError("provider response payload must be an object")
     provider_order_id = _uuid_text(response.get("id"), name="response.id")

@@ -11,7 +11,7 @@ from dataclasses import InitVar, dataclass
 from enum import StrEnum
 from hashlib import sha256
 import json
-from pathlib import Path
+from pathlib import Path, PosixPath, WindowsPath
 import re
 from types import MappingProxyType
 from typing import Mapping, Sequence
@@ -126,6 +126,18 @@ def _boolean(value: bool, *, name: str) -> bool:
     if type(value) is not bool:
         raise TypeError(f"{name} must be boolean")
     return value
+
+
+def _canonical_evidence_root(value: str | Path, *, name: str) -> str | Path:
+    """Reject executable path/string subclasses before trust-root resolution."""
+
+    if type(value) is str:
+        if not value:
+            raise ValueError(f"{name} must be non-empty")
+        return value
+    if type(value) in {PosixPath, WindowsPath}:
+        return value
+    raise TypeError(f"{name} must be an exact str or concrete pathlib path")
 
 
 def _text_tuple(
@@ -980,10 +992,15 @@ class RecoveryQualificationDecision:
                 raise ValueError(
                     "PASS recovery decision requires canonical evidence store authority"
                 )
-            if not isinstance(_verification_root, (str, Path)):
+            try:
+                verification_root = _canonical_evidence_root(
+                    _verification_root,
+                    name="_verification_root",
+                )
+            except (TypeError, ValueError) as error:
                 raise ValueError(
                     "PASS recovery decision requires independent evidence root authority"
-                )
+                ) from error
             if type(_verification_receipt) is not SignedQualificationAttestation:
                 raise ValueError(
                     "PASS recovery decision requires signed qualification evidence"
@@ -1031,7 +1048,7 @@ class RecoveryQualificationDecision:
 
             try:
                 trusted_read = trusted_authenticated_reader(
-                    _verification_root,
+                    verification_root,
                     publication_store=_verification_store,
                 )
             except (
@@ -1144,7 +1161,7 @@ class RecoveryQualificationDecision:
                 accepted = verify_canonical_qualification_attestation(
                     _verification_receipt,
                     evidence_store=_verification_store,
-                    evidence_root=_verification_root,
+                    evidence_root=verification_root,
                     expected_source_sha=self.source_sha,
                     expected_domain=_QUALIFICATION_DOMAIN,
                     expected_gate=_QUALIFICATION_GATE,
@@ -1235,6 +1252,11 @@ def qualify_recovery_release(
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
         raise TypeError(
             "evidence_store must be ArtifactStore (canonical exact type required)"
+        )
+    if evidence_root is not None:
+        evidence_root = _canonical_evidence_root(
+            evidence_root,
+            name="evidence_root",
         )
     if (
         qualification_receipt is not None

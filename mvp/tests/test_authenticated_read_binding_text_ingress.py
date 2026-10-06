@@ -30,6 +30,14 @@ class _HostileSurface:
         raise AssertionError("hostile surface stringification must never execute")
 
 
+class _HostileDict(dict):
+    items_called = False
+
+    def items(self):
+        type(self).items_called = True
+        raise AssertionError("hostile mapping callback must never execute")
+
+
 class _HostileDatetime(datetime):
     def utcoffset(self):
         raise AssertionError("hostile datetime callback must never execute")
@@ -85,6 +93,15 @@ def capability():
 
 
 class AuthenticatedReadTextIngressTests(unittest.TestCase):
+    def test_query_mapping_subclass_is_rejected_before_items_callback(self):
+        _HostileDict.items_called = False
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "query must be an exact inert mapping",
+        ):
+            _canonical_query_values(_HostileDict({"category": "option"}))
+        self.assertFalse(_HostileDict.items_called)
+
     def test_query_key_string_subclass_is_rejected_before_virtual_strip(self):
         with self.assertRaisesRegex(
             ProviderCoreError,

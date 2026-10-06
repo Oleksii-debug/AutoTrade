@@ -382,9 +382,15 @@ def qualify(
                     evidence_root=directory,
                     qualification_receipt=receipt,
                 )
-            self.assertGreaterEqual(verify_canonical.call_count, 1)
-            if decision.status is RecoveryEvidenceStatus.PASS:
-                self.assertEqual(verify_canonical.call_count, 2)
+            if verify_canonical.call_count < 1:
+                raise AssertionError("canonical recovery verifier was not called")
+            if (
+                decision.status is RecoveryEvidenceStatus.PASS
+                and verify_canonical.call_count != 2
+            ):
+                raise AssertionError(
+                    "PASS recovery decision must independently re-verify attestation"
+                )
             self_selected = {
                 "policy",
                 "expected_policy_id",

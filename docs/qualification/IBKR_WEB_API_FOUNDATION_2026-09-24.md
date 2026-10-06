@@ -88,6 +88,28 @@ qualified-read Q/C binding, HTTP method/build routing, init generation,
 credential lifetime, restart recovery and PAPER/LIVE provider qualification
 remain open.
 
+## Canonical authenticated-read Q/C binding — 2026-10-06
+
+The provider-read authority now recognizes `GET /iserver/accounts` as one
+canonical IBKR authenticated-read rule:
+
+- surface `AUTHENTICATED_READ`;
+- permission `ORDER.READ`;
+- data entitlement `ACCOUNT`;
+- successful HTTP status `200`;
+- empty query semantics are enforced by the existing IBKR source-bound parser;
+- source-owned parser identity is `IBKR_BROKERAGE_ACCOUNTS_V1_JSON_V1` with an exact contract digest.
+
+The route layer can therefore require both the exact endpoint rule claim and the
+exact parser contract claim before an IBKR account-membership read is considered
+qualified-read material. This composes with the existing capability/Q current-cut
+authority and does not create a second qualification registry.
+
+This remains only a Q/C semantic binding. The repository still does not claim a
+qualified IBKR provider, live network transport, `/iserver/auth/ssodh/init`
+generation binding, credential lifetime, restart/recovery qualification, or
+PAPER/LIVE provider qualification.
+
 ## What remains unqualified
 
 WP-26 remains incomplete. Required future evidence includes exact API/SDK

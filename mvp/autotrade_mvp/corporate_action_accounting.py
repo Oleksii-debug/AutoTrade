@@ -63,7 +63,7 @@ def _transaction_id(accepted: AuthoritativeCorporateAction, suffix: str) -> str:
         accepted.account_id,
         accepted.environment,
         accepted.external_event_id,
-        accepted.provenance_digest,
+        accepted.provider_fact_digest,
         suffix,
     )
 
@@ -73,7 +73,7 @@ def _corporate_action_reconciliation_id(
     _identity_fn=_identity,
     _error_type=CorporateActionEvidenceConflict,
 ) -> str:
-    """Bind one reconciliation identity to exact provider revision/provenance."""
+    """Bind reconciliation to the stable provider fact, not its observation receipt."""
 
     required_text = (
         "provider_id",
@@ -81,7 +81,7 @@ def _corporate_action_reconciliation_id(
         "environment",
         "external_event_id",
         "provider_revision",
-        "provenance_digest",
+        "provider_fact_digest",
     )
     for name in required_text:
         if type(payload.get(name)) is not str or not payload[name]:
@@ -102,7 +102,7 @@ def _corporate_action_reconciliation_id(
         payload["environment"],
         payload["external_event_id"],
         payload["provider_revision"],
-        payload["provenance_digest"],
+        payload["provider_fact_digest"],
         "" if correction is None else correction,
     )
 
@@ -128,7 +128,7 @@ def _bind_corporate_action_reconciliation_inputs(
 
         Local identities come only from durable accepted evidence. Provider-side
         activities come only from issuer-verified AuthoritativeCorporateAction
-        objects. Revision/provenance changes therefore become ordinary
+        objects. Stable provider-fact changes therefore become ordinary
         missing/unexpected activity mismatches in reconcile_account(); no second
         reconciliation ledger or verdict engine is introduced here.
 
@@ -205,7 +205,7 @@ def _bind_corporate_action_reconciliation_inputs(
                 activity_id=activity_id,
                 activity_type=f"CORPORATE_ACTION:{projection['kind']}",
                 origin="EXTERNAL",
-                occurred_at=projection["observed_at"],
+                occurred_at=projection["effective_at"],
                 instrument=projection["instrument_id"],
                 currency=currency,
             )
@@ -453,7 +453,7 @@ def _dividend_transaction(
         cause_event_id=_identity(
             "corporate-action-cause",
             accepted.external_event_id,
-            accepted.provenance_digest,
+            accepted.provider_fact_digest,
             "effect",
         ),
         postings=(
@@ -532,19 +532,12 @@ def _correction_transactions(
             original,
             transaction_id=expected_reversal_id,
             cause_event_id=committed_reversal.cause_event_id,
-            observed_at=accepted.observed_at,
+            observed_at=committed_reversal.observed_at,
         )
         if rebuilt_reversal != committed_reversal:
             raise AccountingConflict(
                 "corporate-action correction reversal conflicts with retained evidence"
             )
-        replacement = _dividend_transaction(
-            accepted,
-            transition,
-            order_key=original.economic_order_key or order_key,
-            corrects_transaction_id=original.transaction_id,
-            economic_effective_at=original.economic_effective_at,
-        )
         committed_replacement = next(
             (
                 item
@@ -552,6 +545,18 @@ def _correction_transactions(
                 if item.transaction_id == expected_replacement_id
             ),
             None,
+        )
+        replacement = _dividend_transaction(
+            accepted,
+            transition,
+            order_key=original.economic_order_key or order_key,
+            corrects_transaction_id=original.transaction_id,
+            economic_effective_at=original.economic_effective_at,
+            observed_at=(
+                accepted.observed_at
+                if committed_replacement is None
+                else committed_replacement.observed_at
+            ),
         )
         if replacement is None:
             if committed_replacement is not None:
@@ -582,7 +587,7 @@ def _correction_transactions(
         cause_event_id=_identity(
             "corporate-action-cause",
             accepted.external_event_id,
-            accepted.provenance_digest,
+            accepted.provider_fact_digest,
             "reversal",
         ),
         observed_at=accepted.observed_at,
@@ -619,13 +624,18 @@ def _economic_transactions(
         )
 
     order_key = _order_key(accepted.external_event_id)
+    active = _active_for_order_key(economic_book, order_key)
+    retained_observed_at = (
+        active[0].observed_at
+        if exact_retry and len(active) == 1
+        else transaction_observed_at
+    )
     transaction = _dividend_transaction(
         accepted,
         transition,
         order_key=order_key,
-        observed_at=transaction_observed_at,
+        observed_at=retained_observed_at,
     )
-    active = _active_for_order_key(economic_book, order_key)
     if active and not exact_retry:
         raise AccountingConflict(
             "corporate-action economics exist without retained exact source identity"
@@ -868,6 +878,7 @@ def commit_authoritative_corporate_action(
     result = {
         "source_event_id": evidence_plan.event_id,
         "external_event_id": accepted.external_event_id,
+        "provider_fact_digest": accepted.provider_fact_digest,
         "provenance_digest": accepted.provenance_digest,
         "transaction_ids": [item.transaction_id for item in transactions],
         "activation_at": activation_text,
@@ -894,7 +905,7 @@ def commit_authoritative_corporate_action(
                     accepted.account_id,
                     accepted.environment,
                     accepted.external_event_id,
-                    accepted.provenance_digest,
+                    accepted.provider_fact_digest,
                 ]
             ),
         )
@@ -905,7 +916,7 @@ def commit_authoritative_corporate_action(
         accepted.account_id,
         accepted.environment,
         accepted.external_event_id,
-        accepted.provenance_digest,
+        accepted.provider_fact_digest,
     )
     try:
         with journal_store_authority_scope(store, store_identity):

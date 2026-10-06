@@ -233,6 +233,8 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         )
         self.assertTrue(accepted.provenance_digest.startswith("sha256:"))
         self.assertEqual(len(accepted.provenance_digest), 71)
+        self.assertTrue(accepted.provider_fact_digest.startswith("sha256:"))
+        self.assertEqual(len(accepted.provider_fact_digest), 71)
 
         event = accepted.event
         self.assertIsInstance(event, CorporateEvent)
@@ -245,7 +247,8 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
             event.payload,
             {"per_share": "1.25", "currency": "USDT"},
         )
-        self.assertIn(accepted.provenance_digest, event.source_revision)
+        self.assertIn(accepted.provider_fact_digest, event.source_revision)
+        self.assertNotIn(accepted.provenance_digest, event.source_revision)
 
     def test_resolution_is_deterministic_for_same_sealed_evidence(self):
         source = sealed_dividend()
@@ -253,6 +256,38 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         second = resolve(source)
         self.assertEqual(first, second)
         self.assertEqual(first.event, second.event)
+
+    def test_same_provider_fact_reobserved_later_keeps_stable_fact_identity(self):
+        first = resolve(sealed_dividend(observed_offset=2))
+        second = resolve(sealed_dividend(observed_offset=5))
+
+        self.assertNotEqual(first.evidence_ref, second.evidence_ref)
+        self.assertNotEqual(first.observed_at, second.observed_at)
+        self.assertNotEqual(first.provenance_digest, second.provenance_digest)
+        self.assertEqual(first.provider_fact_digest, second.provider_fact_digest)
+        self.assertEqual(first.event, second.event)
+
+    def test_same_revision_economic_change_changes_provider_fact_identity(self):
+        first = resolve(sealed_dividend(per_share="1.25"))
+        changed = resolve(sealed_dividend(per_share="2.00"))
+
+        self.assertNotEqual(first.provider_fact_digest, changed.provider_fact_digest)
+        self.assertNotEqual(first.event.source_revision, changed.event.source_revision)
+
+    def test_lifecycle_timestamp_change_changes_provider_fact_identity(self):
+        first = resolve(
+            sealed_dividend(
+                pay_at=READ_NOW + timedelta(days=1),
+            )
+        )
+        changed = resolve(
+            sealed_dividend(
+                pay_at=READ_NOW + timedelta(days=2),
+            )
+        )
+
+        self.assertNotEqual(first.provider_fact_digest, changed.provider_fact_digest)
+        self.assertNotEqual(first.event.source_revision, changed.event.source_revision)
 
     def test_authoritative_projection_is_inert_and_requires_issuer_authority(self):
         source = sealed_dividend()
@@ -269,6 +304,10 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         self.assertEqual(
             projection["provenance_digest"],
             accepted.provenance_digest,
+        )
+        self.assertEqual(
+            projection["provider_fact_digest"],
+            accepted.provider_fact_digest,
         )
         self.assertEqual(
             dict(projection["payload"]),

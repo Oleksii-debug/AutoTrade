@@ -29,6 +29,15 @@ class ContractsCiEvidenceTests(unittest.TestCase):
             [item["id"] for item in validators],
             ["dataset-manifest-content-authority-v1"],
         )
+        self.assertEqual(
+            set(validators[0]["bindings"]),
+            {"python", "csharp", "typescript"},
+        )
+        self.assertEqual(
+            validators[0]["installed_bindings"],
+            {"python": "autotrade_numeric/dataset_manifest.py"},
+        )
+        self.assertEqual(validators[0]["case_count"], 13)
 
     def test_contracts_workflow_executes_every_recorded_base_command(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")

@@ -2460,6 +2460,7 @@ class GuardedDispatcher:
                 (
                     helper_name,
                     helper,
+                    authority_type(helper),
                     authority_getattr(helper, "__code__", None),
                     authority_getattr(helper, "__defaults__", None),
                     helper_kwdefaults,
@@ -2595,6 +2596,7 @@ class GuardedDispatcher:
             for (
                 name,
                 expected,
+                expected_type,
                 code,
                 defaults,
                 kwdefaults,
@@ -2608,7 +2610,22 @@ class GuardedDispatcher:
                         expected,
                     )
                     changed = True
-                if restore_function_authority(
+                if authority_type(expected) is not expected_type:
+                    # Module objects can legally have their __class__ retargeted.
+                    # Restore through the original type descriptor so a hostile
+                    # replacement __setattr__ is never invoked.
+                    expected_type.__setattr__(
+                        expected,
+                        "__class__",
+                        expected_type,
+                    )
+                    changed = True
+                if (
+                    code is not None
+                    or defaults is not None
+                    or kwdefaults is not None
+                    or kwdefaults_fingerprint is not None
+                ) and restore_function_authority(
                     expected,
                     code,
                     defaults,
@@ -2753,32 +2770,51 @@ class GuardedDispatcher:
                 (
                     authority_dict.get(dispatch_module_globals, name)
                     is expected
+                    and authority_type(expected) is expected_type
                     and (
-                        code is None
-                        or authority_getattr(expected, "__code__", None)
-                        is code
-                    )
-                    and authority_getattr(expected, "__defaults__", None)
-                    is defaults
-                    and authority_getattr(expected, "__kwdefaults__", None)
-                    is kwdefaults
-                    and (
-                        kwdefaults_fingerprint is None
+                        (
+                            code is None
+                            and defaults is None
+                            and kwdefaults is None
+                            and kwdefaults_fingerprint is None
+                        )
                         or (
-                            authority_type(kwdefaults) is authority_dict
-                            and authority_tuple(
-                                (authority_id(key), authority_id(value))
-                                for key, value in authority_dict.items(
-                                    kwdefaults
+                            (
+                                code is None
+                                or authority_getattr(
+                                    expected, "__code__", None
+                                )
+                                is code
+                            )
+                            and authority_getattr(
+                                expected, "__defaults__", None
+                            )
+                            is defaults
+                            and authority_getattr(
+                                expected, "__kwdefaults__", None
+                            )
+                            is kwdefaults
+                            and (
+                                kwdefaults_fingerprint is None
+                                or (
+                                    authority_type(kwdefaults)
+                                    is authority_dict
+                                    and authority_tuple(
+                                        (authority_id(key), authority_id(value))
+                                        for key, value in authority_dict.items(
+                                            kwdefaults
+                                        )
+                                    )
+                                    == kwdefaults_fingerprint
                                 )
                             )
-                            == kwdefaults_fingerprint
                         )
                     )
                 )
                 for (
                     name,
                     expected,
+                    expected_type,
                     code,
                     defaults,
                     kwdefaults,

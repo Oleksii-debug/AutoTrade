@@ -836,6 +836,7 @@ def _prepare_normalized_order_impl(
     at: datetime,
     maximum_session_age_seconds: int,
     _require_session_authority,
+    _capability_admits,
 ) -> IbkrNormalizedOrder:
     """Build normalized fields but deliberately stop before provider serialization.
 
@@ -929,7 +930,7 @@ def _prepare_normalized_order_impl(
         account_id=sealed_intent.account_id,
         environment=capability_environment,
     )
-    if not CapabilitySnapshot.admits(
+    if not _capability_admits(
         capability,
         at=point,
         order_type=sealed_intent.order_type,
@@ -972,8 +973,9 @@ def _prepare_normalized_order_impl(
 def _bind_prepare_normalized_order(
     implementation,
     require_session_authority,
+    capability_admits,
 ):
-    """Keep the financial session-evidence guard outside mutable module lookup."""
+    """Keep financial admission guards outside mutable module lookup."""
 
     def prepare_normalized_order(
         intent: IbkrWebOrderIntent,
@@ -992,6 +994,7 @@ def _bind_prepare_normalized_order(
             at=at,
             maximum_session_age_seconds=maximum_session_age_seconds,
             _require_session_authority=require_session_authority,
+            _capability_admits=capability_admits,
         )
 
     return prepare_normalized_order
@@ -1000,6 +1003,7 @@ def _bind_prepare_normalized_order(
 prepare_normalized_order = _bind_prepare_normalized_order(
     _prepare_normalized_order_impl,
     _require_ibkr_brokerage_session_observation,
+    CapabilitySnapshot.admits,
 )
 del _bind_prepare_normalized_order
 del _prepare_normalized_order_impl

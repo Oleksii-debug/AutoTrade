@@ -24,6 +24,8 @@ The repository and both .NET qualification workflows now select SDK `10.0.100` e
 
 `python tools/check_dependency_composition.py --require-qualified` is the release-enforcement mode. It returns a non-zero exit code whenever any composition blocker remains. Release automation must use this strict form; report mode is not release approval.
 
-## Remaining reproducibility blocker
+## Reproducibility closure on current main
 
-Five Python CI workflows still select the mutable minor line `3.12` rather than one qualified cross-platform patch runtime. The audit reports each as `NON_EXACT_CI_PYTHON_VERSION`. This is intentionally unresolved until a Windows/Linux-compatible exact runtime is selected and qualification evidence exists; the gate must not invent a portable patch pin.
+All inspected Python CI setup points now select exact Python `3.12.10`, including matrix-driven workflows. The composition gate fails closed on unresolved expression-valued `python-version` authority instead of trusting an unevaluated expression. The .NET SDK remains exactly `10.0.100` with literal `rollForward: "disable"`.
+
+NuGet lock qualification remains conditional: the current `src/` tree has no `PackageReference` dependency, so no synthetic `packages.lock.json` is invented. If a package-bearing release project appears, the gate requires its sibling lock, validates Direct and Transitive records plus canonical SHA-512 content hashes and dependency edges, requires inspectable per-project locked restore coverage, and binds that locked graph into release provenance.

@@ -50,6 +50,7 @@ from .provider_transport import (
     BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS,
     KRAKEN_SPOT_AUTHENTICATED_READ_ENDPOINTS,
     IBKR_WEB_AUTHENTICATED_READ_ENDPOINTS,
+    IBKR_WEB_AUTHENTICATED_READ_METHODS,
 )
 
 
@@ -170,6 +171,13 @@ def _qualified_read_endpoint_rule(
         "data_entitlement": rule.data_entitlement,
         "success_statuses": sorted(rule.success_statuses),
     }
+    if provider == "IBKR":
+        http_method = IBKR_WEB_AUTHENTICATED_READ_METHODS.get(endpoint)
+        if http_method not in {"GET", "POST"}:
+            raise ProviderRouteReadError(
+                "IBKR authenticated-read endpoint lacks canonical HTTP method"
+            )
+        policy["http_method"] = http_method
     policy_digest = "sha256:" + sha256(
         canonical_json(policy).encode("utf-8")
     ).hexdigest()

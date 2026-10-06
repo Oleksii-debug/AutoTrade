@@ -408,9 +408,37 @@ def _dotnet_blockers(root: Path) -> tuple[list[str], list[str], str]:
 def _ci_runtime_blockers(root: Path) -> list[str]:
     blockers: list[str] = []
     exact_python = re.compile(r"^\d+\.\d+\.\d+$")
+    pinned_action = re.compile(
+        r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}$"
+    )
+    pinned_container = re.compile(r"^docker://[^@\s]+@sha256:[0-9a-f]{64}$")
     workflows = root / ".github" / "workflows"
     for path in sorted(workflows.glob("*.y*ml")):
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            blockers.append(f"UNREADABLE_CI_WORKFLOW:{path.relative_to(root)}")
+            continue
+
+        for line_number, raw in enumerate(text.splitlines(), start=1):
+            stripped = raw.strip()
+            action_line = stripped[2:].strip() if stripped.startswith("- ") else stripped
+            if action_line.startswith("uses:"):
+                action = action_line.split(":", 1)[1].strip().strip("'\"")
+                if action.startswith("./"):
+                    pass
+                elif action.startswith("docker://"):
+                    if pinned_container.fullmatch(action) is None:
+                        blockers.append(
+                            "NON_IMMUTABLE_CI_ACTION:"
+                            f"{path.relative_to(root)}:{line_number}:{action}"
+                        )
+                elif pinned_action.fullmatch(action) is None:
+                    blockers.append(
+                        "NON_IMMUTABLE_CI_ACTION:"
+                        f"{path.relative_to(root)}:{line_number}:{action}"
+                    )
+
         if "actions/setup-python@" not in text:
             continue
         for raw in text.splitlines():

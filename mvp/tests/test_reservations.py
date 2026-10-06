@@ -9,6 +9,8 @@ from types import MappingProxyType
 import unittest
 
 from mvp.autotrade_mvp.reservations import (
+    ACTIVE_STATES,
+    TERMINAL_STATES,
     InsufficientAvailable,
     ReservationBook,
     ReservationConflict,
@@ -44,6 +46,12 @@ class ReservationFoundationTests(unittest.TestCase):
         (28, ROUND_HALF_EVEN),
         (80, ROUND_HALF_EVEN),
     )
+
+    def test_reservation_state_authority_constants_are_immutable(self):
+        with self.assertRaises(AttributeError):
+            ACTIVE_STATES.add("FORGED")
+        with self.assertRaises(AttributeError):
+            TERMINAL_STATES.add("FORGED")
 
     def test_text_subclass_callbacks_do_not_execute_during_reservation_identity(self):
         book = ReservationBook()

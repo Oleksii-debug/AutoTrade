@@ -936,5 +936,114 @@ class PostSendBuiltinAuthorityTests(unittest.TestCase):
             )
 
 
+    def test_transport_helper_rebinding_before_final_guard_is_zero_wire(self):
+        surfaces = (
+            "_canonical_journal_authority_snapshot",
+            "_journal_store_call",
+            "_envelope",
+            "_detach_submission_json",
+            "submission_attempt_aggregate_id",
+            "_event_id",
+            "_identity_digest",
+            "_instant",
+            "_prepared_lease_state",
+            "_validated_authority_result",
+            "payload_digest",
+            "canonical_json",
+            "_canonical_submission_event_instant",
+            "_exact_response_terminal_semantics_are_canonical",
+            "_has_exact_response_markers",
+            "uuid5",
+            "NAMESPACE_URL",
+            "sha256",
+            "datetime",
+            "timezone",
+            "timedelta",
+            "DispatchOutcome",
+        )
+        for surface in surfaces:
+            with self.subTest(surface=surface), TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                dispatcher = self._dispatcher(path)
+                original = getattr(dispatch_module, surface)
+                hostile_calls = 0
+                outbound = 0
+
+                def forged(*_args, **_kwargs):
+                    nonlocal hostile_calls
+                    hostile_calls += 1
+                    raise AssertionError(f"rebound {surface} executed")
+
+                def transport(_client_order_id, _request, final_guard):
+                    nonlocal outbound
+                    setattr(dispatch_module, surface, forged)
+                    final_guard()
+                    outbound += 1
+                    return ExactJsonTransportResponse(
+                        b'{"accepted":true}',
+                        http_status=200,
+                    )
+
+                try:
+                    with self.assertRaises(PermissionError):
+                        self._dispatch(
+                            dispatcher,
+                            attempt_id=f"preguard-helper-{surface}",
+                            transport=transport,
+                        )
+                    self.assertIs(getattr(dispatch_module, surface), original)
+                finally:
+                    setattr(dispatch_module, surface, original)
+
+                self.assertEqual(hostile_calls, 0)
+                self.assertEqual(outbound, 0)
+                event_types, _events = self._event_types(
+                    path,
+                    dispatcher,
+                    f"preguard-helper-{surface}",
+                )
+                self.assertEqual(event_types, ["SubmissionPrepared"])
+
+    def test_transport_helper_code_mutation_before_final_guard_is_zero_wire(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            helper = dispatch_module._prepared_lease_state
+            original_code = helper.__code__
+            outbound = 0
+
+            def forged(*, prepared_at, now, lease_seconds):
+                raise AssertionError("forged prepared lease helper executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                helper.__code__ = forged.__code__
+                final_guard()
+                outbound += 1
+                return ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+
+            try:
+                with self.assertRaises(PermissionError):
+                    self._dispatch(
+                        dispatcher,
+                        attempt_id="preguard-helper-code-a1",
+                        transport=transport,
+                    )
+                self.assertIs(helper.__code__, original_code)
+            finally:
+                helper.__code__ = original_code
+
+            self.assertEqual(outbound, 0)
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "preguard-helper-code-a1",
+            )
+            self.assertEqual(event_types, ["SubmissionPrepared"])
+
+
 if __name__ == "__main__":
     unittest.main()

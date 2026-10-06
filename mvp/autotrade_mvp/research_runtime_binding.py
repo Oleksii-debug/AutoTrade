@@ -10,15 +10,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Iterable, Mapping
 
-from autotrade_runtime.artifacts import ArtifactStore
-from research.autotrade_research.data.vintages import HistoricalVintageRegistry
-from research.autotrade_research.evaluation.folds import CausalFold
-from research.autotrade_research.features.authoritative import (
+from autotrade_research.artifacts import ArtifactStore
+from autotrade_research.data.vintages import HistoricalVintageRegistry
+from autotrade_research.features.authoritative import (
     AuthoritativeFoldNormalizer,
     HistoricalFeatureInputSpec,
     fit_authoritative_fold_normalizer,
 )
-from research.autotrade_research.features.causal import FeaturePoint
+from autotrade_research.features.causal import CausalFold, FeaturePoint
 
 from .replay import CompositeReplayCheckpoint, RuntimeStateVerifier
 

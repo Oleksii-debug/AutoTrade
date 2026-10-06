@@ -1,10 +1,13 @@
 """Current-parent regression for exact empty post-SEND write evidence."""
 
+from datetime import datetime, timezone
+from hashlib import sha256
+import json
 from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher, load_submission_response_binding
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_transport import (
     BINANCE_SPOT_ENDPOINT_POLICIES,
     BinanceSpotCredential,
@@ -12,7 +15,9 @@ from mvp.autotrade_mvp.provider_transport import (
     BybitV5Credential,
     KrakenFuturesCredential,
     KrakenSpotCredential,
+    KrakenSpotDurableNonceAllocator,
     AlpacaTradingCredential,
+    ProviderTransportError,
     ProviderTransportScopeError,
     TradingWireResponse,
     WhiteBitCredential,
@@ -22,6 +27,7 @@ from mvp.autotrade_mvp.provider_transport import (
     _kraken_spot_exact_trading_response,
     _whitebit_exact_trading_response,
 )
+from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 
 
 class EmptyWriteResidualCurrentTests(unittest.TestCase):
@@ -245,6 +251,68 @@ class EmptyWriteResidualCurrentTests(unittest.TestCase):
                         '{"api_key":"synthetic","api_secret":"synthetic"}'
                     ))
                 self.assertEqual(callbacks, [])
+
+    def test_kraken_legacy_nonce_history_rejects_noncanonical_builtin_handle_text(self):
+        fixed = datetime(2026, 10, 6, 8, 0, tzinfo=timezone.utc)
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            legacy_scope = {
+                "credential_handle_id": " legacy-trade ",
+                "credential_generation": 1,
+            }
+            aggregate_material = (
+                "acct-kraken|LIVE|"
+                + json.dumps(
+                    legacy_scope,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                )
+            )
+            aggregate_id = (
+                "KRAKEN:"
+                + sha256(aggregate_material.encode("utf-8")).hexdigest()
+            )
+            payload = {
+                "provider_id": "KRAKEN",
+                "account_id": "acct-kraken",
+                "environment": "LIVE",
+                "nonce": 700,
+                **legacy_scope,
+            }
+            store.append_event(
+                {
+                    "event_id": "legacy-noncanonical-handle",
+                    "event_type": "ProviderNonceAllocated",
+                    "aggregate_type": "provider_nonce",
+                    "aggregate_id": aggregate_id,
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": fixed.isoformat().replace("+00:00", "Z"),
+                }
+            )
+
+            handle = PersistentCredentialHandle(
+                handle_id="current-trade",
+                account_id="acct-kraken",
+                provider="KRAKEN",
+                environment="LIVE",
+                purpose="TRADE",
+                generation=1,
+            )
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "legacy nonce scope is invalid",
+            ):
+                KrakenSpotDurableNonceAllocator(
+                    journal=store,
+                    account_id="acct-kraken",
+                    environment="LIVE",
+                    credential_handle=handle,
+                    clock_millis=lambda: 100,
+                    clock_utc=lambda: fixed,
+                )
 
     def test_binance_signer_rejects_hostile_parameter_value_before_strip(self):
         callbacks = []

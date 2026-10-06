@@ -2010,6 +2010,7 @@ class KrakenSpotDurableNonceAllocator:
             if (
                 type(handle_id) is not str
                 or not handle_id
+                or handle_id != handle_id.strip()
                 or any(ord(character) < 0x20 for character in handle_id)
                 or isinstance(generation, bool)
                 or not isinstance(generation, int)

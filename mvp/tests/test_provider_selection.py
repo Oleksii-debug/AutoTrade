@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -168,6 +168,18 @@ def accepted_spot_q(
     return record, receipt, protocol
 
 
+class _HostileTimezone(tzinfo):
+    calls = 0
+
+    def utcoffset(self, _dt):
+        type(self).calls += 1
+        raise AssertionError("hostile timezone callback executed")
+
+    def dst(self, _dt):
+        type(self).calls += 1
+        raise AssertionError("hostile timezone callback executed")
+
+
 class ProviderSelectionTests(unittest.TestCase):
     def authorities(self, directory: str, *, unsupported=()):
         journal = JournalStore(Path(directory) / "journal.sqlite3")
@@ -201,6 +213,33 @@ class ProviderSelectionTests(unittest.TestCase):
             receipt=receipt,
         )
         return capabilities, qualifications, record
+
+    def test_selection_rejects_executable_timezone_before_callback(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            _HostileTimezone.calls = 0
+            hostile_at = datetime(
+                2026,
+                10,
+                6,
+                9,
+                0,
+                tzinfo=_HostileTimezone(),
+            )
+
+            with self.assertRaisesRegex(
+                ProviderSelectionError,
+                "exact stdlib timezone datetime",
+            ):
+                select_provider(
+                    request(),
+                    [candidate()],
+                    at=hostile_at,
+                    capability_registry=capabilities,
+                    qualification_registry=qualifications,
+                )
+
+            self.assertEqual(_HostileTimezone.calls, 0)
 
     def test_candidate_contains_no_caller_capability_or_qualification_authority(self):
         route = candidate()

@@ -213,6 +213,41 @@ class VerticalSliceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "side must be BUY or SELL"):
                 run_vertical_slice([100, 101, 102, 103], directory)
 
+    def test_restart_rejects_self_consistent_fill_that_differs_from_durable_intent(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            fill = next(iter(checkpoint["fills"].values()))
+            posting = checkpoint["postings"][0]
+            forged_quantity = Decimal(fill["quantity"]) + Decimal("1")
+            price = Decimal(fill["price"])
+            fee = Decimal(fill["fee"])
+            fill["quantity"] = str(forged_quantity)
+            posting["position_delta"] = str(forged_quantity)
+            posting["cash_delta"] = str(-(forged_quantity * price) - fee)
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "durable order intent does not match fill",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_requires_durable_intent_for_each_restored_fill(self):
+        with TemporaryDirectory() as directory:
+            result = run_vertical_slice([100, 101, 102, 103], directory)
+            intent_path = (
+                Path(directory) / "order-intents" / f"{result.order_id}.json"
+            )
+            intent_path.unlink()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "durable order intent is unavailable",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
     def test_restart_rejects_fill_symbol_outside_run_scope(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

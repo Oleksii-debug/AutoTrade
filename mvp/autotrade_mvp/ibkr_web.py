@@ -38,11 +38,48 @@ class IbkrWebAdapterError(ValueError):
 
 
 IBKR_WEB_BROKERAGE_STATUS_ENDPOINT = "/iserver/auth/status"
+IBKR_WEB_BROKERAGE_ACCOUNTS_ENDPOINT = "/iserver/accounts"
+
+# Source-owned parser identity for the exact provider response used by
+# brokerage-account membership. This is a semantic Q/C contract only; it
+# grants no provider qualification or network authority.
+IBKR_BROKERAGE_ACCOUNTS_PARSER_IDENTITY = "IBKR_BROKERAGE_ACCOUNTS_V1_JSON_V1"
+IBKR_BROKERAGE_ACCOUNTS_PARSER_VERSION = "1.0.0"
+_IBKR_BROKERAGE_ACCOUNTS_PARSER_CONTRACT = {
+    "endpoint": IBKR_WEB_BROKERAGE_ACCOUNTS_ENDPOINT,
+    "surface": "AUTHENTICATED_READ",
+    "permission_scope": "ORDER.READ",
+    "query": {},
+    "payload": {
+        "accounts": "non_empty_unique_canonical_array",
+        "selectedAccount": "canonical_member_of_accounts",
+        "sessionId": "canonical_non_empty_text",
+        "isPaper": "exact_boolean_matching_runtime_environment",
+    },
+    "authority": {
+        "account_scope_must_be_member": True,
+        "observation_time_must_be_causal": True,
+        "post_mint_mutation_rejected": True,
+    },
+}
+IBKR_BROKERAGE_ACCOUNTS_PARSER_CONTRACT_DIGEST = (
+    "sha256:" + hashlib.sha256(
+        json.dumps(
+            _IBKR_BROKERAGE_ACCOUNTS_PARSER_CONTRACT,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+)
 
 
 IBKR_WEB_DOCS = MappingProxyType(
     {
         "session": "https://www.interactivebrokers.com/docs/web-api/trading/trading-sessions-in-the-web-api",
+        "auth_status": "https://www.interactivebrokers.com/docs/web-api/api-reference/trading/trading-session/get-brokerage-status",
+        "brokerage_accounts": "https://www.interactivebrokers.com/docs/web-api/v1/endpoints/accounts/receive-brokerage-accounts",
         "place_order": "https://www.interactivebrokers.com/docs/web-api/v1/endpoints/orders/place-order",
         "modify_order": "https://www.interactivebrokers.com/docs/web-api/api-reference/trading/trading-orders/modify-open-order",
         "execution": "https://www.interactivebrokers.com/docs/tws-api/ref/execution",
@@ -500,6 +537,353 @@ del _install_ibkr_brokerage_session_observation_authority
 
 
 @dataclass(frozen=True)
+class IbkrBrokerageAccountsObservation:
+    """Source-bound tradeable-account membership for one observed IBKR session."""
+
+    accounts: tuple[str, ...]
+    selected_account: str
+    session_id: str
+    is_paper: bool
+    observed_at: datetime
+
+    def __post_init__(self) -> None:
+        if type(self.accounts) is not tuple or not self.accounts:
+            raise IbkrWebAdapterError(
+                "brokerage accounts must be a non-empty exact tuple"
+            )
+        normalized: list[str] = []
+        for account_id in self.accounts:
+            if (
+                type(account_id) is not str
+                or not account_id
+                or account_id != account_id.strip()
+            ):
+                raise IbkrWebAdapterError(
+                    "brokerage account ids must be canonical exact text"
+                )
+            normalized.append(account_id)
+        if len(set(normalized)) != len(normalized):
+            raise IbkrWebAdapterError("brokerage account ids must be unique")
+        if (
+            type(self.selected_account) is not str
+            or not self.selected_account
+            or self.selected_account != self.selected_account.strip()
+        ):
+            raise IbkrWebAdapterError(
+                "selected brokerage account must be canonical exact text"
+            )
+        if self.selected_account not in self.accounts:
+            raise IbkrWebAdapterError(
+                "selected brokerage account must be present in brokerage accounts"
+            )
+        if (
+            type(self.session_id) is not str
+            or not self.session_id
+            or self.session_id != self.session_id.strip()
+        ):
+            raise IbkrWebAdapterError(
+                "brokerage session id must be canonical exact text"
+            )
+        if type(self.is_paper) is not bool:
+            raise TypeError("brokerage is_paper must be exact boolean")
+        object.__setattr__(
+            self,
+            "observed_at",
+            _instant(self.observed_at, name="brokerage accounts observed_at"),
+        )
+
+
+def _install_ibkr_brokerage_accounts_observation_authority():
+    """Bind /iserver/accounts membership to exact authenticated response bytes."""
+
+    accounts_type = IbkrBrokerageAccountsObservation
+    observation_type = ProviderResponseObservation
+    canonical_require_scope = provider_response_observation_require_scope
+    canonical_instant = _instant
+    canonical_text = _text
+    mapping_proxy_type = MappingProxyType
+    surface = Surface.AUTHENTICATED_READ
+    accounts_endpoint = IBKR_WEB_BROKERAGE_ACCOUNTS_ENDPOINT
+    datetime_type = datetime
+    object_getattribute = object.__getattribute__
+    canonical_type = type
+    canonical_id = id
+    canonical_set = set
+    weakref = weakref_ref
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+    def authority_changed() -> None:
+        raise IbkrWebAdapterError(
+            "IBKR brokerage accounts observation authority changed"
+        )
+
+    def implementation_changed() -> None:
+        if (
+            IbkrBrokerageAccountsObservation is not accounts_type
+            or ProviderResponseObservation is not observation_type
+            or provider_response_observation_require_scope is not canonical_require_scope
+            or IBKR_WEB_BROKERAGE_ACCOUNTS_ENDPOINT != accounts_endpoint
+            or datetime is not datetime_type
+            or _instant is not canonical_instant
+            or _text is not canonical_text
+        ):
+            authority_changed()
+
+    def prune() -> None:
+        for object_id, (value_ref, _snapshot) in tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def from_observation(
+        observation: ProviderResponseObservation,
+    ) -> IbkrBrokerageAccountsObservation:
+        implementation_changed()
+        if canonical_type(observation) is not observation_type:
+            raise TypeError(
+                "observation must be exact ProviderResponseObservation"
+            )
+        projection = canonical_require_scope(
+            observation,
+            provider_id="IBKR",
+            surface=surface,
+            endpoint=accounts_endpoint,
+        )
+        query = projection["query"]
+        permission_scope = projection["permission_scope"]
+        if canonical_type(query) is not mapping_proxy_type or len(query) != 0:
+            raise IbkrWebAdapterError(
+                "brokerage accounts requires an empty authenticated query"
+            )
+        if permission_scope != "ORDER.READ":
+            raise IbkrWebAdapterError(
+                "brokerage accounts requires ORDER.READ scope"
+            )
+
+        payload = projection["payload"]
+        if canonical_type(payload) is not mapping_proxy_type:
+            raise IbkrWebAdapterError(
+                "brokerage accounts payload must be an exact provider object"
+            )
+        raw_accounts = payload.get("accounts")
+        if canonical_type(raw_accounts) is not tuple or not raw_accounts:
+            raise IbkrWebAdapterError(
+                "brokerage accounts payload accounts must be a non-empty array"
+            )
+        accounts: list[str] = []
+        for account_id in raw_accounts:
+            if (
+                canonical_type(account_id) is not str
+                or not account_id
+                or account_id != account_id.strip()
+            ):
+                raise IbkrWebAdapterError(
+                    "brokerage account ids must be canonical exact text"
+                )
+            accounts.append(account_id)
+        if len(canonical_set(accounts)) != len(accounts):
+            raise IbkrWebAdapterError(
+                "brokerage accounts payload contains duplicate account ids"
+            )
+        selected_account = payload.get("selectedAccount")
+        session_id = payload.get("sessionId")
+        is_paper = payload.get("isPaper")
+        if (
+            canonical_type(selected_account) is not str
+            or not selected_account
+            or selected_account != selected_account.strip()
+        ):
+            raise IbkrWebAdapterError(
+                "selected brokerage account must be canonical exact text"
+            )
+        if selected_account not in accounts:
+            raise IbkrWebAdapterError(
+                "selected brokerage account is absent from provider accounts"
+            )
+        if (
+            canonical_type(session_id) is not str
+            or not session_id
+            or session_id != session_id.strip()
+        ):
+            raise IbkrWebAdapterError(
+                "brokerage session id must be canonical exact text"
+            )
+        if canonical_type(is_paper) is not bool:
+            raise IbkrWebAdapterError(
+                "brokerage isPaper must be exact boolean"
+            )
+
+        observed_text = projection["observed_at"]
+        if (
+            canonical_type(observed_text) is not str
+            or not observed_text.endswith("Z")
+        ):
+            raise IbkrWebAdapterError(
+                "brokerage accounts observation time must be canonical UTC text"
+            )
+        try:
+            observed_at = datetime_type.fromisoformat(
+                observed_text[:-1] + "+00:00"
+            )
+        except ValueError as error:
+            raise IbkrWebAdapterError(
+                "brokerage accounts observation time must be canonical UTC text"
+            ) from error
+        observed_at = canonical_instant(
+            observed_at,
+            name="brokerage accounts observed_at",
+        )
+
+        bound_account_id = projection["account_id"]
+        bound_environment = projection["environment"]
+        evidence_ref = projection["evidence_ref"]
+        response_sha256 = projection["response_sha256"]
+        if (
+            canonical_type(bound_account_id) is not str
+            or canonical_type(bound_environment) is not str
+            or canonical_type(evidence_ref) is not str
+            or canonical_type(response_sha256) is not str
+        ):
+            authority_changed()
+        if bound_account_id not in accounts:
+            raise IbkrWebAdapterError(
+                "authenticated brokerage account scope is absent from provider accounts"
+            )
+        expected_is_paper = bound_environment == "PAPER"
+        if bound_environment not in {"PAPER", "LIVE"}:
+            raise IbkrWebAdapterError(
+                "brokerage accounts environment must be PAPER or LIVE"
+            )
+        if is_paper is not expected_is_paper:
+            raise IbkrWebAdapterError(
+                "provider isPaper does not match authenticated environment"
+            )
+
+        value = accounts_type(
+            accounts=tuple(accounts),
+            selected_account=selected_account,
+            session_id=session_id,
+            is_paper=is_paper,
+            observed_at=observed_at,
+        )
+        prune()
+        object_id = canonical_id(value)
+        current = states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise IbkrWebAdapterError(
+                "brokerage accounts observation identity collision"
+            )
+        states[object_id] = (
+            weakref(value),
+            (
+                tuple(accounts),
+                selected_account,
+                session_id,
+                is_paper,
+                observed_at,
+                bound_account_id,
+                bound_environment,
+                evidence_ref,
+                response_sha256,
+            ),
+        )
+        return value
+
+    def require(
+        value: IbkrBrokerageAccountsObservation,
+        *,
+        account_id: str,
+        environment: str,
+    ) -> tuple[tuple[str, ...], str, str, bool, datetime, str, str]:
+        implementation_changed()
+        if canonical_type(value) is not accounts_type:
+            raise TypeError(
+                "accounts must be exact IbkrBrokerageAccountsObservation"
+            )
+        current_accounts = object_getattribute(value, "accounts")
+        current_selected = object_getattribute(value, "selected_account")
+        current_session_id = object_getattribute(value, "session_id")
+        current_is_paper = object_getattribute(value, "is_paper")
+        current_observed_at = canonical_instant(
+            object_getattribute(value, "observed_at"),
+            name="accounts.observed_at",
+        )
+        if (
+            canonical_type(current_accounts) is not tuple
+            or not current_accounts
+            or any(
+                canonical_type(account_id) is not str
+                for account_id in current_accounts
+            )
+            or canonical_type(current_selected) is not str
+            or canonical_type(current_session_id) is not str
+            or canonical_type(current_is_paper) is not bool
+        ):
+            raise IbkrWebAdapterError(
+                "brokerage accounts changed after authenticated provider observation"
+            )
+
+        prune()
+        state = states.get(canonical_id(value))
+        if state is None or state[0]() is not value:
+            raise IbkrWebAdapterError(
+                "brokerage accounts must come from authenticated "
+                "/iserver/accounts provider observation"
+            )
+        (
+            accounts,
+            selected_account,
+            session_id,
+            is_paper,
+            observed_at,
+            bound_account_id,
+            bound_environment,
+            evidence_ref,
+            response_sha256,
+        ) = state[1]
+        if (
+            current_accounts != accounts
+            or current_selected != selected_account
+            or current_session_id != session_id
+            or current_is_paper is not is_paper
+            or current_observed_at != observed_at
+        ):
+            raise IbkrWebAdapterError(
+                "brokerage accounts changed after authenticated provider observation"
+            )
+        expected_account = canonical_text(account_id, name="account_id")
+        expected_environment = canonical_text(
+            environment,
+            name="environment",
+        ).upper()
+        if bound_account_id != expected_account:
+            raise IbkrWebAdapterError(
+                "brokerage accounts scope does not match order account"
+            )
+        if bound_environment != expected_environment:
+            raise IbkrWebAdapterError(
+                "brokerage accounts environment does not match order authority"
+            )
+        return (
+            accounts,
+            selected_account,
+            session_id,
+            is_paper,
+            observed_at,
+            evidence_ref,
+            response_sha256,
+        )
+
+    return from_observation, require
+
+
+(
+    brokerage_accounts_from_observation,
+    _require_ibkr_brokerage_accounts_observation,
+) = _install_ibkr_brokerage_accounts_observation_authority()
+del _install_ibkr_brokerage_accounts_observation_authority
+
+
+@dataclass(frozen=True)
 class IbkrContractIdentity:
     conid: int | None = None
     conidex: str | None = None
@@ -834,9 +1218,12 @@ def _prepare_normalized_order_impl(
     client_order_id: str,
     capability: CapabilitySnapshot,
     session: IbkrBrokerageSessionStatus,
+    accounts: IbkrBrokerageAccountsObservation,
     at: datetime,
     maximum_session_age_seconds: int,
+    maximum_accounts_age_seconds: int,
     _require_session_authority,
+    _require_accounts_authority,
     _capability_admits,
     _intent_create,
     _validate_client_order_id,
@@ -856,6 +1243,10 @@ def _prepare_normalized_order_impl(
         raise TypeError("capability must be exact CapabilitySnapshot")
     if type(session) is not IbkrBrokerageSessionStatus:
         raise TypeError("session must be exact IbkrBrokerageSessionStatus")
+    if type(accounts) is not IbkrBrokerageAccountsObservation:
+        raise TypeError(
+            "accounts must be exact IbkrBrokerageAccountsObservation"
+        )
 
     raw_contract = intent.contract
     if type(raw_contract) is not IbkrContractIdentity:
@@ -888,6 +1279,13 @@ def _prepare_normalized_order_impl(
     ):
         raise IbkrWebAdapterError(
             "maximum_session_age_seconds must be a non-negative integer"
+        )
+    if (
+        type(maximum_accounts_age_seconds) is not int
+        or maximum_accounts_age_seconds < 0
+    ):
+        raise IbkrWebAdapterError(
+            "maximum_accounts_age_seconds must be a non-negative integer"
         )
     for field in ("connected", "authenticated", "established", "competing"):
         if type(getattr(session, field)) is not bool:
@@ -935,6 +1333,37 @@ def _prepare_normalized_order_impl(
         account_id=sealed_intent.account_id,
         environment=capability_environment,
     )
+    (
+        provider_accounts,
+        _selected_account,
+        _provider_session_id,
+        _is_paper,
+        accounts_observed_at,
+        _accounts_evidence_ref,
+        _accounts_response_sha256,
+    ) = _require_accounts_authority(
+        accounts,
+        account_id=sealed_intent.account_id,
+        environment=capability_environment,
+    )
+    if accounts_observed_at < session_observed_at:
+        raise IbkrWebAdapterError(
+            "brokerage accounts evidence predates authenticated session status"
+        )
+    if accounts_observed_at > point:
+        raise IbkrWebAdapterError(
+            "brokerage accounts evidence is from the future"
+        )
+    if point - accounts_observed_at > timedelta(
+        seconds=maximum_accounts_age_seconds
+    ):
+        raise IbkrWebAdapterError(
+            "brokerage accounts evidence is stale"
+        )
+    if sealed_intent.account_id not in provider_accounts:
+        raise IbkrWebAdapterError(
+            "intent account is absent from provider-derived brokerage accounts"
+        )
     if not _capability_admits(
         capability,
         at=point,
@@ -982,6 +1411,7 @@ def _prepare_normalized_order_impl(
 def _bind_prepare_normalized_order(
     implementation,
     require_session_authority,
+    require_accounts_authority,
     capability_admits,
     intent_create,
     validate_client_order_id,
@@ -996,17 +1426,22 @@ def _bind_prepare_normalized_order(
         client_order_id: str,
         capability: CapabilitySnapshot,
         session: IbkrBrokerageSessionStatus,
+        accounts: IbkrBrokerageAccountsObservation,
         at: datetime,
         maximum_session_age_seconds: int,
+        maximum_accounts_age_seconds: int,
     ) -> IbkrNormalizedOrder:
         return implementation(
             intent,
             client_order_id=client_order_id,
             capability=capability,
             session=session,
+            accounts=accounts,
             at=at,
             maximum_session_age_seconds=maximum_session_age_seconds,
+            maximum_accounts_age_seconds=maximum_accounts_age_seconds,
             _require_session_authority=require_session_authority,
+            _require_accounts_authority=require_accounts_authority,
             _capability_admits=capability_admits,
             _intent_create=intent_create,
             _validate_client_order_id=validate_client_order_id,
@@ -1020,6 +1455,7 @@ def _bind_prepare_normalized_order(
 prepare_normalized_order = _bind_prepare_normalized_order(
     _prepare_normalized_order_impl,
     _require_ibkr_brokerage_session_observation,
+    _require_ibkr_brokerage_accounts_observation,
     CapabilitySnapshot.admits,
     IbkrWebOrderIntent.create,
     validate_coid,
@@ -1029,6 +1465,7 @@ prepare_normalized_order = _bind_prepare_normalized_order(
 del _bind_prepare_normalized_order
 del _prepare_normalized_order_impl
 del _require_ibkr_brokerage_session_observation
+del _require_ibkr_brokerage_accounts_observation
 
 
 @dataclass(frozen=True)

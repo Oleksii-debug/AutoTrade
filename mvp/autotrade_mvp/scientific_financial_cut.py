@@ -120,6 +120,7 @@ class ScientificFinancialCut:
     account_id: str
     environment: str
     reconciliation_event_id: str
+    reconciliation_journal_sequence: int
     journal_sequence: int
     journal_population_digest: str
     reconciliation_checkpoint_digest: str
@@ -146,8 +147,19 @@ class ScientificFinancialCut:
                 field_name,
                 _sha256(getattr(self, field_name), name=field_name),
             )
+        if (
+            type(self.reconciliation_journal_sequence) is not int
+            or self.reconciliation_journal_sequence <= 0
+        ):
+            raise ValueError(
+                "reconciliation_journal_sequence must be a positive integer"
+            )
         if type(self.journal_sequence) is not int or self.journal_sequence < 0:
             raise ValueError("journal_sequence must be a non-negative integer")
+        if self.reconciliation_journal_sequence > self.journal_sequence:
+            raise ValueError(
+                "reconciliation_journal_sequence cannot exceed journal_sequence"
+            )
         subject = {
             "schema": "autotrade.scientific-financial-cut.v2",
             "scientific_protocol_id": self.scientific_protocol_id,
@@ -156,6 +168,7 @@ class ScientificFinancialCut:
             "account_id": self.account_id,
             "environment": self.environment,
             "reconciliation_event_id": self.reconciliation_event_id,
+            "reconciliation_journal_sequence": self.reconciliation_journal_sequence,
             "journal_sequence": self.journal_sequence,
             "journal_population_digest": self.journal_population_digest,
             "reconciliation_checkpoint_digest": self.reconciliation_checkpoint_digest,
@@ -239,6 +252,15 @@ def capture_current_scientific_financial_cut(
             "financial journal changed while the scientific financial cut was captured"
         )
     checkpoint = _exact_dict(checkpoint, name="reconciliation_checkpoint")
+    reconciliation_sequence = checkpoint.get("journal_sequence")
+    if type(reconciliation_sequence) is not int or reconciliation_sequence <= 0:
+        raise FinancialCutConflict(
+            "reconciliation checkpoint lacks durable journal sequence"
+        )
+    if reconciliation_sequence > frozen_sequence:
+        raise FinancialCutConflict(
+            "reconciliation checkpoint crossed the frozen financial cut"
+        )
 
     population_digest = payload_digest(journal_population)
     reconciliation_digest = payload_digest(checkpoint)
@@ -249,6 +271,7 @@ def capture_current_scientific_financial_cut(
         account_id=account,
         environment=env,
         reconciliation_event_id=checkpoint_id,
+        reconciliation_journal_sequence=reconciliation_sequence,
         journal_sequence=frozen_sequence,
         journal_population_digest=population_digest,
         reconciliation_checkpoint_digest=reconciliation_digest,

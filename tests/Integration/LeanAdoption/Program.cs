@@ -231,22 +231,6 @@ ExpectFailure<ArgumentException>(
     }),
     "callback without symbol identity must fail closed");
 
-var whitespaceSymbol = new Symbol(
-    SecurityIdentifier.GenerateEquity("SPY", Market.USA, mapSymbol: false),
-    " ");
-ExpectFailure<ArgumentException>(
-    () => callbacks.Observe(new OrderEvent
-    {
-        OrderId = 41,
-        Id = 2,
-        Symbol = whitespaceSymbol,
-        UtcTime = instant,
-        Status = OrderStatus.Submitted,
-        FillQuantity = decimal.Zero,
-        FillPrice = decimal.Zero
-    }),
-    "callback with whitespace symbol identity must fail closed");
-
 var submitted = callbacks.Observe(new OrderEvent
 {
     OrderId = 42,

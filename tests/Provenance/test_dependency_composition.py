@@ -499,11 +499,34 @@ project = "not-a-table"
             )
 
 
+    def test_restore_environment_authority_is_rejected_in_flow_and_runtime_export(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "src" / "ReleaseApp" / "ReleaseApp.csproj"
+            project.parent.mkdir(parents=True)
+            project.write_text("<Project />\n", encoding="utf-8")
+            (project.parent / "packages.lock.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "dependencies": {
+                            "net10.0": {
+                                "ReleaseApp": {"type": "Project"}
+                            }
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
+            workflow.parent.mkdir(parents=True)
+
             workflow.write_text(
                 'paths:\n'
                 '  - "src/**/packages.lock.json"\n'
-                "env:\n"
-                "  RestoreForceEvaluate: true\n"
+                "env: { RestoreForceEvaluate: true }\n"
                 "steps:\n"
                 "  - run: dotnet restore src/ReleaseApp/ReleaseApp.csproj --locked-mode\n",
                 encoding="utf-8",
@@ -513,7 +536,24 @@ project = "not-a-table"
                 [
                     "DOTNET_RESTORE_ENVIRONMENT_AUTHORITY_UNSUPPORTED:"
                     ".github/workflows/dotnet-foundation.yml:"
-                    "4:RestoreForceEvaluate"
+                    "3:RestoreForceEvaluate"
+                ],
+            )
+
+            workflow.write_text(
+                'paths:\n'
+                '  - "src/**/packages.lock.json"\n'
+                "steps:\n"
+                '  - run: echo "NuGetLockFilePath=artifacts/other.lock.json" >> "$GITHUB_ENV"\n'
+                "  - run: dotnet restore src/ReleaseApp/ReleaseApp.csproj --locked-mode\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project]),
+                [
+                    "DOTNET_RESTORE_ENVIRONMENT_AUTHORITY_UNSUPPORTED:"
+                    ".github/workflows/dotnet-foundation.yml:"
+                    "4:NuGetLockFilePath"
                 ],
             )
 

@@ -298,6 +298,23 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             [],
         )
 
+    def test_workflow_restore_authority_cannot_hide_in_flow_or_runtime_export(self):
+        findings = dotnet_restore_workflow_environment_authority_lines(
+            "env: { RestoreForceEvaluate: true }\n"
+            "steps:\n"
+            "  - run: echo \"NuGetLockFilePath=artifacts/other.lock.json\" >> \"$GITHUB_ENV\"\n"
+            "  \"NuGetLockFilePath\": artifacts/third.lock.json\n"
+            "# RestoreForceEvaluate: comment-only text\n"
+        )
+        self.assertEqual(
+            findings,
+            [
+                (1, "RestoreForceEvaluate"),
+                (3, "NuGetLockFilePath"),
+                (4, "NuGetLockFilePath"),
+            ],
+        )
+
     def test_current_canonical_restore_targets_exist(self):
         root = Path(__file__).resolve().parents[2]
         workflow = (

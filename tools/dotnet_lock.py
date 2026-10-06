@@ -106,7 +106,14 @@ def dotnet_restore_workflow_commands(
 def dotnet_restore_workflow_environment_authority_lines(
     workflow_text: str,
 ) -> list[tuple[int, str]]:
-    """Find source-controlled workflow environment keys that can replace lock authority."""
+    """Find source-controlled workflow text that can replace lock authority.
+
+    These MSBuild/NuGet property names are forbidden anywhere in executable
+    workflow YAML, not only as block-style env keys. GitHub Actions can
+    establish them through flow mappings, quoted keys or writes to GITHUB_ENV
+    before a later restore, so qualification fails closed on every non-comment
+    source occurrence.
+    """
     if type(workflow_text) is not str:
         raise TypeError("workflow text must be exact str")
 
@@ -114,19 +121,25 @@ def dotnet_restore_workflow_environment_authority_lines(
         name.casefold(): name
         for name in _DOTNET_RESTORE_ENVIRONMENT_AUTHORITY
     }
+    authority_text = re.compile(
+        r"(?<![A-Za-z0-9_])("
+        + "|".join(re.escape(name) for name in _DOTNET_RESTORE_ENVIRONMENT_AUTHORITY)
+        + r")(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    )
     findings: list[tuple[int, str]] = []
+    seen: set[tuple[int, str]] = set()
     for line_number, raw in enumerate(workflow_text.splitlines(), start=1):
         stripped = raw.lstrip()
         if not stripped or stripped.startswith("#"):
             continue
-        match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)[ \t]*:", stripped)
-        if match is None:
-            continue
-        canonical = names.get(match.group(1).casefold())
-        if canonical is not None:
-            findings.append((line_number, canonical))
+        for match in authority_text.finditer(stripped):
+            canonical = names[match.group(1).casefold()]
+            finding = (line_number, canonical)
+            if finding not in seen:
+                findings.append(finding)
+                seen.add(finding)
     return findings
-
 
 def dotnet_restore_command_tokens(command: str) -> tuple[str, ...]:
     """Parse one canonical YAML run-line dotnet restore command."""

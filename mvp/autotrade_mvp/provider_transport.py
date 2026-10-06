@@ -585,6 +585,14 @@ IBKR_WEB_AUTHENTICATED_READ_ENDPOINTS: Mapping[
 )
 
 
+IBKR_WEB_AUTHENTICATED_READ_METHODS: Mapping[str, str] = MappingProxyType(
+    {
+        "/iserver/auth/status": "POST",
+        "/iserver/accounts": "GET",
+    }
+)
+
+
 _BYBIT_OPTION_DELIVERY_ENDPOINT = "/v5/asset/delivery-record"
 _BYBIT_OPTION_DELIVERY_QUERY_FIELDS = frozenset(
     {"category", "symbol", "startTime", "endTime", "expDate", "limit", "cursor"}
@@ -4485,12 +4493,6 @@ class IbkrWebAuthenticatedReadSigner:
     """Pure OAuth2 direct-Web-API request builder for qualified read endpoints."""
 
     _API_PREFIX = "/v1/api"
-    _METHODS = MappingProxyType(
-        {
-            "/iserver/auth/status": "POST",
-            "/iserver/accounts": "GET",
-        }
-    )
 
     @staticmethod
     def sign(
@@ -4518,7 +4520,7 @@ class IbkrWebAuthenticatedReadSigner:
                 "IBKR authenticated-read policy does not match exact environment"
             )
         _ibkr_authenticated_read_rule(query_binding)
-        method = IbkrWebAuthenticatedReadSigner._METHODS.get(
+        method = IBKR_WEB_AUTHENTICATED_READ_METHODS.get(
             query_binding.endpoint
         )
         if method is None:

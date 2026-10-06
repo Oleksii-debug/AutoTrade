@@ -754,6 +754,13 @@ class SupplyChainQualification:
     checks: tuple[tuple[str, str], ...]
     reason_codes: tuple[str, ...]
     release_authority: bool = False
+    accepted_attestation_id: str | None = None
+    accepted_attestation_digest: str | None = None
+    accepted_policy_id: str | None = None
+    accepted_trust_root_id: str | None = None
+    subject_requirement: str | None = None
+    release_artifact_id: str | None = None
+    release_artifact_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _required_text(self.qualification_id, "qualification_id")
@@ -774,6 +781,30 @@ class SupplyChainQualification:
             _required_text(reason, "reason_code")
         if len(self.reason_codes) != len(set(self.reason_codes)):
             raise ValueError("reason_codes must be unique")
+        for name, value in (
+            ("accepted_attestation_id", self.accepted_attestation_id),
+            ("accepted_policy_id", self.accepted_policy_id),
+            ("accepted_trust_root_id", self.accepted_trust_root_id),
+            ("subject_requirement", self.subject_requirement),
+        ):
+            if value is not None:
+                _required_text(value, name)
+        if self.accepted_attestation_digest is not None:
+            try:
+                _sha256(self.accepted_attestation_digest, "accepted_attestation_digest")
+            except ValueError as error:
+                raise ValueError(
+                    "accepted_attestation_digest must use sha256"
+                ) from error
+        if (self.release_artifact_id is None) != (
+            self.release_artifact_sha256 is None
+        ):
+            raise ValueError(
+                "release_artifact_id and release_artifact_sha256 must be supplied together"
+            )
+        if self.release_artifact_id is not None:
+            _artifact_id(self.release_artifact_id, "release_artifact_id")
+            _sha256(self.release_artifact_sha256, "release_artifact_sha256")
         if type(self.release_authority) is not bool:
             raise TypeError("release_authority must be boolean")
         if self.release_authority:
@@ -835,6 +866,8 @@ def qualify_supply_chain(
 ) -> SupplyChainQualification:
     if type(evidence) is not SupplyChainEvidence:
         raise TypeError("evidence must be SupplyChainEvidence")
+    evidence = _snapshot_supply_chain_evidence(evidence)
+    subject_requirement = supply_chain_subject_requirement(evidence)
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
         raise TypeError(
             "evidence_store must be ArtifactStore (canonical exact type required)"
@@ -1025,9 +1058,15 @@ def qualify_supply_chain(
             _INCONCLUSIVE,
             "SUPPLY_CHAIN.TRUST_EVIDENCE_ROOT_INCOMPLETE",
         )
+    elif evidence.release_artifact_id is None:
+        record(
+            "independent_evidence_trust",
+            _INCONCLUSIVE,
+            "SUPPLY_CHAIN.DELIVERED_RELEASE_IDENTITY_MISSING",
+        )
     else:
         try:
-            accepted_trust = verify_canonical_qualification_attestation(
+            accepted_review = verify_canonical_qualification_attestation(
                 trust_receipt,
                 evidence_store=evidence_store,
                 evidence_root=evidence_root,
@@ -1038,7 +1077,39 @@ def qualify_supply_chain(
                 expected_protocol_id="supply-chain-review-v1",
                 expected_protocol_version="1.0.0",
                 expected_requirement_id="independent-supply-chain-review",
+                expected_release_artifact_id=evidence.release_artifact_id,
+                expected_release_artifact_sha256=evidence.release_artifact_sha256,
             )
+            accepted_trust = accepted_review
+            review_identity = (
+                accepted_review.attestation_id,
+                accepted_review.attestation_digest,
+                accepted_review.policy_id,
+                accepted_review.trust_root_id,
+            )
+            accepted_subject = None
+            subject_identity = None
+            if subject_requirement in accepted_review.requirement_ids:
+                accepted_subject = verify_canonical_qualification_attestation(
+                    trust_receipt,
+                    evidence_store=evidence_store,
+                    evidence_root=evidence_root,
+                    expected_source_sha=evidence.release_commit_sha,
+                    expected_domain="SUPPLY_CHAIN",
+                    expected_gate="RELEASE",
+                    expected_package_id="WP-64",
+                    expected_protocol_id="supply-chain-review-v1",
+                    expected_protocol_version="1.0.0",
+                    expected_requirement_id=subject_requirement,
+                    expected_release_artifact_id=evidence.release_artifact_id,
+                    expected_release_artifact_sha256=evidence.release_artifact_sha256,
+                )
+                subject_identity = (
+                    accepted_subject.attestation_id,
+                    accepted_subject.attestation_digest,
+                    accepted_subject.policy_id,
+                    accepted_subject.trust_root_id,
+                )
 
             expected_refs = {
                 (
@@ -1099,7 +1170,16 @@ def qualify_supply_chain(
                 )
                 for ref in accepted_trust.evidence_refs
             }
-            if attested_refs != expected_refs:
+            if (
+                subject_identity is None
+                or review_identity != subject_identity
+            ):
+                record(
+                    "independent_evidence_trust",
+                    _FAIL,
+                    "SUPPLY_CHAIN.TRUST_SUBJECT_MISMATCH",
+                )
+            elif attested_refs != expected_refs:
                 record(
                     "independent_evidence_trust",
                     _FAIL,
@@ -1125,7 +1205,7 @@ def qualify_supply_chain(
                 _INCONCLUSIVE,
                 "SUPPLY_CHAIN.TRUST_ANCHOR_UNAVAILABLE",
             )
-        except QualificationTrustError:
+        except (QualificationTrustError, TypeError, ValueError):
             record(
                 "independent_evidence_trust",
                 _FAIL,
@@ -1345,45 +1425,43 @@ def qualify_supply_chain(
             "reasons": sorted(set(reasons)),
             "trust": (
                 None
-                if trust_receipt is None
+                if accepted_trust is None
                 else {
-                    "attestation_digest": (
-                        accepted_trust.attestation_digest
-                        if accepted_trust is not None
-                        else None
-                    ),
-                    "signature_sha256": (
-                        "sha256:"
-                        + sha256(
-                            accepted_trust.signature_b64.encode("ascii")
-                        ).hexdigest()
-                        if accepted_trust is not None
-                        else None
-                    ),
-                    "policy_id": (
-                        accepted_trust.policy_id
-                        if accepted_trust is not None
-                        else None
-                    ),
-                    "policy_version": (
-                        accepted_trust.policy_version
-                        if accepted_trust is not None
-                        else None
-                    ),
-                    "accepted_attestation_id": (
-                        accepted_trust.attestation_id
-                        if accepted_trust is not None
-                        else None
-                    ),
+                    "attestation_digest": accepted_trust.attestation_digest,
+                    "signature_sha256": "sha256:"
+                    + sha256(
+                        accepted_trust.signature_b64.encode("ascii")
+                    ).hexdigest(),
+                    "policy_id": accepted_trust.policy_id,
+                    "policy_version": accepted_trust.policy_version,
+                    "accepted_attestation_id": accepted_trust.attestation_id,
                 }
             ),
         },
         sort_keys=True,
         separators=(",", ":"),
     )
+    accepted_identity = (
+        None
+        if accepted_trust is None
+        else (
+            accepted_trust.attestation_id,
+            accepted_trust.attestation_digest,
+            accepted_trust.policy_id,
+            accepted_trust.trust_root_id,
+        )
+    )
     return SupplyChainQualification(
         "supply-" + sha256(canonical.encode("utf-8")).hexdigest()[:32],
         status,
         tuple(checks),
         tuple(dict.fromkeys(reasons)),
+        False,
+        None if accepted_identity is None else accepted_identity[0],
+        None if accepted_identity is None else accepted_identity[1],
+        None if accepted_identity is None else accepted_identity[2],
+        None if accepted_identity is None else accepted_identity[3],
+        subject_requirement if accepted_identity is not None else None,
+        evidence.release_artifact_id,
+        evidence.release_artifact_sha256,
     )

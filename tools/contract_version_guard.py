@@ -471,6 +471,53 @@ def contract_bytes(root: Path) -> dict[str, bytes]:
     return files
 
 
+
+def semantic_validator_surface(root: Path, manifest: dict) -> dict[str, object]:
+    """Return the canonical semantic-validator contract surface.
+
+    JSON Schema cannot express every cross-field validity rule. Validators
+    declared in contracts/manifest.json therefore form part of the public
+    contract. Their declaration and shared corpus are versioned together so a
+    semantic accept/reject change cannot hide behind a minor version bump.
+    """
+
+    declared = manifest.get("semantic_validators", [])
+    if declared is None:
+        declared = []
+    if not isinstance(declared, list):
+        raise ValueError("manifest semantic_validators must be an array")
+
+    result: dict[str, object] = {}
+    root_resolved = root.resolve()
+    for entry in declared:
+        if not isinstance(entry, dict):
+            raise ValueError("semantic validator declaration must be an object")
+        validator_id = entry.get("id")
+        corpus = entry.get("corpus")
+        if not isinstance(validator_id, str) or not validator_id:
+            raise ValueError("semantic validator id must be non-empty text")
+        if validator_id in result:
+            raise ValueError(f"duplicate semantic validator id: {validator_id}")
+        if not isinstance(corpus, str) or not corpus:
+            raise ValueError(
+                f"semantic validator {validator_id} corpus must be non-empty text"
+            )
+        corpus_path = (root / corpus).resolve()
+        if not corpus_path.is_relative_to(root_resolved):
+            raise ValueError(
+                f"semantic validator {validator_id} corpus escapes contract tree"
+            )
+        if not corpus_path.is_file():
+            raise ValueError(
+                f"semantic validator {validator_id} corpus does not exist: {corpus}"
+            )
+        corpus_payload = json.loads(corpus_path.read_text(encoding="utf-8"))
+        result[validator_id] = {
+            "declaration": entry,
+            "corpus": corpus_payload,
+        }
+    return result
+
 def evaluate(base_root: Path, current_root: Path) -> list[str]:
     base = load_manifest(base_root)
     current = load_manifest(current_root)
@@ -556,6 +603,17 @@ def evaluate(base_root: Path, current_root: Path) -> list[str]:
         if base_security_schemes[name] != current_security_schemes[name]
     )
 
+    base_semantic_validators = semantic_validator_surface(base_root, base)
+    current_semantic_validators = semantic_validator_surface(current_root, current)
+    changed_semantic_validators = sorted(
+        validator_id
+        for validator_id in (
+            set(base_semantic_validators) | set(current_semantic_validators)
+        )
+        if base_semantic_validators.get(validator_id)
+        != current_semantic_validators.get(validator_id)
+    )
+
     breaking_change = bool(
         removed_schemas
         or removed_defs
@@ -566,6 +624,7 @@ def evaluate(base_root: Path, current_root: Path) -> list[str]:
         or changed_default_security
         or removed_security_schemes
         or changed_security_schemes
+        or changed_semantic_validators
     )
     if breaking_change and current_version[0] <= base_version[0]:
         details = []
@@ -601,6 +660,11 @@ def evaluate(base_root: Path, current_root: Path) -> list[str]:
             details.append(
                 "changed OpenAPI security schemes: "
                 + ", ".join(changed_security_schemes)
+            )
+        if changed_semantic_validators:
+            details.append(
+                "changed semantic validators: "
+                + ", ".join(changed_semantic_validators)
             )
         errors.append("breaking contract change requires a new major version; " + "; ".join(details))
 

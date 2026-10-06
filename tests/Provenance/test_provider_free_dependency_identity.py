@@ -41,6 +41,53 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
             "gmBM3PPMWWJtoDzMg==",
         )
 
+
+    def test_repository_reviewed_license_evidence_is_stageable(self):
+        policy = strict_json_bytes(
+            (
+                candidate.ROOT
+                / "provenance/dotnet-package-rights.json"
+            ).read_bytes(),
+            label="NuGet package rights",
+        )
+        expected = {
+            record["expected_license_text_path"]
+            for record in policy["packages"]
+        }
+        self.assertTrue(expected)
+        for relative in expected:
+            with self.subTest(relative=relative):
+                self.assertTrue(candidate._source_path_selected(relative))
+                self.assertTrue((candidate.ROOT / relative).is_file())
+        self.assertEqual(
+            set(
+                candidate._require_staged_reviewed_license_evidence(
+                    candidate.ROOT
+                )
+            ),
+            expected,
+        )
+
+    def test_missing_reviewed_license_evidence_fails_staged_product(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy_dir = root / "provenance"
+            policy_dir.mkdir(parents=True)
+            (policy_dir / "dotnet-package-rights.json").write_text(
+                json.dumps({
+                    "schema_version": "1.0.0",
+                    "packages": [{
+                        "expected_license_text_path":
+                            "provenance/licenses/Missing.LICENSE.txt",
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ValueError, "absent from staged product"
+            ):
+                candidate._require_staged_reviewed_license_evidence(root)
+
     def test_sha512_archive_identity_is_verified_before_extraction(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

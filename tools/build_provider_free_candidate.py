@@ -26,6 +26,7 @@ from research.autotrade_research.artifacts.durable_publish import atomic_write_j
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PREFIXES = ('mvp/autotrade_mvp/', 'research/autotrade_research/',
                    'autotrade_numeric/', 'autotrade_foundation/')
+REVIEWED_LICENSE_PREFIX = 'provenance/licenses/'
 STATIC = ('web/src/index.html', 'web/src/app.js', 'web/src/host-api-routes.js', 'web/src/styles.css',
           'contracts/openapi/host-api.yaml', 'contracts/bindings/python/common_scalars.py',
           'src/AutoTrade.Desktop/packages.lock.json',
@@ -35,6 +36,23 @@ STATIC = ('web/src/index.html', 'web/src/app.js', 'web/src/host-api-routes.js', 
           'provenance/external-runtime-rights.json',
           'provenance/components.json',
           'provenance/reuse/autosport-neutral-primitives.json')
+
+
+def _source_path_selected(path):
+    if type(path) is not str or not path:
+        raise TypeError('source path selector requires exact non-empty str')
+    return (
+        (path.startswith(SOURCE_PREFIXES) and path.endswith('.py'))
+        or (
+            path.startswith('contracts/jsonschema/')
+            and path.endswith('.json')
+        )
+        or (
+            path.startswith(REVIEWED_LICENSE_PREFIX)
+            and path.endswith('.txt')
+        )
+        or path in STATIC
+    )
 
 
 def _write_new_payload_bytes(path, payload):
@@ -249,8 +267,7 @@ def stage_source(source_root, source_sha, destination, composition_path):
         paths = _git('ls-tree', '-r', '--name-only', source_sha, source_root=source_root).decode('utf-8', errors='strict').splitlines()
     except UnicodeDecodeError as error:
         raise ValueError('exact Git tree contains a non-UTF-8 product path') from error
-    selected = sorted(p for p in paths if (p.startswith(SOURCE_PREFIXES) and p.endswith('.py'))
-        or (p.startswith('contracts/jsonschema/') and p.endswith('.json')) or p in STATIC)
+    selected = sorted(p for p in paths if _source_path_selected(p))
     if not set(STATIC).issubset(selected) or 'mvp/autotrade_mvp/product_runtime.py' not in selected:
         raise ValueError('committed product composition is incomplete')
     destination.mkdir(parents=True, exist_ok=False)
@@ -431,6 +448,44 @@ def _require_copied_executable(expected, snapshot, *, label):
         raise ValueError(label + ' executable changed between admission and candidate copy')
 
 
+def _require_staged_reviewed_license_evidence(product_root):
+    policy = strict_json_bytes(
+        (product_root / 'provenance/dotnet-package-rights.json').read_bytes(),
+        label='staged NuGet package rights',
+    )
+    records = policy.get('packages') if type(policy) is dict else None
+    if (
+        type(policy) is not dict
+        or policy.get('schema_version') != '1.0.0'
+        or type(records) is not list
+    ):
+        raise ValueError('staged NuGet package-rights schema is unsupported')
+    seen = set()
+    for record in records:
+        if type(record) is not dict:
+            raise ValueError('staged NuGet package-rights record is invalid')
+        relative = record.get('expected_license_text_path')
+        if (
+            type(relative) is not str
+            or not relative.startswith(REVIEWED_LICENSE_PREFIX)
+            or '\\' in relative
+            or PurePosixPath(relative).as_posix() != relative
+            or any(part in {'', '.', '..'} for part in PurePosixPath(relative).parts)
+            or not _source_path_selected(relative)
+        ):
+            raise ValueError('reviewed license evidence path is not stageable')
+        if relative in seen:
+            raise ValueError('reviewed license evidence path is duplicated')
+        seen.add(relative)
+        candidate = product_root.joinpath(*PurePosixPath(relative).parts)
+        if not candidate.is_file() or not candidate.read_bytes():
+            raise ValueError(
+                'reviewed license evidence is absent from staged product: '
+                + relative
+            )
+    return tuple(sorted(seen))
+
+
 def _require_webview2_input_identity(product_root, inputs, nuget_lock):
     if type(inputs) is not dict or type(inputs.get('webview2_sdk')) is not dict:
         raise ValueError('provider-free WebView2 input is missing')
@@ -543,6 +598,7 @@ def build_candidate(*, source_root, source_sha, desktop, host, python_archive, w
     work.mkdir(parents=True)
     payload = work / 'payload'; payload.mkdir()
     stage_source(source_root, source_sha, payload / 'product', work / 'source-composition.json')
+    _require_staged_reviewed_license_evidence(payload / 'product')
     inputs = strict_json_bytes(
         (payload / 'product/packaging/windows/provider-free-inputs.json').read_bytes(),
         label='provider-free inputs',

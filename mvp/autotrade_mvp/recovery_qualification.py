@@ -1267,6 +1267,15 @@ def qualify_recovery_release(
         )
 
     by_scenario: dict[RecoveryScenario, RecoveryScenarioEvidence] = {}
+    for item in evidence:
+        if type(item) is not RecoveryScenarioEvidence:
+            raise TypeError(
+                "evidence must contain RecoveryScenarioEvidence"
+            )
+        if item.scenario in by_scenario:
+            raise ValueError(f"duplicate evidence for {item.scenario.value}")
+        by_scenario[item.scenario] = item
+
     blockers: list[str] = []
     hard_failure = False
     inconclusive = False
@@ -1285,15 +1294,6 @@ def qualify_recovery_release(
             ValueError,
         ):
             trusted_read = None
-
-    for item in evidence:
-        if type(item) is not RecoveryScenarioEvidence:
-            raise TypeError(
-                "evidence must contain RecoveryScenarioEvidence"
-            )
-        if item.scenario in by_scenario:
-            raise ValueError(f"duplicate evidence for {item.scenario.value}")
-        by_scenario[item.scenario] = item
 
     missing = sorted(
         (

@@ -4639,7 +4639,7 @@ class AuthorityService:
             risk_intent,
             effective_risk_context,
             effective_risk_policy,
-            intent_hash=_text(intent_hash, name="intent_hash"),
+            intent_hash=ihash,
             policy_version=policy.version,
             reservation_version=reservation_version,
             reservation_requirements=reservation_requirements,
@@ -4758,14 +4758,14 @@ class AuthorityService:
                         _authority_service_store(self, required=True),
                         checkpoint_event_id=checkpoint_event_id,
                         provider_id=provider_id,
-                        account_id=account_id,
-                        environment=environment,
+                        account_id=account,
+                        environment=env,
                         provider_environment=risk_authority_request.provider_environment,
                         resources=tuple(
                             resource
                             for resource, _amount in normalized_requirements
                         ),
-                        now=now,
+                        now=evaluated_at,
                         max_age_seconds=normalized_max_age,
                         evidence_artifact_store=self.evidence_artifact_store,
                         require_latest_scope=True,
@@ -4785,17 +4785,25 @@ class AuthorityService:
                 }
 
             raw_authoritative = availability_evidence.get("availability")
-            if not isinstance(raw_authoritative, Mapping):
+            if (
+                type(raw_authoritative) is not dict
+                or any(type(key) is not str for key in raw_authoritative)
+            ):
                 raise AuthorityConflict(
                     "authoritative reservation availability is malformed"
                 )
-            authoritative_available = dict(raw_authoritative)
+            authoritative_available = dict.copy(raw_authoritative)
 
-            if not isinstance(reservation_available, Mapping):
-                raise TypeError("reservation_available must be a mapping")
+            if (
+                type(reservation_available) is not dict
+                or any(type(key) is not str for key in reservation_available)
+            ):
+                raise TypeError(
+                    "reservation_available must be a mapping backed by an exact dict"
+                )
             caller_available: dict[str, Decimal] = {}
-            for raw_resource, raw_amount in reservation_available.items():
-                resource = _text(
+            for raw_resource, raw_amount in dict.copy(reservation_available).items():
+                resource = _authority_text(
                     raw_resource,
                     name="reservation_available resource",
                 )
@@ -4803,7 +4811,7 @@ class AuthorityService:
                     raise ValueError(
                         "reservation_available resources must be unique after normalization"
                     )
-                amount = _decimal(
+                amount = _authority_decimal(
                     raw_amount,
                     name=f"reservation_available[{resource}]",
                 )
@@ -4813,10 +4821,10 @@ class AuthorityService:
                     )
                 caller_available[resource] = amount
             canonical_available = {
-                _text(
+                _authority_text(
                     resource,
                     name="authoritative availability resource",
-                ): _decimal(
+                ): _authority_decimal(
                     amount,
                     name=f"authoritative availability[{resource}]",
                 )
@@ -4965,9 +4973,9 @@ class AuthorityService:
                             provider_available=canonical_available,
                             required_resources=required_resource_names,
                             provider_id=provider_id,
-                            account_id=account_id,
-                            environment=environment,
-                            provider_environment=_text(
+                            account_id=account,
+                            environment=env,
+                            provider_environment=_authority_text(
                                 availability_evidence.get(
                                     "provider_environment",
                                     availability_evidence.get("environment"),
@@ -4996,9 +5004,9 @@ class AuthorityService:
                             provider_available=canonical_available,
                             required_resources=required_resource_names,
                             provider_id=provider_id,
-                            account_id=account_id,
-                            environment=environment,
-                            provider_environment=_text(
+                            account_id=account,
+                            environment=env,
+                            provider_environment=_authority_text(
                                 availability_evidence.get(
                                     "provider_environment",
                                     availability_evidence.get("environment"),
@@ -5024,13 +5032,13 @@ class AuthorityService:
                 risk_intent=risk_intent,
                 risk_context=effective_risk_context,
                 reservation_book=reservation_book,
-                reservation_provider_id=reservation_provider_id,
-                account_id=account_id,
-                environment=environment,
+                reservation_provider_id=snapshot_provider_id,
+                account_id=account,
+                environment=env,
                 capability_snapshot_id=capability,
-                instrument_id=instrument_id,
-                instrument_version=instrument_version,
-                now=now,
+                instrument_id=snapshot_instrument.instrument_id,
+                instrument_version=snapshot_instrument.version,
+                now=evaluated_at,
             )
 
         if existing is None:
@@ -5045,8 +5053,8 @@ class AuthorityService:
                 )
             current_risk_authority_request = RiskAuthorityRequest(
                 risk_intent=risk_intent,
-                account_id=account_id,
-                environment=environment,
+                account_id=account,
+                environment=env,
                 provider_id=snapshot_provider_id,
                 instrument_version=snapshot_instrument,
                 capability_snapshot_id=capability,
@@ -5060,7 +5068,7 @@ class AuthorityService:
                 authority_policy_version=policy.version,
                 evaluated_at=evaluated_at,
                 **self._risk_policy_cut(provider_id=snapshot_provider_id,
-                    account_id=account_id, environment=environment,
+                    account_id=account, environment=env,
                     journal_sequence_cut=current_cut),
             )
             current_risk_snapshot = self._resolve_authoritative_risk_snapshot(

@@ -86,8 +86,9 @@ jobs:
       - name: Download exact candidate runtime inputs
         shell: pwsh
         run: |
-          Invoke-WebRequest https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip -OutFile artifacts/python.zip
-          Invoke-WebRequest https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.4191.47/microsoft.web.webview2.1.0.4191.47.nupkg -OutFile artifacts/webview.nupkg
+          $inputs = Get-Content -Raw -LiteralPath 'packaging/windows/provider-free-inputs.json' | ConvertFrom-Json
+          Invoke-WebRequest $inputs.python.url -OutFile artifacts/python.zip
+          Invoke-WebRequest $inputs.webview2_sdk.url -OutFile artifacts/webview.nupkg
       - name: Compose through canonical source staging and bundle builder
         run: python -m tools.build_provider_free_candidate --source-sha ${{ env.AUTOTRADE_SOURCE_SHA }} --desktop-publish artifacts/desktop --host-publish artifacts/host --python-archive artifacts/python.zip --webview-archive artifacts/webview.nupkg --work artifacts/candidate-work --output artifacts/AutoTrade-ZERO-win-x64.zip
       - run: npm ci --ignore-scripts

@@ -4,9 +4,10 @@ This creates an unsigned diagnostics candidate, never a qualified release. Sourc
 bytes come from one exact Git object; developer caches and state cannot enter it.
 """
 import argparse
+import base64
 from contextlib import ExitStack
 import io
-from hashlib import sha256
+from hashlib import sha256, sha512
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -18,6 +19,7 @@ from tools.stage_windows_foundation import (
     _retained_posix_directory, _retained_posix_relative_directory,
 )
 from tools.build_windows_bundle import build_bundle, _collect, _windows_path_key
+from tools.release_scope_mapping import strict_json_bytes
 from research.autotrade_research.artifacts.durable_publish import atomic_write_json
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -261,9 +263,15 @@ def stage_source(source_root, source_sha, destination, composition_path):
     return selected
 
 
-def extract_pinned(archive_path, destination, expected_digest, *, overrides=None):
+def extract_pinned(archive_path, destination, expected_digest, *, digest_algorithm='sha256', overrides=None):
     archive_bytes = archive_path.read_bytes()
-    if sha256(archive_bytes).hexdigest() != expected_digest:
+    if digest_algorithm == 'sha256':
+        actual_digest = sha256(archive_bytes).hexdigest()
+    elif digest_algorithm == 'sha512-base64':
+        actual_digest = base64.b64encode(sha512(archive_bytes).digest()).decode('ascii')
+    else:
+        raise ValueError('unsupported external archive digest algorithm')
+    if actual_digest != expected_digest:
         raise ValueError('external runtime archive differs from frozen input')
     destination.mkdir(parents=True, exist_ok=False)
     if overrides is None: overrides = {}
@@ -313,12 +321,71 @@ def _require_copied_executable(expected, snapshot, *, label):
         raise ValueError(label + ' executable changed between admission and candidate copy')
 
 
+def _require_webview2_input_identity(product_root, inputs):
+    if type(inputs) is not dict or type(inputs.get('webview2_sdk')) is not dict:
+        raise ValueError('provider-free WebView2 input is missing')
+    webview = inputs['webview2_sdk']
+    if set(webview) != {'version', 'url', 'content_hash_sha512_base64'}:
+        raise ValueError('provider-free WebView2 input fields mismatch')
+    version = webview['version']
+    content_hash = webview['content_hash_sha512_base64']
+    url = webview['url']
+    if type(version) is not str or not version or version != version.strip():
+        raise ValueError('provider-free WebView2 version is invalid')
+    if type(content_hash) is not str or not content_hash or content_hash != content_hash.strip():
+        raise ValueError('provider-free WebView2 content hash is invalid')
+    expected_url = (
+        'https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/'
+        + version.lower()
+        + '/microsoft.web.webview2.'
+        + version.lower()
+        + '.nupkg'
+    )
+    if url != expected_url:
+        raise ValueError('provider-free WebView2 URL does not match exact version')
+    manifest_path = product_root / 'provenance/release-dependency-manifest.json'
+    manifest = strict_json_bytes(
+        manifest_path.read_bytes(),
+        label='release dependency manifest',
+    )
+    dependencies = (
+        manifest.get('dotnet_package_dependencies')
+        if type(manifest) is dict
+        else None
+    )
+    if type(dependencies) is not list:
+        raise ValueError('release provenance has no .NET dependency graph')
+    identities = {
+        (
+            item.get('name'),
+            item.get('version'),
+            item.get('content_hash_sha512_base64'),
+        )
+        for item in dependencies
+        if type(item) is dict
+        and item.get('name') == 'Microsoft.Web.WebView2'
+    }
+    expected = {('Microsoft.Web.WebView2', version, content_hash)}
+    if identities != expected:
+        raise ValueError(
+            'provider-free WebView2 input differs from release provenance'
+        )
+    return content_hash
+
+
 def build_candidate(*, source_root, source_sha, desktop, host, python_archive, webview_archive, work, output):
     if work.exists(): raise ValueError('candidate work directory must be new')
     work.mkdir(parents=True)
     payload = work / 'payload'; payload.mkdir()
     stage_source(source_root, source_sha, payload / 'product', work / 'source-composition.json')
-    inputs = json.loads((payload / 'product/packaging/windows/provider-free-inputs.json').read_text())
+    inputs = strict_json_bytes(
+        (payload / 'product/packaging/windows/provider-free-inputs.json').read_bytes(),
+        label='provider-free inputs',
+    )
+    webview_content_hash = _require_webview2_input_identity(
+        payload / 'product',
+        inputs,
+    )
 
     desktop_publish_snapshot = _capture_publish(desktop)
     host_publish_snapshot = _capture_publish(host)
@@ -336,7 +403,12 @@ def build_candidate(*, source_root, source_sha, desktop, host, python_archive, w
 
     isolated_python_path = b'python312.zip\n.\n../../product\n../../product/research\n'
     extract_pinned(python_archive, payload / 'runtime/python', inputs['python']['sha256'], overrides={'python312._pth': isolated_python_path})
-    extract_pinned(webview_archive, payload / 'notices/webview2-sdk-package', inputs['webview2_sdk']['sha256'])
+    extract_pinned(
+        webview_archive,
+        payload / 'notices/webview2-sdk-package',
+        webview_content_hash,
+        digest_algorithm='sha512-base64',
+    )
     for required in ('python.exe', 'python312.dll', 'python312.zip', 'python312._pth', 'LICENSE.txt'):
         if not (payload / 'runtime/python' / required).is_file(): raise ValueError('embedded Python input is incomplete: ' + required)
 

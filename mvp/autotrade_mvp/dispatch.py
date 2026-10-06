@@ -11,6 +11,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5, uuid4
+from weakref import ref as weakref_ref
 
 from autotrade_numeric.exact_decimal import (
     ExactDecimalError,
@@ -19,7 +20,11 @@ from autotrade_numeric.exact_decimal import (
 )
 
 from .persistence import JournalStore, canonical_json, payload_digest
-from .provider_response_limits import require_provider_json_depth
+from .provider_response_limits import (
+    HARD_MAX_PROVIDER_RESPONSE_BYTES,
+    require_provider_json_depth,
+    require_provider_response_bytes,
+)
 
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
@@ -143,15 +148,24 @@ class ExactJsonTransportResponse:
 
     def __post_init__(self) -> None:
         raw = self.response_bytes
-        _decode_exact_json_bytes(raw)
+        if type(self.requires_reconciliation) is not bool:
+            raise TypeError("requires_reconciliation must be boolean")
+        try:
+            require_provider_response_bytes(
+                raw,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=self.requires_reconciliation,
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "provider response bytes violate shared byte budget"
+            ) from error
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
             or self.http_status > 599
         ):
             raise ValueError("http_status must be an integer 100..599 when provided")
-        if type(self.requires_reconciliation) is not bool:
-            raise TypeError("requires_reconciliation must be boolean")
         if self.requires_reconciliation:
             if (
                 type(self.ambiguity_reason) is not str
@@ -165,81 +179,214 @@ class ExactJsonTransportResponse:
                 "ambiguity_reason",
                 self.ambiguity_reason.strip(),
             )
-        elif self.ambiguity_reason is not None:
-            raise ValueError(
-                "ambiguity_reason is only valid when reconciliation is required"
-            )
+        else:
+            # Definitive responses remain strict JSON. Opaque wire bytes are
+            # admissible only after the provider classifier has already made
+            # the irreversible post-SEND result reconciliation-required.
+            _decode_exact_json_bytes(raw)
+            if self.ambiguity_reason is not None:
+                raise ValueError(
+                    "ambiguity_reason is only valid when reconciliation is required"
+                )
+        _register_exact_transport_response(self)
 
     @property
     def response_text(self) -> str:
-        return self.response_bytes.decode("utf-8")
+        snapshot = _require_canonical_exact_transport_response(self)
+        return snapshot[0].decode("utf-8")
 
     @property
     def response_sha256(self) -> str:
-        return "sha256:" + sha256(self.response_bytes).hexdigest()
+        snapshot = _require_canonical_exact_transport_response(self)
+        return "sha256:" + sha256(snapshot[0]).hexdigest()
 
     @property
     def payload(self) -> Any:
-        return _decode_exact_json_bytes(self.response_bytes)
+        snapshot = _require_canonical_exact_transport_response(self)
+        return _decode_exact_json_bytes(snapshot[0])
 
 
-_EXACT_TRANSPORT_RESPONSE_STATE_FIELDS = frozenset(
-    {"response_bytes", "http_status", "requires_reconciliation", "ambiguity_reason"}
-)
+def _install_exact_transport_response_authority():
+    """Seal provider post-SEND classification to its validated construction state."""
+
+    response_type = ExactJsonTransportResponse
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_frozenset = frozenset
+    canonical_len = len
+    canonical_dict = dict
+    canonical_bool = bool
+    canonical_int = int
+    canonical_str = str
+    canonical_bytes = bytes
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    canonical_weakref_ref = weakref_ref
+    canonical_require_response_bytes = require_provider_response_bytes
+    require_response_bytes_code = canonical_require_response_bytes.__code__
+    canonical_decode = _decode_exact_json_bytes
+    decode_code = canonical_decode.__code__
+    canonical_sha256 = sha256
+    canonical_hard_response_bytes = HARD_MAX_PROVIDER_RESPONSE_BYTES
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
+    installed: list[object] = []
+
+    def authority_changed():
+        raise ValueError("exact transport response authority is unavailable")
+
+    def implementation_changed():
+        if (
+            ExactJsonTransportResponse is not response_type
+            or type is not canonical_type
+            or id is not canonical_id
+            or tuple is not canonical_tuple
+            or frozenset is not canonical_frozenset
+            or len is not canonical_len
+            or dict is not canonical_dict
+            or bool is not canonical_bool
+            or int is not canonical_int
+            or str is not canonical_str
+            or bytes is not canonical_bytes
+            or object is not canonical_object
+            or weakref_ref is not canonical_weakref_ref
+            or require_provider_response_bytes is not canonical_require_response_bytes
+            or canonical_require_response_bytes.__code__ is not require_response_bytes_code
+            or _decode_exact_json_bytes is not canonical_decode
+            or canonical_decode.__code__ is not decode_code
+            or sha256 is not canonical_sha256
+            or type(HARD_MAX_PROVIDER_RESPONSE_BYTES) is not canonical_int
+            or HARD_MAX_PROVIDER_RESPONSE_BYTES != canonical_hard_response_bytes
+            or canonical_len(installed) != 2
+            or _register_exact_transport_response is not installed[0]
+            or _require_canonical_exact_transport_response is not installed[1]
+        ):
+            authority_changed()
+
+    field_names = (
+        "response_bytes",
+        "http_status",
+        "requires_reconciliation",
+        "ambiguity_reason",
+    )
+    exact_field_names = canonical_frozenset(field_names)
+
+    def raw_snapshot(value):
+        state = object_getattribute(value, "__dict__")
+        if canonical_type(state) is not canonical_dict:
+            authority_changed()
+        if canonical_frozenset(state) != exact_field_names:
+            authority_changed()
+        return canonical_tuple(state[name] for name in field_names)
+
+    def prune():
+        for object_id, (value_ref, _snapshot) in canonical_tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def register(value):
+        implementation_changed()
+        if canonical_type(value) is not response_type:
+            authority_changed()
+        current = raw_snapshot(value)
+        if canonical_type(current[0]) is not canonical_bytes:
+            authority_changed()
+        if current[1] is not None and canonical_type(current[1]) is not canonical_int:
+            authority_changed()
+        if canonical_type(current[2]) is not canonical_bool:
+            authority_changed()
+        if current[3] is not None and canonical_type(current[3]) is not canonical_str:
+            authority_changed()
+        prune()
+        object_id = canonical_id(value)
+        previous = states.get(object_id)
+        if previous is not None and previous[0]() is not None:
+            authority_changed()
+        states[object_id] = (canonical_weakref_ref(value), current)
+        return value
+
+    def require(value):
+        implementation_changed()
+        if canonical_type(value) is not response_type:
+            authority_changed()
+        prune()
+        state = states.get(canonical_id(value))
+        if state is None or state[0]() is not value:
+            authority_changed()
+        expected = state[1]
+        current = raw_snapshot(value)
+        if (
+            canonical_type(current[0]) is not canonical_bytes
+            or current[0] is not expected[0]
+            or current[1] != expected[1]
+            or canonical_type(current[2]) is not canonical_bool
+            or current[2] is not expected[2]
+            or current[3] != expected[3]
+        ):
+            authority_changed()
+        if current[1] is not None and canonical_type(current[1]) is not canonical_int:
+            authority_changed()
+        if current[3] is not None and canonical_type(current[3]) is not canonical_str:
+            authority_changed()
+        canonical_require_response_bytes(
+            current[0],
+            max_bytes=canonical_hard_response_bytes,
+            allow_empty=current[2],
+        )
+        return expected
+
+    installed.extend((register, require))
+    return register, require
+
+
+(
+    _register_exact_transport_response,
+    _require_canonical_exact_transport_response,
+) = _install_exact_transport_response_authority()
+del _install_exact_transport_response_authority
 
 
 def _snapshot_exact_transport_response(
     response: ExactJsonTransportResponse,
-) -> tuple[str, str, Any, int | None, bool, str | None]:
-    """Revalidate exact response state at the post-SEND consumption boundary."""
+    _canonical_authority=_require_canonical_exact_transport_response,
+    _canonical_decoder=_decode_exact_json_bytes,
+    _canonical_sha256=sha256,
+) -> tuple[str, str, str, Any, int | None, bool, str | None]:
+    """Revalidate issuer authority at the post-SEND consumption boundary."""
 
-    if type(response) is not ExactJsonTransportResponse:
-        raise TypeError("exact provider response must use the canonical response type")
-    # Frozen dataclasses can still be altered through object.__setattr__(). Read
-    # the raw instance dictionary through object.__getattribute__ so rebound
-    # response properties/__getattribute__ hooks are not response authority.
-    state = object.__getattribute__(response, "__dict__")
     if (
-        type(state) is not dict
-        or set(state) != _EXACT_TRANSPORT_RESPONSE_STATE_FIELDS
+        _require_canonical_exact_transport_response is not _canonical_authority
+        or _decode_exact_json_bytes is not _canonical_decoder
+        or sha256 is not _canonical_sha256
     ):
-        raise TypeError("exact provider response state is invalid")
-    raw = dict.__getitem__(state, "response_bytes")
-    http_status = dict.__getitem__(state, "http_status")
-    requires_reconciliation = dict.__getitem__(
-        state, "requires_reconciliation"
-    )
-    ambiguity_reason = dict.__getitem__(state, "ambiguity_reason")
+        raise ValueError("exact transport response authority is unavailable")
+    (
+        raw,
+        http_status,
+        requires_reconciliation,
+        ambiguity_reason,
+    ) = _canonical_authority(response)
 
-    if type(raw) is not bytes or not raw:
-        raise TypeError("exact provider response bytes are invalid")
-    payload = _decode_exact_json_bytes(raw)
-    if http_status is not None and (
-        type(http_status) is not int
-        or http_status < 100
-        or http_status > 599
-    ):
-        raise ValueError("exact provider HTTP status must be an integer 100..599")
-    if type(requires_reconciliation) is not bool:
-        raise TypeError("exact provider reconciliation flag must be boolean")
     if requires_reconciliation:
-        if (
-            type(ambiguity_reason) is not str
-            or not ambiguity_reason.strip()
-            or ambiguity_reason.strip() != ambiguity_reason
-        ):
-            raise ValueError(
-                "ambiguous exact response requires canonical non-empty reason"
-            )
-    elif ambiguity_reason is not None:
-        raise ValueError(
-            "ambiguity reason is invalid without reconciliation requirement"
-        )
+        try:
+            _canonical_decoder(raw)
+        except (TypeError, ValueError):
+            response_text = raw.hex()
+            response_encoding = "hex"
+        else:
+            response_text = raw.decode("utf-8")
+            response_encoding = "utf-8-json"
+        outcome_response = None
+    else:
+        outcome_response = _canonical_decoder(raw)
+        response_text = raw.decode("utf-8")
+        response_encoding = "utf-8-json"
 
     return (
-        raw.decode("utf-8"),
-        "sha256:" + sha256(raw).hexdigest(),
-        payload,
+        response_text,
+        response_encoding,
+        "sha256:" + _canonical_sha256(raw).hexdigest(),
+        outcome_response,
         http_status,
         requires_reconciliation,
         ambiguity_reason,
@@ -263,6 +410,10 @@ class SubmissionResponseBinding:
     submission_scope_hash: str
     response_bytes: bytes
     response_sha256: str
+    response_encoding: str = "utf-8-json"
+    terminal_state: str = "SENT"
+    ambiguity_reason: str | None = None
+    retry_disposition: str | None = None
     http_status: int | None = None
     _factory_token: object = field(default=None, repr=False, compare=False)
 
@@ -297,14 +448,55 @@ class SubmissionResponseBinding:
             or re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None
         ):
             raise ValueError("response_sha256 must be a canonical SHA-256 digest")
-        if type(self.response_bytes) is not bytes or not self.response_bytes:
-            raise ValueError("response_bytes must be non-empty bytes")
+        if (
+            type(self.response_encoding) is not str
+            or self.response_encoding not in {"utf-8-json", "hex"}
+        ):
+            raise ValueError("durable provider response encoding is invalid")
+        if (
+            type(self.terminal_state) is not str
+            or self.terminal_state not in {"SENT", "UNKNOWN"}
+        ):
+            raise ValueError("terminal_state must be SENT or UNKNOWN")
+        if self.terminal_state == "UNKNOWN":
+            if (
+                type(self.ambiguity_reason) is not str
+                or not self.ambiguity_reason.strip()
+                or self.ambiguity_reason != self.ambiguity_reason.strip()
+            ):
+                raise ValueError(
+                    "UNKNOWN durable response requires a canonical ambiguity_reason"
+                )
+            if self.retry_disposition != "RECONCILE_FIRST":
+                raise ValueError(
+                    "UNKNOWN durable response must remain RECONCILE_FIRST"
+                )
+        elif self.ambiguity_reason is not None or self.retry_disposition is not None:
+            raise ValueError(
+                "SENT durable response cannot carry UNKNOWN retry semantics"
+            )
+        if self.response_encoding == "hex" and self.terminal_state != "UNKNOWN":
+            raise ValueError("opaque provider response must remain UNKNOWN")
+        try:
+            require_provider_response_bytes(
+                self.response_bytes,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=(
+                    self.response_encoding == "hex"
+                    and self.terminal_state == "UNKNOWN"
+                ),
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "durable provider response bytes violate shared byte budget"
+            ) from error
         if (
             "sha256:" + sha256(self.response_bytes).hexdigest()
             != self.response_sha256
         ):
             raise ValueError("durable provider response digest mismatch")
-        _decode_exact_json_bytes(self.response_bytes)
+        if self.response_encoding == "utf-8-json":
+            _decode_exact_json_bytes(self.response_bytes)
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -355,6 +547,8 @@ class SubmissionResponseBinding:
 
     @property
     def payload(self) -> Any:
+        if self.response_encoding != "utf-8-json":
+            raise ValueError("opaque provider response has no JSON payload")
         return _freeze_json(_decode_exact_json_bytes(self.response_bytes))
 
 
@@ -616,29 +810,72 @@ def load_submission_response_binding(
     sent_payload = sent.get("payload")
     if not isinstance(sent_payload, dict):
         raise ValueError("durable terminal submission payload is invalid")
-    if not _exact_response_terminal_semantics_are_canonical(
-        sent["event_type"],
-        sent_payload,
-    ):
-        raise ValueError("durable exact response terminal semantics are invalid")
+    terminal_state = (
+        "UNKNOWN"
+        if sent["event_type"] == "SubmissionUnknown"
+        else "SENT"
+    )
+    ambiguity_reason = sent_payload.get("reason")
+    retry_disposition = sent_payload.get("retry_disposition")
+    if terminal_state == "UNKNOWN":
+        if (
+            type(ambiguity_reason) is not str
+            or not ambiguity_reason.strip()
+            or ambiguity_reason != ambiguity_reason.strip()
+            or retry_disposition != "RECONCILE_FIRST"
+        ):
+            raise ValueError(
+                "response-bearing SubmissionUnknown must remain RECONCILE_FIRST"
+            )
+    elif ambiguity_reason is not None or retry_disposition is not None:
+        raise ValueError("SubmissionSent cannot carry UNKNOWN retry semantics")
+
     response_text = sent_payload.get("response_text")
     response_sha256 = sent_payload.get("response_sha256")
-    if (
-        sent_payload.get("response_encoding") != "utf-8-json"
-        or not isinstance(response_text, str)
-        or not response_text
-        or not isinstance(response_sha256, str)
-    ):
+    response_encoding = sent_payload.get("response_encoding")
+    if type(response_text) is not str or type(response_sha256) is not str:
         raise ValueError(
             "durable exact provider response bytes are unavailable"
         )
-    response_bytes = response_text.encode("utf-8")
+    if response_encoding == "utf-8-json":
+        if not response_text:
+            raise ValueError(
+                "durable exact provider response bytes are unavailable"
+            )
+        response_bytes = response_text.encode("utf-8")
+        _decode_exact_json_bytes(response_bytes)
+    elif response_encoding == "hex" and terminal_state == "UNKNOWN":
+        if (
+            len(response_text) > HARD_MAX_PROVIDER_RESPONSE_BYTES * 2
+            or len(response_text) % 2
+        ):
+            raise ValueError(
+                "durable exact provider response bytes are unavailable"
+            )
+        try:
+            response_bytes = bytes.fromhex(response_text)
+        except ValueError as error:
+            raise ValueError(
+                "durable exact provider response bytes are unavailable"
+            ) from error
+        if response_text != response_bytes.hex():
+            raise ValueError(
+                "durable exact provider response bytes are unavailable"
+            )
+        require_provider_response_bytes(
+            response_bytes,
+            max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+            allow_empty=True,
+        )
+    else:
+        raise ValueError(
+            "durable exact provider response bytes are unavailable"
+        )
     if "sha256:" + sha256(response_bytes).hexdigest() != response_sha256:
         raise ValueError("durable provider response digest mismatch")
     http_status = sent_payload.get("http_status")
     if http_status is not None and (
-        isinstance(http_status, bool)
-        or not isinstance(http_status, int)
+        type(http_status) is not int
         or http_status < 100
         or http_status > 599
     ):
@@ -765,9 +1002,269 @@ def load_submission_response_binding(
         submission_scope_hash=scope_hash,
         response_bytes=response_bytes,
         response_sha256=response_sha256,
+        response_encoding=response_encoding,
+        terminal_state=terminal_state,
+        ambiguity_reason=ambiguity_reason,
+        retry_disposition=retry_disposition,
         http_status=http_status,
         _factory_token=_SUBMISSION_RESPONSE_BINDING_TOKEN,
     )
+
+
+def _install_submission_response_binding_authority(loader):
+    """Seal durable response bindings to the exact loader and resource authorities."""
+
+    binding_type = SubmissionResponseBinding
+    binding_token = _SUBMISSION_RESPONSE_BINDING_TOKEN
+    error_type = ValueError
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_frozenset = frozenset
+    canonical_dict = dict
+    canonical_range = range
+    canonical_enumerate = enumerate
+    canonical_str = str
+    canonical_int = int
+    canonical_bytes = bytes
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    canonical_getattr = getattr
+    mapping_proxy_type = MappingProxyType
+    canonical_weakref_ref = weakref_ref
+    canonical_loader = loader
+    loader_code = loader.__code__
+    canonical_journal_snapshot = _canonical_journal_authority_snapshot
+    journal_snapshot_code = canonical_journal_snapshot.__code__
+    canonical_attempt_id = submission_attempt_aggregate_id
+    attempt_id_code = canonical_attempt_id.__code__
+    canonical_decode = _decode_exact_json_bytes
+    decode_code = canonical_decode.__code__
+    canonical_require_json_depth = require_provider_json_depth
+    require_json_depth_code = canonical_require_json_depth.__code__
+    canonical_require_response_bytes = require_provider_response_bytes
+    require_response_bytes_code = canonical_require_response_bytes.__code__
+    canonical_hard_response_bytes = HARD_MAX_PROVIDER_RESPONSE_BYTES
+    canonical_freeze = _freeze_json
+    freeze_code = canonical_freeze.__code__
+    canonical_instant = _instant
+    instant_code = canonical_instant.__code__
+    canonical_journal_type = JournalStore
+    canonical_journal_load_events = JournalStore.load_events
+    journal_load_events_code = canonical_journal_load_events.__code__
+    canonical_journal_decode_event_row = JournalStore._decode_event_row
+    journal_decode_event_row_code = canonical_journal_decode_event_row.__code__
+    canonical_journal_connect = JournalStore._connect
+    journal_connect_code = canonical_journal_connect.__code__
+    canonical_journal_require_text = JournalStore._require_text
+    journal_require_text_code = canonical_journal_require_text.__code__
+    canonical_journal_store_identity = JournalStore.store_identity
+    canonical_journal_schema_version = JournalStore.SCHEMA_VERSION
+
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
+    field_names = (
+        "attempt_id",
+        "aggregate_id",
+        "provider",
+        "request_hash",
+        "client_order_id",
+        "environment",
+        "account_id",
+        "prepared_at",
+        "sent_at",
+        "submission_scope",
+        "submission_scope_hash",
+        "response_bytes",
+        "response_sha256",
+        "response_encoding",
+        "terminal_state",
+        "ambiguity_reason",
+        "retry_disposition",
+        "http_status",
+        "_factory_token",
+    )
+
+    exact_field_names = canonical_frozenset(field_names)
+
+    def authority_changed():
+        raise error_type("submission response binding authority is unavailable")
+
+    def implementation_changed():
+        if (
+            SubmissionResponseBinding is not binding_type
+            or _SUBMISSION_RESPONSE_BINDING_TOKEN is not binding_token
+            or ValueError is not error_type
+            or type is not canonical_type
+            or id is not canonical_id
+            or tuple is not canonical_tuple
+            or frozenset is not canonical_frozenset
+            or dict is not canonical_dict
+            or range is not canonical_range
+            or enumerate is not canonical_enumerate
+            or str is not canonical_str
+            or int is not canonical_int
+            or bytes is not canonical_bytes
+            or object is not canonical_object
+            or getattr is not canonical_getattr
+            or MappingProxyType is not mapping_proxy_type
+            or weakref_ref is not canonical_weakref_ref
+            or JournalStore is not canonical_journal_type
+            or JournalStore.load_events is not canonical_journal_load_events
+            or canonical_journal_load_events.__code__ is not journal_load_events_code
+            or JournalStore._decode_event_row is not canonical_journal_decode_event_row
+            or canonical_journal_decode_event_row.__code__
+            is not journal_decode_event_row_code
+            or JournalStore._connect is not canonical_journal_connect
+            or canonical_journal_connect.__code__ is not journal_connect_code
+            or JournalStore._require_text is not canonical_journal_require_text
+            or canonical_journal_require_text.__code__ is not journal_require_text_code
+            or JournalStore.store_identity is not canonical_journal_store_identity
+            or JournalStore.SCHEMA_VERSION != canonical_journal_schema_version
+            or _canonical_journal_authority_snapshot is not canonical_journal_snapshot
+            or canonical_getattr(canonical_journal_snapshot, "__code__", None)
+            is not journal_snapshot_code
+            or submission_attempt_aggregate_id is not canonical_attempt_id
+            or canonical_getattr(canonical_attempt_id, "__code__", None)
+            is not attempt_id_code
+            or _decode_exact_json_bytes is not canonical_decode
+            or canonical_getattr(canonical_decode, "__code__", None)
+            is not decode_code
+            or require_provider_json_depth is not canonical_require_json_depth
+            or canonical_getattr(canonical_require_json_depth, "__code__", None)
+            is not require_json_depth_code
+            or require_provider_response_bytes is not canonical_require_response_bytes
+            or canonical_getattr(canonical_require_response_bytes, "__code__", None)
+            is not require_response_bytes_code
+            or type(HARD_MAX_PROVIDER_RESPONSE_BYTES) is not canonical_int
+            or HARD_MAX_PROVIDER_RESPONSE_BYTES != canonical_hard_response_bytes
+            or _freeze_json is not canonical_freeze
+            or canonical_getattr(canonical_freeze, "__code__", None)
+            is not freeze_code
+            or _instant is not canonical_instant
+            or canonical_getattr(canonical_instant, "__code__", None)
+            is not instant_code
+            or canonical_getattr(canonical_loader, "__code__", None)
+            is not loader_code
+        ):
+            authority_changed()
+
+    def raw_snapshot(value):
+        state = object_getattribute(value, "__dict__")
+        if canonical_type(state) is not canonical_dict:
+            authority_changed()
+        if canonical_frozenset(state) != exact_field_names:
+            authority_changed()
+        return canonical_tuple(state[name] for name in field_names)
+
+    def prune():
+        for object_id, (value_ref, _snapshot) in canonical_tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def register(value):
+        implementation_changed()
+        if canonical_type(value) is not binding_type:
+            authority_changed()
+        current = raw_snapshot(value)
+        if current[-1] is not binding_token:
+            authority_changed()
+        if canonical_type(current[9]) is not mapping_proxy_type:
+            authority_changed()
+        if canonical_type(current[11]) is not canonical_bytes:
+            authority_changed()
+        prune()
+        object_id = canonical_id(value)
+        previous = states.get(object_id)
+        if previous is not None and previous[0]() is not None:
+            authority_changed()
+        states[object_id] = (canonical_weakref_ref(value), current)
+
+    def require_canonical_submission_response_binding(value):
+        implementation_changed()
+        if canonical_type(value) is not binding_type:
+            authority_changed()
+        prune()
+        state = states.get(canonical_id(value))
+        if state is None or state[0]() is not value:
+            authority_changed()
+        expected = state[1]
+        current = raw_snapshot(value)
+
+        for index in canonical_range(9):
+            if canonical_type(current[index]) is not canonical_str:
+                authority_changed()
+            if current[index] != expected[index]:
+                authority_changed()
+        if canonical_type(current[9]) is not mapping_proxy_type or current[9] is not expected[9]:
+            authority_changed()
+        for index in (10, 12, 13, 14):
+            if canonical_type(current[index]) is not canonical_str or current[index] != expected[index]:
+                authority_changed()
+        if canonical_type(current[11]) is not canonical_bytes or current[11] is not expected[11]:
+            authority_changed()
+        for index in (15, 16):
+            if current[index] is None:
+                if expected[index] is not None:
+                    authority_changed()
+            elif (
+                canonical_type(current[index]) is not canonical_str
+                or current[index] != expected[index]
+            ):
+                authority_changed()
+        if current[17] is None:
+            if expected[17] is not None:
+                authority_changed()
+        elif (
+            canonical_type(current[17]) is not canonical_int
+            or current[17] != expected[17]
+        ):
+            authority_changed()
+        if current[18] is not binding_token:
+            authority_changed()
+        return expected
+
+    def submission_response_binding_projection(value):
+        current = require_canonical_submission_response_binding(value)
+        return mapping_proxy_type(
+            {
+                name: current[index]
+                for index, name in canonical_enumerate(field_names[:-1])
+            }
+        )
+
+    def registered_loader(
+        store: JournalStore,
+        *,
+        environment: str,
+        account_id: str,
+        attempt_id: str,
+    ) -> SubmissionResponseBinding:
+        implementation_changed()
+        value = canonical_loader(
+            store,
+            environment=environment,
+            account_id=account_id,
+            attempt_id=attempt_id,
+        )
+        implementation_changed()
+        register(value)
+        return value
+
+    return (
+        registered_loader,
+        require_canonical_submission_response_binding,
+        submission_response_binding_projection,
+    )
+
+
+(
+    load_submission_response_binding,
+    require_canonical_submission_response_binding,
+    submission_response_binding_projection,
+) = _install_submission_response_binding_authority(
+    load_submission_response_binding
+)
+del _install_submission_response_binding_authority
 
 
 def stable_client_order_id(
@@ -1948,6 +2445,8 @@ class GuardedDispatcher:
                 ) from error
             barrier_passed = True
 
+        exact_response_snapshot = _snapshot_exact_transport_response
+
         try:
             response = transport_send(client_order_id, request_frozen, final_guard)
             try:
@@ -2182,19 +2681,24 @@ class GuardedDispatcher:
                 # Revalidate raw exact state now. Frozen dataclass construction
                 # is not sufficient authority because object.__setattr__ can
                 # alter fields after __post_init__ and before transport returns.
+                if _snapshot_exact_transport_response is not exact_response_snapshot:
+                    raise ValueError(
+                        "exact transport response authority changed after send"
+                    )
                 (
                     response_text,
+                    response_encoding,
                     response_sha256,
                     outcome_response,
                     response_http_status,
                     terminal_requires_reconciliation,
                     response_ambiguity_reason,
-                ) = _snapshot_exact_transport_response(response)
+                ) = exact_response_snapshot(response)
                 sent_payload = {
                     "client_order_id": client_order_id,
                     "response_text": response_text,
                     "response_sha256": response_sha256,
-                    "response_encoding": "utf-8-json",
+                    "response_encoding": response_encoding,
                 }
                 if response_http_status is not None:
                     sent_payload["http_status"] = response_http_status

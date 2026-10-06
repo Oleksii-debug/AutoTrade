@@ -742,7 +742,12 @@ class GuardedDispatcher:
         elapsed = _instant(now) - prepared_at
         if elapsed < timedelta(0):
             return DispatchOutcome("IN_PROGRESS", client_order_id, None, "clock_before_prepared_timestamp")
-        if elapsed < timedelta(seconds=self.prepared_lease_seconds):
+        elapsed_microseconds = (
+            (elapsed.days * 86400 + elapsed.seconds) * 1_000_000
+            + elapsed.microseconds
+        )
+        lease_microseconds = self.prepared_lease_seconds * 1_000_000
+        if elapsed_microseconds < lease_microseconds:
             return DispatchOutcome("IN_PROGRESS", client_order_id, None, "prepared_owner_lease_active")
         # SubmissionPrepared is durably before the irreversible boundary. If its
         # lease expires while no SubmissionSending exists, the journal proves

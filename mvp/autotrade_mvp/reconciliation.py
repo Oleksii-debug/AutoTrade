@@ -415,8 +415,10 @@ class ResourceAvailabilityEvidence:
             MappingProxyType(dict(sorted(normalized_details.items()))),
         )
 
-        if not isinstance(self.evidence_refs, tuple):
-            raise TypeError("evidence_refs must be a tuple of strings")
+        if type(self.evidence_refs) is not tuple:
+            raise TypeError("evidence_refs must use an exact tuple of strings")
+        if any(type(reference) is not str for reference in self.evidence_refs):
+            raise TypeError("evidence_refs must contain exact strings")
         if not self.evidence_refs:
             raise ValueError(
                 "resource availability requires at least one evidence_ref"

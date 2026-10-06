@@ -71,6 +71,14 @@ class _ExplosiveAdmissionDict(dict):
         raise AssertionError("financial admission invoked polymorphic mapping")
 
 
+class _ExplosiveEvidenceRefs(tuple):
+    calls = 0
+
+    def __iter__(self):
+        type(self).calls += 1
+        raise AssertionError("financial evidence invoked polymorphic tuple iterator")
+
+
 class _ExplosiveReservationBook(DurableReservationBook):
     calls = 0
 
@@ -345,6 +353,24 @@ def _admit(authority, reservations, checkpoint, **overrides):
 
 
 class AuthorityAccountAvailabilityTests(unittest.TestCase):
+    def test_resource_availability_rejects_polymorphic_evidence_refs_before_callbacks(self):
+        _ExplosiveEvidenceRefs.calls = 0
+        hostile_refs = _ExplosiveEvidenceRefs(("provider:availability-snapshot",))
+        with self.assertRaisesRegex(TypeError, "exact tuple"):
+            ResourceAvailabilityEvidence(
+                provider_id=PROVIDER_ID,
+                account_id=ACCOUNT_ID,
+                environment=ENVIRONMENT,
+                snapshot_id="availability-hostile-evidence-refs",
+                query_started_at="2026-09-24T18:00:00Z",
+                query_completed_at="2026-09-24T18:00:30Z",
+                valid_until="2026-09-24T18:02:00Z",
+                available_resources={"CASH:USD": "1000"},
+                provider_as_of="2026-09-24T18:00:30Z",
+                evidence_refs=hostile_refs,
+            )
+        self.assertEqual(_ExplosiveEvidenceRefs.calls, 0)
+
     def test_settlement_capital_datetime_guard_rejects_hostile_tzinfo_without_callbacks(self):
         class HostileTimezone(tzinfo):
             calls = 0

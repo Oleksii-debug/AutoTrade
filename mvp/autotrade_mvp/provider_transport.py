@@ -745,6 +745,15 @@ def _validate_bybit_option_delivery_query(
 def _bybit_authenticated_read_rule(
     binding: AuthenticatedReadQueryBinding,
 ) -> AuthenticatedReadEndpointRule:
+    if type(binding) is not AuthenticatedReadQueryBinding:
+        raise TypeError(
+            "Bybit authenticated-read binding must be exact AuthenticatedReadQueryBinding"
+        )
+    _require_authenticated_read_query_binding_authority(binding)
+    if binding.provider_id != "BYBIT":
+        raise ProviderTransportScopeError(
+            "Bybit authenticated-read binding provider mismatch"
+        )
     rule = BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS.get(binding.endpoint)
     if rule is None:
         raise ProviderTransportScopeError(
@@ -4811,10 +4820,11 @@ class BybitV5AuthenticatedReadTransport:
         self,
         query_binding: AuthenticatedReadQueryBinding,
     ) -> ProviderResponseObservation:
-        if not isinstance(query_binding, AuthenticatedReadQueryBinding):
+        if type(query_binding) is not AuthenticatedReadQueryBinding:
             raise TypeError(
-                "query_binding must be AuthenticatedReadQueryBinding"
+                "query_binding must be exact AuthenticatedReadQueryBinding"
             )
+        _require_authenticated_read_query_binding_authority(query_binding)
         if (
             query_binding.provider_id != "BYBIT"
             or query_binding.account_id != self.account_id

@@ -2501,6 +2501,411 @@ del _bind_direct_trading_write_receipt_access
 del _direct_trading_write_execution_receipt_state
 
 
+_DIRECT_AUTHENTICATED_READ_TRANSPORT_IDENTITY = (
+    "autotrade.provider_transport.UrllibJsonWireClient:direct-auth-read:v1"
+)
+_DIRECT_AUTHENTICATED_READ_NETWORK_POLICY_IDENTITY = "sha256:" + sha256(
+    json.dumps(
+        {
+            "automatic_retries": False,
+            "https_only": True,
+            "proxy_mode": "DIRECT_ONLY",
+            "redirects": False,
+            "response_body": "BOUNDED_EXACT_BYTES",
+            "transport": "urllib",
+            "version": 1,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
+class DirectAuthenticatedReadExecutionReceipt:
+    """Sealed proof of one exact direct authenticated HTTP response.
+
+    The receipt proves only that the canonical direct urllib client sent the
+    exact signed request and returned the bound status/body. Provider
+    qualification, Host issuer authority and financial PROVIDER_ORIGIN remain
+    separate authorities.
+    """
+
+    transport_identity: str
+    network_policy_identity: str
+    query_digest: str
+    request_sha256: str
+    request_semantics_sha256: str
+    http_status: int
+    response_sha256: str
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        raise ProviderTransportError(
+            "direct authenticated-read receipt is minted only by canonical wire execution"
+        )
+
+
+def direct_authenticated_read_transport_identity() -> str:
+    return _DIRECT_AUTHENTICATED_READ_TRANSPORT_IDENTITY
+
+
+def direct_authenticated_read_network_policy_identity() -> str:
+    return _DIRECT_AUTHENTICATED_READ_NETWORK_POLICY_IDENTITY
+
+
+def _direct_authenticated_read_request_digest(
+    request: AuthenticatedReadHttpRequest,
+    _require_request=_require_authenticated_read_http_request,
+) -> str:
+    try:
+        method, url, headers, body, timeout_seconds = _require_request(request)
+    except (TypeError, ProviderTransportScopeError) as error:
+        raise ProviderTransportError(
+            "direct authenticated-read receipt requires canonical HTTP request"
+        ) from error
+    material = {
+        "method": method,
+        "url_sha256": "sha256:" + sha256(url.encode("utf-8")).hexdigest(),
+        "headers_sha256": "sha256:"
+        + sha256(
+            json.dumps(
+                dict(sorted(dict(headers).items())),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        "body_sha256": "sha256:" + sha256(body).hexdigest(),
+        "timeout_seconds": timeout_seconds,
+    }
+    return "sha256:" + sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _canonical_bybit_authenticated_read_query(
+    query_binding: AuthenticatedReadQueryBinding,
+    _rule=_bybit_authenticated_read_rule,
+) -> str:
+    _rule(query_binding)
+    query: dict[str, str] = {}
+    for raw_key, raw_value in query_binding.query.items():
+        key = _canonical_text(raw_key, name="query parameter")
+        if type(raw_value) is not str or raw_value != raw_value.strip():
+            raise ProviderTransportScopeError(
+                "Bybit authenticated-read query values must be canonical strings"
+            )
+        if key in query:
+            raise ProviderTransportScopeError(
+                "Bybit authenticated-read query keys must be unique"
+            )
+        query[key] = raw_value
+    if not query:
+        raise ProviderTransportScopeError(
+            "Bybit authenticated-read query must not be empty"
+        )
+    if query_binding.endpoint == _BYBIT_OPTION_DELIVERY_ENDPOINT:
+        parts: list[str] = []
+        for key, value in sorted(query.items()):
+            if key == "cursor":
+                parts.append("cursor=" + value)
+            else:
+                parts.append(urlencode(((key, value),)))
+        return "&".join(parts)
+    return urlencode(sorted(query.items()))
+
+
+def _validated_bybit_authenticated_read_wire_semantics_digest(
+    request: AuthenticatedReadHttpRequest,
+    query_binding: AuthenticatedReadQueryBinding,
+    _require_query=_require_authenticated_read_query_binding_authority,
+    _require_request=_require_authenticated_read_http_request,
+    _query_text=_canonical_bybit_authenticated_read_query,
+) -> str:
+    try:
+        _require_query(query_binding)
+        method, url, headers, body, timeout_seconds = _require_request(request)
+    except Exception as error:
+        raise ProviderTransportError(
+            "Bybit direct authenticated-read authority is unavailable"
+        ) from error
+    if query_binding.provider_id != "BYBIT":
+        raise ProviderTransportError(
+            "Bybit direct authenticated-read requires BYBIT query authority"
+        )
+    policy = BYBIT_V5_ENDPOINT_POLICIES.get(query_binding.provider_environment)
+    if type(policy) is not ProviderEndpointPolicy:
+        raise ProviderTransportError(
+            "Bybit direct authenticated-read provider environment is unsupported"
+        )
+    expected_url = policy.absolute_url(query_binding.endpoint) + "?" + _query_text(
+        query_binding
+    )
+    header_values = dict(headers)
+    expected_headers = {
+        "Accept",
+        "X-BAPI-API-KEY",
+        "X-BAPI-TIMESTAMP",
+        "X-BAPI-RECV-WINDOW",
+        "X-BAPI-SIGN",
+    }
+    timestamp = header_values.get("X-BAPI-TIMESTAMP")
+    recv_window = header_values.get("X-BAPI-RECV-WINDOW")
+    signature = header_values.get("X-BAPI-SIGN")
+    api_key = header_values.get("X-BAPI-API-KEY")
+    if (
+        method != "GET"
+        or url != expected_url
+        or body != b""
+        or timeout_seconds != policy.timeout_seconds
+        or set(header_values) != expected_headers
+        or header_values.get("Accept") != "application/json"
+        or type(api_key) is not str
+        or not api_key
+        or type(timestamp) is not str
+        or not timestamp.isdigit()
+        or type(recv_window) is not str
+        or not recv_window.isdigit()
+        or not 1 <= int(recv_window) <= 60000
+        or type(signature) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", signature) is None
+    ):
+        raise ProviderTransportError(
+            "Bybit transmitted authenticated-read request differs from canonical semantics"
+        )
+    material = {
+        "provider_id": "BYBIT",
+        "environment": query_binding.environment,
+        "provider_environment": query_binding.provider_environment,
+        "account_id": query_binding.account_id,
+        "entity_id": query_binding.entity_id,
+        "capability_snapshot_id": query_binding.capability_snapshot_id,
+        "instrument_version": query_binding.instrument_version,
+        "surface": query_binding.surface.value,
+        "permission_scope": query_binding.permission_scope,
+        "endpoint": query_binding.endpoint,
+        "query": dict(sorted(dict(query_binding.query).items())),
+        "query_digest": query_binding.query_digest,
+        "method": method,
+        "host": urlsplit(policy.base_url).hostname,
+        "timeout_seconds": timeout_seconds,
+    }
+    return "sha256:" + sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _install_direct_authenticated_read_execution_authority(
+    require_direct_client,
+    send_impl,
+    request_digest,
+    semantics_digest,
+):
+    receipts: dict[
+        int,
+        tuple[object, object, tuple[str, str, str, str, str, int, str]],
+    ] = {}
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    weakref = weakref_ref
+    client_type = UrllibJsonWireClient
+    request_type = AuthenticatedReadHttpRequest
+    response_type = AuthenticatedReadWireResponse
+    receipt_type = DirectAuthenticatedReadExecutionReceipt
+    transport_error = ProviderTransportError
+    canonical_sha256 = sha256
+    transport_identity = _DIRECT_AUTHENTICATED_READ_TRANSPORT_IDENTITY
+    network_policy_identity = _DIRECT_AUTHENTICATED_READ_NETWORK_POLICY_IDENTITY
+
+    def prune() -> None:
+        for object_id, state in canonical_tuple(receipts.items()):
+            if state[0]() is None:
+                receipts.pop(object_id, None)
+
+    def execute(
+        client: object,
+        request: object,
+        query_binding: AuthenticatedReadQueryBinding,
+    ) -> AuthenticatedReadWireResponse:
+        if canonical_type(client) is not client_type:
+            raise transport_error(
+                "canonical direct authenticated-read urllib client is required"
+            )
+        if canonical_type(request) is not request_type:
+            raise transport_error(
+                "exact authenticated-read HTTP request is required"
+            )
+        try:
+            require_direct_client(client)
+        except transport_error as error:
+            raise transport_error(
+                "canonical direct authenticated-read network authority is unavailable"
+            ) from error
+        semantics_sha256 = semantics_digest(request, query_binding)
+        request_sha256 = request_digest(request)
+        response = send_impl(client, request)
+        if canonical_type(response) is not response_type:
+            raise transport_error(
+                "direct authenticated-read wire must return exact status/body response"
+            )
+        status = object_getattribute(response, "http_status")
+        raw = object_getattribute(response, "body")
+        response_sha256 = "sha256:" + canonical_sha256(raw).hexdigest()
+        receipt = canonical_object.__new__(receipt_type)
+        values = (
+            transport_identity,
+            network_policy_identity,
+            query_binding.query_digest,
+            request_sha256,
+            semantics_sha256,
+            status,
+            response_sha256,
+        )
+        for field_name, field_value in zip(
+            (
+                "transport_identity",
+                "network_policy_identity",
+                "query_digest",
+                "request_sha256",
+                "request_semantics_sha256",
+                "http_status",
+                "response_sha256",
+            ),
+            values,
+        ):
+            canonical_object.__setattr__(receipt, field_name, field_value)
+        prune()
+        receipts[canonical_id(receipt)] = (
+            weakref(receipt),
+            weakref(response),
+            values,
+        )
+        canonical_object.__setattr__(
+            response,
+            "_direct_authenticated_read_execution_receipt",
+            receipt,
+        )
+        return response
+
+    def snapshot(
+        receipt: object,
+    ) -> tuple[str, str, str, str, str, int, str, object | None]:
+        if canonical_type(receipt) is not receipt_type:
+            raise transport_error(
+                "canonical direct authenticated-read execution receipt is required"
+            )
+        prune()
+        state = receipts.get(canonical_id(receipt))
+        if state is None or state[0]() is not receipt:
+            raise transport_error(
+                "direct authenticated-read receipt construction authority is unavailable"
+            )
+        values = state[2]
+        current = canonical_tuple(
+            object_getattribute(receipt, name)
+            for name in (
+                "transport_identity",
+                "network_policy_identity",
+                "query_digest",
+                "request_sha256",
+                "request_semantics_sha256",
+                "http_status",
+                "response_sha256",
+            )
+        )
+        if current != values:
+            raise transport_error(
+                "direct authenticated-read receipt changed after wire execution"
+            )
+        return (*values, state[1]())
+
+    return execute, snapshot
+
+
+(
+    _execute_direct_bybit_authenticated_read_wire,
+    _direct_authenticated_read_execution_receipt_state,
+) = _install_direct_authenticated_read_execution_authority(
+    require_direct_trading_write_client,
+    UrllibJsonWireClient.send,
+    _direct_authenticated_read_request_digest,
+    _validated_bybit_authenticated_read_wire_semantics_digest,
+)
+del _install_direct_authenticated_read_execution_authority
+
+
+def _bind_direct_authenticated_read_receipt_access(snapshot_impl):
+    receipt_type = DirectAuthenticatedReadExecutionReceipt
+    response_type = AuthenticatedReadWireResponse
+    canonical_type = type
+    canonical_getattr = getattr
+    canonical_sha256 = sha256
+    mapping_proxy = MappingProxyType
+    transport_error = ProviderTransportError
+    object_getattribute = object.__getattribute__
+
+    def direct_authenticated_read_execution_receipt(
+        response: AuthenticatedReadWireResponse,
+    ) -> DirectAuthenticatedReadExecutionReceipt:
+        if canonical_type(response) is not response_type:
+            raise transport_error(
+                "exact authenticated-read wire response is required"
+            )
+        receipt = canonical_getattr(
+            response,
+            "_direct_authenticated_read_execution_receipt",
+            None,
+        )
+        values = snapshot_impl(receipt)
+        if values[7] is not response:
+            raise transport_error(
+                "direct authenticated-read receipt is not bound to exact response"
+            )
+        status = object_getattribute(response, "http_status")
+        raw = object_getattribute(response, "body")
+        if (
+            values[5] != status
+            or values[6] != "sha256:" + canonical_sha256(raw).hexdigest()
+        ):
+            raise transport_error(
+                "direct authenticated-read receipt does not match exact response"
+            )
+        return receipt
+
+    def direct_authenticated_read_execution_receipt_snapshot(
+        receipt: DirectAuthenticatedReadExecutionReceipt,
+    ) -> Mapping[str, object]:
+        values = snapshot_impl(receipt)
+        return mapping_proxy(
+            {
+                "transport_identity": values[0],
+                "network_policy_identity": values[1],
+                "query_digest": values[2],
+                "request_sha256": values[3],
+                "request_semantics_sha256": values[4],
+                "http_status": values[5],
+                "response_sha256": values[6],
+            }
+        )
+
+    return (
+        direct_authenticated_read_execution_receipt,
+        direct_authenticated_read_execution_receipt_snapshot,
+    )
+
+
+(
+    direct_authenticated_read_execution_receipt,
+    direct_authenticated_read_execution_receipt_snapshot,
+) = _bind_direct_authenticated_read_receipt_access(
+    _direct_authenticated_read_execution_receipt_state
+)
+del _bind_direct_authenticated_read_receipt_access
+del _direct_authenticated_read_execution_receipt_state
+
+
 def _install_direct_trading_exact_response_authority(
     receipt_reader,
     receipt_snapshot,
@@ -5551,40 +5956,8 @@ class BybitV5AuthenticatedReadSigner:
                 "recv_window_ms must be an integer from 1 through 60000"
             )
 
-        query: dict[str, str] = {}
-        for raw_key, raw_value in query_binding.query.items():
-            key = _canonical_text(raw_key, name="query parameter")
-            if type(raw_value) is not str or raw_value != raw_value.strip():
-                raise ProviderTransportScopeError(
-                    "Bybit authenticated-read query values must be canonical strings"
-                )
-            if key in query:
-                raise ProviderTransportScopeError(
-                    "Bybit authenticated-read query keys must be unique"
-                )
-            query[key] = raw_value
-        if not query:
-            raise ProviderTransportScopeError(
-                "Bybit authenticated-read query must not be empty"
-            )
-
+        exact_query = _canonical_bybit_authenticated_read_query(query_binding)
         credential = BybitV5Credential.parse(credential_plaintext)
-        if query_binding.endpoint == _BYBIT_OPTION_DELIVERY_ENDPOINT:
-            # Bybit returns nextPageCursor as an already percent-encoded opaque
-            # token and instructs callers to feed that exact token back. Encoding
-            # '%' again would turn %3A/%2C into %253A/%252C and change both the
-            # signed bytes and pagination meaning. Other fields retain the
-            # existing urlencode contract; the cursor validator above limits the
-            # raw token to RFC3986 unreserved bytes plus canonical %XX escapes.
-            exact_parts = []
-            for key, value in sorted(query.items()):
-                if key == "cursor":
-                    exact_parts.append("cursor=" + value)
-                else:
-                    exact_parts.append(urlencode(((key, value),)))
-            exact_query = "&".join(exact_parts)
-        else:
-            exact_query = urlencode(sorted(query.items()))
         signing_material = (
             str(timestamp_ms)
             + credential.api_key
@@ -5824,6 +6197,145 @@ class BybitV5AuthenticatedReadTransport:
                 response_bytes=wire_response.body,
                 observed_at=self.clock_utc(),
             )
+
+
+def _install_bybit_direct_authenticated_read_executor(
+    transport_type,
+    query_type,
+    rule_resolver,
+    require_query,
+    require_direct_client,
+    direct_send,
+    receipt_reader,
+    receipt_snapshot,
+    signer,
+    observer,
+):
+    canonical_type = type
+    transport_error = ProviderTransportError
+    scope_error = ProviderTransportScopeError
+
+    def execute_direct(
+        self,
+        query_binding: AuthenticatedReadQueryBinding,
+    ) -> tuple[ProviderResponseObservation, DirectAuthenticatedReadExecutionReceipt]:
+        if canonical_type(self) is not transport_type:
+            raise TypeError(
+                "direct Bybit authenticated read requires exact transport type"
+            )
+        if canonical_type(query_binding) is not query_type:
+            raise TypeError(
+                "query_binding must be exact AuthenticatedReadQueryBinding"
+            )
+        require_query(query_binding)
+        if (
+            query_binding.provider_id != "BYBIT"
+            or query_binding.account_id != self.account_id
+            or query_binding.environment != self.policy.environment
+            or query_binding.provider_environment != self.provider_environment
+            or query_binding.capability_snapshot_id != self.capability_snapshot_id
+        ):
+            raise scope_error(
+                "Bybit authenticated-read query scope mismatch"
+            )
+        rule = rule_resolver(query_binding)
+
+        # Production-origin execution requires the exact canonical direct client.
+        # Reject injected/replaced clients before quota waits or credential access.
+        require_direct_client(self.wire_client)
+
+        if self.quota_gate is not None:
+            self.quota_gate(
+                "BYBIT",
+                self.account_id,
+                self.policy.environment,
+                "AUTHENTICATED_READ",
+            )
+
+        self._require_current_capability(query_binding, rule)
+
+        with self.secret_resolver.lease_for_execution(
+            self.session_token,
+            origin=self.origin,
+            handle=self.credential_handle,
+            execution_identity=self.execution_identity,
+            account_id=self.account_id,
+            provider="BYBIT",
+            environment=self.policy.environment,
+            purpose="READ",
+            provider_environment=self.provider_environment,
+        ) as credential_plaintext:
+            try:
+                signed = signer(
+                    policy=self.policy,
+                    query_binding=query_binding,
+                    credential_plaintext=credential_plaintext,
+                    timestamp_ms=self.clock_millis(),
+                    recv_window_ms=self.recv_window_ms,
+                )
+            finally:
+                credential_plaintext = None
+
+            self._require_current_capability(query_binding, rule)
+            wire_response = direct_send(
+                self.wire_client,
+                signed,
+                query_binding,
+            )
+            if canonical_type(wire_response) is not AuthenticatedReadWireResponse:
+                raise transport_error(
+                    "Bybit direct authenticated-read wire must preserve HTTP status"
+                )
+            if wire_response.http_status not in rule.success_statuses:
+                raise transport_error(
+                    "Bybit direct authenticated read returned unexpected HTTP status "
+                    + str(wire_response.http_status)
+                )
+            receipt = receipt_reader(wire_response)
+            receipt_values = receipt_snapshot(receipt)
+            if (
+                receipt_values["query_digest"] != query_binding.query_digest
+                or receipt_values["http_status"] != wire_response.http_status
+                or receipt_values["response_sha256"]
+                != "sha256:" + sha256(wire_response.body).hexdigest()
+            ):
+                raise transport_error(
+                    "Bybit direct authenticated-read receipt differs from exact wire result"
+                )
+            observation = observer(
+                query_binding=query_binding,
+                http_status=wire_response.http_status,
+                response_bytes=wire_response.body,
+                observed_at=self.clock_utc(),
+            )
+            if (
+                observation.query_binding is not query_binding
+                or observation.http_status != receipt_values["http_status"]
+                or observation.response_sha256 != receipt_values["response_sha256"]
+            ):
+                raise transport_error(
+                    "Bybit direct authenticated-read observation differs from wire receipt"
+                )
+            return observation, receipt
+
+    return execute_direct
+
+
+BybitV5AuthenticatedReadTransport.execute_direct = (
+    _install_bybit_direct_authenticated_read_executor(
+        BybitV5AuthenticatedReadTransport,
+        AuthenticatedReadQueryBinding,
+        _bybit_authenticated_read_rule,
+        _require_authenticated_read_query_binding_authority,
+        require_direct_trading_write_client,
+        _execute_direct_bybit_authenticated_read_wire,
+        direct_authenticated_read_execution_receipt,
+        direct_authenticated_read_execution_receipt_snapshot,
+        BybitV5AuthenticatedReadSigner.sign,
+        observe_authenticated_json_response,
+    )
+)
+del _install_bybit_direct_authenticated_read_executor
 
 
 @dataclass(frozen=True)

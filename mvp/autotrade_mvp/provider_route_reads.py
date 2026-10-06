@@ -22,6 +22,10 @@ from .bybit_v5 import (
     BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
     BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
 )
+from .ibkr_web import (
+    IBKR_BROKERAGE_ACCOUNTS_PARSER_CONTRACT_DIGEST,
+    IBKR_BROKERAGE_ACCOUNTS_PARSER_IDENTITY,
+)
 from .capabilities import CapabilityError
 from .durable_capabilities import DurableCapabilityRegistry
 from .durable_provider_qualification import DurableProviderQualificationRegistry
@@ -43,6 +47,7 @@ from .provider_transport import (
     BINANCE_SPOT_AUTHENTICATED_READ_ENDPOINTS,
     BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS,
     KRAKEN_SPOT_AUTHENTICATED_READ_ENDPOINTS,
+    IBKR_WEB_AUTHENTICATED_READ_ENDPOINTS,
 )
 
 
@@ -87,6 +92,7 @@ _READ_ENDPOINTS = MappingProxyType(
         "BINANCE": BINANCE_SPOT_AUTHENTICATED_READ_ENDPOINTS,
         "BYBIT": BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS,
         "KRAKEN": KRAKEN_SPOT_AUTHENTICATED_READ_ENDPOINTS,
+        "IBKR": IBKR_WEB_AUTHENTICATED_READ_ENDPOINTS,
     }
 )
 
@@ -96,6 +102,10 @@ _READ_ENDPOINT_PARSER_CONTRACTS = MappingProxyType(
         ("BYBIT", "/v5/asset/delivery-record"): (
             BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
             BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
+        ),
+        ("IBKR", "/iserver/accounts"): (
+            IBKR_BROKERAGE_ACCOUNTS_PARSER_IDENTITY,
+            IBKR_BROKERAGE_ACCOUNTS_PARSER_CONTRACT_DIGEST,
         ),
     }
 )

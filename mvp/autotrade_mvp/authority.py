@@ -692,6 +692,55 @@ def _authority_service_instrument_registry_operations():
 del _authority_service_instrument_registry_operations
 
 
+def _build_authority_service_instrument_version_resolver():
+    """Resolve one exact instrument through the product-selected registry."""
+
+    registry_type = InstrumentRegistry
+    version_type = InstrumentVersion
+    registry_error = InstrumentRegistryError
+    exact = InstrumentRegistry.exact
+
+    def resolve(
+        service: object,
+        identity: InstrumentVersionIdentity,
+    ) -> InstrumentVersion:
+        if type(identity) is not InstrumentVersionIdentity:
+            raise TypeError(
+                "instrument identity must be exact InstrumentVersionIdentity"
+            )
+        registry = _authority_service_instrument_registry(service, required=True)
+        if type(registry) is not registry_type:
+            raise AuthorityConflict(
+                "financial instrument registry authority changed type"
+            )
+        try:
+            selected = exact(
+                registry,
+                f"{identity.instrument_id}@{identity.version}",
+            )
+        except registry_error as error:
+            raise AuthorityConflict(
+                "financial borrow authority cannot resolve canonical instrument version"
+            ) from error
+        if (
+            type(selected) is not version_type
+            or selected.instrument_id != identity.instrument_id
+            or selected.version != identity.version
+        ):
+            raise AuthorityConflict(
+                "canonical instrument registry returned mismatched instrument identity"
+            )
+        return selected
+
+    return resolve
+
+
+_resolve_authority_service_instrument_version = (
+    _build_authority_service_instrument_version_resolver()
+)
+del _build_authority_service_instrument_version_resolver
+
+
 def _require_authority_service_future_lifecycle(
     service: object,
     *,
@@ -3635,6 +3684,10 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "regenerated reservation availability is malformed"
                 )
+            canonical_borrow_instrument = _resolve_authority_service_instrument_version(
+                self,
+                record.instrument_version,
+            )
             adjusted_available = dict(regenerated_available)
             canonical_adjustments: dict[str, dict[str, str]] = {}
             for resource in borrow_resources:
@@ -3642,6 +3695,7 @@ class AuthorityService:
                 if not isinstance(raw_adjustment, Mapping) or set(
                     raw_adjustment
                 ) != {
+                    "quantity_unit",
                     "total_capacity",
                     "current_borrowed_quantity",
                     "reservable_capacity",
@@ -3675,7 +3729,9 @@ class AuthorityService:
                     name="borrow.reservation_requirement",
                 )
                 if (
-                    total_capacity < 0
+                    raw_adjustment.get("quantity_unit")
+                    != canonical_borrow_instrument.quantity_unit
+                    or total_capacity < 0
                     or current_borrowed < 0
                     or reservable_capacity < 0
                     or required_increment < 0
@@ -3691,6 +3747,7 @@ class AuthorityService:
                     )
                 adjusted_available[resource] = _canonical_decimal_text(reservable_capacity)
                 canonical_adjustments[resource] = {
+                    "quantity_unit": canonical_borrow_instrument.quantity_unit,
                     "total_capacity": _canonical_decimal_text(total_capacity),
                     "current_borrowed_quantity": _canonical_decimal_text(current_borrowed),
                     "reservable_capacity": _canonical_decimal_text(reservable_capacity),
@@ -4917,6 +4974,7 @@ class AuthorityService:
             if resource.startswith("BORROW:")
         )
         required_borrow_resource: str | None = None
+        canonical_borrow_instrument: InstrumentVersion | None = None
         required_borrow_quantity = Decimal("0")
         current_borrowed_quantity = Decimal("0")
         if decision.admitted:
@@ -4940,6 +4998,10 @@ class AuthorityService:
                     -current_position,
                 )
                 if required_borrow_quantity > 0:
+                    canonical_borrow_instrument = _resolve_authority_service_instrument_version(
+                        self,
+                        snapshot_instrument,
+                    )
                     required_borrow_resource = borrow_resource_key(
                         provider_id=snapshot_provider_id,
                         account_id=account,
@@ -5089,6 +5151,36 @@ class AuthorityService:
                 )
                 for resource, amount in authoritative_available.items()
             }
+            if required_borrow_resource is not None:
+                if canonical_borrow_instrument is None:
+                    raise AuthorityConflict(
+                        "financial borrow instrument authority is unavailable"
+                    )
+                resource_details = availability_evidence.get("resource_details")
+                if not isinstance(resource_details, Mapping):
+                    raise AuthorityConflict(
+                        "authoritative borrow availability lacks typed resource details"
+                    )
+                raw_borrow_detail = resource_details.get(required_borrow_resource)
+                if not isinstance(raw_borrow_detail, Mapping):
+                    raise AuthorityConflict(
+                        "authoritative borrow availability lacks required resource detail"
+                    )
+                borrow_evidence = BorrowAvailabilityEvidence.from_resource_detail(
+                    raw_borrow_detail
+                )
+                if (
+                    borrow_evidence.resource_key != required_borrow_resource
+                    or borrow_evidence.instrument_id
+                    != snapshot_instrument.instrument_id
+                    or borrow_evidence.instrument_version
+                    != snapshot_instrument.version
+                    or borrow_evidence.quantity_unit
+                    != canonical_borrow_instrument.quantity_unit
+                ):
+                    raise AuthorityConflict(
+                        "authoritative borrow quantity unit or instrument scope mismatch"
+                    )
             caller_expected_available = dict(canonical_available)
             durable_borrow_adjustment: tuple[Decimal, Decimal] | None = None
             if existing is not None and required_borrow_resource is not None:
@@ -5104,6 +5196,7 @@ class AuthorityService:
                     )
                 raw_adjustment = raw_adjustments.get(required_borrow_resource)
                 required_adjustment_fields = {
+                    "quantity_unit",
                     "total_capacity",
                     "current_borrowed_quantity",
                     "reservable_capacity",
@@ -5138,6 +5231,8 @@ class AuthorityService:
                 if (
                     durable_available is None
                     or total_capacity < 0
+                    or raw_adjustment.get("quantity_unit")
+                    != canonical_borrow_instrument.quantity_unit
                     or durable_current_borrowed < 0
                     or reservable_capacity < 0
                     or durable_required_increment < 0
@@ -5200,6 +5295,7 @@ class AuthorityService:
                         },
                         "borrow_capacity_adjustments": {
                             required_borrow_resource: {
+                                "quantity_unit": canonical_borrow_instrument.quantity_unit,
                                 "total_capacity": _canonical_decimal_text(
                                     total_capacity
                                 ),
@@ -6090,6 +6186,12 @@ class AuthorityService:
                     if resource.startswith("BORROW:")
                 )
                 if borrow_resources:
+                    canonical_dispatch_instrument = (
+                        _resolve_authority_service_instrument_version(
+                            self,
+                            record.instrument_version,
+                        )
+                    )
                     availability_evidence = risk_payload.get(
                         "reservation_availability_evidence"
                     )
@@ -6121,6 +6223,8 @@ class AuthorityService:
                             != record.instrument_version.instrument_id
                             or borrow.instrument_version
                             != record.instrument_version.version
+                            or borrow.quantity_unit
+                            != canonical_dispatch_instrument.quantity_unit
                         ):
                             raise AuthorityConflict(
                                 "durable borrow dispatch scope mismatch"
@@ -6137,6 +6241,7 @@ class AuthorityService:
                             provider_environment=borrow.provider_environment,
                             instrument_id=borrow.instrument_id,
                             instrument_version=borrow.instrument_version,
+                            quantity_unit=borrow.quantity_unit,
                             evidence_artifact_store=self.evidence_artifact_store,
                         )
                         if projection.active_quantity_at(now) > 0:

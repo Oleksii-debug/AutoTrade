@@ -42,6 +42,7 @@ def availability(**overrides):
         locate_id="locate-1",
         provider_revision="borrow-r7",
         capacity_quantity="100",
+        quantity_unit="share",
         hard_to_borrow=True,
         observed_at="2026-09-25T05:00:30Z",
         effective_at="2026-09-25T05:00:00Z",
@@ -63,6 +64,7 @@ def recall(**overrides):
         instrument_version=1,
         provider_revision="recall-r1",
         quantity="3",
+        quantity_unit="share",
         observed_at="2026-09-25T05:01:00Z",
         effective_at="2026-09-25T05:00:45Z",
         deadline="2026-09-25T06:00:00Z",
@@ -83,6 +85,7 @@ def resolution(**overrides):
         instrument_version=1,
         provider_revision="recall-r2",
         resolved_quantity="1",
+        quantity_unit="share",
         observed_at="2026-09-25T05:10:00Z",
         effective_at="2026-09-25T05:09:30Z",
         evidence_ref="provider:recall-r2",
@@ -92,6 +95,25 @@ def resolution(**overrides):
 
 
 class SecuritiesBorrowEvidenceTests(unittest.TestCase):
+    def test_quantity_unit_is_part_of_provider_evidence_identity(self):
+        evidence = availability()
+        self.assertEqual(
+            provider_borrow_evidence_receipt(evidence)["schema_version"],
+            2,
+        )
+        self.assertEqual(evidence.resource_detail()["quantity_unit"], "share")
+        restored = BorrowAvailabilityEvidence.from_resource_detail(
+            evidence.resource_detail()
+        )
+        self.assertEqual(restored.quantity_unit, "share")
+        self.assertEqual(recall().payload()["quantity_unit"], "share")
+        self.assertEqual(resolution().payload()["quantity_unit"], "share")
+        without_unit = dict(evidence.resource_detail())
+        without_unit.pop("quantity_unit")
+        with self.assertRaisesRegex((TypeError, ValueError), "quantity_unit"):
+            BorrowAvailabilityEvidence.from_resource_detail(without_unit)
+
+
     def test_resource_identity_is_scope_and_version_bound(self):
         base = borrow_resource_key(
             provider_id=PROVIDER_ID,
@@ -236,6 +258,23 @@ class SecuritiesBorrowEvidenceTests(unittest.TestCase):
 
 
 class DurableBorrowRecallProjectionTests(unittest.TestCase):
+    def test_projection_rejects_quantity_unit_mismatch(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            projection = EvidencedBorrowRecallProjection(
+                store,
+                provider_id=PROVIDER_ID,
+                account_id=ACCOUNT_ID,
+                environment=ENVIRONMENT,
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                quantity_unit="share",
+            )
+            with self.assertRaisesRegex(BorrowRecallConflict, "scope mismatch"):
+                projection.record_recall(recall(quantity_unit="contract"))
+
+
+
     def setUp(self):
         self.temp = TemporaryDirectory()
         self.path = f"{self.temp.name}/journal.sqlite3"
@@ -251,6 +290,7 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
             environment=ENVIRONMENT,
             instrument_id=INSTRUMENT_ID,
             instrument_version=1,
+            quantity_unit="share",
         )
         values.update(overrides)
         return EvidencedBorrowRecallProjection(store or self.store, **values)
@@ -335,6 +375,7 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
                 provider_environment="TESTNET",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
+                quantity_unit="share",
                 evidence_artifact_store=artifact_store_for(self.store),
             )
 
@@ -353,6 +394,7 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
                 environment=ENVIRONMENT,
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
+                quantity_unit="share",
                 evidence_artifact_store=artifact_store_for(self.store),
             )
 
@@ -365,6 +407,7 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
             environment=ENVIRONMENT,
             instrument_id=INSTRUMENT_ID,
             instrument_version=1,
+            quantity_unit="share",
             evidence_artifact_store=artifacts,
         )
         callbacks = [
@@ -387,6 +430,7 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
                 environment=ENVIRONMENT,
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
+                quantity_unit="share",
                 evidence_artifact_store=artifacts,
             )
 
@@ -405,6 +449,7 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
             environment=ENVIRONMENT,
             instrument_id=INSTRUMENT_ID,
             instrument_version=1,
+            quantity_unit="share",
             evidence_artifact_store=artifacts,
         )
         other = JournalStore(f"{self.temp.name}/other.sqlite3")
@@ -422,6 +467,7 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
             environment=ENVIRONMENT,
             instrument_id=INSTRUMENT_ID,
             instrument_version=1,
+            quantity_unit="share",
             evidence_artifact_store=artifacts,
         )
         calls = []
@@ -664,6 +710,7 @@ class SecuritiesBorrowArtifactBindingTests(unittest.TestCase):
             environment=ENVIRONMENT,
             instrument_id=INSTRUMENT_ID,
             instrument_version=1,
+            quantity_unit="share",
             evidence_artifact_store=artifacts,
         )
         return store, artifacts, projection
@@ -736,6 +783,7 @@ class SecuritiesBorrowArtifactBindingTests(unittest.TestCase):
                     environment=ENVIRONMENT,
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
+                    quantity_unit="share",
                     evidence_artifact_store=artifact_store_for(store),
                 )
 

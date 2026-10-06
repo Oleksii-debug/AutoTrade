@@ -122,6 +122,78 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "SENT")
 
+    def _redispatch_exact_response_attempt(self, path: str):
+        store = JournalStore(path)
+        dispatcher = GuardedDispatcher(
+            store,
+            environment="SIMULATION",
+            account_id="acct",
+            owner_token="restart-owner",
+        )
+
+        def unexpected_authority(_intent_hash, _now):
+            raise AssertionError("existing durable attempt must not rerun authority")
+
+        def unexpected_transport(_client_order_id, _request, _guard):
+            raise AssertionError("existing durable attempt must not rerun transport")
+
+        return dispatcher.dispatch(
+            attempt_id="binding-type-a1",
+            intent_id="intent-1",
+            intent_hash="sha256:" + "1" * 64,
+            provider="provider",
+            request={"side": "BUY"},
+            now="2026-10-06T14:00:02Z",
+            authority_check=unexpected_authority,
+            transport_send=unexpected_transport,
+            submission_scope={"endpoint": "/orders"},
+        )
+
+    def test_runtime_recovery_rejects_non_contiguous_aggregate_versions(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            self._tamper_event_aggregate_version(
+                path,
+                "SubmissionSent",
+                4,
+            )
+
+            result = self._redispatch_exact_response_attempt(path)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "durable_submission_history_invalid")
+
+    def test_runtime_recovery_rejects_cross_event_client_order_retargeting(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            self._tamper_event_field(
+                path,
+                "SubmissionSent",
+                "client_order_id",
+                "forged-client-order-id",
+            )
+
+            result = self._redispatch_exact_response_attempt(path)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "durable_submission_history_invalid")
+
+    def test_runtime_recovery_rejects_cross_event_environment_retargeting(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            self._tamper_event_field(
+                path,
+                "SubmissionSending",
+                "environment",
+                "PAPER",
+                envelope_field=True,
+            )
+
+            result = self._redispatch_exact_response_attempt(path)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "durable_submission_history_invalid")
+
     def test_restart_rejects_non_contiguous_aggregate_versions(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

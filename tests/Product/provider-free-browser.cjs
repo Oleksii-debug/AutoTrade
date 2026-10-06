@@ -138,12 +138,21 @@ async function exercisePortfolioTableTools(page) {
   assert.match(copiedPortfolio, /895\.696/);
   await page.keyboard.press("Shift+Tab");
   assert.equal(await page.evaluate(() => document.activeElement.id), "portfolio-filter");
-  await page.keyboard.press("Control+A");
-  await page.keyboard.press("Backspace");
+  await page.keyboard.press("Escape");
   await page.waitForFunction(() => {
+    const filter = document.querySelector("#portfolio-filter");
     const status = document.querySelector("#portfolio-filter-status")?.textContent || "";
-    return status.includes("Page 1 of ") && status.includes("Sort: host order.");
+    return filter?.value === "" &&
+      status.includes("Page 1 of ") &&
+      status.includes("Sort: host order.");
   });
+  assert.equal(
+    await page.evaluate(() => document.activeElement.id),
+    "portfolio-filter",
+    "Escape clears the current table filter without moving keyboard focus");
+  await page.waitForFunction(() =>
+    (document.querySelector("#polite-status")?.textContent || "").includes(
+      "Sort: host order."));
 }
 
 async function exercisePortfolioPagingAndSort(page) {

@@ -33,6 +33,33 @@ class PersistenceSnapshotCutTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "ahead of the journal"):
                 store.load_events_after_journal_sequence(2)
 
+    def test_journal_tail_page_does_not_include_append_after_snapshot_cut(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+
+            original = store._journal_sequence_value
+            raced = False
+
+            def race(connection):
+                nonlocal raced
+                current = original(connection)
+                if not raced:
+                    raced = True
+                    JournalStore(path).append_event(event("evt-cut-later", 2))
+                return current
+
+            store._journal_sequence_value = race
+            page = store.load_events_after_journal_sequence(0)
+
+            self.assertTrue(raced)
+            self.assertEqual(
+                [item["event_id"] for item in page],
+                ["evt-cut-1"],
+            )
+            self.assertEqual(JournalStore(path).current_journal_sequence(), 2)
+
     def test_projection_checkpoint_cannot_become_valid_from_later_journal_write(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

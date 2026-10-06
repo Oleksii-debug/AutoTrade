@@ -154,12 +154,13 @@ class ExactJsonTransportResponse:
             require_provider_response_bytes(
                 raw,
                 max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
-                allow_empty=self.requires_reconciliation,
+                allow_empty=False,
             )
         except (TypeError, ValueError) as error:
             raise ValueError(
                 "provider response bytes violate shared byte budget"
             ) from error
+        _decode_exact_json_bytes(raw)
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -179,15 +180,10 @@ class ExactJsonTransportResponse:
                 "ambiguity_reason",
                 self.ambiguity_reason.strip(),
             )
-        else:
-            # Definitive responses remain strict JSON. Opaque wire bytes are
-            # admissible only after the provider classifier has already made
-            # the irreversible post-SEND result reconciliation-required.
-            _decode_exact_json_bytes(raw)
-            if self.ambiguity_reason is not None:
-                raise ValueError(
-                    "ambiguity_reason is only valid when reconciliation is required"
-                )
+        elif self.ambiguity_reason is not None:
+            raise ValueError(
+                "ambiguity_reason is only valid when reconciliation is required"
+            )
         _register_exact_transport_response(self)
 
     @property
@@ -207,7 +203,7 @@ class ExactJsonTransportResponse:
 
 
 def _install_exact_transport_response_authority():
-    """Seal provider post-SEND classification to its validated construction state."""
+    """Seal provider post-SEND classification to validated construction state."""
 
     response_type = ExactJsonTransportResponse
     canonical_type = type
@@ -232,10 +228,10 @@ def _install_exact_transport_response_authority():
     states: dict[int, tuple[object, tuple[object, ...]]] = {}
     installed: list[object] = []
 
-    def authority_changed():
+    def authority_changed() -> None:
         raise ValueError("exact transport response authority is unavailable")
 
-    def implementation_changed():
+    def implementation_changed() -> None:
         if (
             ExactJsonTransportResponse is not response_type
             or type is not canonical_type
@@ -277,9 +273,12 @@ def _install_exact_transport_response_authority():
             authority_changed()
         if canonical_frozenset(state) != exact_field_names:
             authority_changed()
-        return canonical_tuple(state[name] for name in field_names)
+        return canonical_tuple(
+            canonical_dict.__getitem__(state, name)
+            for name in field_names
+        )
 
-    def prune():
+    def prune() -> None:
         for object_id, (value_ref, _snapshot) in canonical_tuple(states.items()):
             if value_ref() is None:
                 states.pop(object_id, None)
@@ -331,8 +330,9 @@ def _install_exact_transport_response_authority():
         canonical_require_response_bytes(
             current[0],
             max_bytes=canonical_hard_response_bytes,
-            allow_empty=current[2],
+            allow_empty=False,
         )
+        canonical_decode(current[0])
         return expected
 
     installed.extend((register, require))
@@ -348,45 +348,19 @@ del _install_exact_transport_response_authority
 
 def _snapshot_exact_transport_response(
     response: ExactJsonTransportResponse,
-    _canonical_authority=_require_canonical_exact_transport_response,
-    _canonical_decoder=_decode_exact_json_bytes,
-    _canonical_sha256=sha256,
-) -> tuple[str, str, str, Any, int | None, bool, str | None]:
-    """Revalidate issuer authority at the post-SEND consumption boundary."""
+) -> tuple[str, str, Any, int | None, bool, str | None]:
+    """Return one sealed, revalidated exact-response snapshot."""
 
-    if (
-        _require_canonical_exact_transport_response is not _canonical_authority
-        or _decode_exact_json_bytes is not _canonical_decoder
-        or sha256 is not _canonical_sha256
-    ):
-        raise ValueError("exact transport response authority is unavailable")
     (
         raw,
         http_status,
         requires_reconciliation,
         ambiguity_reason,
-    ) = _canonical_authority(response)
-
-    if requires_reconciliation:
-        try:
-            _canonical_decoder(raw)
-        except (TypeError, ValueError):
-            response_text = raw.hex()
-            response_encoding = "hex"
-        else:
-            response_text = raw.decode("utf-8")
-            response_encoding = "utf-8-json"
-        outcome_response = None
-    else:
-        outcome_response = _canonical_decoder(raw)
-        response_text = raw.decode("utf-8")
-        response_encoding = "utf-8-json"
-
+    ) = _require_canonical_exact_transport_response(response)
     return (
-        response_text,
-        response_encoding,
-        "sha256:" + _canonical_sha256(raw).hexdigest(),
-        outcome_response,
+        raw.decode("utf-8"),
+        "sha256:" + sha256(raw).hexdigest(),
+        _decode_exact_json_bytes(raw),
         http_status,
         requires_reconciliation,
         ambiguity_reason,

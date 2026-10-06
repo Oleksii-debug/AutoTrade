@@ -25,6 +25,7 @@ from autotrade_runtime.artifacts import (
 
 from .qualification_attestation import (
     AcceptedQualificationAttestation,
+    EvidenceArtifactRef,
     QualificationTrustError,
     QualificationTrustUnavailable,
     SignedQualificationAttestation,
@@ -40,6 +41,9 @@ _QUALIFICATION_DOMAIN = "RECOVERY"
 _QUALIFICATION_GATE = "RELEASE"
 _QUALIFICATION_PACKAGE = "WP-59"
 _QUALIFICATION_REQUIREMENT = "recovery-release-qualification"
+_RECOVERY_POLICY_REQUIREMENT_PREFIX = "recovery-decision-policy/sha256:"
+
+
 class RecoveryScenario(StrEnum):
     POWER_LOSS = "POWER_LOSS"
     NETWORK_LOSS = "NETWORK_LOSS"
@@ -357,6 +361,39 @@ class RecoveryQualificationPolicy:
         )
 
 
+def recovery_policy_subject_requirement(
+    policy: RecoveryQualificationPolicy,
+) -> str:
+    """Bind the exact terminal recovery criteria into signed qualification."""
+
+    if type(policy) is not RecoveryQualificationPolicy:
+        raise TypeError("policy must be RecoveryQualificationPolicy")
+    scenarios = sorted(RecoveryScenario, key=lambda item: item.value)
+    payload = {
+        "source_sha": policy.source_sha,
+        "release_artifact_id": policy.release_artifact_id,
+        "release_artifact_sha256": policy.release_artifact_sha256,
+        "evidence_schema_version": policy.evidence_schema_version,
+        "protocol_id": policy.protocol_id,
+        "max_downtime_ms": {
+            scenario.value: policy.max_downtime_ms[scenario]
+            for scenario in scenarios
+        },
+        "required_tests": {
+            scenario.value: sorted(policy.required_tests[scenario])
+            for scenario in scenarios
+        },
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return _RECOVERY_POLICY_REQUIREMENT_PREFIX + sha256(encoded).hexdigest()
+
+
 def recovery_evidence_receipt_metadata(
     item: RecoveryScenarioEvidence,
 ) -> dict[str, object]:
@@ -395,6 +432,54 @@ def recovery_evidence_receipt_metadata(
     }
 
 
+def recovery_evidence_receipt_payload(
+    item: RecoveryScenarioEvidence,
+) -> dict[str, object]:
+    """Canonical bytes whose digest binds every recovery decision fact."""
+
+    payload = dict(recovery_evidence_receipt_metadata(item))
+    payload.pop("evidence_artifact_sha256")
+    return payload
+
+
+def recovery_evidence_receipt_bytes(
+    item: RecoveryScenarioEvidence,
+) -> bytes:
+    return json.dumps(
+        recovery_evidence_receipt_payload(item),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _evidence_ref_identity(
+    ref: EvidenceArtifactRef,
+) -> tuple[str, str, str, str, str]:
+    if type(ref) is not EvidenceArtifactRef:
+        raise TypeError("accepted evidence refs must be EvidenceArtifactRef")
+    return (
+        ref.artifact_id,
+        ref.sha256,
+        ref.source_sha,
+        ref.media_type,
+        ref.evidence_kind,
+    )
+
+
+def _summary_evidence_ref_identity(
+    item: RecoveryScenarioEvidence,
+) -> tuple[str, str, str, str, str]:
+    return (
+        item.evidence_artifact_id,
+        item.evidence_artifact_sha256,
+        item.source_sha,
+        _RECOVERY_EVIDENCE_MEDIA_TYPE,
+        "RECOVERY_SCENARIO_EVIDENCE",
+    )
+
+
 def _store_artifact_matches(
     read_snapshot,
     *,
@@ -403,12 +488,18 @@ def _store_artifact_matches(
     media_type: str,
     source_sha: str,
     metadata: dict[str, object],
+    expected_bytes: bytes | None = None,
 ) -> bool:
-    """Verify stored bytes and declared bindings, not independent producer trust."""
+    """Verify exact stored bytes and immutable declared bindings."""
     try:
         manifest, raw = read_snapshot(artifact_id)
         if type(manifest) is not dict or type(raw) is not bytes:
             return False
+        if "sha256:" + sha256(raw).hexdigest() != artifact_sha256:
+            return False
+        if expected_bytes is not None:
+            if type(expected_bytes) is not bytes or raw != expected_bytes:
+                return False
         if type(manifest.get("manifest_hash")) is not str:
             return False
         if manifest.get("sha256") != artifact_sha256:
@@ -695,11 +786,11 @@ def qualify_recovery_release(
             inconclusive = True
         else:
             signed_refs = {
-                (item.artifact_id, item.sha256)
+                _evidence_ref_identity(item)
                 for item in accepted.evidence_refs
             }
             expected_refs = {
-                (item.evidence_artifact_id, item.evidence_artifact_sha256)
+                _summary_evidence_ref_identity(item)
                 for item in by_scenario.values()
             }
             if accepted.result == "FAIL":
@@ -712,6 +803,12 @@ def qualify_recovery_release(
                 inconclusive = True
             elif signed_refs != expected_refs:
                 blockers.append("independent_evidence_set_mismatch")
+                hard_failure = True
+            if (
+                recovery_policy_subject_requirement(policy)
+                not in accepted.requirement_ids
+            ):
+                blockers.append("independent_recovery_policy_mismatch")
                 hard_failure = True
 
     for scenario in sorted(by_scenario, key=lambda item: item.value):
@@ -727,6 +824,7 @@ def qualify_recovery_release(
                 media_type=_RECOVERY_EVIDENCE_MEDIA_TYPE,
                 source_sha=item.source_sha,
                 metadata=recovery_evidence_receipt_metadata(item),
+                expected_bytes=recovery_evidence_receipt_bytes(item),
             )
         if not integrity_verified:
             blockers.append(f"{prefix}:evidence_integrity_unverified")

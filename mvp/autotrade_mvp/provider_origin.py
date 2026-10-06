@@ -935,6 +935,11 @@ _HOST_ATTESTED_OBSERVED_KIND = "HOST_ATTESTED_OBSERVED"
 _HOST_JOURNAL_IDENTITY_SCHEMA = "autotrade-provider-origin-journal-identity:v1"
 _HOST_PREPARED_DURABILITY_SCHEMA = "autotrade-provider-read-durable-prepared:v1"
 _HOST_OBSERVED_DURABILITY_SCHEMA = "autotrade-provider-read-durable-observed:v1"
+_HOST_SESSION_SCHEMA = "autotrade-provider-issuer-session:v1"
+_HOST_READ_ATTEMPT_SCHEMA = "autotrade-provider-authenticated-read-attempt:v1"
+_HOST_READ_RECEIPT_SCHEMA = "autotrade-provider-authenticated-read-receipt:v1"
+_HOST_PREPARED_ENVELOPE_SCHEMA = "autotrade-host-authenticated-read-prepared:v1"
+_HOST_OBSERVED_ENVELOPE_SCHEMA = "autotrade-host-authenticated-read-observed:v2"
 _HOST_PREPARED_PAYLOAD_KEYS = frozenset(
     {
         "origin_kind",
@@ -988,6 +993,7 @@ def _require_host_expected_scope(
         raise ProviderOriginError(
             "Host expected scope must be exact HostAuthenticatedReadExpectedScope"
         )
+    values: dict[str, object] = {}
     for name in (
         "data_entitlement",
         "credential_handle_id",
@@ -996,7 +1002,10 @@ def _require_host_expected_scope(
         "adapter_build_identity",
         "transport_identity",
     ):
-        _exact_text(object.__getattribute__(value, name), name=name)
+        values[name] = _exact_text(
+            object.__getattribute__(value, name),
+            name=name,
+        )
     endpoint_rule = _exact_text(
         object.__getattribute__(value, "endpoint_rule_identity"),
         name="endpoint_rule_identity",
@@ -1018,8 +1027,17 @@ def _require_host_expected_scope(
         raise ProviderOriginError(
             "credential_generation must be an exact positive integer"
         )
-    return value
-
+    return HostAuthenticatedReadExpectedScope(
+        data_entitlement=values["data_entitlement"],
+        endpoint_rule_identity=endpoint_rule,
+        credential_handle_id=values["credential_handle_id"],
+        credential_generation=generation,
+        qualification_id=values["qualification_id"],
+        qualification_build_id=values["qualification_build_id"],
+        adapter_build_identity=values["adapter_build_identity"],
+        network_policy_identity=network_policy,
+        transport_identity=values["transport_identity"],
+    )
 
 def _host_canonical_utc(value: object, *, name: str) -> str:
     if type(value) is not datetime or type(value.tzinfo) is not timezone:
@@ -1183,6 +1201,85 @@ def _host_observed_receipt_payload(receipt: object) -> dict[str, object]:
         "observed_journal_sequence": receipt.observed_journal_sequence,
         "committed_at_utc": receipt.committed_at_utc,
         "receipt_identity": receipt.receipt_identity,
+    }
+
+
+def _host_prepared_attestation_payload(
+    verified: object,
+) -> dict[str, object]:
+    from .provider_host_attestation import VerifiedHostPreparedAttestation
+
+    if type(verified) is not VerifiedHostPreparedAttestation:
+        raise ProviderOriginError(
+            "Host Prepared verifier returned non-canonical evidence"
+        )
+    session = verified.issuer_session
+    attempt = verified.attempt
+    subject = attempt.subject
+    return {
+        "schema": _HOST_PREPARED_ENVELOPE_SCHEMA,
+        "issuer_session": {
+            "schema": _HOST_SESSION_SCHEMA,
+            "issuer_instance_id": session.issuer_instance_id,
+            "started_at_utc": session.started_at_utc,
+            "public_key_spki_base64": session.public_key_spki_base64,
+            "public_key_sha256": session.public_key_sha256,
+            "session_identity": session.session_identity,
+        },
+        "attempt": {
+            "schema": _HOST_READ_ATTEMPT_SCHEMA,
+            "issuer_session_identity": attempt.issuer_session_identity,
+            "subject": {
+                "provider_id": subject.provider_id,
+                "account_id": subject.account_id,
+                "entity_id": subject.entity_id,
+                "runtime_environment": subject.runtime_environment,
+                "provider_environment": subject.provider_environment,
+                "endpoint": subject.endpoint,
+                "surface": subject.surface,
+                "permission_scope": subject.permission_scope,
+                "data_entitlement": subject.data_entitlement,
+                "instrument_version": subject.instrument_version,
+                "query_digest": subject.query_digest,
+                "endpoint_rule_identity": subject.endpoint_rule_identity,
+                "credential_handle_id": subject.credential_handle_id,
+                "credential_generation": subject.credential_generation,
+                "capability_id": subject.capability_id,
+                "qualification_id": subject.qualification_id,
+                "qualification_build_id": subject.qualification_build_id,
+                "adapter_build_identity": subject.adapter_build_identity,
+                "network_policy_identity": subject.network_policy_identity,
+                "transport_identity": subject.transport_identity,
+            },
+            "read_generation": attempt.read_generation,
+            "read_attempt_id": attempt.read_attempt_id,
+            "prepared_at_utc": attempt.prepared_at_utc,
+            "binding_sha256": attempt.binding_sha256,
+            "signature_base64": attempt.signature_base64,
+        },
+        "query": dict(verified.query),
+    }
+
+
+def _host_provider_receipt_payload(receipt: object) -> dict[str, object]:
+    from .provider_host_attestation import HostAuthenticatedReadReceipt
+
+    if type(receipt) is not HostAuthenticatedReadReceipt:
+        raise ProviderOriginError(
+            "Host provider receipt must be exact HostAuthenticatedReadReceipt"
+        )
+    return {
+        "schema": _HOST_READ_RECEIPT_SCHEMA,
+        "issuer_session_identity": receipt.issuer_session_identity,
+        "read_attempt_binding_sha256": receipt.read_attempt_binding_sha256,
+        "read_attempt_id": receipt.read_attempt_id,
+        "read_generation": receipt.read_generation,
+        "http_status": receipt.http_status,
+        "response_sha256": receipt.response_sha256,
+        "response_length": receipt.response_length,
+        "observed_at_utc": receipt.observed_at_utc,
+        "receipt_sha256": receipt.receipt_sha256,
+        "signature_base64": receipt.signature_base64,
     }
 
 
@@ -1362,7 +1459,7 @@ class HostAuthenticatedReadJournalBridge:
         )
 
         expected = _query_snapshot(query_binding)
-        _require_host_expected_scope(expected_scope)
+        pins = _require_host_expected_scope(expected_scope)
         try:
             verified = verify_host_prepared_attestation(
                 prepared_envelope,
@@ -1380,8 +1477,9 @@ class HostAuthenticatedReadJournalBridge:
         expected = self._require_subject_scope(
             verified,
             query_binding,
-            expected_scope,
+            pins,
         )
+        canonical_prepared = _host_prepared_attestation_payload(verified)
         committed = _host_canonical_utc(
             committed_at,
             name="Host Prepared committed_at",
@@ -1436,7 +1534,7 @@ class HostAuthenticatedReadJournalBridge:
             "query": expected,
             "transport_identity": verified.attempt.subject.transport_identity,
             "network_policy_identity": verified.attempt.subject.network_policy_identity,
-            "host_prepared_attestation": prepared_envelope,
+            "host_prepared_attestation": canonical_prepared,
         }
         _append_origin_event(
             store,
@@ -1560,8 +1658,21 @@ class HostAuthenticatedReadJournalBridge:
             verify_host_prepared_attestation,
         )
 
+        if type(response_bytes) is not bytes or not response_bytes:
+            raise ProviderOriginError(
+                "Host Observed response_bytes must be exact non-empty bytes"
+            )
+        try:
+            require_provider_response_bytes(
+                response_bytes,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+            )
+        except (TypeError, ValueError) as error:
+            raise ProviderOriginError(
+                "Host Observed response_bytes exceed provider response authority budget"
+            ) from error
         expected = _query_snapshot(query_binding)
-        _require_host_expected_scope(expected_scope)
+        pins = _require_host_expected_scope(expected_scope)
         try:
             verified = verify_host_prepared_attestation(
                 prepared_envelope,
@@ -1589,7 +1700,11 @@ class HostAuthenticatedReadJournalBridge:
         expected = self._require_subject_scope(
             verified,
             query_binding,
-            expected_scope,
+            pins,
+        )
+        canonical_prepared = _host_prepared_attestation_payload(verified)
+        canonical_provider_receipt = _host_provider_receipt_payload(
+            provider_receipt
         )
 
         attempt_id = verified.attempt.read_attempt_id
@@ -1653,7 +1768,7 @@ class HostAuthenticatedReadJournalBridge:
             "response_sha256": provider_receipt.response_sha256,
             "response_base64": encoded,
             "observed_at": provider_receipt.observed_at_utc,
-            "host_provider_receipt": provider_receipt_payload,
+            "host_provider_receipt": canonical_provider_receipt,
             "prepared_receipt_identity": prepared_receipt.receipt_identity,
         }
 
@@ -1730,7 +1845,7 @@ class HostAuthenticatedReadJournalBridge:
 
         attempt = _exact_text(attempt_id, name="attempt_id")
         expected = _query_snapshot(query_binding)
-        _require_host_expected_scope(expected_scope)
+        pins = _require_host_expected_scope(expected_scope)
         store, identity = self._require_store()
         events = _load_origin_events(store, identity, attempt)
         if len(events) != 2:
@@ -1799,7 +1914,7 @@ class HostAuthenticatedReadJournalBridge:
             self._require_subject_scope(
                 verified_prepared,
                 query_binding,
-                expected_scope,
+                pins,
             )
             provider_receipt = _parse_receipt(
                 provider_receipt_payload,
@@ -1841,7 +1956,7 @@ class HostAuthenticatedReadJournalBridge:
             )
 
         observed_envelope = {
-            "schema": "autotrade-host-authenticated-read-observed:v2",
+            "schema": _HOST_OBSERVED_ENVELOPE_SCHEMA,
             "issuer_session": prepared_envelope["issuer_session"],
             "attempt": prepared_envelope["attempt"],
             "receipt": provider_receipt_payload,

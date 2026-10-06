@@ -49,10 +49,7 @@ def _source_path_selected(path):
             path.startswith('contracts/jsonschema/')
             and path.endswith('.json')
         )
-        or (
-            path.startswith(REVIEWED_LICENSE_PREFIX)
-            and path.endswith('.txt')
-        )
+        or path.startswith(REVIEWED_LICENSE_PREFIX)
         or path in STATIC
     )
 

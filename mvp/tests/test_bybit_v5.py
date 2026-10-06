@@ -193,7 +193,14 @@ def bound_execution_response(
     query_category="spot",
     permission_scope="ORDER.READ",
     ensure_response_category=True,
+    ensure_trade_exec_type=True,
+    query_overrides=None,
 ):
+    query_values = {"category": query_category, "limit": "100"}
+    if query_overrides is not None:
+        if type(query_overrides) is not dict:
+            raise TypeError("query_overrides must be an exact dict")
+        query_values.update(query_overrides)
     query = prepare_authenticated_read_query(
         capability=read_capability(
             account_id=account_id,
@@ -203,17 +210,35 @@ def bound_execution_response(
         ),
         surface=Surface.AUTHENTICATED_READ,
         endpoint="/v5/execution/list",
-        query={"category": query_category, "limit": "100"},
+        query=query_values,
         at=READ_AT,
         permission_scope=permission_scope,
     )
-    if ensure_response_category and type(response) is dict:
+    if type(response) is dict:
         result = response.get("result")
-        if type(result) is dict and "category" not in result:
-            response = dict.copy(response)
-            result = dict.copy(result)
-            result["category"] = query_category
-            response["result"] = result
+        if type(result) is dict:
+            rows = result.get("list")
+            needs_category = ensure_response_category and "category" not in result
+            needs_exec_type = (
+                ensure_trade_exec_type
+                and type(rows) is list
+                and any(type(row) is dict and "execType" not in row for row in rows)
+            )
+            if needs_category or needs_exec_type:
+                response = dict.copy(response)
+                result = dict.copy(result)
+                if needs_category:
+                    result["category"] = query_category
+                if needs_exec_type:
+                    result["list"] = [
+                        (
+                            dict(row, execType="Trade")
+                            if type(row) is dict and "execType" not in row
+                            else row
+                        )
+                        for row in rows
+                    ]
+                response["result"] = result
     raw = json.dumps(
         response,
         sort_keys=True,
@@ -1938,6 +1963,151 @@ class BybitV5AdapterTests(unittest.TestCase):
                 missing_response_category,
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
             )
+
+    def test_execution_rows_match_exact_active_query_filter(self):
+        row = {
+            "execId": "exec-query-filter",
+            "orderId": "provider-order-1",
+            "orderLinkId": "client-filter-1",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.01",
+            "execPrice": "65000",
+            "execFee": "0",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+
+        for query_overrides, message in (
+            ({"symbol": "ETHUSDT"}, "exact symbol query"),
+            ({"orderLinkId": "client-filter-2"}, "exact orderLinkId query"),
+            ({"orderId": "provider-order-2"}, "exact orderId query"),
+        ):
+            with self.subTest(query_overrides=query_overrides):
+                observation = bound_execution_response(
+                    {"retCode": 0, "result": {"list": [row]}},
+                    query_overrides=query_overrides,
+                )
+                with self.assertRaisesRegex(ProviderCoreError, message):
+                    parse_executions(
+                        observation,
+                        instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                    )
+
+        priority_bound = bound_execution_response(
+            {"retCode": 0, "result": {"list": [row]}},
+            query_overrides={
+                "orderId": "provider-order-1",
+                "orderLinkId": "ignored-lower-priority-client",
+                "symbol": "ETHUSDT",
+            },
+        )
+        fills = parse_executions(
+            priority_bound,
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].provider_execution_id, "exec-query-filter")
+
+        base_coin_only = bound_execution_response(
+            {"retCode": 0, "result": {"list": [row]}},
+            query_overrides={"baseCoin": "BTC"},
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "baseCoin-filtered execution rows require qualified",
+        ):
+            parse_executions(
+                base_coin_only,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+    def test_execution_rows_require_exact_trade_exec_type(self):
+        row = {
+            "execId": "exec-type-guard",
+            "orderId": "provider-order-type-guard",
+            "orderLinkId": "",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.01",
+            "execPrice": "65000",
+            "execFee": "0",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+
+        missing = bound_execution_response(
+            {"retCode": 0, "result": {"list": [row]}},
+            ensure_trade_exec_type=False,
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "row execType to be exact Trade",
+        ):
+            parse_executions(
+                missing,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+        for non_trade_type in (
+            "AdlTrade",
+            "Funding",
+            "BustTrade",
+            "Delivery",
+            "Settle",
+            "BlockTrade",
+            "MovePosition",
+            "FutureSpread",
+            "CorporateAction",
+            "UNKNOWN",
+        ):
+            with self.subTest(execType=non_trade_type):
+                response = bound_execution_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "list": [dict(row, execType=non_trade_type)]
+                        },
+                    }
+                )
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "row execType to be exact Trade",
+                ):
+                    parse_executions(
+                        response,
+                        instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                    )
+
+        non_trade_query = bound_execution_response(
+            {
+                "retCode": 0,
+                "result": {"list": [dict(row, execType="Funding")]},
+            },
+            query_overrides={"execType": "Funding"},
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "query execType to be exact Trade",
+        ):
+            parse_executions(
+                non_trade_query,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+        exact_trade = bound_execution_response(
+            {
+                "retCode": 0,
+                "result": {"list": [dict(row, execType="Trade")]},
+            },
+            query_overrides={"execType": "Trade"},
+        )
+        fills = parse_executions(
+            exact_trade,
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].provider_execution_id, "exec-type-guard")
 
     def test_execution_success_code_requires_exact_json_integer(self):
         row = {

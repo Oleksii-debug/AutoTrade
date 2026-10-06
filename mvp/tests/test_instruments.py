@@ -1,5 +1,5 @@
 from contextlib import ExitStack
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from decimal import Decimal, localcontext, ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN
 import json
 from pathlib import Path
@@ -949,6 +949,74 @@ class InstrumentRegistryTests(unittest.TestCase):
                 settlement_method="CASH",
                 margin_model_id="future-margin-v1",
             )
+
+
+class _TrapText(str):
+    def strip(self, *args, **kwargs):
+        raise AssertionError("caller text method executed")
+
+
+class _TrapMapping(dict):
+    def items(self):
+        raise AssertionError("caller mapping method executed")
+
+    def __iter__(self):
+        raise AssertionError("caller mapping iteration executed")
+
+
+class _TrapTzInfo(tzinfo):
+    def utcoffset(self, dt):
+        raise AssertionError("caller tzinfo method executed")
+
+    def dst(self, dt):
+        raise AssertionError("caller tzinfo method executed")
+
+    def tzname(self, dt):
+        raise AssertionError("caller tzinfo method executed")
+
+
+class InstrumentIngressAuthorityTests(unittest.TestCase):
+    def test_text_subclass_is_rejected_before_virtual_strip(self):
+        with self.assertRaisesRegex(InstrumentRegistryError, "provider_symbol is required"):
+            spot(symbol=_TrapText("ABC"))
+
+    def test_metadata_mapping_subclass_is_rejected_before_iteration(self):
+        evidence = _TrapMapping(
+            {
+                "artifact_id": B,
+                "sha256": "sha256:" + "0" * 64,
+                "observed_at": "2026-01-01T00:00:00Z",
+            }
+        )
+        with self.assertRaisesRegex(
+            InstrumentRegistryError,
+            "metadata_evidence entries must be exact built-in objects",
+        ):
+            spot(metadata_evidence=(evidence,))
+
+    def test_custom_tzinfo_is_rejected_before_time_callbacks(self):
+        hostile_time = datetime(2026, 1, 1, tzinfo=_TrapTzInfo())
+        with self.assertRaisesRegex(
+            InstrumentRegistryError,
+            "exact timezone-aware UTC datetime",
+        ):
+            spot(effective_from=hostile_time)
+
+    def test_exact_builtin_ingress_remains_compatible(self):
+        candidate = spot(
+            symbol="ABC",
+            effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            metadata_evidence=(
+                {
+                    "artifact_id": B,
+                    "sha256": "sha256:" + "0" * 64,
+                    "observed_at": "2026-01-01T00:00:00Z",
+                },
+            ),
+        )
+        self.assertEqual(candidate.provider_symbol, "ABC")
+        self.assertEqual(candidate.effective_from.tzinfo, timezone.utc)
+        self.assertEqual(candidate.metadata_evidence[0]["artifact_id"], B)
 
 
 if __name__ == "__main__":

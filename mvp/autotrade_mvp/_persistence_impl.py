@@ -9,6 +9,10 @@ from pathlib import Path
 import re
 import sqlite3
 from typing import Any, Mapping
+from urllib.parse import urlsplit
+from uuid import UUID
+
+from contracts.bindings.python.common_scalars import is_valid_common_scalar
 
 
 def _detach_json_value(
@@ -161,6 +165,177 @@ def _projection_checkpoint_digest(
 
 
 _SEQUENCE_RE = re.compile(r"^(0|[1-9][0-9]*)$")
+_SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+_UTC_INSTANT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
+)
+_EVENT_ENVELOPE_REQUIRED_FIELDS = frozenset(
+    {
+        "event_id",
+        "event_type",
+        "schema_version",
+        "aggregate_type",
+        "aggregate_id",
+        "aggregate_version",
+        "host_id",
+        "owner_epoch",
+        "environment",
+        "occurred_at",
+        "observed_at",
+        "committed_at",
+        "correlation_id",
+        "payload",
+        "payload_hash",
+        "evidence_refs",
+    }
+)
+_EVENT_ENVELOPE_OPTIONAL_FIELDS = frozenset(
+    {
+        "causation_id",
+        "provider_id",
+        "account_id",
+        "provider_event_id",
+        "provider_sequence",
+        "source_resolution",
+    }
+)
+_EVIDENCE_REF_REQUIRED_FIELDS = frozenset(
+    {"artifact_id", "sha256", "observed_at"}
+)
+_EVIDENCE_REF_OPTIONAL_FIELDS = frozenset(
+    {"source_uri", "rights_id"}
+)
+
+
+def _require_uuid_text(value: object, *, name: str) -> None:
+    if type(value) is not str:
+        raise ValueError(f"{name} must be a UUID string")
+    try:
+        UUID(value)
+    except (ValueError, AttributeError) as error:
+        raise ValueError(f"{name} must be a UUID string") from error
+
+
+def _require_utc_instant(value: object, *, name: str) -> None:
+    if type(value) is not str or _UTC_INSTANT_RE.fullmatch(value) is None:
+        raise ValueError(f"{name} must be an RFC3339 UTC instant ending Z")
+    try:
+        datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as error:
+        raise ValueError(f"{name} must be a valid UTC instant") from error
+
+
+def _validate_evidence_ref(value: object) -> None:
+    if type(value) is not dict:
+        raise ValueError("EventEnvelope evidence_refs entries must be objects")
+    fields = set(value)
+    if not _EVIDENCE_REF_REQUIRED_FIELDS <= fields:
+        raise ValueError("EventEnvelope EvidenceRef is missing required fields")
+    if fields - (
+        _EVIDENCE_REF_REQUIRED_FIELDS | _EVIDENCE_REF_OPTIONAL_FIELDS
+    ):
+        raise ValueError("EventEnvelope EvidenceRef contains unsupported fields")
+    _require_uuid_text(value.get("artifact_id"), name="EvidenceRef artifact_id")
+    if not is_valid_common_scalar("Digest", value.get("sha256")):
+        raise ValueError("EvidenceRef sha256 must be a canonical Digest")
+    _require_utc_instant(value.get("observed_at"), name="EvidenceRef observed_at")
+    source_uri = value.get("source_uri")
+    if source_uri is not None:
+        if type(source_uri) is not str or not source_uri:
+            raise ValueError("EvidenceRef source_uri must be a URI")
+        parsed = urlsplit(source_uri)
+        if not parsed.scheme:
+            raise ValueError("EvidenceRef source_uri must be an absolute URI")
+    rights_id = value.get("rights_id")
+    if rights_id is not None and (type(rights_id) is not str or not rights_id):
+        raise ValueError("EvidenceRef rights_id must be non-empty text")
+
+
+def _validate_canonical_event_envelope_if_claimed(
+    envelope: Mapping[str, Any],
+) -> None:
+    """Validate every contract-v5 EventEnvelope field when schema_version is claimed.
+
+    Legacy internal journal rows without schema_version remain readable/writable
+    during migration. Once a caller asserts EventEnvelope schema identity, the
+    persistence boundary fails closed on partial, extra, or malformed wire shape.
+    """
+
+    if "schema_version" not in envelope:
+        return
+    if type(envelope) is not dict:
+        raise TypeError("canonical EventEnvelope must be an exact dict")
+    fields = set(envelope)
+    missing = _EVENT_ENVELOPE_REQUIRED_FIELDS - fields
+    unknown = fields - (
+        _EVENT_ENVELOPE_REQUIRED_FIELDS | _EVENT_ENVELOPE_OPTIONAL_FIELDS
+    )
+    if missing:
+        raise ValueError(
+            "canonical EventEnvelope is missing required fields: "
+            + ", ".join(sorted(missing))
+        )
+    if unknown:
+        raise ValueError(
+            "canonical EventEnvelope contains unsupported fields: "
+            + ", ".join(sorted(unknown))
+        )
+
+    _require_uuid_text(envelope.get("event_id"), name="EventEnvelope event_id")
+    _require_uuid_text(
+        envelope.get("correlation_id"), name="EventEnvelope correlation_id"
+    )
+    causation_id = envelope.get("causation_id")
+    if causation_id is not None:
+        _require_uuid_text(causation_id, name="EventEnvelope causation_id")
+
+    for field in (
+        "event_type",
+        "aggregate_type",
+        "aggregate_id",
+        "host_id",
+    ):
+        value = envelope.get(field)
+        if type(value) is not str or not value:
+            raise ValueError(f"EventEnvelope {field} must be non-empty text")
+
+    schema_version = envelope.get("schema_version")
+    if type(schema_version) is not str or _SEMVER_RE.fullmatch(schema_version) is None:
+        raise ValueError("EventEnvelope schema_version must be SemVer text")
+    if not is_valid_common_scalar(
+        "Sequence", envelope.get("aggregate_version")
+    ):
+        raise ValueError("EventEnvelope aggregate_version must be a canonical Sequence")
+    if not is_valid_common_scalar("Sequence", envelope.get("owner_epoch")):
+        raise ValueError("EventEnvelope owner_epoch must be a canonical Sequence")
+    if not is_valid_common_scalar("Environment", envelope.get("environment")):
+        raise ValueError("EventEnvelope environment must be canonical")
+
+    for field in ("occurred_at", "observed_at", "committed_at"):
+        _require_utc_instant(envelope.get(field), name=f"EventEnvelope {field}")
+
+    if not is_valid_common_scalar("Digest", envelope.get("payload_hash")):
+        raise ValueError("EventEnvelope payload_hash must be a canonical Digest")
+
+    evidence_refs = envelope.get("evidence_refs")
+    if type(evidence_refs) is not list:
+        raise ValueError("EventEnvelope evidence_refs must be an array")
+    for evidence_ref in evidence_refs:
+        _validate_evidence_ref(evidence_ref)
+
+    for field in (
+        "provider_id",
+        "account_id",
+        "provider_event_id",
+        "source_resolution",
+    ):
+        value = envelope.get(field)
+        if value is not None and (type(value) is not str or not value):
+            raise ValueError(f"EventEnvelope {field} must be non-empty text")
+    if "provider_sequence" in envelope and not is_valid_common_scalar(
+        "Sequence", envelope.get("provider_sequence")
+    ):
+        raise ValueError("EventEnvelope provider_sequence must be a canonical Sequence")
 
 
 def _require_canonical_durable_text(value: object, *, name: str) -> str:
@@ -1239,6 +1414,7 @@ class JournalStore:
         if type(envelope) is not dict:
             raise TypeError("event envelope must be an exact dict")
         envelope = _detach_json_value(envelope)
+        _validate_canonical_event_envelope_if_claimed(envelope)
         event_id = _require_canonical_durable_text(envelope.get("event_id"), name="event_id")
         event_type = _require_canonical_durable_text(envelope.get("event_type"), name="event_type")
         aggregate_type = _require_canonical_durable_text(
@@ -2592,6 +2768,7 @@ class JournalStore:
             if type(envelope) is not dict:
                 raise TypeError("Each event envelope must be an exact dict")
             envelope = _detach_json_value(envelope)
+            _validate_canonical_event_envelope_if_claimed(envelope)
             event_id = _require_canonical_durable_text(
                 envelope.get("event_id"), name="event_id"
             )

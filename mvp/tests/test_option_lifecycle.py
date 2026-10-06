@@ -17,6 +17,7 @@ from mvp.autotrade_mvp.instruments import (
     InstrumentRegistry,
     InstrumentVersion,
 )
+import mvp.autotrade_mvp.option_lifecycle as option_lifecycle_module
 from mvp.autotrade_mvp.option_lifecycle import (
     DurableOptionLifecycleAuthority,
     OptionLifecycleConflict,
@@ -69,7 +70,7 @@ def option_version(
     return InstrumentVersion(
         instrument_id=OPTION_ID,
         version=version,
-        provider_id="BYBIT",
+        provider_id="TEST_PROVIDER",
         venue_id="OPTIONS",
         provider_symbol=(
             "ABC-202612-C50" if option_right == "CALL" else "ABC-202612-P50"
@@ -111,9 +112,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self.registry = InstrumentRegistry(versions=(option_version(),))
         self.book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         self._evidence = {}
         self.authority = self._authority(
@@ -192,6 +193,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         instrument_version,
         observed_at,
         permission_scope=LIFECYCLE_SCOPE,
+        environment="SIMULATION",
     ):
         claim_time = observed_at - timedelta(minutes=2)
         expires_at = observed_at + timedelta(minutes=10)
@@ -201,7 +203,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                 provider_id=provider_id,
                 account_id="paper-1",
                 entity_id="entity-1",
-                environment="PAPER",
+                environment=environment,
                 instrument_version=instrument_version,
                 observed_at=claim_time,
                 expires_at=expires_at,
@@ -239,16 +241,18 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         cash_settlement_amount: str | None = None,
         corrects_external_event_id: str | None = None,
         instrument_version: str = f"{OPTION_ID}@1",
-        provider_id: str = "BYBIT",
+        provider_id: str = "TEST_PROVIDER",
         venue_id: str = "OPTIONS",
         endpoint: str = LIFECYCLE_ENDPOINT,
         permission_scope: str = LIFECYCLE_SCOPE,
+        environment: str = "SIMULATION",
     ) -> str:
         capability = self._capability(
             provider_id=provider_id,
             instrument_version=instrument_version,
             observed_at=observed_at,
             permission_scope=permission_scope,
+            environment=environment,
         )
         binding = prepare_authenticated_read_query(
             capability=capability,
@@ -288,9 +292,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                 raise AssertionError("hostile Decimal subclass must not dispatch")
 
         base = {
-            "provider_id": "BYBIT",
+            "provider_id": "TEST_PROVIDER",
             "account_id": "paper-1",
-            "environment": "PAPER",
+            "environment": "SIMULATION",
             "venue_id": "OPTIONS",
             "instrument_version": f"{OPTION_ID}@1",
             "external_event_id": "hostile-life",
@@ -339,7 +343,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             TypeError, "economic_book must be exact DurableProviderEconomicBook",
         ):
             HostileEconomicBook(
-                self.store, provider_id="BYBIT", account_id="paper-1", environment="PAPER",
+                self.store, provider_id="TEST_PROVIDER", account_id="paper-1", environment="SIMULATION",
             )
 
     def test_lifecycle_rejects_post_construction_economic_method_shadow(self):
@@ -401,9 +405,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             price=Decimal("1"),
         )
         cut = EconomicBookCut(
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
+            environment="SIMULATION",
             transactions=(current,),
             book_digest="sha256:" + "a" * 64,
             aggregate_version=1,
@@ -508,11 +512,331 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             )
         )
 
+    def test_paper_and_live_lifecycle_reject_test_injected_response_before_financial_mutation(self):
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment):
+                book = DurableProviderEconomicBook(
+                    self.store,
+                    provider_id="TEST_PROVIDER",
+                    account_id="paper-1",
+                    environment=environment,
+                )
+                book.append(
+                    book_equity_fill(
+                        transaction_id=f"origin-firebreak-seed-{environment.lower()}",
+                        cause_event_id=f"origin-firebreak-seed-cause-{environment.lower()}",
+                        instrument=f"{OPTION_ID}@1",
+                        settlement_currency="USD",
+                        side="BUY",
+                        quantity=Decimal("1"),
+                        price=Decimal("1"),
+                    )
+                )
+                authority = self._authority(
+                    registry=self.registry,
+                    economic_book=book,
+                )
+                reference = self.evidence(
+                    external_event_id=f"{environment.lower()}-test-injected-life",
+                    environment=environment,
+                )
+                before_lifecycle = tuple(
+                    self.store.load_events("option_lifecycle", authority.aggregate_id)
+                )
+                before_economic = tuple(book.transactions)
+
+                with self.assertRaisesRegex(
+                    OptionLifecycleError,
+                    "durable PROVIDER_ORIGIN evidence",
+                ):
+                    authority.apply(reference)
+
+                self.assertEqual(
+                    tuple(
+                        self.store.load_events(
+                            "option_lifecycle",
+                            authority.aggregate_id,
+                        )
+                    ),
+                    before_lifecycle,
+                )
+                self.assertEqual(tuple(book.transactions), before_economic)
+                self.assertEqual(
+                    book.position(f"{OPTION_ID}@1"),
+                    Decimal("1"),
+                )
+
+    def test_paper_and_live_firebreak_precedes_arbitrary_evidence_resolver(self):
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment):
+                book = DurableProviderEconomicBook(
+                    self.store,
+                    provider_id="TEST_PROVIDER",
+                    account_id="paper-1",
+                    environment=environment,
+                )
+                resolver_calls = []
+
+                def mutate_financial_state_if_called(_reference):
+                    resolver_calls.append(environment)
+                    book.append(
+                        book_equity_fill(
+                            transaction_id=(
+                                f"resolver-side-effect-{environment.lower()}"
+                            ),
+                            cause_event_id=(
+                                f"resolver-side-effect-cause-{environment.lower()}"
+                            ),
+                            instrument=f"{OPTION_ID}@1",
+                            settlement_currency="USD",
+                            side="BUY",
+                            quantity=Decimal("1"),
+                            price=Decimal("1"),
+                        )
+                    )
+                    raise AssertionError(
+                        "PAPER/LIVE firebreak must precede evidence resolver"
+                    )
+
+                authority = DurableOptionLifecycleAuthority(
+                    self.store,
+                    registry=self.registry,
+                    economic_book=book,
+                    evidence_resolver=mutate_financial_state_if_called,
+                    lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+                    permission_scope=LIFECYCLE_SCOPE,
+                )
+                before_economic = tuple(book.transactions)
+                before_lifecycle = tuple(
+                    self.store.load_events(
+                        "option_lifecycle",
+                        authority.aggregate_id,
+                    )
+                )
+
+                with self.assertRaisesRegex(
+                    OptionLifecycleError,
+                    "durable PROVIDER_ORIGIN evidence",
+                ):
+                    authority.apply(
+                        f"resolver-firebreak-{environment.lower()}"
+                    )
+
+                self.assertEqual(resolver_calls, [])
+                self.assertEqual(tuple(book.transactions), before_economic)
+                self.assertEqual(
+                    tuple(
+                        self.store.load_events(
+                            "option_lifecycle",
+                            authority.aggregate_id,
+                        )
+                    ),
+                    before_lifecycle,
+                )
+
+    def test_simulation_resolver_cannot_rebind_lifecycle_observation_parser(self):
+        reference = self.evidence(
+            external_event_id="resolver-parser-rebind-life",
+        )
+        original_parser = (
+            option_lifecycle_module._canonical_observation_from_sealed_response
+        )
+
+        def rebind_parser_then_resolve(evidence_ref):
+            option_lifecycle_module._canonical_observation_from_sealed_response = (
+                lambda _source: self.forged_observation()
+            )
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=rebind_parser_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", authority.aggregate_id)
+        )
+        try:
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "evidence authority changed during resolution",
+            ):
+                authority.apply(reference)
+        finally:
+            option_lifecycle_module._canonical_observation_from_sealed_response = (
+                original_parser
+            )
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            before_lifecycle,
+        )
+
+    def test_simulation_resolver_cannot_rebind_response_scope_validator(self):
+        reference = self.evidence(
+            external_event_id="resolver-scope-rebind-life",
+        )
+        source_type = type(self._evidence[reference])
+        original_require_scope = source_type.require_scope
+
+        def rebind_scope_validator_then_resolve(evidence_ref):
+            source_type.require_scope = lambda *_args, **_kwargs: None
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=rebind_scope_validator_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", authority.aggregate_id)
+        )
+        try:
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "evidence authority changed during resolution",
+            ):
+                authority.apply(reference)
+        finally:
+            source_type.require_scope = original_require_scope
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            before_lifecycle,
+        )
+
+    def test_simulation_resolver_cannot_swap_same_scope_economic_book(self):
+        reference = self.evidence(
+            external_event_id="resolver-book-swap-life",
+        )
+        replacement_book = DurableProviderEconomicBook(
+            self.store,
+            provider_id="TEST_PROVIDER",
+            account_id="paper-1",
+            environment="SIMULATION",
+        )
+        holder = {}
+
+        def swap_book_then_resolve(evidence_ref):
+            holder["authority"].economic_book = replacement_book
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=swap_book_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        holder["authority"] = authority
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", authority.aggregate_id)
+        )
+
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "option lifecycle authority changed during evidence resolution",
+        ):
+            authority.apply(reference)
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            before_lifecycle,
+        )
+
+    def test_simulation_resolver_cannot_swap_instrument_registry(self):
+        reference = self.evidence(
+            external_event_id="resolver-registry-swap-life",
+        )
+        replacement_registry = InstrumentRegistry(versions=(option_version(),))
+        holder = {}
+
+        def swap_registry_then_resolve(evidence_ref):
+            holder["authority"].registry = replacement_registry
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=swap_registry_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        holder["authority"] = authority
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", authority.aggregate_id)
+        )
+
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "option lifecycle authority changed during evidence resolution",
+        ):
+            authority.apply(reference)
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            before_lifecycle,
+        )
+
+    def test_simulation_resolver_cannot_retarget_permission_scope(self):
+        forged_scope = "ACCOUNT.FORGED"
+        reference = self.evidence(
+            external_event_id="resolver-permission-retarget-life",
+            permission_scope=forged_scope,
+        )
+        holder = {}
+
+        def retarget_permission_then_resolve(evidence_ref):
+            holder["authority"].permission_scope = forged_scope
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=retarget_permission_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        holder["authority"] = authority
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", authority.aggregate_id)
+        )
+
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "option lifecycle authority changed during evidence resolution",
+        ):
+            authority.apply(reference)
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            before_lifecycle,
+        )
+
     def forged_observation(self) -> OptionLifecycleObservation:
         return OptionLifecycleObservation(
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
+            environment="SIMULATION",
             venue_id="OPTIONS",
             instrument_version=f"{OPTION_ID}@1",
             external_event_id="forged-life",
@@ -725,9 +1049,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
     def test_lifecycle_observation_decimal_identity_ignores_ambient_context(self):
         observation = OptionLifecycleObservation(
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
+            environment="SIMULATION",
             venue_id="OPTIONS",
             instrument_version=f"{OPTION_ID}@1",
             external_event_id="identity-context",
@@ -837,9 +1161,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         restarted_book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         changed_authority = self._authority(
             registry=changed_registry,
@@ -893,9 +1217,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         restarted_book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         changed_authority = self._authority(
             registry=changed_registry,
@@ -939,9 +1263,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
         competing_book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         competing_book.append(
             book_equity_fill(
@@ -979,9 +1303,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self.seed_option_position("1")
         competing_book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         original_prepare = DurableProviderEconomicBook.prepare_batch_mutation
         raced = False
@@ -1023,9 +1347,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         current = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         self.assertEqual(current.position(f"{OPTION_ID}@1"), Decimal("0"))
 
@@ -1042,9 +1366,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
         restarted_book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         restarted = self._authority(
             registry=self.registry,
@@ -1339,9 +1663,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
         restarted = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         self.assertEqual(restarted.position(f"{OPTION_ID}@1"), Decimal("0"))
         self.assertEqual(restarted.position("ABC"), Decimal("0"))
@@ -1355,9 +1679,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         authority = self._authority(
             registry=registry,
@@ -1386,9 +1710,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         authority = self._authority(
             registry=registry,
@@ -1418,9 +1742,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         authority = self._authority(
             registry=registry,
@@ -1453,9 +1777,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         authority = self._authority(
             registry=registry,
@@ -1509,9 +1833,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         authority = self._authority(
             registry=registry,

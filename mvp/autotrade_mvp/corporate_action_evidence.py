@@ -387,6 +387,23 @@ def _authoritative_corporate_action_operations():
             raise CorporateActionEvidenceError(
                 "authoritative corporate action requires exact CorporateEvent"
             )
+        for name in ("event_id", "instrument_id", "kind", "source_revision"):
+            if type(getattr(event, name)) is not str:
+                raise CorporateActionEvidenceError(
+                    f"authoritative corporate-action event {name} must remain exact text"
+                )
+        if type(event.instrument_version) is not int:
+            raise CorporateActionEvidenceError(
+                "authoritative corporate-action instrument_version must remain exact int"
+            )
+        if event.source_sequence is not None and type(event.source_sequence) is not int:
+            raise CorporateActionEvidenceError(
+                "authoritative corporate-action source_sequence must remain exact int"
+            )
+        if event.effective_at is not None and type(event.effective_at) is not datetime:
+            raise CorporateActionEvidenceError(
+                "authoritative corporate-action effective_at must remain exact datetime"
+            )
         if type(event.payload) is not dict:
             raise CorporateActionEvidenceError(
                 "authoritative corporate-action payload must remain canonical"
@@ -411,6 +428,31 @@ def _authoritative_corporate_action_operations():
         )
 
     def snapshot(value: AuthoritativeCorporateAction) -> tuple[object, ...]:
+        for name in (
+            "evidence_ref",
+            "provider_id",
+            "account_id",
+            "environment",
+            "external_event_id",
+            "provider_revision",
+            "raw_evidence_digest",
+            "query_digest",
+            "capability_snapshot_id",
+            "provider_instrument_version",
+            "observed_at",
+            "provenance_digest",
+        ):
+            if type(getattr(value, name)) is not str:
+                raise CorporateActionEvidenceError(
+                    f"authoritative corporate-action {name} must remain exact text"
+                )
+        if (
+            value.corrects_external_event_id is not None
+            and type(value.corrects_external_event_id) is not str
+        ):
+            raise CorporateActionEvidenceError(
+                "authoritative corporate-action correction identity must remain exact text"
+            )
         return (
             event_snapshot(value.event),
             value.evidence_ref,

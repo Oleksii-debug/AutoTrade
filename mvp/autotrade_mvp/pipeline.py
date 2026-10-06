@@ -220,6 +220,75 @@ class Fill:
     fee: Decimal
 
 
+def _checkpoint_text(value: object, *, name: str) -> str:
+    if type(value) is not str or not value or value != str.strip(value):
+        raise ValueError(f"Corrupt checkpoint {name}: expected canonical text")
+    return value
+
+
+def _restore_checkpoint_fill(
+    map_key: object,
+    value: object,
+    *,
+    expected_symbol: str,
+) -> Fill:
+    """Re-admit one durable simulated fill before it becomes financial truth."""
+
+    client_key = _checkpoint_text(map_key, name="fill map key")
+    if type(value) is not dict:
+        raise ValueError("Corrupt checkpoint fill: expected exact object")
+    required = {
+        "fill_id",
+        "client_order_id",
+        "symbol",
+        "side",
+        "quantity",
+        "price",
+        "fee",
+    }
+    if set(dict.keys(value)) != required:
+        raise ValueError("Corrupt checkpoint fill: unexpected schema")
+    fill_id = _checkpoint_text(value["fill_id"], name="fill id")
+    client_order_id = _checkpoint_text(
+        value["client_order_id"], name="fill client_order_id"
+    )
+    symbol = _checkpoint_text(value["symbol"], name="fill symbol")
+    side = _checkpoint_text(value["side"], name="fill side")
+    if client_key != client_order_id:
+        raise ValueError(
+            "Corrupt checkpoint fill: map key does not match client_order_id"
+        )
+    if symbol != expected_symbol:
+        raise ValueError("Corrupt checkpoint fill: symbol does not match run scope")
+    if side not in {"BUY", "SELL"}:
+        raise ValueError("Corrupt checkpoint fill: side must be BUY or SELL")
+    expected_fill_id = (
+        "fill-" + sha256(client_order_id.encode("utf-8")).hexdigest()[:20]
+    )
+    if fill_id != expected_fill_id:
+        raise ValueError(
+            "Corrupt checkpoint fill: fill_id does not match simulated identity"
+        )
+    quantity = _checkpoint_decimal(value["quantity"], name="fill quantity")
+    price = _checkpoint_decimal(value["price"], name="fill price")
+    fee = _checkpoint_decimal(value["fee"], name="fill fee")
+    if quantity <= 0:
+        raise ValueError("Corrupt checkpoint fill quantity: must be positive")
+    if price <= 0:
+        raise ValueError("Corrupt checkpoint fill price: must be positive")
+    if fee < 0:
+        raise ValueError("Corrupt checkpoint fill fee: must be non-negative")
+    return Fill(
+        fill_id=fill_id,
+        client_order_id=client_order_id,
+        symbol=symbol,
+        side=side,
+        quantity=quantity,
+        price=price,
+        fee=fee,
+    )
+
+
 @dataclass(frozen=True)
 class RunResult:
     status: str
@@ -471,10 +540,21 @@ def _reconcile(provider: SimulatedProvider, ledger: EconomicLedger) -> bool:
                 fill.fee,
             )
         )
+        if row is None or type(row) is not dict:
+            raise ValueError("Fill and economic ledger do not reconcile")
+        posting_fill_id = _checkpoint_text(
+            row.get("fill_id"), name="posting fill_id"
+        )
+        posting_fee = _checkpoint_decimal(row.get("fee"), name="posting fee")
         if (
-            row is None
-            or _checkpoint_decimal(row["position_delta"], name="position_delta") != signed
-            or _money(_checkpoint_decimal(row["cash_delta"], name="cash_delta")) != expected_cash
+            posting_fill_id != fill.fill_id
+            or posting_fee != fill.fee
+            or _checkpoint_decimal(
+                row.get("position_delta"), name="position_delta"
+            ) != signed
+            or _money(
+                _checkpoint_decimal(row.get("cash_delta"), name="cash_delta")
+            ) != expected_cash
         ):
             raise ValueError("Fill and economic ledger do not reconcile")
     return True
@@ -514,8 +594,8 @@ def run_vertical_slice(
 ) -> RunResult:
     """Run or resume one safe simulated end-to-end trading episode."""
 
-    if not symbol or not symbol.strip():
-        raise ValueError("A simulated symbol is required")
+    if type(symbol) is not str or not symbol or symbol != str.strip(symbol):
+        raise ValueError("A canonical simulated symbol is required")
     starting_cash = _money(initial_cash)
     quantity = _money(order_quantity)
     position_limit = _money(max_abs_position)
@@ -529,21 +609,27 @@ def run_vertical_slice(
     checkpoint_path = root / "checkpoint.json"
     evidence_path = root / "learning-evidence.jsonl"
     state, resumed = handle_restart_recovery(state_dir, starting_cash)
-    if resumed and state.get("symbol", symbol) != symbol:
-        raise ValueError("Checkpoint belongs to another symbol")
+    if resumed:
+        stored_symbol = _checkpoint_text(
+            state.get("symbol"), name="run symbol"
+        )
+        if stored_symbol != symbol:
+            raise ValueError("Checkpoint belongs to another symbol")
+    postings = state.get("postings", [])
+    fills = state.get("fills", {})
+    if type(postings) is not list or type(fills) is not dict:
+        raise ValueError("Corrupt checkpoint ledger or fills")
     ledger = EconomicLedger(
         _checkpoint_decimal(state["initial_cash"], name="initial_cash"),
-        list(state.get("postings", [])),
+        list(postings),
     )
     restored_fills = {
-        key: Fill(
-            fill_id=value["fill_id"], client_order_id=value["client_order_id"], symbol=value["symbol"],
-            side=value["side"],
-            quantity=_checkpoint_decimal(value["quantity"], name="fill quantity"),
-            price=_checkpoint_decimal(value["price"], name="fill price"),
-            fee=_checkpoint_decimal(value["fee"], name="fill fee"),
+        key: _restore_checkpoint_fill(
+            key,
+            value,
+            expected_symbol=symbol,
         )
-        for key, value in state.get("fills", {}).items()
+        for key, value in dict.items(fills)
     }
     provider = SimulatedProvider(restored_fills)
     _reconcile(provider, ledger)

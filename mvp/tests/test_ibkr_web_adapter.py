@@ -17,6 +17,7 @@ from mvp.autotrade_mvp.provider_core import (
     prepare_authenticated_read_query,
 )
 from mvp.autotrade_mvp.ibkr_web import (
+    IBKR_WEB_DOCS,
     IbkrAbsenceEvidence,
     IbkrBrokerageSessionStatus,
     IbkrContractIdentity,
@@ -1353,14 +1354,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 exact_limit_price_text=None,
                 exact_stop_price_text=None,
                 capability_snapshot_id="capability-1",
-                documentation_refs=tuple(
-                    (
-                        "https://www.interactivebrokers.com/docs/web-api/trading/trading-sessions-in-the-web-api",
-                        "https://www.interactivebrokers.com/docs/web-api/v1/endpoints/orders/place-order",
-                        "https://www.interactivebrokers.com/docs/web-api/api-reference/trading/trading-orders/modify-open-order",
-                        "https://www.interactivebrokers.com/docs/tws-api/ref/execution",
-                    )
-                ),
+                documentation_refs=tuple(IBKR_WEB_DOCS.values()),
             )
         self.assertFalse(ExecutableFields.iter_called)
 
@@ -1381,14 +1375,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 exact_limit_price_text=None,
                 exact_stop_price_text=None,
                 capability_snapshot_id="capability-1",
-                documentation_refs=tuple(
-                    (
-                        "https://www.interactivebrokers.com/docs/web-api/trading/trading-sessions-in-the-web-api",
-                        "https://www.interactivebrokers.com/docs/web-api/v1/endpoints/orders/place-order",
-                        "https://www.interactivebrokers.com/docs/web-api/api-reference/trading/trading-orders/modify-open-order",
-                        "https://www.interactivebrokers.com/docs/tws-api/ref/execution",
-                    )
-                ),
+                documentation_refs=tuple(IBKR_WEB_DOCS.values()),
             )
 
     def test_normalized_order_rejects_shape_that_implies_unqualified_serialization(self):
@@ -1410,14 +1397,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 exact_limit_price_text=None,
                 exact_stop_price_text=None,
                 capability_snapshot_id="capability-1",
-                documentation_refs=tuple(
-                    (
-                        "https://www.interactivebrokers.com/docs/web-api/trading/trading-sessions-in-the-web-api",
-                        "https://www.interactivebrokers.com/docs/web-api/v1/endpoints/orders/place-order",
-                        "https://www.interactivebrokers.com/docs/web-api/api-reference/trading/trading-orders/modify-open-order",
-                        "https://www.interactivebrokers.com/docs/tws-api/ref/execution",
-                    )
-                ),
+                documentation_refs=tuple(IBKR_WEB_DOCS.values()),
             )
 
         with self.assertRaisesRegex(
@@ -1430,14 +1410,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 exact_limit_price_text="100",
                 exact_stop_price_text=None,
                 capability_snapshot_id="capability-1",
-                documentation_refs=tuple(
-                    (
-                        "https://www.interactivebrokers.com/docs/web-api/trading/trading-sessions-in-the-web-api",
-                        "https://www.interactivebrokers.com/docs/web-api/v1/endpoints/orders/place-order",
-                        "https://www.interactivebrokers.com/docs/web-api/api-reference/trading/trading-orders/modify-open-order",
-                        "https://www.interactivebrokers.com/docs/tws-api/ref/execution",
-                    )
-                ),
+                documentation_refs=tuple(IBKR_WEB_DOCS.values()),
             )
 
     def test_execution_evidence_direct_constructor_enforces_canonical_invariants(self):

@@ -394,6 +394,41 @@ class ReleaseScopeMappingTests(unittest.TestCase):
         ):
             self._build(reuse=[])
 
+
+    def test_orphan_reuse_manifest_fails_exact_scope_closure(self):
+        orphan = json.loads(json.dumps(REUSE[0]))
+        orphan["source"]["repository"] = "Oleksii-debug/Other"
+        orphan["source"]["revision"] = "e" * 40
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError,
+            "source outside imported release scope",
+        ):
+            self._build(reuse=REUSE + [orphan])
+
+    def test_duplicate_reuse_source_identity_fails(self):
+        duplicate = json.loads(json.dumps(REUSE[0]))
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError,
+            "source identity is duplicated",
+        ):
+            self._build(reuse=REUSE + [duplicate])
+
+    def test_reuse_migration_requires_canonical_source_path(self):
+        broken = json.loads(json.dumps(REUSE[0]))
+        broken["migrations"][0].pop("source_path")
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError, "source_path"
+        ):
+            self._build(reuse=[broken])
+
+    def test_reuse_migration_requires_nonempty_unique_symbols(self):
+        broken = json.loads(json.dumps(REUSE[0]))
+        broken["migrations"][0]["symbols"] = ["strict_json_loads"] * 2
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError, "symbols are duplicated"
+        ):
+            self._build(reuse=[broken])
+
     def test_imported_source_mapping_binds_destination_path(self):
         result = self._build()
         autosport = next(

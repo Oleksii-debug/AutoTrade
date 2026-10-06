@@ -555,9 +555,37 @@ def build_mapping(
         if state != "APPROVED":
             unresolved_external.append(name)
 
+    reuse_by_source = {}
+    for reuse in reuse_documents:
+        if (
+            type(reuse) is not dict
+            or reuse.get("schema_version") != "1.0.0"
+            or type(reuse.get("source")) is not dict
+        ):
+            raise ReleaseScopeMappingError(
+                "reuse provenance manifest schema is unsupported"
+            )
+        reuse_source = reuse["source"]
+        reuse_key = (
+            _text(
+                reuse_source.get("repository"),
+                name="reuse source repository",
+            ),
+            _git_sha(
+                reuse_source.get("revision"),
+                name="reuse source revision",
+            ),
+        )
+        if reuse_key in reuse_by_source:
+            raise ReleaseScopeMappingError(
+                "reuse provenance source identity is duplicated"
+            )
+        reuse_by_source[reuse_key] = reuse
+
     scope = []
     unresolved_rights = []
     seen_provenance_names = set()
+    used_reuse_sources = set()
     for item in provenance_components:
         if type(item) is not dict:
             raise ReleaseScopeMappingError("provenance component must be object")
@@ -594,22 +622,13 @@ def build_mapping(
             "release_distribution_state": state,
         }
         if classification == "IMPORTED_FIRST_PARTY_SOURCE":
-            matches = []
-            for reuse in reuse_documents:
-                if type(reuse) is not dict or reuse.get("schema_version") != "1.0.0":
-                    continue
-                source = reuse.get("source")
-                if (
-                    type(source) is dict
-                    and source.get("repository") == repository
-                    and source.get("revision") == revision
-                ):
-                    matches.append(reuse)
-            if len(matches) != 1:
+            reuse_key = (repository, revision)
+            reuse = reuse_by_source.get(reuse_key)
+            if reuse is None:
                 raise ReleaseScopeMappingError(
                     f"imported first-party source requires one exact reuse manifest: {name}"
                 )
-            reuse = matches[0]
+            used_reuse_sources.add(reuse_key)
             source = reuse["source"]
             migrations = reuse.get("migrations")
             if type(migrations) is not list or not migrations:
@@ -625,6 +644,23 @@ def build_mapping(
                 if migration.get("runtime_dependency_on_autosport") is not False:
                     raise ReleaseScopeMappingError(
                         f"reuse migration retains source runtime dependency: {name}"
+                    )
+                _path(
+                    migration.get("source_path"),
+                    name=f"{name} source_path",
+                )
+                symbols = migration.get("symbols")
+                if type(symbols) is not list or not symbols:
+                    raise ReleaseScopeMappingError(
+                        f"reuse migration symbols are missing: {name}"
+                    )
+                normalized_symbols = [
+                    _text(symbol, name=f"{name} migration symbol")
+                    for symbol in symbols
+                ]
+                if len(normalized_symbols) != len(set(normalized_symbols)):
+                    raise ReleaseScopeMappingError(
+                        f"reuse migration symbols are duplicated: {name}"
                     )
                 destinations.append(
                     _path(
@@ -664,6 +700,10 @@ def build_mapping(
             and state != "APPROVED"
         ):
             unresolved_rights.append(name)
+    if set(reuse_by_source) != used_reuse_sources:
+        raise ReleaseScopeMappingError(
+            "reuse provenance contains source outside imported release scope"
+        )
     scope.sort(key=lambda item: item["name"].casefold())
 
     result = {

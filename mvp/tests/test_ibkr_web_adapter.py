@@ -1,5 +1,5 @@
 from functools import partial
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import json
 import unittest
@@ -35,6 +35,30 @@ from mvp.autotrade_mvp.ibkr_web import (
 
 
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
+
+
+class _HostileDecimal(Decimal):
+    def is_finite(self):
+        raise AssertionError("hostile Decimal callback executed")
+
+    def as_tuple(self):
+        raise AssertionError("hostile Decimal callback executed")
+
+
+class _HostileDatetime(datetime):
+    def utcoffset(self):
+        raise AssertionError("hostile datetime callback executed")
+
+    def astimezone(self, *args, **kwargs):
+        raise AssertionError("hostile datetime callback executed")
+
+
+class _HostileTimezone(tzinfo):
+    def utcoffset(self, dt):
+        raise AssertionError("hostile timezone callback executed")
+
+    def dst(self, dt):
+        return None
 
 
 def capability(*, account_id="U1234567", order_types=("MARKET", "LIMIT", "STOP", "STOP_LIMIT")):
@@ -174,6 +198,73 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(normalized.order_type, "LIMIT")
         self.assertEqual(normalized.quantity, Decimal("1.25"))
         self.assertEqual(normalized.limit_price, Decimal("220.10"))
+
+    def test_financial_numeric_ingress_rejects_decimal_subclass_before_callbacks(self):
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "bounded exact decimal",
+        ):
+            IbkrWebOrderIntent.create(
+                instrument_version="AAPL-CONID-265598:v1",
+                account_id="U1234567",
+                contract=IbkrContractIdentity(conid=265598),
+                side="BUY",
+                order_type="MARKET",
+                time_in_force="DAY",
+                quantity=_HostileDecimal("1"),
+            )
+
+    def test_session_time_rejects_datetime_subclass_before_callbacks(self):
+        hostile = _HostileDatetime(2026, 9, 24, 20, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "exact timezone-aware datetime",
+        ):
+            IbkrBrokerageSessionStatus(
+                connected=True,
+                authenticated=True,
+                established=True,
+                competing=False,
+                observed_at=hostile,
+            )
+
+    def test_session_time_rejects_custom_timezone_before_callbacks(self):
+        hostile = datetime(2026, 9, 24, 20, tzinfo=_HostileTimezone())
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "exact timezone-aware datetime",
+        ):
+            IbkrBrokerageSessionStatus(
+                connected=True,
+                authenticated=True,
+                established=True,
+                competing=False,
+                observed_at=hostile,
+            )
+
+    def test_order_preparation_rejects_datetime_subclass_before_callbacks(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        hostile = _HostileDatetime(2026, 9, 24, 20, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "exact timezone-aware datetime",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-hostile-time",
+                capability=capability(),
+                session=ready_session(),
+                at=hostile,
+                maximum_session_age_seconds=30,
+            )
 
     def test_normalized_order_rejects_polymorphic_admission_authorities(self):
         class ExecutableIntent(IbkrWebOrderIntent):

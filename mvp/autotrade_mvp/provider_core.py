@@ -623,6 +623,7 @@ def _install_authenticated_provider_read_authority():
             != projection["environment"]
         ):
             raise ProviderCoreError("provider-read provenance environment mismatch")
+        return projection
 
     return (
         register_query,

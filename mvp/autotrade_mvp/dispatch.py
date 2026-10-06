@@ -1483,17 +1483,59 @@ class GuardedDispatcher:
             events = self._events(attempt_id)
             last = events[-1]
             if last["event_type"] == "SubmissionSending":
-                self._append(
+                if not self._existing_history_is_canonical(
+                    events=events,
                     attempt_id=attempt_id,
-                    event_type="SubmissionUnknown",
-                    version=3,
-                    payload={
-                        "client_order_id": client_order_id,
-                        "reason": f"transport_exception_after_send_barrier:{type(error).__name__}",
-                    },
-                    now=barrier_now,
-                )
+                    client_order_id=client_order_id,
+                    expected_prepared=expected_prepared,
+                ):
+                    return DispatchOutcome(
+                        "UNKNOWN",
+                        client_order_id,
+                        None,
+                        "durable_submission_history_invalid",
+                    )
+                try:
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionUnknown",
+                        version=3,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": f"transport_exception_after_send_barrier:{type(error).__name__}",
+                        },
+                        now=barrier_now,
+                    )
+                except ValueError:
+                    current = self._events(attempt_id)
+                    return self._terminal_outcome_from_existing_history(
+                        events=current,
+                        attempt_id=attempt_id,
+                        client_order_id=client_order_id,
+                        expected_prepared=expected_prepared,
+                    )
                 return DispatchOutcome("UNKNOWN", client_order_id, None, "transport_result_ambiguous")
+            if (
+                barrier_passed
+                and last["event_type"] in {
+                    "SubmissionSent",
+                    "SubmissionBlocked",
+                    "SubmissionUnknown",
+                }
+            ):
+                return self._terminal_outcome_from_existing_history(
+                    events=events,
+                    attempt_id=attempt_id,
+                    client_order_id=client_order_id,
+                    expected_prepared=expected_prepared,
+                )
+            if barrier_passed:
+                return DispatchOutcome(
+                    "UNKNOWN",
+                    client_order_id,
+                    None,
+                    "durable_submission_history_invalid",
+                )
             if not guard_called:
                 self._append(
                     attempt_id=attempt_id,
@@ -1573,6 +1615,39 @@ class GuardedDispatcher:
                 "provider_guard_contract_violation",
             )
 
+        post_transport_events = self._events(attempt_id)
+        if not self._existing_history_is_canonical(
+            events=post_transport_events,
+            attempt_id=attempt_id,
+            client_order_id=client_order_id,
+            expected_prepared=expected_prepared,
+        ):
+            return DispatchOutcome(
+                "UNKNOWN",
+                client_order_id,
+                None,
+                "durable_submission_history_invalid",
+            )
+        post_transport_last = post_transport_events[-1]
+        if post_transport_last["event_type"] in {
+            "SubmissionSent",
+            "SubmissionBlocked",
+            "SubmissionUnknown",
+        }:
+            return self._terminal_outcome_from_existing_history(
+                events=post_transport_events,
+                attempt_id=attempt_id,
+                client_order_id=client_order_id,
+                expected_prepared=expected_prepared,
+            )
+        if post_transport_last["event_type"] != "SubmissionSending":
+            return DispatchOutcome(
+                "UNKNOWN",
+                client_order_id,
+                None,
+                "durable_submission_history_invalid",
+            )
+
         terminal_requires_reconciliation = False
         terminal_reason = "sent_confirmed"
         try:
@@ -1639,6 +1714,18 @@ class GuardedDispatcher:
                     now=barrier_now,
                 )
             except Exception:
+                current = self._events(attempt_id)
+                if current and current[-1]["event_type"] in {
+                    "SubmissionSent",
+                    "SubmissionBlocked",
+                    "SubmissionUnknown",
+                }:
+                    return self._terminal_outcome_from_existing_history(
+                        events=current,
+                        attempt_id=attempt_id,
+                        client_order_id=client_order_id,
+                        expected_prepared=expected_prepared,
+                    )
                 # A durable SubmissionSending row already exists. Recovery will
                 # convert that state to UNKNOWN without another outbound send.
                 raise persistence_error

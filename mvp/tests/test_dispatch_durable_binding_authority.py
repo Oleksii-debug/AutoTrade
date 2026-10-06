@@ -341,6 +341,175 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 )
                 self.assertEqual(wire_calls, 0)
 
+    def test_post_barrier_durable_tamper_never_returns_sent(self):
+        for event_type, field, value, envelope_field in (
+            ("SubmissionSending", "client_order_id", "retargeted-client", False),
+            ("SubmissionSending", "environment", "PAPER", True),
+            ("SubmissionPrepared", "provider", "retargeted-provider", False),
+        ):
+            with self.subTest(event_type=event_type, field=field), TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                store = JournalStore(path)
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+
+                def transport(_client_order_id, _request, guard):
+                    guard()
+                    self._tamper_event_field(
+                        path,
+                        event_type,
+                        field,
+                        value,
+                        envelope_field=envelope_field,
+                    )
+                    return ExactJsonTransportResponse(b'{"accepted":true}')
+
+                result = dispatcher.dispatch(
+                    attempt_id="post-barrier-tamper-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T14:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    submission_scope={"endpoint": "/orders"},
+                )
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertEqual(result.reason, "durable_submission_history_invalid")
+                events = dispatcher._events("post-barrier-tamper-a1")
+                self.assertEqual(
+                    [event["event_type"] for event in events],
+                    ["SubmissionPrepared", "SubmissionSending"],
+                )
+
+    def test_post_barrier_recovery_terminal_race_converges_without_sent_overwrite(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            nested = []
+
+            def authority(_hash, _now):
+                return True, "allowed"
+
+            def transport(_client_order_id, _request, guard):
+                guard()
+                recovery = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="recovery-owner",
+                )
+                nested.append(
+                    recovery.dispatch(
+                        attempt_id="post-barrier-race-a1",
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:01Z",
+                        authority_check=authority,
+                        transport_send=lambda *_args: (_ for _ in ()).throw(
+                            AssertionError("recovery must not resend")
+                        ),
+                        submission_scope={"endpoint": "/orders"},
+                    )
+                )
+                return ExactJsonTransportResponse(b'{"accepted":true}')
+
+            result = dispatcher.dispatch(
+                attempt_id="post-barrier-race-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(nested[0].status, "UNKNOWN")
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(
+                result.reason,
+                "recovered_after_send_barrier_without_terminal_result",
+            )
+            events = dispatcher._events("post-barrier-race-a1")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+
+    def test_post_barrier_exception_converges_with_recovery_terminal_race(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+
+            def authority(_hash, _now):
+                return True, "allowed"
+
+            def transport(_client_order_id, _request, guard):
+                guard()
+                recovery = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="recovery-owner",
+                )
+                recovered = recovery.dispatch(
+                    attempt_id="post-barrier-exception-race-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T14:00:01Z",
+                    authority_check=authority,
+                    transport_send=lambda *_args: (_ for _ in ()).throw(
+                        AssertionError("recovery must not resend")
+                    ),
+                    submission_scope={"endpoint": "/orders"},
+                )
+                self.assertEqual(recovered.status, "UNKNOWN")
+                raise TimeoutError("provider reply lost")
+
+            result = dispatcher.dispatch(
+                attempt_id="post-barrier-exception-race-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(
+                result.reason,
+                "recovered_after_send_barrier_without_terminal_result",
+            )
+            events = dispatcher._events("post-barrier-exception-race-a1")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+
     def test_runtime_redispatch_rejects_submission_scope_retargeting(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

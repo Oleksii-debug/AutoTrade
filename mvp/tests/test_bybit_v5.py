@@ -193,7 +193,13 @@ def bound_execution_response(
     query_category="spot",
     permission_scope="ORDER.READ",
     ensure_response_category=True,
+    query_overrides=None,
 ):
+    query_values = {"category": query_category, "limit": "100"}
+    if query_overrides is not None:
+        if type(query_overrides) is not dict:
+            raise TypeError("query_overrides must be an exact dict")
+        query_values.update(query_overrides)
     query = prepare_authenticated_read_query(
         capability=read_capability(
             account_id=account_id,
@@ -203,7 +209,7 @@ def bound_execution_response(
         ),
         surface=Surface.AUTHENTICATED_READ,
         endpoint="/v5/execution/list",
-        query={"category": query_category, "limit": "100"},
+        query=query_values,
         at=READ_AT,
         permission_scope=permission_scope,
     )
@@ -1936,6 +1942,64 @@ class BybitV5AdapterTests(unittest.TestCase):
         ):
             parse_executions(
                 missing_response_category,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+    def test_execution_rows_match_exact_active_query_filter(self):
+        row = {
+            "execId": "exec-query-filter",
+            "orderId": "provider-order-1",
+            "orderLinkId": "client-filter-1",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.01",
+            "execPrice": "65000",
+            "execFee": "0",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+
+        for query_overrides, message in (
+            ({"symbol": "ETHUSDT"}, "exact symbol query"),
+            ({"orderLinkId": "client-filter-2"}, "exact orderLinkId query"),
+            ({"orderId": "provider-order-2"}, "exact orderId query"),
+        ):
+            with self.subTest(query_overrides=query_overrides):
+                observation = bound_execution_response(
+                    {"retCode": 0, "result": {"list": [row]}},
+                    query_overrides=query_overrides,
+                )
+                with self.assertRaisesRegex(ProviderCoreError, message):
+                    parse_executions(
+                        observation,
+                        instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                    )
+
+        priority_bound = bound_execution_response(
+            {"retCode": 0, "result": {"list": [row]}},
+            query_overrides={
+                "orderId": "provider-order-1",
+                "orderLinkId": "ignored-lower-priority-client",
+                "symbol": "ETHUSDT",
+            },
+        )
+        fills = parse_executions(
+            priority_bound,
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].provider_execution_id, "exec-query-filter")
+
+        base_coin_only = bound_execution_response(
+            {"retCode": 0, "result": {"list": [row]}},
+            query_overrides={"baseCoin": "BTC"},
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "baseCoin-filtered execution rows require qualified",
+        ):
+            parse_executions(
+                base_coin_only,
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
             )
 

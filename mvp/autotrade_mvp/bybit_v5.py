@@ -1428,13 +1428,35 @@ def parse_executions(
         raise ProviderCoreError(
             "Bybit execution evidence requires ORDER.READ permission scope"
         )
-    query_category = binding.query.get("category")
+    query = binding.query
+    query_category = query.get("category")
     if (
         type(query_category) is not str
         or query_category not in {"spot", "linear", "inverse", "option"}
     ):
         raise ProviderCoreError(
             "Bybit execution query requires exact documented category"
+        )
+
+    execution_filter = None
+    for filter_name in ("orderId", "orderLinkId", "symbol", "baseCoin"):
+        filter_value = query.get(filter_name)
+        if filter_value is None:
+            continue
+        if (
+            type(filter_value) is not str
+            or not filter_value
+            or filter_value != filter_value.strip()
+        ):
+            raise ProviderCoreError(
+                f"Bybit execution query {filter_name} must be canonical exact text"
+            )
+        if execution_filter is None:
+            execution_filter = (filter_name, filter_value)
+    if execution_filter is not None and execution_filter[0] == "baseCoin":
+        raise ProviderCoreError(
+            "Bybit baseCoin-filtered execution rows require qualified "
+            "symbol/base-coin authority"
         )
     response = observation.payload
     account_id = observation.account_id
@@ -1534,6 +1556,27 @@ def parse_executions(
                     "Bybit execution orderLinkId must be canonical exact text"
                 )
             client_id = _client_order_id(link)
+
+        if execution_filter is not None:
+            filter_name, filter_value = execution_filter
+            if filter_name == "orderId":
+                row_order_id = row.get("orderId")
+                if (
+                    type(row_order_id) is not str
+                    or row_order_id != filter_value
+                ):
+                    raise ProviderCoreError(
+                        "Bybit execution row does not match exact orderId query"
+                    )
+            elif filter_name == "orderLinkId":
+                if type(link) is not str or link != filter_value:
+                    raise ProviderCoreError(
+                        "Bybit execution row does not match exact orderLinkId query"
+                    )
+            elif filter_name == "symbol" and symbol != filter_value:
+                raise ProviderCoreError(
+                    "Bybit execution row does not match exact symbol query"
+                )
 
         extra_fees = row.get("extraFees")
         if extra_fees not in (None, "", [], {}, ()):

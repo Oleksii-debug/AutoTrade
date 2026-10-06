@@ -43,6 +43,7 @@ from .options import (
 from .persistence import JournalStore, payload_digest
 from .provider_activity_accounting import DurableProviderEconomicBook, EconomicBookCut
 from .provider_core import ProviderResponseObservation, Surface
+from .provider_route_reads import QualifiedProviderResponseObservation
 
 
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -71,7 +72,8 @@ _OPTION_LIFECYCLE_PARSER_CONTRACT_DIGEST = payload_digest(
     }
 )
 
-OptionLifecycleEvidenceResolver = Callable[[str], ProviderResponseObservation]
+OptionLifecycleEvidence = ProviderResponseObservation | QualifiedProviderResponseObservation
+OptionLifecycleEvidenceResolver = Callable[[str], OptionLifecycleEvidence]
 
 
 class OptionLifecycleError(ValueError):
@@ -790,7 +792,7 @@ class DurableOptionLifecycleAuthority:
     def _observation_from_evidence(
         self,
         evidence_ref: str,
-    ) -> tuple[OptionLifecycleObservation, ProviderResponseObservation]:
+    ) -> tuple[OptionLifecycleObservation, ProviderResponseObservation, QualifiedProviderResponseObservation | None]:
         reference = _text(evidence_ref, "evidence_ref")
         try:
             source = self.evidence_resolver(reference)
@@ -798,24 +800,49 @@ class DurableOptionLifecycleAuthority:
             raise OptionLifecycleError(
                 "provider lifecycle evidence could not be resolved"
             ) from error
-        # Validate captured financial scope immediately after the callback,
-        # before the source is interpreted using any caller-retargeted owner.
+
+        # The evidence resolver is caller-supplied and may execute arbitrary code.
+        # Validate canonical authorities immediately after the callback.
         self._require_canonical_authorities()
-        if not isinstance(source, ProviderResponseObservation):
+
+        qualified_source: QualifiedProviderResponseObservation | None = None
+        if type(source) is QualifiedProviderResponseObservation:
+            try:
+                qualified_evidence_ref = source.evidence_ref
+                parser_identity = source.parser_identity
+                qualified_source = source
+                neutral_source = source.observation
+            except Exception as error:
+                raise OptionLifecycleError(
+                    "qualified provider lifecycle evidence authority is unavailable"
+                ) from error
+            if qualified_evidence_ref != reference:
+                raise OptionLifecycleError(
+                    "resolved provider lifecycle evidence identity mismatch"
+                )
+            if parser_identity != _OPTION_LIFECYCLE_PARSER_ID:
+                raise OptionLifecycleError(
+                    "qualified provider lifecycle evidence parser identity is unsupported"
+                )
+        elif type(source) is ProviderResponseObservation:
+            neutral_source = source
+            if neutral_source.evidence_ref != reference:
+                raise OptionLifecycleError(
+                    "resolved provider lifecycle evidence identity mismatch"
+                )
+        else:
             raise OptionLifecycleError(
-                "provider lifecycle evidence must be a sealed ProviderResponseObservation"
+                "provider lifecycle evidence must be a sealed ProviderResponseObservation or qualified provider response"
             )
-        if source.evidence_ref != reference:
-            raise OptionLifecycleError(
-                "resolved provider lifecycle evidence identity mismatch"
-            )
-        endpoint = source.query_binding.endpoint
+
+        self._require_canonical_authorities()
+        endpoint = neutral_source.query_binding.endpoint
         if endpoint not in self.lifecycle_endpoints:
             raise OptionLifecycleError(
                 "provider lifecycle evidence endpoint is not allowed"
             )
         try:
-            source.require_scope(
+            neutral_source.require_scope(
                 provider_id=self.economic_book.provider_id,
                 surface=Surface.ACTIVITIES,
                 endpoint=endpoint,
@@ -826,34 +853,34 @@ class DurableOptionLifecycleAuthority:
             raise OptionLifecycleError(
                 "provider lifecycle evidence scope mismatch"
             ) from error
-        if source.query_binding.permission_scope != self.permission_scope:
+        if neutral_source.query_binding.permission_scope != self.permission_scope:
             raise OptionLifecycleError(
                 "provider lifecycle evidence permission scope mismatch"
             )
-        observation = _canonical_observation_from_sealed_response(source)
+        observation = _canonical_observation_from_sealed_response(neutral_source)
         observed_at = datetime.fromisoformat(
-            source.observed_at.replace("Z", "+00:00")
+            neutral_source.observed_at.replace("Z", "+00:00")
         ).astimezone(timezone.utc)
         if (
-            observation.provider_id != source.provider_id
-            or observation.account_id != source.account_id
-            or observation.environment != source.environment
+            observation.provider_id != neutral_source.provider_id
+            or observation.account_id != neutral_source.account_id
+            or observation.environment != neutral_source.environment
             or observation.instrument_version
-            != source.query_binding.instrument_version
-            or observation.raw_evidence_digest != source.response_sha256
+            != neutral_source.query_binding.instrument_version
+            or observation.raw_evidence_digest != neutral_source.response_sha256
             or observation.observed_at != observed_at
         ):
             raise OptionLifecycleError(
                 "normalized lifecycle fact does not match sealed provider evidence"
             )
-        return observation, source
+        return observation, neutral_source, qualified_source
 
     def apply(
         self,
         evidence_ref: str,
     ) -> OptionLifecycleApplyResult:
         self._require_canonical_authorities()
-        observation, provider_evidence = self._observation_from_evidence(evidence_ref)
+        observation, provider_evidence, qualified_provider_evidence = self._observation_from_evidence(evidence_ref)
         # The evidence resolver is caller-supplied and may execute arbitrary code.
         # Revalidate every canonical financial owner after crossing that callback.
         self._require_canonical_authorities()
@@ -869,9 +896,17 @@ class DurableOptionLifecycleAuthority:
         observation_digest = payload_digest(observation_payload)
         instrument_digest = payload_digest(version.to_contract_dict())
         provider_evidence_payload = {
-            "evidence_ref": provider_evidence.evidence_ref,
+            "evidence_ref": (
+                qualified_provider_evidence.evidence_ref
+                if qualified_provider_evidence is not None
+                else provider_evidence.evidence_ref
+            ),
             "response_sha256": provider_evidence.response_sha256,
-            "query_digest": provider_evidence.query_binding.query_digest,
+            "query_digest": (
+                qualified_provider_evidence.query_binding.query_digest
+                if qualified_provider_evidence is not None
+                else provider_evidence.query_binding.query_digest
+            ),
             "endpoint": provider_evidence.query_binding.endpoint,
             "permission_scope": provider_evidence.query_binding.permission_scope,
             "capability_snapshot_id": (
@@ -883,6 +918,34 @@ class DurableOptionLifecycleAuthority:
             "parser_version": _OPTION_LIFECYCLE_PARSER_VERSION,
             "parser_contract_digest": _OPTION_LIFECYCLE_PARSER_CONTRACT_DIGEST,
         }
+        if qualified_provider_evidence is not None:
+            provider_evidence_payload.update(
+                {
+                    "qualification_id": qualified_provider_evidence.qualification_id,
+                    "route_semantics_digest": (
+                        qualified_provider_evidence.route_semantics_digest
+                    ),
+                    "endpoint_rule_digest": (
+                        qualified_provider_evidence.endpoint_rule_digest
+                    ),
+                    "qualified_route_rule_digest": (
+                        qualified_provider_evidence.qualified_route_rule_digest
+                    ),
+                    "data_entitlement": qualified_provider_evidence.data_entitlement,
+                    "provider_environment": (
+                        qualified_provider_evidence.query_binding.provider_environment
+                    ),
+                    "authority_journal_sequence_cut": (
+                        qualified_provider_evidence.query_binding.authority_journal_sequence_cut
+                    ),
+                    "adapter_code_sha": (
+                        qualified_provider_evidence.query_binding.adapter_code_sha
+                    ),
+                    "packaged_artifact_digest": (
+                        qualified_provider_evidence.query_binding.packaged_artifact_digest
+                    ),
+                }
+            )
         provider_evidence_digest = payload_digest(provider_evidence_payload)
         events = self._events()
 
@@ -1101,7 +1164,11 @@ class DurableOptionLifecycleAuthority:
             "observed_at": _utc_text(observation.observed_at),
             "provider_revision": observation.provider_revision,
             "raw_evidence_digest": observation.raw_evidence_digest,
-            "provider_evidence_ref": provider_evidence.evidence_ref,
+            "provider_evidence_ref": (
+                qualified_provider_evidence.evidence_ref
+                if qualified_provider_evidence is not None
+                else provider_evidence.evidence_ref
+            ),
             "provider_evidence_digest": provider_evidence_digest,
             "provider_evidence": provider_evidence_payload,
             "observation_digest": observation_digest,

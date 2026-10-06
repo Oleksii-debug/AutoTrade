@@ -324,8 +324,8 @@ internal sealed class ProviderIssuerAuthority : IDisposable
         if (!subject.Endpoint.StartsWith("/", StringComparison.Ordinal)
             || subject.Endpoint.StartsWith("//", StringComparison.Ordinal)
             || subject.Endpoint.Contains("://", StringComparison.Ordinal)
-            || subject.Endpoint.Contains('?', StringComparison.Ordinal)
-            || subject.Endpoint.Contains('#', StringComparison.Ordinal))
+            || subject.Endpoint.Contains("?", StringComparison.Ordinal)
+            || subject.Endpoint.Contains("#", StringComparison.Ordinal))
         {
             throw new ProviderIssuerAuthorityException(
                 "Endpoint must be one canonical provider-relative path");

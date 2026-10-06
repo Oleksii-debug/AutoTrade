@@ -308,5 +308,43 @@ class AccessibleStatusTests(unittest.TestCase):
         self.assertIn("Economic edge: unproven", text)
 
 
+    def test_hostile_mapping_keys_do_not_execute_equality_during_status_read(self):
+        class TrapKey:
+            def __init__(self, text):
+                self.text = text
+
+            def __hash__(self):
+                return hash(self.text)
+
+            def __eq__(self, other):
+                raise AssertionError("caller-controlled key equality executed")
+
+        text = format_accessible_status(
+            {
+                TrapKey("status"): "running",
+                "status": "running",
+                TrapKey("fills"): {},
+                "fills": {},
+                "symbol": "SIM",
+                "state_format": "canonical_journal",
+                "active_reservations": [
+                    {
+                        TrapKey("remaining"): {},
+                        "remaining": {},
+                        "state": "ACTIVE",
+                    }
+                ],
+            },
+            {
+                TrapKey("reconciled"): True,
+                "reconciled": True,
+            },
+        )
+        self.assertIn("System state: Running", text)
+        self.assertIn("Instrument: SIM", text)
+        self.assertIn("Active reservations: 1", text)
+        self.assertIn("Economic reconciliation: passed", text)
+
+
 if __name__ == "__main__":
     unittest.main()

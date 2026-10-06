@@ -613,7 +613,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 observation=forged,
             )
 
-    def test_submission_consumer_does_not_call_rebindable_require_scope(self):
+    def test_submission_consumer_rejects_rebound_require_scope_without_callback(self):
         attempt, prepared, observation = self._durable_submission_observation(
             {"error": [], "result": {"txid": ["OABC-D123-E456"]}},
             intent_id="kraken-spot-no-virtual-scope",
@@ -624,15 +624,18 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             side_effect=AssertionError(
                 "rebindable require_scope callback must not execute"
             ),
-        ):
-            result = parse_spot_submission_response(
-                attempt_id=attempt,
-                prepared_request=prepared,
-                source_uri="https://api.kraken.com/0/private/AddOrder",
-                observation=observation,
-            )
-        self.assertEqual(result["outcome"], "ACKNOWLEDGED")
-        self.assertEqual(result["provider_order_id"], "OABC-D123-E456")
+        ) as rebound:
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "provider submission observation authority is unavailable",
+            ):
+                parse_spot_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    source_uri="https://api.kraken.com/0/private/AddOrder",
+                    observation=observation,
+                )
+        rebound.assert_not_called()
 
     def test_empty_txid_fails_closed(self):
         with self.assertRaisesRegex(KrakenSpotAdapterError, "transaction id"):

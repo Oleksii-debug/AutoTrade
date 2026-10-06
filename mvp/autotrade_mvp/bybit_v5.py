@@ -1180,7 +1180,7 @@ def parse_executions(
 
 
 BYBIT_OPTION_DELIVERY_PARSER_IDENTITY = "BYBIT_OPTION_DELIVERY_V5_JSON_V1"
-BYBIT_OPTION_DELIVERY_PARSER_VERSION = "1.0.0"
+BYBIT_OPTION_DELIVERY_PARSER_VERSION = "1.1.0"
 BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST = (
     "sha256:"
     + sha256(
@@ -1195,7 +1195,8 @@ BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST = (
                     "endpoint": "/v5/asset/delivery-record",
                     "permission_scope": "ACCOUNT.READ",
                     "category": "option",
-                    "symbol": "OPTIONAL_EXACT_INSTRUMENT_SYMBOL_FILTER",
+                    "symbol": "EXPLICIT_QUERY_SYMBOL",
+                    "time_window": "EXPLICIT_START_OR_END",
                 },
                 "query_fields": [
                     "category",

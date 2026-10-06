@@ -534,6 +534,82 @@ class VerticalSliceTests(unittest.TestCase):
             )
 
 
+    def test_resume_rejects_duplicate_checkpoint_json_keys_before_mutation(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            checkpoint_path = root / "checkpoint.json"
+            checkpoint_text = checkpoint_path.read_text(encoding="utf-8")
+            marker = '"schema_version": 3,'
+            self.assertEqual(checkpoint_text.count(marker), 1)
+            checkpoint_path.write_text(
+                checkpoint_text.replace(
+                    marker,
+                    marker + '\n  "schema_version": 3,',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            checkpoint_before = checkpoint_path.read_bytes()
+            evidence_before = (root / "learning-evidence.jsonl").read_bytes()
+            journal_before = (root / "journal.sqlite3").read_bytes()
+            intents_before = {
+                path.name: path.read_bytes()
+                for path in (root / "order-intents").glob("*.json")
+            }
+
+            with self.assertRaisesRegex(ValueError, "Corrupt checkpoint JSON"):
+                run_vertical_slice([103, 102, 101, 100], directory)
+
+            self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertEqual(
+                (root / "learning-evidence.jsonl").read_bytes(),
+                evidence_before,
+            )
+            self.assertEqual((root / "journal.sqlite3").read_bytes(), journal_before)
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in (root / "order-intents").glob("*.json")
+                },
+                intents_before,
+            )
+
+    def test_replay_rejects_duplicate_evidence_json_keys(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            evidence_path = root / "learning-evidence.jsonl"
+            row = json.loads(evidence_path.read_text(encoding="utf-8"))
+            encoded = json.dumps(row, sort_keys=True)
+            duplicate = (
+                encoded[:-1]
+                + ',"risk_outcome":'
+                + json.dumps(row["risk_outcome"])
+                + '}'
+            )
+            evidence_path.write_text(duplicate + "\n", encoding="utf-8")
+
+            self.assertFalse(verify_replay(directory))
+            evidence_before = evidence_path.read_bytes()
+            checkpoint_before = (root / "checkpoint.json").read_bytes()
+            journal_before = (root / "journal.sqlite3").read_bytes()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Corrupt learning evidence before replay repair",
+            ):
+                run_vertical_slice([103, 102, 101, 100], directory)
+
+            self.assertEqual(evidence_path.read_bytes(), evidence_before)
+            self.assertEqual(
+                (root / "checkpoint.json").read_bytes(),
+                checkpoint_before,
+            )
+            self.assertEqual((root / "journal.sqlite3").read_bytes(), journal_before)
+
+
     def test_checkpoint_ledger_mismatch_is_rejected(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

@@ -482,12 +482,29 @@ def _initial_checkpoint(financial_configuration: dict[str, object]) -> dict[str,
     }
 
 
+def _strict_json_loads(text: str) -> object:
+    """Decode durable JSON while rejecting ambiguous duplicate object keys."""
+
+    if type(text) is not str:
+        raise TypeError("durable JSON input must be exact text")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate JSON key")
+            result[key] = value
+        return result
+
+    return json.loads(text, object_pairs_hook=unique_object)
+
+
 def _read_state(path: Path, initial_cash: Decimal) -> tuple[dict, bool]:
     if not path.exists():
         return {"initial_cash": str(initial_cash), "postings": [], "fills": {}, "evidence_ids": []}, False
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        data = _strict_json_loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as error:
         raise ValueError("Corrupt checkpoint JSON") from error
     if not isinstance(data, dict):
         raise ValueError("Corrupt checkpoint structure")
@@ -515,14 +532,14 @@ def _find_evidence(path: Path, evidence_id: str) -> dict | None:
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
-            recorded = json.loads(line)
+            recorded = _strict_json_loads(line)
             if type(recorded) is not dict or type(recorded.get("evidence_id")) is not str:
                 raise ValueError("Corrupt learning evidence")
             if recorded["evidence_id"] == evidence_id:
                 if found is not None:
                     raise ValueError("Duplicate learning evidence ID")
                 found = recorded
-    except (json.JSONDecodeError, KeyError, TypeError) as error:
+    except (ValueError, KeyError, TypeError) as error:
         raise ValueError("Corrupt learning evidence") from error
     return found
 
@@ -720,7 +737,7 @@ def _repair_interrupted_replay(
             for line in evidence_path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
                     continue
-                recorded = json.loads(line)
+                recorded = _strict_json_loads(line)
                 evidence_id = (
                     recorded.get("evidence_id")
                     if type(recorded) is dict
@@ -740,7 +757,7 @@ def _repair_interrupted_replay(
                         "Learning evidence conflicts with checkpoint before replay repair"
                     )
                 existing_evidence_ids.add(evidence_id)
-        except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        except (OSError, ValueError, KeyError, TypeError) as error:
             raise ValueError(
                 "Corrupt learning evidence before replay repair"
             ) from error
@@ -850,8 +867,8 @@ def _persist_intent(path: Path, intent: OrderIntent) -> None:
     payload = {**asdict(intent), "quantity": str(intent.quantity), "price": str(intent.price)}
     if path.exists():
         try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+            existing = _strict_json_loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as error:
             raise ValueError("Corrupt durable order intent") from error
         if existing != payload:
             raise ValueError("Durable order intent conflicts with this decision")
@@ -917,8 +934,8 @@ def _restore_simulated_fills(
 
         intent_path = root / "order-intents" / f"{client_order_id}.json"
         try:
-            intent_payload = json.loads(intent_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+            intent_payload = _strict_json_loads(intent_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as error:
             raise ValueError("Durable order intent missing for checkpoint fill") from error
         expected_intent_payload = {
             "client_order_id": client_order_id,
@@ -980,7 +997,7 @@ def verify_replay(state_dir: str | Path) -> bool:
     if not checkpoint_path.is_file() or not evidence_path.is_file() or not journal_path.is_file():
         return False
     try:
-        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        checkpoint = _strict_json_loads(checkpoint_path.read_text(encoding="utf-8"))
         checkpoint_fields = {
             "schema_version",
             "symbol",
@@ -1081,7 +1098,7 @@ def verify_replay(state_dir: str | Path) -> bool:
             }
         )
         rows = [
-            json.loads(line)
+            _strict_json_loads(line)
             for line in evidence_path.read_text(encoding="utf-8").splitlines()
         ]
         if any(

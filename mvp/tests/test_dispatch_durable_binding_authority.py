@@ -1561,7 +1561,7 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 ["SubmissionPrepared"],
             )
 
-    def test_post_guard_store_retarget_terminalizes_unknown_on_original_journal(self):
+    def test_post_guard_store_retarget_preserves_original_sending_authority(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             other_store = JournalStore(f"{directory}/other.sqlite3")
@@ -1611,12 +1611,7 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 [
                     "SubmissionPrepared",
                     "SubmissionSending",
-                    "SubmissionUnknown",
                 ],
-            )
-            self.assertEqual(
-                events[-1]["payload"]["reason"],
-                "dispatcher_authority_changed_after_send_barrier",
             )
             self.assertEqual(
                 JournalStore.load_events(
@@ -1653,7 +1648,20 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             self.assertEqual(recovered.status, "UNKNOWN")
             self.assertEqual(
                 recovered.reason,
-                "dispatcher_authority_changed_after_send_barrier",
+                "recovered_after_send_barrier_without_terminal_result",
+            )
+            recovered_events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("post-guard-store-retarget-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in recovered_events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
             )
 
     def test_post_guard_store_retarget_then_transport_error_stays_on_original_journal(self):
@@ -1708,7 +1716,6 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 [
                     "SubmissionPrepared",
                     "SubmissionSending",
-                    "SubmissionUnknown",
                 ],
             )
             self.assertEqual(
@@ -1718,6 +1725,63 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                     dispatcher._aggregate_id("post-guard-store-error-a1"),
                 ),
                 [],
+            )
+
+    def test_post_guard_class_rebind_never_calls_rebound_dispatcher_method(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            original_events = GuardedDispatcher._events
+            hostile_calls = 0
+            wire_calls = 0
+
+            def hostile_events(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("post-barrier rebound _events must not execute")
+
+            def transport(_client_order_id, _request, guard):
+                nonlocal wire_calls
+                guard()
+                wire_calls += 1
+                GuardedDispatcher._events = hostile_events
+                return ExactJsonTransportResponse(b'{"accepted":true}')
+
+            try:
+                result = dispatcher.dispatch(
+                    attempt_id="post-guard-class-rebind-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T14:00:00Z",
+                    authority_check=lambda *_args: (True, "allowed"),
+                    transport_send=transport,
+                    submission_scope={"endpoint": "/orders"},
+                )
+            finally:
+                GuardedDispatcher._events = original_events
+
+            self.assertEqual(wire_calls, 1)
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(
+                result.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("post-guard-class-rebind-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending"],
             )
 
     def test_terminal_reread_rejects_post_append_tamper(self):

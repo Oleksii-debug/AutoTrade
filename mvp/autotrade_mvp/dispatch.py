@@ -1651,80 +1651,18 @@ class GuardedDispatcher:
         barrier_passed = False
         barrier_now = now
 
-        def terminalize_authority_change_after_send() -> DispatchOutcome:
-            """Persist worst-case exposure on the invocation-selected journal."""
-
-            events = self._events(attempt_id)
-            if (
-                not events
-                or not self._existing_history_is_canonical(
-                    events=events,
-                    attempt_id=attempt_id,
-                    client_order_id=client_order_id,
-                    expected_prepared=expected_prepared,
-                )
-            ):
-                return DispatchOutcome(
-                    "UNKNOWN",
-                    client_order_id,
-                    None,
-                    "durable_submission_history_invalid",
-                )
-            last = events[-1]
-            if last["event_type"] in {
-                "SubmissionSent",
-                "SubmissionBlocked",
-                "SubmissionUnknown",
-            }:
-                return self._terminal_outcome_from_existing_history(
-                    events=events,
-                    attempt_id=attempt_id,
-                    client_order_id=client_order_id,
-                    expected_prepared=expected_prepared,
-                )
-            if last["event_type"] != "SubmissionSending":
-                return DispatchOutcome(
-                    "UNKNOWN",
-                    client_order_id,
-                    None,
-                    "durable_submission_history_invalid",
-                )
-            try:
-                self._append(
-                    attempt_id=attempt_id,
-                    event_type="SubmissionUnknown",
-                    version=last["aggregate_version"] + 1,
-                    payload={
-                        "client_order_id": client_order_id,
-                        "reason": "dispatcher_authority_changed_after_send_barrier",
-                    },
-                    now=barrier_now,
-                )
-            except ValueError:
-                current = self._events(attempt_id)
-                if current and current[-1]["event_type"] in {
-                    "SubmissionSent",
-                    "SubmissionBlocked",
-                    "SubmissionUnknown",
-                }:
-                    return self._terminal_outcome_from_existing_history(
-                        events=current,
-                        attempt_id=attempt_id,
-                        client_order_id=client_order_id,
-                        expected_prepared=expected_prepared,
-                    )
-                return DispatchOutcome(
-                    "UNKNOWN",
-                    client_order_id,
-                    None,
-                    "durable_submission_history_invalid",
-                )
-            current = self._events(attempt_id)
-            return self._terminal_outcome_from_existing_history(
-                events=current,
-                attempt_id=attempt_id,
-                client_order_id=client_order_id,
-                expected_prepared=expected_prepared,
+        def authority_change_after_send_outcome() -> DispatchOutcome:
+            # SubmissionSending was durably committed before barrier_passed became
+            # true. Do not call any dispatcher method after detecting a mutable
+            # dispatcher/class authority change: that method surface itself may
+            # be the thing a hostile callback rebound. The durable Sending cut
+            # is already sufficient to forbid blind resend; normal recovery will
+            # converge it to terminal UNKNOWN on the original journal.
+            return DispatchOutcome(
+                "UNKNOWN",
+                client_order_id,
+                None,
+                "dispatcher_authority_changed_after_send_barrier",
             )
 
         def final_guard() -> None:
@@ -1928,7 +1866,7 @@ class GuardedDispatcher:
                 require_dispatch_call_authority()
             except _DispatchAuthorityChanged:
                 if barrier_passed:
-                    return terminalize_authority_change_after_send()
+                    return authority_change_after_send_outcome()
                 raise
         except _DispatchAuthorityChanged:
             # The authority helper restores the invocation-selected cut before
@@ -1936,14 +1874,14 @@ class GuardedDispatcher:
             # UNKNOWN on that original journal rather than leaking a retryable
             # callback/transport error.
             if barrier_passed:
-                return terminalize_authority_change_after_send()
+                return authority_change_after_send_outcome()
             raise
         except DispatchBlocked as error:
             try:
                 require_dispatch_call_authority()
             except _DispatchAuthorityChanged:
                 if barrier_passed:
-                    return terminalize_authority_change_after_send()
+                    return authority_change_after_send_outcome()
                 raise
             events = self._events(attempt_id)
             if events:
@@ -1972,7 +1910,7 @@ class GuardedDispatcher:
                 require_dispatch_call_authority()
             except _DispatchAuthorityChanged:
                 if barrier_passed:
-                    return terminalize_authority_change_after_send()
+                    return authority_change_after_send_outcome()
                 raise
             events = self._events(attempt_id)
             if not events:

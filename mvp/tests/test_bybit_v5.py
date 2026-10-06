@@ -51,8 +51,9 @@ def read_capability(
     instrument_version="BTCUSDT@v1",
     provider_environment=None,
     permission_scopes=("ORDER.READ",),
+    at=READ_AT,
 ):
-    observed_at = READ_AT - timedelta(hours=1)
+    observed_at = at - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
             source=source,
@@ -63,7 +64,7 @@ def read_capability(
             provider_environment=provider_environment or ("MAINNET" if environment == "LIVE" else "TESTNET"),
             instrument_version=instrument_version,
             observed_at=observed_at,
-            expires_at=READ_AT + timedelta(hours=1),
+            expires_at=at + timedelta(hours=1),
             supported_order_types=frozenset({"LIMIT", "MARKET"}),
             time_in_force=frozenset({"GTC", "IOC"}),
             permission_scopes=frozenset(permission_scopes),
@@ -83,7 +84,7 @@ def read_capability(
     return fresh_test_admission(derive_capability_snapshot(
         snapshot_id=str(uuid4()),
         claims=claims,
-        observed_at=READ_AT,
+        observed_at=at,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
     ))
 
@@ -193,27 +194,56 @@ def bound_execution_response(
     query_category="spot",
     permission_scope="ORDER.READ",
     ensure_response_category=True,
+    ensure_trade_exec_type=True,
+    query_overrides=None,
+    capability=None,
+    at=READ_AT,
 ):
+    query_values = {"category": query_category, "limit": "100"}
+    if query_overrides is not None:
+        if type(query_overrides) is not dict:
+            raise TypeError("query_overrides must be an exact dict")
+        query_values.update(query_overrides)
+    capability = capability or read_capability(
+        account_id=account_id,
+        environment=environment,
+        instrument_version=instrument_version,
+        permission_scopes=(permission_scope,),
+        at=at,
+    )
     query = prepare_authenticated_read_query(
-        capability=read_capability(
-            account_id=account_id,
-            environment=environment,
-            instrument_version=instrument_version,
-            permission_scopes=(permission_scope,),
-        ),
+        capability=capability,
         surface=Surface.AUTHENTICATED_READ,
         endpoint="/v5/execution/list",
-        query={"category": query_category, "limit": "100"},
-        at=READ_AT,
+        query=query_values,
+        at=at,
         permission_scope=permission_scope,
     )
-    if ensure_response_category and type(response) is dict:
+    if type(response) is dict:
         result = response.get("result")
-        if type(result) is dict and "category" not in result:
-            response = dict.copy(response)
-            result = dict.copy(result)
-            result["category"] = query_category
-            response["result"] = result
+        if type(result) is dict:
+            rows = result.get("list")
+            needs_category = ensure_response_category and "category" not in result
+            needs_exec_type = (
+                ensure_trade_exec_type
+                and type(rows) is list
+                and any(type(row) is dict and "execType" not in row for row in rows)
+            )
+            if needs_category or needs_exec_type:
+                response = dict.copy(response)
+                result = dict.copy(result)
+                if needs_category:
+                    result["category"] = query_category
+                if needs_exec_type:
+                    result["list"] = [
+                        (
+                            dict(row, execType="Trade")
+                            if type(row) is dict and "execType" not in row
+                            else row
+                        )
+                        for row in rows
+                    ]
+                response["result"] = result
     raw = json.dumps(
         response,
         sort_keys=True,
@@ -225,7 +255,7 @@ def bound_execution_response(
         query_binding=query,
         http_status=200,
         response_bytes=raw,
-        observed_at=READ_AT,
+        observed_at=at,
     )
 
 
@@ -1939,6 +1969,151 @@ class BybitV5AdapterTests(unittest.TestCase):
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
             )
 
+    def test_execution_rows_match_exact_active_query_filter(self):
+        row = {
+            "execId": "exec-query-filter",
+            "orderId": "provider-order-1",
+            "orderLinkId": "client-filter-1",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.01",
+            "execPrice": "65000",
+            "execFee": "0",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+
+        for query_overrides, message in (
+            ({"symbol": "ETHUSDT"}, "exact symbol query"),
+            ({"orderLinkId": "client-filter-2"}, "exact orderLinkId query"),
+            ({"orderId": "provider-order-2"}, "exact orderId query"),
+        ):
+            with self.subTest(query_overrides=query_overrides):
+                observation = bound_execution_response(
+                    {"retCode": 0, "result": {"list": [row]}},
+                    query_overrides=query_overrides,
+                )
+                with self.assertRaisesRegex(ProviderCoreError, message):
+                    parse_executions(
+                        observation,
+                        instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                    )
+
+        priority_bound = bound_execution_response(
+            {"retCode": 0, "result": {"list": [row]}},
+            query_overrides={
+                "orderId": "provider-order-1",
+                "orderLinkId": "ignored-lower-priority-client",
+                "symbol": "ETHUSDT",
+            },
+        )
+        fills = parse_executions(
+            priority_bound,
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].provider_execution_id, "exec-query-filter")
+
+        base_coin_only = bound_execution_response(
+            {"retCode": 0, "result": {"list": [row]}},
+            query_overrides={"baseCoin": "BTC"},
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "baseCoin-filtered execution rows require qualified",
+        ):
+            parse_executions(
+                base_coin_only,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+    def test_execution_rows_require_exact_trade_exec_type(self):
+        row = {
+            "execId": "exec-type-guard",
+            "orderId": "provider-order-type-guard",
+            "orderLinkId": "",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.01",
+            "execPrice": "65000",
+            "execFee": "0",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+
+        missing = bound_execution_response(
+            {"retCode": 0, "result": {"list": [row]}},
+            ensure_trade_exec_type=False,
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "row execType to be exact Trade",
+        ):
+            parse_executions(
+                missing,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+        for non_trade_type in (
+            "AdlTrade",
+            "Funding",
+            "BustTrade",
+            "Delivery",
+            "Settle",
+            "BlockTrade",
+            "MovePosition",
+            "FutureSpread",
+            "CorporateAction",
+            "UNKNOWN",
+        ):
+            with self.subTest(execType=non_trade_type):
+                response = bound_execution_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "list": [dict(row, execType=non_trade_type)]
+                        },
+                    }
+                )
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "row execType to be exact Trade",
+                ):
+                    parse_executions(
+                        response,
+                        instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                    )
+
+        non_trade_query = bound_execution_response(
+            {
+                "retCode": 0,
+                "result": {"list": [dict(row, execType="Funding")]},
+            },
+            query_overrides={"execType": "Funding"},
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "query execType to be exact Trade",
+        ):
+            parse_executions(
+                non_trade_query,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+        exact_trade = bound_execution_response(
+            {
+                "retCode": 0,
+                "result": {"list": [dict(row, execType="Trade")]},
+            },
+            query_overrides={"execType": "Trade"},
+        )
+        fills = parse_executions(
+            exact_trade,
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].provider_execution_id, "exec-type-guard")
+
     def test_execution_success_code_requires_exact_json_integer(self):
         row = {
             "execId": "exec-ret-code-type",
@@ -2033,7 +2208,6 @@ class BybitV5AdapterTests(unittest.TestCase):
                             {"retCode": 0, "result": {"list": [row]}}
                         ),
                         instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
-                        qualified_fee_currencies={"BTCUSDT@v1": "USDT"},
                     )
 
     def test_execution_metadata_inputs_require_exact_dict_snapshots(self):
@@ -2045,7 +2219,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execQty": "0.01",
             "execPrice": "65000",
             "execFee": "0.5",
-            "feeCurrency": "",
+            "feeCurrency": "USDT",
             "execTime": "1790280000000",
         }
         observation = bound_execution_response(
@@ -2071,33 +2245,15 @@ class BybitV5AdapterTests(unittest.TestCase):
                 instrument_versions=HostileDict(
                     {"BTCUSDT": "BTCUSDT@v1"}
                 ),
-                qualified_fee_currencies={"BTCUSDT@v1": "USDT"},
-            )
-        self.assertEqual(callbacks, [])
-
-        with self.assertRaisesRegex(
-            ProviderCoreError,
-            "qualified_fee_currencies must be an exact dict snapshot",
-        ):
-            parse_executions(
-                observation,
-                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
-                qualified_fee_currencies=HostileDict(
-                    {"BTCUSDT@v1": "USDT"}
-                ),
             )
         self.assertEqual(callbacks, [])
 
         immutable_instruments = MappingProxyType(
             {"BTCUSDT": "BTCUSDT@v1"}
         )
-        immutable_fee_currencies = MappingProxyType(
-            {"BTCUSDT@v1": "USDT"}
-        )
         fills = parse_executions(
             observation,
             instrument_versions=immutable_instruments,
-            qualified_fee_currencies=immutable_fee_currencies,
         )
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].instrument, "BTCUSDT@v1")
@@ -2112,19 +2268,6 @@ class BybitV5AdapterTests(unittest.TestCase):
                 instrument_versions=MappingProxyType(
                     {1: "BTCUSDT@v1"}
                 ),
-                qualified_fee_currencies=immutable_fee_currencies,
-            )
-
-        with self.assertRaisesRegex(
-            ProviderCoreError,
-            "qualified_fee_currencies keys and values must be exact text",
-        ):
-            parse_executions(
-                observation,
-                instrument_versions=immutable_instruments,
-                qualified_fee_currencies=MappingProxyType(
-                    {"BTCUSDT@v1": 1}
-                ),
             )
 
         with self.assertRaisesRegex(
@@ -2134,7 +2277,6 @@ class BybitV5AdapterTests(unittest.TestCase):
             parse_executions(
                 observation,
                 instrument_versions={"BTCUSDT": " BTCUSDT@v1 "},
-                qualified_fee_currencies={"BTCUSDT@v1": "USDT"},
             )
 
     def test_execution_rejects_noncanonical_provider_identity_text(self):
@@ -2245,7 +2387,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                         instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
                     )
 
-    def test_documented_linear_execution_requires_qualified_fee_currency(self):
+    def test_documented_linear_execution_fails_closed_without_qualified_authority(self):
         response = {"retCode": 0, "result": {"category": "linear", "list": [{
             "execId": "e0cbe81d-0f18-5866-9415-cf319b5dab3b", "orderLinkId": "",
             "symbol": "ETHPERP", "side": "Buy", "execQty": "0.1", "execPrice": "1190.15",
@@ -2259,25 +2401,12 @@ class BybitV5AdapterTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ProviderCoreError, "fee currency is unresolved"):
             parse_executions(evidence, instrument_versions={"ETHPERP": "ETHPERP@v1"})
-        for malformed in (" USDT ", "usdt", 123):
-            with self.subTest(qualified_fee_currency=malformed):
-                with self.assertRaisesRegex(
-                    ProviderCoreError,
-                    "qualified fee currency must be canonical exact text",
-                ):
-                    parse_executions(
-                        evidence,
-                        instrument_versions={"ETHPERP": "ETHPERP@v1"},
-                        qualified_fee_currencies={"ETHPERP@v1": malformed},
-                    )
-        fills = parse_executions(
-            evidence,
-            instrument_versions={"ETHPERP": "ETHPERP@v1"},
-            qualified_fee_currencies={"ETHPERP@v1": "USDT"},
-        )
-        self.assertEqual(len(fills), 1)
-        self.assertEqual(fills[0].fee_amount, Decimal("0.071409"))
-        self.assertEqual(fills[0].fee_currency, "USDT")
+        with self.assertRaises(TypeError):
+            parse_executions(
+                evidence,
+                instrument_versions={"ETHPERP": "ETHPERP@v1"},
+                qualified_fee_currencies={"ETHPERP@v1": "USDT"},
+            )
 
     def test_nonempty_extra_fees_cannot_silently_disappear(self):
         response = {"retCode": 0, "result": {"category": "spot", "list": [{

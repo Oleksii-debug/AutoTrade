@@ -474,7 +474,7 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
                             response(),
                             query={
                                 "category": "option",
-                                "symbol": "BTC-29FEB23-16000-P",
+                                "symbol": "BTC-29DEC22-16000-P",
                                 "expDate": exp_date,
                             },
                         )

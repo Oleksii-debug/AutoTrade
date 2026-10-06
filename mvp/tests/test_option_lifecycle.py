@@ -355,6 +355,108 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self.assertIs(qualified, forged)
         self.assertEqual(observation.raw_evidence_digest, neutral_source.response_sha256)
 
+    def test_qualified_lifecycle_apply_persists_full_provider_q_provenance(self):
+        self.seed_option_position("1")
+        neutral_ref = self.evidence(
+            external_event_id="qualified-lifecycle-apply",
+            provider_revision="qualified-r1",
+        )
+        neutral_source = self._evidence[neutral_ref]
+
+        class QualifiedBinding:
+            query_digest = "sha256:" + "a" * 64
+            provider_environment = "TESTNET"
+            authority_journal_sequence_cut = 17
+            adapter_code_sha = "b" * 40
+            packaged_artifact_digest = "sha256:" + "c" * 64
+
+        forged = object.__new__(QualifiedProviderResponseObservation)
+        object.__setattr__(forged, "observation", neutral_source)
+        object.__setattr__(forged, "query_binding", QualifiedBinding())
+        self._evidence["qualified-lifecycle-apply"] = forged
+
+        patches = (
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "evidence_ref",
+                new_callable=property,
+                return_value="qualified-lifecycle-apply",
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "parser_identity",
+                new_callable=property,
+                return_value="autotrade.option-lifecycle.sealed-json",
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "qualification_id",
+                new_callable=property,
+                return_value="provider-qualification:sha256:" + "d" * 64,
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "route_semantics_digest",
+                new_callable=property,
+                return_value="sha256:" + "e" * 64,
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "endpoint_rule_digest",
+                new_callable=property,
+                return_value="sha256:" + "f" * 64,
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "qualified_route_rule_digest",
+                new_callable=property,
+                return_value="sha256:" + "0" * 64,
+            ),
+            patch.object(
+                QualifiedProviderResponseObservation,
+                "data_entitlement",
+                new_callable=property,
+                return_value="ACCOUNT",
+            ),
+        )
+        for item in patches:
+            item.start()
+        try:
+            result = self.authority.apply("qualified-lifecycle-apply")
+        finally:
+            for item in reversed(patches):
+                item.stop()
+
+        self.assertTrue(result.inserted)
+        event = self.store.load_events(
+            "option_lifecycle",
+            self.authority.aggregate_id,
+        )[0]["payload"]
+        evidence = event["provider_evidence"]
+        self.assertEqual(
+            event["provider_evidence_ref"],
+            "qualified-lifecycle-apply",
+        )
+        self.assertEqual(evidence["evidence_ref"], "qualified-lifecycle-apply")
+        self.assertEqual(
+            evidence["qualification_id"],
+            "provider-qualification:sha256:" + "d" * 64,
+        )
+        self.assertEqual(evidence["route_semantics_digest"], "sha256:" + "e" * 64)
+        self.assertEqual(evidence["endpoint_rule_digest"], "sha256:" + "f" * 64)
+        self.assertEqual(
+            evidence["qualified_route_rule_digest"],
+            "sha256:" + "0" * 64,
+        )
+        self.assertEqual(evidence["data_entitlement"], "ACCOUNT")
+        self.assertEqual(evidence["provider_environment"], "TESTNET")
+        self.assertEqual(evidence["authority_journal_sequence_cut"], 17)
+        self.assertEqual(evidence["adapter_code_sha"], "b" * 40)
+        self.assertEqual(
+            evidence["packaged_artifact_digest"],
+            "sha256:" + "c" * 64,
+        )
+
     def test_lifecycle_financial_decimals_reject_subclasses_before_virtual_dispatch(self):
         class HostileDecimal(Decimal):
             def is_finite(self):

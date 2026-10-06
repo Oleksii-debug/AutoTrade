@@ -115,6 +115,7 @@ class JournalStore(_JournalStoreImpl):
         )
         if type(envelope) is not dict:
             raise TypeError("envelope must be an exact object")
+        envelope = _impl._detach_json_value(envelope)
 
         event_id = JournalStore._require_text(
             envelope.get("event_id"), "event_id"
@@ -143,10 +144,12 @@ class JournalStore(_JournalStoreImpl):
             raise ValueError("first-event claim requires aggregate_version 1")
 
         payload = envelope.get("payload")
-        expected_payload_hash = _impl.payload_digest(payload)
+        payload_json = _impl.canonical_json(payload)
+        expected_payload_hash = (
+            "sha256:" + __import__("hashlib").sha256(payload_json.encode("utf-8")).hexdigest()
+        )
         if envelope.get("payload_hash") != expected_payload_hash:
             raise ValueError("payload_hash does not match payload")
-        payload_json = _impl.canonical_json(payload)
         envelope_json = _impl.canonical_json(envelope)
         envelope_hash = _impl._event_envelope_digest(envelope_json)
         committed_at = JournalStore._require_text(

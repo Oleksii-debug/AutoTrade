@@ -1546,6 +1546,7 @@ def execution_to_reconciliation_fill(
     fee_amount,
     fee_currency: str,
     trade_time: str,
+    evidence_refs: tuple[str, ...],
 ) -> ProviderFillEvidence:
     """Bind unique IBKR execution identity into canonical account truth.
 
@@ -1585,6 +1586,20 @@ def execution_to_reconciliation_fill(
     if execution_account != account:
         raise IbkrWebAdapterError("execution account does not match reconciliation account")
     client_id = None if client_order_id is None else validate_coid(client_order_id)
+    if (
+        type(evidence_refs) is not tuple
+        or not evidence_refs
+        or any(
+            type(reference) is not str
+            or not reference
+            or reference != reference.strip()
+            for reference in evidence_refs
+        )
+        or len(set(evidence_refs)) != len(evidence_refs)
+    ):
+        raise IbkrWebAdapterError(
+            "execution reconciliation requires exact unique evidence_refs"
+        )
     return ProviderFillEvidence.create(
         provider_id="IBKR",
         account_id=account,
@@ -1597,4 +1612,5 @@ def execution_to_reconciliation_fill(
         fee_amount=_decimal(fee_amount, name="fee_amount"),
         fee_currency=_text(fee_currency, name="fee_currency"),
         trade_time=_text(trade_time, name="trade_time"),
+        evidence_refs=evidence_refs,
     )

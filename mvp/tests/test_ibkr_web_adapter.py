@@ -41,6 +41,7 @@ from mvp.autotrade_mvp.ibkr_web import (
 
 
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
+EXECUTION_EVIDENCE_REFS = ("ibkr-execution-evidence:test",)
 
 
 class _HostileText(str):
@@ -1088,6 +1089,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
             fee_amount="-0.35",
             fee_currency="USD",
             trade_time="2026-09-24T20:00:01Z",
+                evidence_refs=EXECUTION_EVIDENCE_REFS,
         )
         self.assertEqual(fill.provider_id, "IBKR")
         self.assertEqual(fill.account_id, "U1234567")
@@ -1098,8 +1100,40 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(fill.price, Decimal("220.10"))
         self.assertEqual(fill.fee_amount, Decimal("-0.35"))
         self.assertEqual(fill.fee_currency, "USD")
+        self.assertEqual(fill.evidence_refs, EXECUTION_EVIDENCE_REFS)
 
 
+
+    def test_tws_execution_reconciliation_refuses_missing_or_noncanonical_provenance(self):
+        execution = IbkrExecutionEvidence.create(
+            execution_id="0001.provenance.01",
+            permanent_order_id=778899,
+            account_id="U1234567",
+            quantity="1",
+            price="100",
+        )
+        for refs in (
+            (),
+            ("",),
+            (" bad-ref",),
+            ("duplicate", "duplicate"),
+            ["not-a-tuple"],
+        ):
+            with self.subTest(evidence_refs=refs):
+                with self.assertRaisesRegex(
+                    IbkrWebAdapterError, "evidence_refs"
+                ):
+                    execution_to_reconciliation_fill(
+                        execution,
+                        environment="PAPER",
+                        client_order_id="at-ibkr-provenance",
+                        expected_account_id="U1234567",
+                        instrument="AAPL-CONID-265598:v1",
+                        fee_amount="0",
+                        fee_currency="USD",
+                        trade_time="2026-09-24T20:00:01Z",
+                        evidence_refs=refs,
+                    )
 
     def test_tws_execution_correction_maps_to_stable_reconciliation_identity(self):
         correction = IbkrExecutionEvidence.create(
@@ -1118,6 +1152,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
             fee_amount="0.30",
             fee_currency="USD",
             trade_time="2026-09-24T20:00:01Z",
+                evidence_refs=EXECUTION_EVIDENCE_REFS,
         )
         self.assertEqual(
             fill.provider_execution_id,
@@ -1141,6 +1176,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
             fee_amount="0",
             fee_currency="USD",
             trade_time="2026-09-24T20:00:01Z",
+                evidence_refs=EXECUTION_EVIDENCE_REFS,
         )
         self.assertEqual(fill.provider_execution_id, "external.1.01")
 
@@ -1624,6 +1660,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_amount="0",
                 fee_currency="USD",
                 trade_time="2026-09-24T20:00:01Z",
+                    evidence_refs=EXECUTION_EVIDENCE_REFS,
             )
 
     def test_execution_cannot_cross_account_boundary_during_reconciliation(self):
@@ -1643,6 +1680,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_amount="0",
                 fee_currency="USD",
                 trade_time="2026-09-24T20:00:01Z",
+                    evidence_refs=EXECUTION_EVIDENCE_REFS,
             )
 
     def test_reconciliation_execution_requires_exact_evidence_type(self):
@@ -1659,6 +1697,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_amount="0",
                 fee_currency="USD",
                 trade_time="2026-09-24T20:00:01Z",
+                    evidence_refs=EXECUTION_EVIDENCE_REFS,
             )
 
     def test_regulated_instrument_requires_manual_indicator_evidence(self):
@@ -1894,6 +1933,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_amount="0",
                 fee_currency="USD",
                 trade_time="2026-09-24T20:00:01Z",
+                    evidence_refs=EXECUTION_EVIDENCE_REFS,
             )
 
         execution = IbkrExecutionEvidence.create(
@@ -1915,6 +1955,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_amount="0",
                 fee_currency="USD",
                 trade_time="2026-09-24T20:00:01Z",
+                    evidence_refs=EXECUTION_EVIDENCE_REFS,
             )
 
         _HostileText.strip_called = False
@@ -1935,6 +1976,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_amount="0",
                 fee_currency="USD",
                 trade_time="2026-09-24T20:00:01Z",
+                    evidence_refs=EXECUTION_EVIDENCE_REFS,
             )
         self.assertFalse(_HostileText.strip_called)
 

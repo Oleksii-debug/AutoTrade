@@ -147,5 +147,30 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 )
 
 
+    def test_desktop_client_lock_matches_desktop_webview_dependency(self):
+        desktop_lock = json.loads(
+            (ROOT / "src" / "AutoTrade.Desktop" / "packages.lock.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        client_lock = json.loads(
+            (ROOT / "tests" / "Desktop.Client" / "packages.lock.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        target = "net10.0-windows7.0"
+        desktop = desktop_lock["dependencies"][target]["Microsoft.Web.WebView2"]
+        client = client_lock["dependencies"][target]["Microsoft.Web.WebView2"]
+        self.assertEqual(client["resolved"], desktop["resolved"])
+        self.assertEqual(client["contentHash"], desktop["contentHash"])
+        self.assertEqual(
+            client_lock["dependencies"][target]["autotrade.desktop"]["dependencies"][
+                "Microsoft.Web.WebView2"
+            ],
+            f"[{desktop['resolved']}, )",
+        )
+
+
+
 if __name__ == "__main__":
     unittest.main()

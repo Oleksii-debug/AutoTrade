@@ -139,6 +139,8 @@ def ibkr_session_observation(
     environment="PAPER",
     observed_at=None,
     endpoint="/iserver/auth/status",
+    query=None,
+    permission_scope="ORDER.READ",
 ):
     point = NOW - timedelta(seconds=1) if observed_at is None else observed_at
     binding = prepare_authenticated_read_query(
@@ -148,8 +150,9 @@ def ibkr_session_observation(
         ),
         surface=Surface.AUTHENTICATED_READ,
         endpoint=endpoint,
-        query={},
+        query={} if query is None else query,
         at=point,
+        permission_scope=permission_scope,
     )
     return observe_authenticated_json_response(
         query_binding=binding,
@@ -270,6 +273,34 @@ class IbkrWebAdapterTests(unittest.TestCase):
             "endpoint mismatch",
         ):
             brokerage_session_status_from_observation(observation)
+
+    def test_brokerage_status_requires_empty_query_and_read_scope(self):
+        payload = {
+            "connected": True,
+            "authenticated": True,
+            "established": True,
+            "competing": False,
+        }
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "empty authenticated query",
+        ):
+            brokerage_session_status_from_observation(
+                ibkr_session_observation(
+                    payload,
+                    query={"caller": "selected"},
+                )
+            )
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "ORDER.READ scope",
+        ):
+            brokerage_session_status_from_observation(
+                ibkr_session_observation(
+                    payload,
+                    permission_scope="ORDER_WRITE",
+                )
+            )
 
     def test_brokerage_status_rejects_malformed_flags_and_provider_failure(self):
         base = {

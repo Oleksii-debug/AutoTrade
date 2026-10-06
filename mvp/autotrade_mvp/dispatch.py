@@ -1996,16 +1996,26 @@ class GuardedDispatcher:
                 None,
                 "sent_response_persistence_failed",
             )
-        if terminal_requires_reconciliation:
+        terminal_events = self._events(attempt_id)
+        if (
+            not self._existing_history_is_canonical(
+                events=terminal_events,
+                attempt_id=attempt_id,
+                client_order_id=client_order_id,
+                expected_prepared=expected_prepared,
+            )
+            or terminal_events[-1]["event_type"]
+            not in {"SubmissionSent", "SubmissionUnknown"}
+        ):
             return DispatchOutcome(
                 "UNKNOWN",
                 client_order_id,
                 None,
-                terminal_reason,
+                "durable_submission_history_invalid",
             )
-        return DispatchOutcome(
-            "SENT",
-            client_order_id,
-            outcome_response,
-            "sent_confirmed",
+        return self._terminal_outcome_from_existing_history(
+            events=terminal_events,
+            attempt_id=attempt_id,
+            client_order_id=client_order_id,
+            expected_prepared=expected_prepared,
         )

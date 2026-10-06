@@ -39,6 +39,14 @@ class _HostileList(list):
     def __iter__(self):
         raise AssertionError("hostile list iter dispatched")
 
+    def __len__(self):
+        raise AssertionError("hostile list length dispatched")
+
+
+class _HostileTuple(tuple):
+    def __iter__(self):
+        raise AssertionError("hostile tuple iter dispatched")
+
 
 class _HostileText(str):
     def __str__(self):
@@ -94,6 +102,59 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
                     "global_projection_checkpoints": 0,
                 },
             )
+
+    def test_commit_command_rejects_executable_events_container_before_iteration(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            events = _HostileList([(_event("evt-hostile-events"), None)])
+            with self.assertRaisesRegex(TypeError, "events must be an exact list"):
+                store.commit_command(
+                    command_id="cmd-hostile-events",
+                    actor="operator",
+                    environment="PAPER",
+                    idempotency_key="key-hostile-events",
+                    request={"action": "ORDER.SUBMIT"},
+                    result={"status": "ACCEPTED"},
+                    state_version=1,
+                    events=events,
+                )
+            self.assertEqual(store.current_journal_sequence(), 0)
+
+    def test_commit_command_rejects_executable_event_tuple_before_unpack(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            item = _HostileTuple((_event("evt-hostile-tuple"), None))
+            with self.assertRaisesRegex(
+                TypeError,
+                "event batch entries must be exact 2-tuples",
+            ):
+                store.commit_command(
+                    command_id="cmd-hostile-tuple",
+                    actor="operator",
+                    environment="PAPER",
+                    idempotency_key="key-hostile-tuple",
+                    request={"action": "ORDER.SUBMIT"},
+                    result={"status": "ACCEPTED"},
+                    state_version=1,
+                    events=[item],
+                )
+            self.assertEqual(store.current_journal_sequence(), 0)
+
+    def test_record_command_preserves_first_call_result_object(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            result = ("ACCEPTED", {"reason": "test"})
+            saved, inserted = store.record_command(
+                command_id="cmd-result-compat",
+                actor="operator",
+                environment="PAPER",
+                idempotency_key="key-result-compat",
+                request={"action": "TEST"},
+                result=result,
+                state_version=0,
+            )
+            self.assertTrue(inserted)
+            self.assertIs(saved, result)
 
     def test_projection_checkpoint_rejects_executable_state_before_write(self):
         with TemporaryDirectory() as directory:

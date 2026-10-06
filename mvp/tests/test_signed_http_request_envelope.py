@@ -179,5 +179,71 @@ class SignedHttpRequestEnvelopeTests(unittest.TestCase):
         self.assertEqual(timeout, 5)
 
 
+    def test_wire_rejects_post_construction_signed_request_mutation_zero_wire(self):
+        class Opener:
+            def __init__(self):
+                self.calls = 0
+
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                raise AssertionError("wire must not be reached")
+
+        request = SignedHttpRequest(
+            method="POST",
+            url="https://api.example.test/v1/order",
+            headers={"Content-Type": "application/json"},
+            body=b"{}",
+            timeout_seconds=5,
+        )
+        object.__setattr__(
+            request,
+            "url",
+            "https://attacker.invalid/v1/order",
+        )
+        client = UrllibJsonWireClient(max_response_bytes=1024)
+        opener = Opener()
+        client._opener = opener
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "signed request changed after construction",
+        ):
+            client.send(request)
+
+        self.assertEqual(opener.calls, 0)
+
+    def test_wire_rejects_unissued_exact_signed_request_zero_wire(self):
+        class Opener:
+            def __init__(self):
+                self.calls = 0
+
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                raise AssertionError("wire must not be reached")
+
+        forged = object.__new__(SignedHttpRequest)
+        object.__setattr__(forged, "method", "POST")
+        object.__setattr__(forged, "url", "https://api.example.test/v1/order")
+        object.__setattr__(
+            forged,
+            "headers",
+            {"Content-Type": "application/json"},
+        )
+        object.__setattr__(forged, "body", b"{}")
+        object.__setattr__(forged, "timeout_seconds", 5)
+
+        client = UrllibJsonWireClient(max_response_bytes=1024)
+        opener = Opener()
+        client._opener = opener
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "signed request lacks construction authority",
+        ):
+            client.send(forged)
+
+        self.assertEqual(opener.calls, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1109,6 +1109,100 @@ class SignedHttpRequest:
         object.__setattr__(
             self, "headers", MappingProxyType(dict(normalized_headers))
         )
+        _register_signed_http_request(self)
+
+
+def _install_signed_http_request_integrity():
+    """Seal one exact write envelope against post-construction mutation."""
+
+    request_type = SignedHttpRequest
+    object_getattribute = object.__getattribute__
+    canonical_type = type
+    canonical_id = id
+    mapping_proxy_type = canonical_type(MappingProxyType({}))
+    weakref = weakref_ref
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+    def prune() -> None:
+        for object_id, (value_ref, _snapshot) in tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def register(value: SignedHttpRequest) -> None:
+        if canonical_type(value) is not request_type:
+            return
+        method = object_getattribute(value, "method")
+        url = object_getattribute(value, "url")
+        headers = object_getattribute(value, "headers")
+        body = object_getattribute(value, "body")
+        timeout_seconds = object_getattribute(value, "timeout_seconds")
+        if (
+            canonical_type(method) is not str
+            or canonical_type(url) is not str
+            or canonical_type(headers) is not mapping_proxy_type
+            or canonical_type(body) is not bytes
+            or canonical_type(timeout_seconds) is not int
+        ):
+            raise ProviderTransportScopeError(
+                "signed request must contain exact canonical fields"
+            )
+        if any(
+            canonical_type(key) is not str or canonical_type(item) is not str
+            for key, item in headers.items()
+        ):
+            raise ProviderTransportScopeError(
+                "signed request headers must contain exact text"
+            )
+        prune()
+        object_id = canonical_id(value)
+        current = states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise ProviderTransportScopeError(
+                "signed request identity collision"
+            )
+        states[object_id] = (
+            weakref(value),
+            (method, url, headers, body, timeout_seconds),
+        )
+
+    def require(value: SignedHttpRequest) -> None:
+        if canonical_type(value) is not request_type:
+            raise TypeError("request must be exact SignedHttpRequest")
+        prune()
+        state = states.get(canonical_id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderTransportScopeError(
+                "signed request lacks construction authority"
+            )
+        method, url, headers, body, timeout_seconds = state[1]
+        current_method = object_getattribute(value, "method")
+        current_url = object_getattribute(value, "url")
+        current_headers = object_getattribute(value, "headers")
+        current_body = object_getattribute(value, "body")
+        current_timeout = object_getattribute(value, "timeout_seconds")
+        if (
+            canonical_type(current_method) is not str
+            or canonical_type(current_url) is not str
+            or canonical_type(current_body) is not bytes
+            or canonical_type(current_timeout) is not int
+            or current_method != method
+            or current_url != url
+            or current_headers is not headers
+            or current_body != body
+            or current_timeout != timeout_seconds
+        ):
+            raise ProviderTransportScopeError(
+                "signed request changed after construction"
+            )
+
+    return register, require
+
+
+(
+    _register_signed_http_request,
+    _require_signed_http_request,
+) = _install_signed_http_request_integrity()
+del _install_signed_http_request_integrity
 
 
 @dataclass(frozen=True)
@@ -1426,6 +1520,7 @@ class UrllibJsonWireClient:
             data = request.body or None
             method = request.method
         else:
+            _require_signed_http_request(request)
             data = request.body or None
             method = request.method
         outbound = Request(

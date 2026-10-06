@@ -266,8 +266,14 @@ class JournalStore(_JournalStoreImpl):
             self,
             subject="outbox delivery-state store",
         )
-        event_id = JournalStore._require_text(event_id, "event_id")
-        topic = JournalStore._require_text(topic, "topic")
+        event_id = _impl._require_canonical_durable_text(
+            event_id,
+            name="event_id",
+        )
+        topic = _impl._require_canonical_durable_text(
+            topic,
+            name="outbox topic",
+        )
         with journal_store_authority_scope(self, identity):
             with JournalStore._connect(self) as connection:
                 connection.execute("BEGIN")

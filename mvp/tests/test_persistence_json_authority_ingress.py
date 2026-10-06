@@ -329,6 +329,39 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "limit must be between 1 and 1000"):
                 store.pending_outbox(limit=_HostileInt(1))
 
+    def test_outbox_delivery_state_rejects_noncanonical_requested_route(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            store.append_event(
+                _event("evt-exact-recovery-route"),
+                outbox_topic="fills",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "event_id must be canonical non-empty text",
+            ):
+                store.outbox_delivery_state(
+                    " evt-exact-recovery-route ",
+                    topic="fills",
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox topic must be canonical non-empty text",
+            ):
+                store.outbox_delivery_state(
+                    "evt-exact-recovery-route",
+                    topic=" fills ",
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox topic must be canonical non-empty text",
+            ):
+                store.outbox_delivery_state(
+                    "evt-exact-recovery-route",
+                    topic=_HostileText("fills"),
+                )
+
     def test_outbox_reads_and_ack_reject_blob_payload_authority(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

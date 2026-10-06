@@ -222,9 +222,12 @@ class ProviderCandidate:
     protocol_id: str
     protocol_version: str
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _provider_definition=provider_definition,
+    ) -> None:
         provider = _text(self.provider_id, "provider_id").upper()
-        definition = provider_definition(provider)
+        definition = _provider_definition(provider)
         family = _text(self.product_family, "product_family").upper()
         if family not in definition.product_families:
             raise ProviderSelectionError("product_family is not declared for provider")
@@ -933,7 +936,62 @@ def _install_provider_selector(
     route_issuer: Callable[..., SelectedProviderRoute],
     implementation: Callable[..., ProviderSelection],
 ) -> Callable[..., ProviderSelection]:
-    """Bind canonical route issuance into the only public selector entry point."""
+    """Bind canonical route issuance and detach caller-owned route inputs."""
+
+    request_type = ProviderRouteRequest
+    candidate_type = ProviderCandidate
+    request_initializer = request_type.__post_init__
+    candidate_initializer = candidate_type.__post_init__
+    object_new = object.__new__
+    object_getattribute = object.__getattribute__
+    object_setattr = object.__setattr__
+    request_fields = (
+        "asset_class",
+        "environment",
+        "instrument_version",
+        "order_type",
+        "time_in_force",
+        "permission_scope",
+        "preferred_provider_id",
+    )
+    candidate_fields = (
+        "provider_id",
+        "product_family",
+        "provider_environment",
+        "account_id",
+        "entity_id",
+        "entity_policy_id",
+        "adapter_code_sha",
+        "packaged_artifact_digest",
+        "protocol_id",
+        "protocol_version",
+    )
+
+    def detach_request(value: object) -> ProviderRouteRequest:
+        if type(value) is not request_type:
+            raise TypeError("request must be exact ProviderRouteRequest")
+        state = tuple(object_getattribute(value, name) for name in request_fields)
+        if any(type(item) is not str for item in state[:-1]) or (
+            state[-1] is not None and type(state[-1]) is not str
+        ):
+            raise TypeError("request fields must be canonical inert values")
+        detached = object_new(request_type)
+        for name, item in zip(request_fields, state, strict=True):
+            object_setattr(detached, name, item)
+        request_initializer(detached)
+        return detached
+
+    def detach_candidate(value: object) -> ProviderCandidate:
+        if type(value) is not candidate_type:
+            raise TypeError("candidates must contain exact ProviderCandidate values")
+        state = tuple(object_getattribute(value, name) for name in candidate_fields)
+        if any(type(item) is not str for item in state):
+            raise TypeError("candidate fields must be canonical inert values")
+        detached = object_new(candidate_type)
+        for name, item in zip(candidate_fields, state, strict=True):
+            object_setattr(detached, name, item)
+        candidate_initializer(detached)
+        return detached
 
     def select_provider(
         request: ProviderRouteRequest,
@@ -945,14 +1003,22 @@ def _install_provider_selector(
     ) -> ProviderSelection:
         """Resolve one exact route from durable C/Q authority or fail closed.
 
-        C and Q are both replayed at one captured global journal sequence. If the
-        shared JournalStore advances while selection is evaluating candidates,
-        no route is returned; the caller must retry against a fresh decision cut.
+        Caller-owned request/candidate objects are detached before any registry
+        callback. C and Q are replayed at one captured global journal sequence;
+        if that JournalStore advances during selection, no route is returned.
         """
 
+        detached_request = detach_request(request)
+        if type(candidates) is tuple:
+            detached_candidates = tuple(detach_candidate(item) for item in candidates)
+        elif type(candidates) is list:
+            detached_candidates = tuple(detach_candidate(item) for item in candidates)
+        else:
+            raise TypeError("candidates must be an exact list or tuple")
+
         return implementation(
-            request,
-            candidates,
+            detached_request,
+            detached_candidates,
             at=at,
             capability_registry=capability_registry,
             qualification_registry=qualification_registry,

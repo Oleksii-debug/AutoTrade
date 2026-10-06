@@ -305,6 +305,54 @@ class ProviderSelectionTests(unittest.TestCase):
 
             self.assertEqual(_HostileCandidateList.calls, 0)
 
+    def test_selection_detaches_caller_owned_request_and_candidate(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            original_request = request()
+            original_candidate = candidate()
+            result = select_provider(
+                original_request,
+                [original_candidate],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            self.assertEqual(result.status, "SELECTED_UNAMBIGUOUS")
+            route = result.selected
+            self.assertIsNotNone(route)
+            self.assertIsNot(route.candidate, original_candidate)
+
+            object.__setattr__(
+                original_candidate,
+                "account_id",
+                "caller-retargeted-account",
+            )
+            object.__setattr__(
+                original_request,
+                "permission_scope",
+                "WITHDRAW",
+            )
+
+            self.assertEqual(route.candidate.account_id, "paper-account")
+            self.assertEqual(route.capability.account_id, "paper-account")
+
+    def test_candidate_constructor_ignores_public_provider_definition_rebinding(self):
+        original = provider_selection_module.provider_definition
+        calls = []
+
+        def hostile_definition(*_args, **_kwargs):
+            calls.append("provider_definition")
+            raise AssertionError("rebound provider definition executed")
+
+        provider_selection_module.provider_definition = hostile_definition
+        try:
+            value = candidate()
+        finally:
+            provider_selection_module.provider_definition = original
+
+        self.assertEqual(value.provider_id, "BYBIT")
+        self.assertEqual(calls, [])
+
     def test_selection_rejects_journal_cut_instance_shadow_before_callback(self):
         with TemporaryDirectory() as directory:
             capabilities, qualifications, _record = self.authorities(directory)

@@ -299,6 +299,25 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
         ):
             parse_option_delivery_page(observation(payload))
 
+    def test_no_symbol_read_still_binds_every_row_to_instrument(self):
+        payload = response()
+        payload["result"]["list"].append(
+            {
+                **payload["result"]["list"][0],
+                "symbol": "ETH-29DEC22-1600-P",
+            }
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "violates bound instrument symbol",
+        ):
+            parse_option_delivery_page(
+                observation(
+                    payload,
+                    query={"category": "option"},
+                )
+            )
+
     def test_parser_binds_rows_to_requested_symbol(self):
         payload = response()
         payload["result"]["list"][0]["symbol"] = "ETH-29DEC22-1600-P"

@@ -237,10 +237,6 @@ def _require_clean_reconciliation(
         raise ScientificFinancialOwnerConflict(
             "reconciliation checkpoint payload must be an exact dictionary"
         )
-    if payload.get("complete") is not True:
-        raise ScientificFinancialOwnerConflict(
-            "financial accounting owner requires complete reconciliation"
-        )
     if payload.get("snapshot_consistent") is not True:
         raise ScientificFinancialOwnerConflict(
             "financial accounting owner requires a consistent provider snapshot"
@@ -267,6 +263,11 @@ def _require_clean_reconciliation(
             raise ScientificFinancialOwnerConflict(
                 f"reconciliation {field} must be empty"
             )
+
+    if payload.get("complete") is not True:
+        raise ScientificFinancialOwnerConflict(
+            "financial accounting owner requires complete reconciliation"
+        )
 
     provider_cash = _canonical_decimal_map(
         payload.get("provider_cash"),

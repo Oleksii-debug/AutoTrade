@@ -1020,6 +1020,16 @@ def observe_submission_json_response(
                 "durable submission capability scope does not match prepared request"
             )
 
+    if "provider_route_provider_environment" in actual_scope:
+        if (
+            "provider_environment" not in actual_scope
+            or actual_scope["provider_route_provider_environment"]
+            != actual_scope["provider_environment"]
+        ):
+            raise ProviderCoreError(
+                "durable submission provider-route environment scope mismatch"
+            )
+
     identity_material = json.dumps(
         {
             "aggregate_id": binding["aggregate_id"],
@@ -1498,7 +1508,7 @@ def _install_provider_submission_observation_authority(binding_projection):
         scope = binding["submission_scope"]
         if canonical_type(scope) is not mapping_proxy_type:
             authority_changed()
-        expected_keys = canonical_frozenset(
+        required_keys = canonical_frozenset(
             (
                 "endpoint",
                 "prepared_request_sha256",
@@ -1511,11 +1521,12 @@ def _install_provider_submission_observation_authority(binding_projection):
                 ),
             )
         )
-        if canonical_frozenset(scope.keys()) != expected_keys:
+        scope_keys = canonical_frozenset(scope.keys())
+        if not required_keys.issubset(scope_keys):
             raise error_type(
                 "durable submission scope does not match prepared provider request"
             )
-        if provider == "BYBIT":
+        if "provider_environment" in scope:
             raw_provider_environment = scope["provider_environment"]
             scoped_provider_environment = canonical_text(
                 raw_provider_environment,
@@ -1536,6 +1547,62 @@ def _install_provider_submission_observation_authority(binding_projection):
             raise error_type(
                 "durable submission scope does not match prepared provider request"
             )
+
+        # Financial/provider-route extensions are sealed by submission_scope_hash.
+        # Keep the prepared-request subset mandatory and independently cross-check
+        # every extension whose identity is also available at this neutral boundary.
+        financial_scope = {
+            "provider_id": provider,
+            "account_id": binding["account_id"],
+            "environment": binding["environment"],
+        }
+        for key, value in financial_scope.items():
+            if key in scope and canonical_text(
+                scope[key],
+                "submission_scope." + key,
+            ) != value:
+                raise error_type(
+                    "durable submission financial scope does not match response binding"
+                )
+        for key in (
+            "capability_snapshot_id",
+            "provider_route_capability_snapshot_id",
+        ):
+            if key in scope and (
+                len(capabilities) != 1
+                or canonical_text(
+                    scope[key],
+                    "submission_scope." + key,
+                )
+                != capabilities[0]
+            ):
+                raise error_type(
+                    "durable submission capability scope does not match prepared request"
+                )
+        if "provider_route_provider_environment" in scope:
+            if "provider_environment" not in scope:
+                raise error_type(
+                    "durable submission provider-route environment scope mismatch"
+                )
+            raw_route_provider_environment = scope[
+                "provider_route_provider_environment"
+            ]
+            route_provider_environment = canonical_text(
+                raw_route_provider_environment,
+                "submission_scope.provider_route_provider_environment",
+            ).upper()
+            if route_provider_environment != raw_route_provider_environment:
+                raise error_type(
+                    "durable submission provider-route environment is not canonical"
+                )
+            scoped_provider_environment = canonical_text(
+                scope["provider_environment"],
+                "submission_scope.provider_environment",
+            ).upper()
+            if route_provider_environment != scoped_provider_environment:
+                raise error_type(
+                    "durable submission provider-route environment scope mismatch"
+                )
 
         identity_material = canonical_json_dumps(
             {

@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import autotrade_research.memory.reconciled_outcome as reconciled_module
+import autotrade_research.evaluation.ablation_outcome_binding as binding_module
 from autotrade_research.evaluation.ablation import CanonicalAblationOutcomeEvidence
 from autotrade_research.evaluation.ablation_outcome_binding import (
     bind_ablation_outcome_to_reconciled_fact,
@@ -223,6 +224,72 @@ class ReconciledOutcomeExecutableAuthorityTests(unittest.TestCase):
             finally:
                 reconciled_module.resolve_reconciled_outcome_fact = original
             self.assertEqual(bound.reconciled_fact, fact)
+            self.assertEqual(calls, [])
+
+    def test_late_bridge_globals_cannot_retarget_population_recheck(self):
+        calls: list[str] = []
+        with TemporaryDirectory() as directory:
+            memory = self._memory(Path(directory) / "memory.sqlite3")
+            fact = self._fact(memory)
+            outcome = self._canonical_outcome(fact)
+
+            def hostile(*args, **kwargs):
+                calls.append("hostile")
+                raise AssertionError(
+                    "late ablation bridge module global must not execute"
+                )
+
+            with (
+                patch.object(binding_module, "_ASSERT_MEMORY_AUTHORITY", new=hostile),
+                patch.object(binding_module, "_VERIFY_FACT_INTEGRITY", new=hostile),
+                patch.object(binding_module, "_RESOLVE_RECONCILED_FACT", new=hostile),
+                patch.object(binding_module, "_REVERIFY_RECONCILED_FACT", new=hostile),
+                patch.object(binding_module, "_COVERAGE_READ", new=hostile),
+                patch.object(binding_module, "_COVERAGE_VERIFY", new=hostile),
+                patch.object(binding_module, "_canonical_text", new=hostile),
+                patch.object(binding_module, "_sha256", new=hostile),
+                patch.object(binding_module, "_stored_utc", new=hostile),
+                patch.object(binding_module, "ExperienceMemory", new=object),
+                patch.object(
+                    binding_module,
+                    "CoveragePopulationSnapshot",
+                    new=object,
+                ),
+                patch.object(
+                    binding_module,
+                    "CanonicalAblationOutcomeEvidence",
+                    new=object,
+                ),
+                patch.object(
+                    binding_module,
+                    "ReconciledOutcomeFactEvidence",
+                    new=object,
+                ),
+                patch.object(
+                    binding_module,
+                    "BoundReconciledAblationOutcome",
+                    new=object,
+                ),
+                patch.object(binding_module, "MemoryIntegrityError", new=RuntimeError),
+                patch.object(binding_module, "MappingProxyType", new=object),
+                patch.object(binding_module, "datetime", new=object),
+                patch.object(binding_module, "timezone", new=object),
+                patch.object(binding_module, "UUID", new=object),
+            ):
+                bound = bind_ablation_outcome_to_reconciled_fact(
+                    memory,
+                    outcome,
+                    causal_cutoff=BASE + timedelta(days=1),
+                    granted_permissions={"RESEARCH"},
+                    task="exec-authority",
+                    instrument_family="EQUITY",
+                )
+
+            self.assertEqual(bound.reconciled_fact, fact)
+            self.assertEqual(
+                bound.effective_outcome_available_utc,
+                BASE,
+            )
             self.assertEqual(calls, [])
 
     def test_bridge_still_never_promotes_artifact_numeric_economics(self):

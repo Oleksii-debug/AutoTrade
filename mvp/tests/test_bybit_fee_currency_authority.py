@@ -315,6 +315,112 @@ class BybitFeeCurrencyAuthorityTests(unittest.TestCase):
                 fee_currency_authorities=(authority,),
             )
 
+    def test_mutated_q_identity_material_fails_closed(self):
+        mutations = (
+            ("required_cases", ("CASE_Z",)),
+            ("unsupported_features", ("MUTATED",)),
+            ("documentation_revisions", ("MUTATED-DOC",)),
+            (
+                "supersedes_qualification_id",
+                "provider-qualification:sha256:" + "8" * 64,
+            ),
+        )
+        for field, value in mutations:
+            with self.subTest(field=field):
+                instrument, registry, capability, qualification, _authority = (
+                    issued_fixture()
+                )
+                object.__setattr__(qualification, field, value)
+                with self.assertRaisesRegex(
+                    BybitFeeCurrencyAuthorityError,
+                    "campaign content does not match Q identity",
+                ):
+                    issue_bybit_execution_fee_currency_authority(
+                        qualification=qualification,
+                        capability=capability,
+                        instrument_registry=registry,
+                        venue_id="BYBIT",
+                        provider_symbol="ETHPERP",
+                        fee_currency="USDT",
+                        rule_id="BYBIT_EXECUTION_FEE_CURRENCY",
+                        rule_version="2026-10",
+                        rule_valid_from=RULE_FROM,
+                        rule_valid_until=RULE_UNTIL,
+                        at=NOW,
+                    )
+
+    def test_q_identity_and_scope_are_exact_source_types_before_field_access(self):
+        instrument, registry, capability, qualification, _authority = issued_fixture()
+        callbacks = []
+
+        class Hostile:
+            def __getattribute__(self, name):
+                callbacks.append(name)
+                raise AssertionError("hostile callback executed")
+
+        object.__setattr__(qualification, "identity", Hostile())
+        with self.assertRaisesRegex(
+            BybitFeeCurrencyAuthorityError,
+            "identity is non-canonical",
+        ):
+            issue_bybit_execution_fee_currency_authority(
+                qualification=qualification,
+                capability=capability,
+                instrument_registry=registry,
+                venue_id="BYBIT",
+                provider_symbol="ETHPERP",
+                fee_currency="USDT",
+                rule_id="BYBIT_EXECUTION_FEE_CURRENCY",
+                rule_version="2026-10",
+                rule_valid_from=RULE_FROM,
+                rule_valid_until=RULE_UNTIL,
+                at=NOW,
+            )
+        self.assertEqual(callbacks, [])
+
+        instrument, registry, capability, qualification, _authority = issued_fixture()
+        object.__setattr__(qualification, "scope", Hostile())
+        with self.assertRaisesRegex(
+            BybitFeeCurrencyAuthorityError,
+            "scope is non-canonical",
+        ):
+            issue_bybit_execution_fee_currency_authority(
+                qualification=qualification,
+                capability=capability,
+                instrument_registry=registry,
+                venue_id="BYBIT",
+                provider_symbol="ETHPERP",
+                fee_currency="USDT",
+                rule_id="BYBIT_EXECUTION_FEE_CURRENCY",
+                rule_version="2026-10",
+                rule_valid_from=RULE_FROM,
+                rule_valid_until=RULE_UNTIL,
+                at=NOW,
+            )
+        self.assertEqual(callbacks, [])
+
+        instrument, registry, capability, qualification, _authority = issued_fixture()
+        identity = object.__getattribute__(qualification, "identity")
+        object.__setattr__(identity, "provider_scope", Hostile())
+        with self.assertRaisesRegex(
+            BybitFeeCurrencyAuthorityError,
+            "financial scope is non-canonical",
+        ):
+            issue_bybit_execution_fee_currency_authority(
+                qualification=qualification,
+                capability=capability,
+                instrument_registry=registry,
+                venue_id="BYBIT",
+                provider_symbol="ETHPERP",
+                fee_currency="USDT",
+                rule_id="BYBIT_EXECUTION_FEE_CURRENCY",
+                rule_version="2026-10",
+                rule_valid_from=RULE_FROM,
+                rule_valid_until=RULE_UNTIL,
+                at=NOW,
+            )
+        self.assertEqual(callbacks, [])
+
     def test_direct_mutated_or_non_tuple_authority_input_fails_closed(self):
         with self.assertRaisesRegex(
             BybitFeeCurrencyAuthorityError,

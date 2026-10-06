@@ -7,10 +7,12 @@ profitability, economic edge, financial invariants, or research metrics.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from hashlib import sha256
 from typing import Any
 
 from .persistence import (
     JournalStore,
+    canonical_json,
     journal_store_authority_scope,
     payload_digest,
     require_exact_journal_store_authority,
@@ -66,25 +68,41 @@ def _journal_sequence(state: dict[str, Any]) -> int:
     return value
 
 
-def _load_exact_journal_population(
+def _digest_exact_journal_population(
     store: JournalStore,
     *,
     target_sequence: int,
     page_size: int = 1000,
-) -> list[dict[str, Any]]:
+) -> str:
+    """Hash the exact append-only population through one frozen sequence.
+
+    The encoding is byte-for-byte the same canonical JSON representation used
+    by payload_digest(list_of_events), but pages are released as they are read
+    so qualification memory remains bounded by page_size rather than journal
+    lifetime.
+    """
+
     if type(target_sequence) is not int or target_sequence < 0:
         raise FinancialCutConflict("target journal sequence is invalid")
-    if type(page_size) is not int or page_size <= 0:
-        raise ValueError("page_size must be a positive integer")
+    if type(page_size) is not int or page_size <= 0 or page_size > 100000:
+        raise ValueError("page_size must be between 1 and 100000")
 
-    events: list[dict[str, Any]] = []
+    digest = sha256()
+    digest.update(b"[")
     after_sequence = 0
+    first_event = True
     while after_sequence < target_sequence:
         remaining = target_sequence - after_sequence
-        batch = store.load_events_after_journal_sequence(
-            after_sequence,
-            limit=min(page_size, remaining),
-        )
+        try:
+            batch = JournalStore.load_events_after_journal_sequence(
+                store,
+                after_sequence,
+                limit=min(page_size, remaining),
+            )
+        except ValueError as error:
+            raise FinancialCutConflict(
+                "journal population is not contiguous at the frozen cut"
+            ) from error
         if type(batch) is not list or not batch:
             raise FinancialCutConflict(
                 "journal population ended before the frozen journal sequence"
@@ -101,13 +119,42 @@ def _load_exact_journal_population(
                 raise FinancialCutConflict(
                     "journal reader crossed the frozen financial cut"
                 )
-            events.append(event)
+            if not first_event:
+                digest.update(b",")
+            digest.update(canonical_json(event).encode("utf-8"))
+            first_event = False
             after_sequence = sequence
-    if len(events) != target_sequence:
+    if after_sequence != target_sequence:
         raise FinancialCutConflict(
             "journal population cardinality does not match the frozen sequence"
         )
-    return events
+    digest.update(b"]")
+    return "sha256:" + digest.hexdigest()
+
+
+def _event_at_journal_sequence(
+    store: JournalStore,
+    *,
+    journal_sequence: int,
+) -> dict[str, Any]:
+    if type(journal_sequence) is not int or journal_sequence <= 0:
+        raise FinancialCutConflict("journal event sequence must be positive")
+    try:
+        events = JournalStore.load_events_after_journal_sequence(
+            store,
+            journal_sequence - 1,
+            limit=1,
+        )
+    except ValueError as error:
+        raise FinancialCutConflict(
+            "journal event slot is not contiguous"
+        ) from error
+    if type(events) is not list or len(events) != 1:
+        raise FinancialCutConflict("journal event slot is unavailable")
+    event = _exact_dict(events[0], name="journal_event_slot")
+    if event.get("journal_sequence") != journal_sequence:
+        raise FinancialCutConflict("journal event slot sequence mismatch")
+    return event
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,11 +271,11 @@ def capture_current_scientific_financial_cut(
     )
     with journal_store_authority_scope(store, identity):
         before = _exact_dict(
-            store.whole_store_state_cut(),
+            JournalStore.whole_store_state_cut(store),
             name="journal_state_before",
         )
         frozen_sequence = _journal_sequence(before)
-        journal_population = _load_exact_journal_population(
+        population_digest = _digest_exact_journal_population(
             store,
             target_sequence=frozen_sequence,
         )
@@ -258,7 +305,7 @@ def capture_current_scientific_financial_cut(
             except (TypeError, ValueError) as error:
                 checkpoint_error = error
         after = _exact_dict(
-            store.whole_store_state_cut(),
+            JournalStore.whole_store_state_cut(store),
             name="journal_state_after",
         )
 
@@ -288,13 +335,15 @@ def capture_current_scientific_financial_cut(
         raise FinancialCutConflict(
             "reconciliation checkpoint crossed the frozen financial cut"
         )
-    population_checkpoint = journal_population[reconciliation_sequence - 1]
+    population_checkpoint = _event_at_journal_sequence(
+        store,
+        journal_sequence=reconciliation_sequence,
+    )
     if population_checkpoint != checkpoint:
         raise FinancialCutConflict(
             "reconciliation checkpoint does not match the frozen journal population"
         )
 
-    population_digest = payload_digest(journal_population)
     reconciliation_digest = payload_digest(checkpoint)
     return ScientificFinancialCut(
         scientific_protocol_id=protocol_id,

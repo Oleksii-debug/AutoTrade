@@ -751,6 +751,32 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
                 [],
             )
 
+    def test_equal_polymorphic_scalar_cannot_replace_issued_exact_text(self):
+        class EqualText(str):
+            pass
+
+        accepted = self._accepted()
+        object.__setattr__(
+            accepted,
+            "provider_revision",
+            EqualText(accepted.provider_revision),
+        )
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceError,
+                "provider_revision must remain exact text",
+            ):
+                durable.record(accepted)
+            self.assertEqual(
+                journal.load_events(
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
+
     def test_post_issuance_action_mutation_is_rejected_before_journal_mutation(self):
         accepted = self._accepted()
         object.__setattr__(accepted, "provider_revision", "forged-revision")

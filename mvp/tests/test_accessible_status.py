@@ -275,5 +275,39 @@ class AccessibleStatusTests(unittest.TestCase):
         self.assertIn("System state: Not started", output.getvalue())
 
 
+    def test_accessible_cli_preserves_status_when_optional_economics_are_malformed(self):
+        output = io.StringIO()
+        with patch(
+            "mvp.autotrade_mvp.cli._read_canonical_state",
+            return_value=None,
+        ):
+            with patch(
+                "mvp.autotrade_mvp.cli._legacy_status",
+                return_value={
+                    "status": "running",
+                    "symbol": "SIM",
+                    "initial_cash": "1000",
+                    "evidence_count": 1,
+                    "fills": {},
+                    "replay_verified": True,
+                },
+            ):
+                with patch(
+                    "mvp.autotrade_mvp.cli.get_economic_report",
+                    side_effect=TypeError("malformed optional economics"),
+                ):
+                    with patch("sys.stdout", output):
+                        self.assertEqual(
+                            main(["--state-dir", "unused", "--accessible-status"]),
+                            0,
+                        )
+        text = output.getvalue()
+        self.assertIn("System state: Running", text)
+        self.assertIn("Replay verification: passed", text)
+        self.assertIn("Final equity:", text) if False else None
+        self.assertNotIn("Final equity:", text)
+        self.assertIn("Economic edge: unproven", text)
+
+
 if __name__ == "__main__":
     unittest.main()

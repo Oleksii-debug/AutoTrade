@@ -1710,21 +1710,22 @@ def _direct_trading_write_request_digest(request: SignedHttpRequest) -> str:
     method, url, headers, body, timeout_seconds = _require_signed_http_request(request)
     material = {
         "method": method,
-        "url_sha256": "sha256:" + _sha256(url.encode("utf-8")).hexdigest(),
+        "url_sha256": "sha256:" + sha256(url.encode("utf-8")).hexdigest(),
         "headers_sha256": "sha256:"
-        + _sha256(
-            _json_dumps(
-                _dict(_sorted(_dict(headers).items())),
+        + sha256(
+            json.dumps(
+                dict(sorted(dict(headers).items())),
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest(),
-        "body_sha256": "sha256:" + _sha256(body).hexdigest(),
+        "body_sha256": "sha256:" + sha256(body).hexdigest(),
         "timeout_seconds": timeout_seconds,
     }
-    return "sha256:" + _sha256(
-        _json_dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
@@ -2585,6 +2586,9 @@ def _direct_authenticated_read_request_digest(
     _json_dumps=json.dumps,
     _dict=dict,
     _sorted=sorted,
+    _exception=Exception,
+    _transport_error=ProviderTransportError,
+    _policy_absolute_url=ProviderEndpointPolicy.absolute_url,
 ) -> str:
     try:
         method, url, headers, body, timeout_seconds = _require_request(request)
@@ -2594,16 +2598,16 @@ def _direct_authenticated_read_request_digest(
         ) from error
     material = {
         "method": method,
-        "url_sha256": "sha256:" + sha256(url.encode("utf-8")).hexdigest(),
+        "url_sha256": "sha256:" + _sha256(url.encode("utf-8")).hexdigest(),
         "headers_sha256": "sha256:"
-        + sha256(
-            json.dumps(
-                dict(sorted(dict(headers).items())),
+        + _sha256(
+            _json_dumps(
+                _dict(_sorted(_dict(headers).items())),
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest(),
-        "body_sha256": "sha256:" + sha256(body).hexdigest(),
+        "body_sha256": "sha256:" + _sha256(body).hexdigest(),
         "timeout_seconds": timeout_seconds,
     }
     return "sha256:" + _sha256(
@@ -2689,12 +2693,12 @@ def _validated_bybit_authenticated_read_wire_semantics_digest(
     try:
         _require_query(query_binding)
         method, url, headers, body, timeout_seconds = _require_request(request)
-    except Exception as error:
-        raise ProviderTransportError(
+    except _exception as error:
+        raise _transport_error(
             "Bybit direct authenticated-read authority is unavailable"
         ) from error
     if query_binding.provider_id != "BYBIT":
-        raise ProviderTransportError(
+        raise _transport_error(
             "Bybit direct authenticated-read requires BYBIT query authority"
         )
     policy = _policies.get(query_binding.provider_environment)
@@ -2711,10 +2715,14 @@ def _validated_bybit_authenticated_read_wire_semantics_digest(
         )
         != expected_policy
     ):
-        raise ProviderTransportError(
+        raise _transport_error(
             "Bybit direct authenticated-read provider policy authority changed"
         )
-    expected_url = policy.absolute_url(query_binding.endpoint) + "?" + _query_text(
+    if ProviderEndpointPolicy.absolute_url is not _policy_absolute_url:
+        raise _transport_error(
+            "Bybit provider policy executable authority changed"
+        )
+    expected_url = _policy_absolute_url(policy, query_binding.endpoint) + "?" + _query_text(
         query_binding
     )
     header_values = _dict(headers)
@@ -2746,7 +2754,7 @@ def _validated_bybit_authenticated_read_wire_semantics_digest(
         or _type(signature) is not _str
         or _fullmatch(r"[0-9a-f]{64}", signature) is None
     ):
-        raise ProviderTransportError(
+        raise _transport_error(
             "Bybit transmitted authenticated-read request differs from canonical semantics"
         )
     material = {

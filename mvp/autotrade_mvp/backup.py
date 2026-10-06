@@ -423,8 +423,16 @@ def _append_restore_provenance(root: Path, marker: dict[str, Any]) -> None:
 def _load_restore_provenance(root: Path) -> dict[str, Any] | None:
     """Read the latest restore generation from canonical journal authority."""
 
+    journal_path = root / "state" / "journal.sqlite3"
+    # Validation must never manufacture replacement durable authority.  The
+    # JournalStore constructor initializes a database when the path is absent,
+    # so reject missing/unsafe restore state before opening it.
+    if journal_path.is_symlink() or not journal_path.is_file():
+        raise BackupIntegrityError(
+            "Restore provenance journal is missing or unsafe"
+        )
     try:
-        store = JournalStore(root / "state" / "journal.sqlite3")
+        store = JournalStore(journal_path)
         events = store.load_events(
             _RESTORE_PROVENANCE_AGGREGATE_TYPE,
             _RESTORE_PROVENANCE_AGGREGATE_ID,

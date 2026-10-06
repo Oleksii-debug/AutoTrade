@@ -778,6 +778,34 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertIsNone(marker["runtime_checkpoint_evidence_sha256"])
             self.assertTrue(restore_requires_reconciliation(restored))
 
+    def test_restore_validation_never_recreates_missing_journal(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            journal = restored / "state" / "journal.sqlite3"
+            self.assertTrue(journal.is_file())
+            journal.unlink()
+
+            self.assertTrue(restore_requires_reconciliation(restored))
+            self.assertFalse(journal.exists())
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "journal is missing or unsafe",
+            ):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=None,
+                    reconciliation_checkpoint_event_id="unused",
+                    fencing_evidence=(),
+                    completed_at="2026-09-25T08:00:03Z",
+                )
+            self.assertFalse(journal.exists())
+            self.assertFalse(
+                (restored / "RESTORE_RECONCILIATION_COMPLETE.json").exists()
+            )
+
     def test_restore_persists_journal_bound_provenance_before_publication(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

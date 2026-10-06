@@ -53,6 +53,7 @@ from .whitebit import (
 )
 from .provider_core import (
     AuthenticatedReadQueryBinding,
+    _require_authenticated_read_query_binding_authority,
     ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
@@ -2481,6 +2482,7 @@ class KrakenSpotAuthenticatedReadSigner:
             raise TypeError(
                 "query_binding must be AuthenticatedReadQueryBinding"
             )
+        _require_authenticated_read_query_binding_authority(query_binding)
         if policy.provider_id != "KRAKEN" or policy.environment != "LIVE":
             raise ProviderTransportScopeError(
                 "Kraken Spot authenticated-read signer requires KRAKEN LIVE policy"
@@ -4385,6 +4387,7 @@ class BinanceSpotAuthenticatedReadSigner:
             raise TypeError(
                 "query_binding must be AuthenticatedReadQueryBinding"
             )
+        _require_authenticated_read_query_binding_authority(query_binding)
         if policy.provider_id != "BINANCE":
             raise ProviderTransportScopeError(
                 "Binance authenticated-read signer requires BINANCE policy"

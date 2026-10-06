@@ -575,7 +575,7 @@ def _restore_evidence_graph(
         try:
             for line in evidence_path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
-                    continue
+                    raise ValueError("Corrupt learning evidence")
                 row = json.loads(line)
                 if type(row) is not dict:
                     raise ValueError("Corrupt learning evidence")

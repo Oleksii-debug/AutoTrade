@@ -162,6 +162,25 @@ class VerticalSliceTests(unittest.TestCase):
                 ):
                     run_vertical_slice([100, 101, 102, 103], directory)
 
+    def test_restart_rejects_blank_jsonl_row_before_checkpoint_write(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            evidence_path = Path(directory) / "learning-evidence.jsonl"
+            evidence_path.write_text(
+                evidence_path.read_text(encoding="utf-8") + "\n",
+                encoding="utf-8",
+            )
+
+            with patch(
+                "mvp.autotrade_mvp.pipeline._atomic_json",
+                side_effect=AssertionError("checkpoint write attempted"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Corrupt learning evidence",
+                ):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
     def test_restart_rejects_checkpoint_jsonl_disagreement_before_write(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

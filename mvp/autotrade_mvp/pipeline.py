@@ -21,15 +21,15 @@ from uuid import NAMESPACE_URL, uuid5
 
 from .exact_decimal import (
     ExactDecimalError,
-    as_fraction, bounded_fraction, exact_abs, exact_add, exact_multiply,
-    exact_subtract, exact_sum, parse_bounded_exact_decimal,
+    as_fraction, bounded_fraction, canonical_decimal_text, exact_abs, exact_add,
+    exact_multiply, exact_subtract, exact_sum, parse_bounded_exact_decimal,
     round_fraction_to_quantum, terminating_decimal,
 )
 from .persistence import JournalStore, payload_digest
 
 
 MONEY_QUANTUM = Decimal("0.00000001")
-CHECKPOINT_SCHEMA_VERSION = 4
+CHECKPOINT_SCHEMA_VERSION = 5
 
 
 def _exact_decimal(value: Decimal | str | int, *, name: str) -> Decimal:
@@ -78,7 +78,7 @@ def _financial_configuration(
         "order_quantity": str(order_quantity),
         "max_abs_position": str(max_abs_position),
         "max_notional": str(max_notional),
-        "fee_rate": str(fee_rate),
+        "fee_rate": canonical_decimal_text(fee_rate),
         "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
         "money_quantum": str(MONEY_QUANTUM),
         "strategy": {

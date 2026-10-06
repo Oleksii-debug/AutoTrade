@@ -81,7 +81,7 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertEqual([item.status for item in results], ["filled", "hold", "filled"])
             self.assertEqual(results[-1].position, 0)
             self.assertEqual(results[-1].evidence_count, 3)
-            replay = run_multi_episode(episodes, directory, max_abs_position="1")
+            replay = run_multi_episode(episodes, directory)
             self.assertEqual(replay[-1].position, 0)
             self.assertEqual(replay[-1].evidence_count, 3)
             checkpoint = json.loads((Path(directory) / "checkpoint.json").read_text(encoding="utf-8"))
@@ -114,7 +114,7 @@ class VerticalSliceTests(unittest.TestCase):
             checkpoint_path = Path(directory) / "checkpoint.json"
             self.assertTrue(checkpoint_path.exists())
             checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-            self.assertEqual(checkpoint["schema_version"], 3)
+            self.assertEqual(checkpoint["schema_version"], 5)
             self.assertEqual(checkpoint["postings"], [])
             self.assertEqual(checkpoint["fills"], {})
             self.assertEqual(checkpoint["evidence_ids"], [])
@@ -594,12 +594,12 @@ class VerticalSliceTests(unittest.TestCase):
             root = Path(directory)
             checkpoint_path = root / "checkpoint.json"
             checkpoint_text = checkpoint_path.read_text(encoding="utf-8")
-            marker = '"schema_version": 4,'
+            marker = '"schema_version": 5,'
             self.assertEqual(checkpoint_text.count(marker), 1)
             checkpoint_path.write_text(
                 checkpoint_text.replace(
                     marker,
-                    marker + '\n  "schema_version": 4,',
+                    marker + '\n  "schema_version": 5,',
                     1,
                 ),
                 encoding="utf-8",
@@ -932,6 +932,44 @@ class VerticalSliceTests(unittest.TestCase):
         )
         self.assertEqual(hostile[-1].position, reference[-1].position)
 
+    def test_resume_accepts_equivalent_fee_rate_presentations(self):
+        with TemporaryDirectory() as directory:
+            first = run_vertical_slice(
+                [100, 101, 102, 103],
+                directory,
+                fee_rate="0.0010",
+            )
+            root = Path(directory)
+            checkpoint_before = json.loads(
+                (root / "checkpoint.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                checkpoint_before["financial_configuration"]["fee_rate"],
+                "0.001",
+            )
+            configuration_hash = checkpoint_before["financial_configuration_hash"]
+
+            resumed = run_vertical_slice(
+                [100, 101, 102, 103],
+                directory,
+                fee_rate="1e-3",
+            )
+            self.assertTrue(resumed.resumed)
+            self.assertEqual(resumed.order_id, first.order_id)
+            self.assertEqual(resumed.fill_id, first.fill_id)
+
+            checkpoint_after = json.loads(
+                (root / "checkpoint.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                checkpoint_after["financial_configuration"]["fee_rate"],
+                "0.001",
+            )
+            self.assertEqual(
+                checkpoint_after["financial_configuration_hash"],
+                configuration_hash,
+            )
+
     def test_resume_rejects_changed_financial_configuration_before_mutation(self):
         changes = (
             {"initial_cash": "9999"},
@@ -1018,7 +1056,7 @@ class VerticalSliceTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "forced durable sync failure"):
                     pipeline_module._atomic_json(
                         checkpoint_path,
-                        {"schema_version": 4},
+                        {"schema_version": 5},
                     )
 
             temporary = root / "checkpoint.json.tmp"
@@ -1323,7 +1361,7 @@ class VerticalSliceTests(unittest.TestCase):
                 run_vertical_slice([100, 101, 102, 103], directory)
 
             checkpoint = dict(original)
-            checkpoint["schema_version"] = 2
+            checkpoint["schema_version"] = 4
             checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
             with self.assertRaisesRegex(
                 ValueError,

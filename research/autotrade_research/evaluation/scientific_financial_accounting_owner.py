@@ -67,6 +67,7 @@ class ScientificFinancialAccountingEvidence:
     economic_transaction_count: int
     reconciled_cash_digest: str
     reconciled_position_digest: str
+    reconciled_settlement_digest: str
     owner_digest: str = ""
 
     def __post_init__(self) -> None:
@@ -80,7 +81,7 @@ class ScientificFinancialAccountingEvidence:
         if self.economic_transaction_count < 0:
             raise ValueError("economic_transaction_count cannot be negative")
         subject = {
-            "schema_version": "wp36-financial-accounting-owner-v1",
+            "schema_version": "wp36-financial-accounting-owner-v2",
             "scientific_protocol_id": self.scientific_protocol_id,
             "gate_profile_digest": self.gate_profile_digest,
             "financial_cut_digest": self.financial_cut_digest,
@@ -94,6 +95,7 @@ class ScientificFinancialAccountingEvidence:
             "economic_transaction_count": self.economic_transaction_count,
             "reconciled_cash_digest": self.reconciled_cash_digest,
             "reconciled_position_digest": self.reconciled_position_digest,
+            "reconciled_settlement_digest": self.reconciled_settlement_digest,
         }
         object.__setattr__(self, "owner_digest", payload_digest(subject))
 
@@ -226,7 +228,7 @@ def _require_clean_reconciliation(
     *,
     cut: ScientificFinancialCut,
     book: DurableProviderEconomicBook,
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     checkpoint = require_current_reconciliation_checkpoint(
         store,
         checkpoint_event_id=cut.reconciliation_event_id,
@@ -255,6 +257,19 @@ def _require_clean_reconciliation(
 
     for field in ("cash_differences", "position_differences", "borrow_differences"):
         _require_zero_differences(payload, field)
+
+    if payload.get("settlement_activity_complete") is not True:
+        raise ScientificFinancialOwnerConflict(
+            "financial accounting owner requires complete settlement activity"
+        )
+    settlement_differences = _canonical_decimal_map(
+        payload.get("settlement_differences"),
+        name="settlement_differences",
+    )
+    if any(amount != "0" for amount in settlement_differences.values()):
+        raise ScientificFinancialOwnerConflict(
+            "reconciliation settlement_differences is non-zero"
+        )
 
     for field in (
         "unexpected_execution_ids",
@@ -300,7 +315,15 @@ def _require_clean_reconciliation(
             "canonical economic-book positions do not match reconciled provider positions"
         )
 
-    return payload_digest(local_cash), payload_digest(local_positions)
+    settlement_authority = {
+        "settlement_activity_complete": True,
+        "settlement_differences": settlement_differences,
+    }
+    return (
+        payload_digest(local_cash),
+        payload_digest(local_positions),
+        payload_digest(settlement_authority),
+    )
 
 
 def resolve_scientific_financial_accounting_owner(
@@ -353,7 +376,11 @@ def resolve_scientific_financial_accounting_owner(
         environment=before.environment,
         provider_environment=before.provider_environment,
     )
-    local_cash_digest, local_position_digest = _require_clean_reconciliation(
+    (
+        local_cash_digest,
+        local_position_digest,
+        settlement_digest,
+    ) = _require_clean_reconciliation(
         store,
         cut=before,
         book=economic_book,
@@ -391,6 +418,7 @@ def resolve_scientific_financial_accounting_owner(
         economic_transaction_count=transaction_count,
         reconciled_cash_digest=local_cash_digest,
         reconciled_position_digest=local_position_digest,
+        reconciled_settlement_digest=settlement_digest,
     )
 
 
@@ -427,6 +455,9 @@ def _decision_with_owner_check(
                 "scientific_financial_cash_digest": owner.reconciled_cash_digest,
                 "scientific_financial_position_digest": (
                     owner.reconciled_position_digest
+                ),
+                "scientific_financial_settlement_digest": (
+                    owner.reconciled_settlement_digest
                 ),
             }
         )

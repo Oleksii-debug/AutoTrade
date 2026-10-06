@@ -202,7 +202,7 @@ def dotnet_restore_tokens_are_locked(tokens: tuple[str, ...] | list[str]) -> boo
         if prefix is None:
             continue
         payload = token[len(prefix):]
-        for assignment in payload.split(';'):
+        for assignment in re.split(r'[;,]', payload):
             if '=' not in assignment:
                 continue
             name, value = assignment.split('=', 1)

@@ -5,6 +5,9 @@ on:
   push:
     branches: [main]
     paths:
+      - "autotrade_numeric/**"
+      - "pyproject.toml"
+      - "research/pyproject.toml"
       - "contracts/**"
       - "tests/Contracts/**"
       - "tests/Contracts.DotNet/**"
@@ -13,7 +16,10 @@ on:
       - "tools/contract_version_guard.py"
       - "tools/generate_common_scalar_corpus.py"
       - "tools/generate_common_scalar_bindings.py"
+      - "tools/generate_contract_shape_bindings.py"
       - "tools/generate_host_api_routes.py"
+      - "tools/write_ci_evidence.py"
+      - "tools/write_contracts_ci_evidence.py"
       - "web/src/host-api-routes.js"
       - "web/src/app.js"
       - "web/src/index.html"
@@ -21,6 +27,9 @@ on:
       - ".github/workflows/contracts.yml"
   pull_request:
     paths:
+      - "autotrade_numeric/**"
+      - "pyproject.toml"
+      - "research/pyproject.toml"
       - "contracts/**"
       - "tests/Contracts/**"
       - "tests/Contracts.DotNet/**"
@@ -29,7 +38,10 @@ on:
       - "tools/contract_version_guard.py"
       - "tools/generate_common_scalar_corpus.py"
       - "tools/generate_common_scalar_bindings.py"
+      - "tools/generate_contract_shape_bindings.py"
       - "tools/generate_host_api_routes.py"
+      - "tools/write_ci_evidence.py"
+      - "tools/write_contracts_ci_evidence.py"
       - "web/src/host-api-routes.js"
       - "web/src/app.js"
       - "web/src/index.html"
@@ -51,7 +63,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-22.04, windows-2025]
         python-version: ["3.12.10"]
     runs-on: ${{ matrix.os }}
     steps:
@@ -70,20 +82,26 @@ jobs:
           node-version: "22"
       - run: python -m pip install -r requirements-dev.txt
       - run: python tools/generate_common_scalar_bindings.py --check
+      - run: python tools/generate_contract_shape_bindings.py --check
       - run: python tools/generate_host_api_routes.py --check
       - run: python tools/generate_common_scalar_corpus.py --check
       - run: python -m unittest discover -s tests/Contracts -v
-      - run: dotnet run --project tests/Contracts.DotNet/Contracts.DotNet.csproj --configuration Release -- contracts/fixtures/common-scalars.corpus.json
+      - run: python -m pip install . --no-deps --force-reinstall
+      - name: Verify installed v6 numeric package off checkout
+        run: python -c "import os,tempfile,importlib.metadata as m; os.chdir(tempfile.gettempdir()); import autotrade_numeric.dataset_manifest as d; assert m.version('autotrade-exact-numeric') == '0.0.2'; assert d.CONTRACT_VERSION == '6.0.0'; assert d.DATASET_MANIFEST_SEMANTIC_VALIDATOR_ID == 'dataset-manifest-content-authority-v1'"
+      - run: dotnet run --project tests/Contracts.DotNet/Contracts.DotNet.csproj --configuration Release -- contracts/fixtures/common-scalars.corpus.json contracts/fixtures/dataset-manifest.semantic.corpus.json contracts/fixtures/contract-shapes.corpus.json
       - run: node tests/Contracts.TypeScript/common-scalars.test.cjs
+      - run: node tests/Contracts.TypeScript/dataset-manifest.test.cjs
+      - run: node tests/Contracts.TypeScript/contract-shapes.test.cjs
       - run: node tests/Contracts.TypeScript/host-api-routes.test.cjs
       - if: github.event_name == 'pull_request'
         run: python tools/contract_version_guard.py --base-ref origin/${{ github.base_ref }}
       - name: Write exact-head contracts evidence for pull request
         if: github.event_name == 'pull_request'
-        run: python tools/write_ci_evidence.py --suite contracts --command "json-schema + dotnet + typescript + contract-version-guard" --output "artifacts/contracts-${{ runner.os }}.json"
+        run: python tools/write_contracts_ci_evidence.py --output "artifacts/contracts-${{ runner.os }}.json"
       - name: Write exact-head contracts evidence for non-PR run
         if: github.event_name != 'pull_request'
-        run: python tools/write_ci_evidence.py --suite contracts --command "json-schema + dotnet + typescript" --output "artifacts/contracts-${{ runner.os }}.json"
+        run: python tools/write_contracts_ci_evidence.py --output "artifacts/contracts-${{ runner.os }}.json"
       - name: Upload exact-head contracts evidence
         uses: actions/upload-artifact@v4
         with:

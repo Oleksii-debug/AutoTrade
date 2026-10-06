@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier
 import unittest
+from uuid import NAMESPACE_URL, uuid5
 
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
@@ -14,8 +15,14 @@ NOW = "2026-10-03T17:30:00Z"
 
 def owner_event(event_id: str, aggregate_id: str) -> dict:
     payload = {"schema_version": "1.0.0", "owner": aggregate_id}
+    canonical_event_id = str(
+        uuid5(NAMESPACE_URL, "https://events.autotrade.test/" + event_id)
+    )
+    correlation_id = str(
+        uuid5(NAMESPACE_URL, "https://correlations.autotrade.test/" + event_id)
+    )
     return {
-        "event_id": event_id,
+        "event_id": canonical_event_id,
         "event_type": "TestStoreOwned",
         "schema_version": "1.0.0",
         "aggregate_type": "test_store_owner",
@@ -27,7 +34,7 @@ def owner_event(event_id: str, aggregate_id: str) -> dict:
         "occurred_at": NOW,
         "observed_at": NOW,
         "committed_at": NOW,
-        "correlation_id": event_id + "-correlation",
+        "correlation_id": correlation_id,
         "causation_id": None,
         "payload": payload,
         "payload_hash": payload_digest(payload),

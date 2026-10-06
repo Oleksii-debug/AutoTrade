@@ -136,7 +136,7 @@ class HostCommandStore:
         max_events: int = 100,
         now: Callable[[], str] | None = None,
     ) -> None:
-        if not isinstance(account_id, str) or not account_id.strip():
+        if type(account_id) is not str or not str.strip(account_id):
             raise ValueError("account_id must be a non-empty string")
         if not is_valid_common_scalar("Environment", environment):
             raise ValueError("environment must be a canonical Environment")
@@ -146,7 +146,7 @@ class HostCommandStore:
             raise TypeError("request_origin_provider must be callable")
         if max_events < 1:
             raise ValueError("max_events must be positive")
-        self.account_id = account_id.strip()
+        self.account_id = str.strip(account_id)
         self.environment = environment
         self._session_validator = session_validator
         self._request_origin_provider = request_origin_provider
@@ -176,7 +176,7 @@ class HostCommandStore:
     @staticmethod
     def _required_text(command: Mapping[str, object], field: str) -> str:
         value = command.get(field)
-        if not isinstance(value, str) or not value:
+        if type(value) is not str or not value:
             raise ValueError(f"{field} must be a non-empty string")
         return value
 
@@ -221,15 +221,24 @@ class HostCommandStore:
         if account_id != self.account_id or environment != self.environment:
             raise ValueError("command scope does not match active host account/environment")
         action = canonical_host_action(command.get("action"))
-        expected_raw = self._required_text(command, "expected_state_version")
+        expected_raw = command.get("expected_state_version")
         if "payload" not in command or not isinstance(command["payload"], dict):
             raise ValueError("payload must be an object")
-        if not expected_raw.isdigit():
-            raise ValueError("expected_state_version must be a sequence")
+        if not is_valid_common_scalar("Sequence", expected_raw):
+            raise ValueError(
+                "expected_state_version must be a canonical Sequence"
+            )
         request_origin = self._request_origin_provider()
-        if not isinstance(request_origin, str) or not request_origin.strip():
+        if type(request_origin) is not str or not str.strip(request_origin):
             raise PermissionError("Current request origin is unavailable")
-        if not self._session_validator(session, actor, request_origin.strip(), action):
+        normalized_origin = str.strip(request_origin)
+        authorized = self._session_validator(
+            session,
+            actor,
+            normalized_origin,
+            action,
+        )
+        if authorized is not True:
             raise PermissionError(
                 "Session is not authorized for actor, request origin, and action"
             )
@@ -257,8 +266,7 @@ class HostCommandStore:
                 reason_codes=("command_id_conflict",),
             )
 
-        expected = int(expected_raw)
-        if expected != self.state_version:
+        if expected_raw != str(self.state_version):
             result = CommandResult(
                 command_id=command_id,
                 status="CONFLICT",
@@ -382,13 +390,23 @@ class HostCommandStore:
         }
 
     def events_after(self, after: str | int) -> tuple[HostEvent, ...]:
-        try:
+        current = self.cursor
+        if isinstance(after, str):
+            if not is_valid_common_scalar("Sequence", after):
+                raise ValueError("Cursor must be a canonical Sequence")
+            current_text = str(current)
+            if len(after) > len(current_text) or (
+                len(after) == len(current_text) and after > current_text
+            ):
+                raise ValueError("Cursor is ahead of host state")
             cursor = int(after)
-        except (TypeError, ValueError) as error:
-            raise ValueError("Cursor must be an integer sequence") from error
+        elif type(after) is int:
+            cursor = after
+        else:
+            raise ValueError("Cursor must be a canonical Sequence")
         if cursor < 0:
             raise ValueError("Cursor must be non-negative")
-        if cursor > self.cursor:
+        if cursor > current:
             raise ValueError("Cursor is ahead of host state")
         if self._events:
             oldest = self._events[0].cursor

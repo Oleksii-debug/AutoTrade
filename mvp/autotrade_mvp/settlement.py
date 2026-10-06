@@ -12,9 +12,16 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Iterable, Mapping
 
-from .accounting import EconomicBook, JournalTransaction, ScopedEconomicBook, _canonical_equity_fill_terms
+from .accounting import (
+    EconomicBook,
+    JournalTransaction,
+    ScopedEconomicBook,
+    _canonical_equity_fill_terms,
+    _require_exact_transaction_graph,
+)
 from .exact_decimal import (
     ExactDecimalError,
+    canonical_decimal_text,
     exact_add,
     exact_multiply,
     exact_subtract,
@@ -38,15 +45,20 @@ def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact text")
+    if not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
 
 def _utc(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime):
-        raise TypeError(f"{name} must be a datetime")
-    if value.tzinfo is None or value.utcoffset() is None:
+    if type(value) is not datetime:
+        raise TypeError(f"{name} must be an exact datetime")
+    selected_timezone = value.tzinfo
+    if type(selected_timezone) is not type(timezone.utc):
+        raise TypeError(f"{name} must use an exact built-in timezone")
+    if value.utcoffset() is None:
         raise ValueError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc)
 
@@ -115,8 +127,8 @@ class SettlementRuleBinding:
         object.__setattr__(
             self, "rule_version", _text(self.rule_version, name="rule_version")
         )
-        if not isinstance(self.scope, SettlementAccountScope):
-            raise TypeError("scope must be SettlementAccountScope")
+        if type(self.scope) is not SettlementAccountScope:
+            raise TypeError("scope must be exact SettlementAccountScope")
         object.__setattr__(
             self,
             "instrument_version",
@@ -134,8 +146,12 @@ class SettlementRuleBinding:
                 raise TypeError("effective_to must be a date value")
             if self.effective_to <= self.effective_from:
                 raise ValueError("effective_to must be after effective_from")
-        if not isinstance(self.evidence_refs, tuple) or not self.evidence_refs:
+        if type(self.evidence_refs) is not tuple:
+            raise TypeError("evidence_refs must use an exact tuple")
+        if not self.evidence_refs:
             raise ValueError("evidence_refs must be a non-empty tuple")
+        if any(type(item) is not str for item in self.evidence_refs):
+            raise TypeError("evidence_refs must contain exact text")
         refs = tuple(_text(item, name="evidence_ref") for item in self.evidence_refs)
         if len(refs) != len(set(refs)):
             raise ValueError("evidence_refs must be unique")
@@ -206,8 +222,8 @@ class SettlementObligation:
                 _text(self.source_transaction_id, name="source_transaction_id"),
             )
         if self.rule_binding is not None:
-            if not isinstance(self.rule_binding, SettlementRuleBinding):
-                raise TypeError("rule_binding must be SettlementRuleBinding")
+            if type(self.rule_binding) is not SettlementRuleBinding:
+                raise TypeError("rule_binding must be exact SettlementRuleBinding")
             if self.rule_binding.settlement_currency != currency:
                 raise SettlementConflict(
                     "settlement rule currency does not match obligation currency"
@@ -252,6 +268,81 @@ class SettlementCheckpoint:
     settled_cash: tuple[tuple[str, Decimal], ...]
     settled_obligation_evidence: tuple[SettlementEvidence, ...]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "checkpoint_id",
+            _text(self.checkpoint_id, name="checkpoint_id"),
+        )
+        if type(self.settled_cash) is not tuple:
+            raise TypeError("checkpoint settled_cash must use an exact tuple")
+        normalized_cash: list[tuple[str, Decimal]] = []
+        seen_currencies: set[str] = set()
+        for entry in self.settled_cash:
+            if type(entry) is not tuple or len(entry) != 2:
+                raise TypeError(
+                    "checkpoint settled_cash entries must use exact pairs"
+                )
+            raw_currency, raw_amount = entry
+            if type(raw_currency) is not str:
+                raise TypeError("checkpoint currency must use exact text")
+            currency = _text(
+                raw_currency,
+                name="checkpoint currency",
+            ).upper()
+            if currency != raw_currency:
+                raise ValueError(
+                    "checkpoint currency must use canonical uppercase text"
+                )
+            if type(raw_amount) is not Decimal:
+                raise TypeError(
+                    "checkpoint settled_cash amount must use exact Decimal"
+                )
+            amount = _decimal(
+                raw_amount,
+                name="checkpoint settled_cash",
+            )
+            if currency in seen_currencies:
+                raise SettlementConflict(
+                    "checkpoint contains duplicate currency identities"
+                )
+            seen_currencies.add(currency)
+            normalized_cash.append((currency, amount))
+        if tuple(sorted(normalized_cash)) != self.settled_cash:
+            raise SettlementConflict(
+                "checkpoint settled_cash must use canonical sorted ordering"
+            )
+
+        if type(self.settled_obligation_evidence) is not tuple:
+            raise TypeError(
+                "checkpoint settlement evidence must use an exact tuple"
+            )
+        seen_obligations: set[str] = set()
+        normalized_evidence: list[SettlementEvidence] = []
+        for record in self.settled_obligation_evidence:
+            if type(record) is not SettlementEvidence:
+                raise TypeError(
+                    "checkpoint settlement evidence must be exact SettlementEvidence"
+                )
+            if record.obligation_id in seen_obligations:
+                raise SettlementConflict(
+                    "checkpoint contains duplicate settlement evidence identities"
+                )
+            seen_obligations.add(record.obligation_id)
+            normalized_evidence.append(record)
+        if (
+            tuple(
+                sorted(
+                    normalized_evidence,
+                    key=lambda record: record.obligation_id,
+                )
+            )
+            != self.settled_obligation_evidence
+        ):
+            raise SettlementConflict(
+                "checkpoint settlement evidence must use canonical sorted ordering"
+            )
+
     @classmethod
     def create(
         cls,
@@ -260,6 +351,12 @@ class SettlementCheckpoint:
         settled_cash: Mapping[str, Decimal | str | int],
         settled_obligation_evidence: Mapping[str, SettlementEvidence],
     ) -> "SettlementCheckpoint":
+        if type(settled_cash) is not dict:
+            raise TypeError("checkpoint settled_cash must use an exact dict")
+        if type(settled_obligation_evidence) is not dict:
+            raise TypeError(
+                "checkpoint settlement evidence must use an exact dict"
+            )
         cash: dict[str, Decimal] = {}
         for raw_currency, raw_amount in settled_cash.items():
             currency = _text(raw_currency, name="checkpoint currency").upper()
@@ -272,8 +369,10 @@ class SettlementCheckpoint:
         evidence: dict[str, SettlementEvidence] = {}
         for raw_id, record in settled_obligation_evidence.items():
             obligation_id = _text(raw_id, name="checkpoint obligation_id")
-            if not isinstance(record, SettlementEvidence):
-                raise TypeError("checkpoint settlement evidence must be SettlementEvidence")
+            if type(record) is not SettlementEvidence:
+                raise TypeError(
+                    "checkpoint settlement evidence must be exact SettlementEvidence"
+                )
             if record.obligation_id != obligation_id:
                 raise SettlementConflict(
                     "checkpoint evidence key does not match evidence obligation_id"
@@ -326,11 +425,24 @@ class BuyingPowerEvidence:
     evidence_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
+        if type(self.evidence_id) is not str:
+            raise TypeError("evidence_id must be exact text")
+        if type(self.scope) is not SettlementAccountScope:
+            raise TypeError("scope must be exact SettlementAccountScope")
+        if type(self.currency) is not str:
+            raise TypeError("currency must be exact text")
+        if type(self.observed_at) is not datetime or type(self.valid_until) is not datetime:
+            raise TypeError("buying-power timestamps must be exact datetime values")
+        if (
+            type(self.evidence_refs) is not tuple
+            or not self.evidence_refs
+            or any(type(item) is not str for item in self.evidence_refs)
+        ):
+            raise TypeError("evidence_refs must be a non-empty exact-text tuple")
+
         object.__setattr__(
             self, "evidence_id", _text(self.evidence_id, name="evidence_id")
         )
-        if not isinstance(self.scope, SettlementAccountScope):
-            raise TypeError("scope must be SettlementAccountScope")
         object.__setattr__(
             self, "currency", _text(self.currency, name="currency").upper()
         )
@@ -344,12 +456,130 @@ class BuyingPowerEvidence:
             raise ValueError("valid_until must be after observed_at")
         object.__setattr__(self, "observed_at", observed)
         object.__setattr__(self, "valid_until", valid_until)
-        if not isinstance(self.evidence_refs, tuple) or not self.evidence_refs:
-            raise ValueError("evidence_refs must be a non-empty tuple")
         refs = tuple(_text(item, name="evidence_ref") for item in self.evidence_refs)
         if len(refs) != len(set(refs)):
             raise ValueError("evidence_refs must be unique")
         object.__setattr__(self, "evidence_refs", refs)
+
+    @property
+    def resource_key(self) -> str:
+        """Canonical reservation resource for separately evidenced margin credit."""
+
+        return f"MARGIN_CREDIT:{self.currency}"
+
+    def resource_detail(self) -> dict[str, str]:
+        """Serialize one typed provider buying-power observation for reconciliation."""
+
+        try:
+            credit = canonical_decimal_text(self.additional_credit)
+        except ExactDecimalError as error:
+            raise SettlementConflict(
+                "buying-power credit exceeds exact rendering authority"
+            ) from error
+        detail = {
+            "schema_version": "margin-buying-power-resource.v1",
+            "resource_type": "MARGIN_BUYING_POWER",
+            "credit_semantics": "ADDITIONAL_TO_SETTLED_CASH",
+            "evidence_id": self.evidence_id,
+            "provider_id": self.scope.provider_id,
+            "account_id": self.scope.account_id,
+            "environment": self.scope.environment,
+            "provider_environment": self.scope.provider_environment,
+            "currency": self.currency,
+            "additional_credit": credit,
+            "observed_at": self.observed_at.isoformat().replace("+00:00", "Z"),
+            "valid_until": self.valid_until.isoformat().replace("+00:00", "Z"),
+            "evidence_ref_count": str(len(self.evidence_refs)),
+        }
+        detail.update(
+            {
+                f"evidence_ref_{index}": reference
+                for index, reference in enumerate(self.evidence_refs)
+            }
+        )
+        return detail
+
+    @classmethod
+    def from_resource_detail(
+        cls,
+        detail: Mapping[str, object],
+    ) -> "BuyingPowerEvidence":
+        """Rebuild typed margin credit from the exact durable resource detail."""
+
+        if type(detail) is not dict:
+            raise TypeError("margin-credit resource detail must use an exact dict")
+        if detail.get("schema_version") != "margin-buying-power-resource.v1":
+            raise ValueError("margin-credit resource detail schema is unsupported")
+        if detail.get("resource_type") != "MARGIN_BUYING_POWER":
+            raise ValueError("margin-credit resource detail has invalid resource_type")
+        if detail.get("credit_semantics") != "ADDITIONAL_TO_SETTLED_CASH":
+            raise ValueError(
+                "margin-credit evidence must be additional to settled cash"
+            )
+
+        raw_count = detail.get("evidence_ref_count")
+        if type(raw_count) is not str or not raw_count.isdigit():
+            raise ValueError("margin-credit evidence_ref_count is invalid")
+        count = int(raw_count)
+        if count < 1 or count > 64 or raw_count != str(count):
+            raise ValueError("margin-credit evidence_ref_count is invalid")
+
+        fixed = {
+            "schema_version",
+            "resource_type",
+            "credit_semantics",
+            "evidence_id",
+            "provider_id",
+            "account_id",
+            "environment",
+            "provider_environment",
+            "currency",
+            "additional_credit",
+            "observed_at",
+            "valid_until",
+            "evidence_ref_count",
+        }
+        expected = fixed | {f"evidence_ref_{index}" for index in range(count)}
+        if set(detail) != expected:
+            raise ValueError("margin-credit resource detail fields are invalid")
+
+        def exact_text(field: str) -> str:
+            value = detail.get(field)
+            if type(value) is not str or not value.strip():
+                raise TypeError(f"margin-credit {field} must be exact text")
+            return value.strip()
+
+        def exact_instant(field: str) -> datetime:
+            text = exact_text(field)
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError as error:
+                raise ValueError(
+                    f"margin-credit {field} must be an ISO timestamp"
+                ) from error
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError(
+                    f"margin-credit {field} must include a timezone"
+                )
+            return parsed.astimezone(timezone.utc)
+
+        scope = SettlementAccountScope(
+            provider_id=exact_text("provider_id"),
+            account_id=exact_text("account_id"),
+            environment=exact_text("environment"),
+            provider_environment=exact_text("provider_environment"),
+        )
+        return cls(
+            evidence_id=exact_text("evidence_id"),
+            scope=scope,
+            currency=exact_text("currency"),
+            additional_credit=exact_text("additional_credit"),
+            observed_at=exact_instant("observed_at"),
+            valid_until=exact_instant("valid_until"),
+            evidence_refs=tuple(
+                exact_text(f"evidence_ref_{index}") for index in range(count)
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,6 +620,13 @@ class SettlementBook:
         obligations: Iterable[SettlementObligation] = (),
         settled_obligation_evidence: Mapping[str, SettlementEvidence] | None = None,
     ) -> None:
+        if settled_cash is not None and type(settled_cash) is not dict:
+            raise TypeError("settled_cash must use an exact dict")
+        if (
+            settled_obligation_evidence is not None
+            and type(settled_obligation_evidence) is not dict
+        ):
+            raise TypeError("settled obligation evidence must use an exact dict")
         self._settled_cash: dict[str, Decimal] = {}
         for currency, amount in (settled_cash or {}).items():
             unit = _text(currency, name="currency").upper()
@@ -398,6 +635,8 @@ class SettlementBook:
                     "settled_cash contains duplicate normalized currency codes"
                 )
             self._settled_cash[unit] = _decimal(amount, name="settled_cash")
+        if type(obligations) not in {tuple, list}:
+            raise TypeError("obligations must use an exact tuple or list")
         self._obligations: dict[str, SettlementObligation] = {}
         self._by_cause_component: dict[tuple[str, str], SettlementObligation] = {}
         self._settled_ids: set[str] = set()
@@ -406,8 +645,10 @@ class SettlementBook:
             self.add(obligation)
         for obligation_id, record in (settled_obligation_evidence or {}).items():
             key = _text(obligation_id, name="settled_obligation_id")
-            if not isinstance(record, SettlementEvidence):
-                raise TypeError("settled obligation evidence must be SettlementEvidence")
+            if type(record) is not SettlementEvidence:
+                raise TypeError(
+                    "settled obligation evidence must be exact SettlementEvidence"
+                )
             if record.obligation_id != key:
                 raise SettlementConflict(
                     "settlement evidence key does not match evidence obligation_id"
@@ -463,9 +704,16 @@ class SettlementBook:
         applied twice after restart.
         """
 
-        if not isinstance(checkpoint, SettlementCheckpoint):
-            raise TypeError("checkpoint must be SettlementCheckpoint")
+        if type(checkpoint) is not SettlementCheckpoint:
+            raise TypeError("checkpoint must be exact SettlementCheckpoint")
+        if (
+            settled_obligation_evidence is not None
+            and type(settled_obligation_evidence) is not dict
+        ):
+            raise TypeError("retained settlement evidence must use an exact dict")
 
+        if type(obligations) not in {tuple, list}:
+            raise TypeError("retained obligations must use an exact tuple or list")
         obligations_tuple = tuple(obligations)
         validation = cls(
             settled_cash=checkpoint.cash_dict(),
@@ -475,8 +723,10 @@ class SettlementBook:
         normalized: dict[str, SettlementEvidence] = {}
         for raw_id, record in (settled_obligation_evidence or {}).items():
             obligation_id = _text(raw_id, name="settled_obligation_id")
-            if not isinstance(record, SettlementEvidence):
-                raise TypeError("settled obligation evidence must be SettlementEvidence")
+            if type(record) is not SettlementEvidence:
+                raise TypeError(
+                    "settled obligation evidence must be exact SettlementEvidence"
+                )
             if record.obligation_id != obligation_id:
                 raise SettlementConflict(
                     "settlement evidence key does not match evidence obligation_id"
@@ -522,8 +772,8 @@ class SettlementBook:
         return book
 
     def add(self, obligation: SettlementObligation) -> bool:
-        if not isinstance(obligation, SettlementObligation):
-            raise TypeError("obligation must be SettlementObligation")
+        if type(obligation) is not SettlementObligation:
+            raise TypeError("obligation must be exact SettlementObligation")
         existing = self._obligations.get(obligation.obligation_id)
         if existing is not None:
             if existing != obligation:
@@ -554,8 +804,10 @@ class SettlementBook:
         key = _text(obligation_id, name="obligation_id")
         if type(as_of) is not date:
             raise TypeError("as_of must be a date value")
-        if not isinstance(settlement_evidence, SettlementEvidence):
-            raise TypeError("settlement_evidence must be SettlementEvidence")
+        if type(settlement_evidence) is not SettlementEvidence:
+            raise TypeError(
+                "settlement_evidence must be exact SettlementEvidence"
+            )
         if settlement_evidence.obligation_id != key:
             raise SettlementConflict(
                 "settlement evidence obligation_id does not match requested obligation"
@@ -598,13 +850,15 @@ class SettlementBook:
 
         if type(as_of) is not date:
             raise TypeError("as_of must be a date value")
-        if not isinstance(settlement_evidence, Mapping):
-            raise TypeError("settlement_evidence must be a mapping")
+        if type(settlement_evidence) is not dict:
+            raise TypeError("settlement_evidence must use an exact dict")
         normalized_evidence: dict[str, SettlementEvidence] = {}
         for raw_id, record in settlement_evidence.items():
             obligation_id = _text(raw_id, name="settlement_evidence obligation_id")
-            if not isinstance(record, SettlementEvidence):
-                raise TypeError("settlement evidence values must be SettlementEvidence")
+            if type(record) is not SettlementEvidence:
+                raise TypeError(
+                    "settlement evidence values must be exact SettlementEvidence"
+                )
             if record.obligation_id != obligation_id:
                 raise SettlementConflict(
                     "settlement evidence key does not match evidence obligation_id"
@@ -700,7 +954,7 @@ class SettlementBook:
                 environment, account_id, canonical_book = _require_scoped_economic_book_owner(economic_book)
             except AccountingConflict as error:
                 raise SettlementConflict(str(error)) from error
-            owner_scope = (None, account_id, environment)
+            owner_scope = (None, account_id, environment, None)
         else:
             # The durable financial book has its own original provider/account/
             # store generation seal. Validate it before obtaining the projection.
@@ -710,7 +964,12 @@ class SettlementBook:
             if type(economic_book) is not DurableProviderEconomicBook:
                 raise TypeError("economic_book must be an exact canonical economic authority")
             authority = _require_durable_provider_economic_book_authority(economic_book)
-            owner_scope = (authority.provider_id, authority.account_id, authority.environment)
+            owner_scope = (
+                authority.provider_id,
+                authority.account_id,
+                authority.environment,
+                authority.provider_environment,
+            )
             canonical_book = object.__getattribute__(economic_book, "_book")
             if type(canonical_book) is not EconomicBook:
                 raise TypeError("durable economic authority must own an exact EconomicBook")
@@ -722,17 +981,54 @@ class SettlementBook:
             canonical_book,
             EconomicBook,
         )
+        if any(type(transaction) is not JournalTransaction for transaction in transactions):
+            raise TypeError(
+                "economic projection requires exact JournalTransaction values"
+            )
+        for transaction in transactions:
+            _require_exact_transaction_graph(transaction)
 
+        if type(obligations) not in {tuple, list}:
+            raise TypeError(
+                "economic-book obligations must use an exact tuple or list"
+            )
+        if (
+            settled_obligation_evidence is not None
+            and type(settled_obligation_evidence) is not dict
+        ):
+            raise TypeError(
+                "economic-book settlement evidence must use an exact dict"
+            )
         items = tuple(obligations)
+        if any(type(item) is not SettlementObligation for item in items):
+            raise TypeError(
+                "economic-book obligations must contain exact SettlementObligation values"
+            )
+        if settled_obligation_evidence is not None:
+            if any(
+                type(obligation_id) is not str
+                or type(record) is not SettlementEvidence
+                for obligation_id, record in settled_obligation_evidence.items()
+            ):
+                raise TypeError(
+                    "economic-book settlement evidence must contain exact str/SettlementEvidence entries"
+                )
         if owner_scope is not None:
-            provider, account, environment = owner_scope
+            provider, account, environment, provider_environment = owner_scope
             for item in items:
                 scope = None if item.rule_binding is None else item.rule_binding.scope
                 if scope is None or (
-                    scope.account_id != account or scope.environment != environment
+                    scope.account_id != account
+                    or scope.environment != environment
                     or (provider is not None and scope.provider_id != provider)
+                    or (
+                        provider_environment is not None
+                        and scope.provider_environment != provider_environment
+                    )
                 ):
-                    raise SettlementConflict("scoped economic book differs from settlement scope")
+                    raise SettlementConflict(
+                        "scoped economic book differs from settlement scope"
+                    )
         by_transaction = {
             transaction.transaction_id: transaction
             for transaction in transactions
@@ -916,11 +1212,15 @@ class SettlementBook:
     ) -> CapitalAvailabilityProjection:
         """Project spendable capital without treating receivables as cash."""
 
-        if not isinstance(scope, SettlementAccountScope):
-            raise TypeError("scope must be SettlementAccountScope")
+        if type(scope) is not SettlementAccountScope:
+            raise TypeError("scope must be exact SettlementAccountScope")
+        if type(currency) is not str:
+            raise TypeError("currency must be exact text")
+        if type(as_of) is not datetime:
+            raise TypeError("as_of must be an exact datetime")
         unit = _text(currency, name="currency").upper()
         point = _utc(as_of, name="as_of")
-        if not isinstance(require_buying_power_evidence, bool):
+        if type(require_buying_power_evidence) is not bool:
             raise TypeError("require_buying_power_evidence must be boolean")
 
         overdue: list[str] = []
@@ -944,9 +1244,9 @@ class SettlementBook:
         additional_credit = Decimal("0")
         credit_unknown = False
         if buying_power_evidence is not None:
-            if not isinstance(buying_power_evidence, BuyingPowerEvidence):
+            if type(buying_power_evidence) is not BuyingPowerEvidence:
                 raise TypeError(
-                    "buying_power_evidence must be BuyingPowerEvidence"
+                    "buying_power_evidence must be exact BuyingPowerEvidence"
                 )
             if (
                 buying_power_evidence.scope != scope
@@ -1003,12 +1303,11 @@ def cash_settlement_obligation_from_transaction(
     contractual settlement date.
     """
 
-    if not isinstance(transaction, JournalTransaction):
-        raise TypeError("transaction must be a JournalTransaction")
+    _require_exact_transaction_graph(transaction)
     if type(trade_date) is not date or type(settlement_date) is not date:
         raise TypeError("trade_date and settlement_date must be date values")
-    if not isinstance(rule_binding, SettlementRuleBinding):
-        raise TypeError("rule_binding must be SettlementRuleBinding")
+    if type(rule_binding) is not SettlementRuleBinding:
+        raise TypeError("rule_binding must be exact SettlementRuleBinding")
     unit = _text(currency, name="currency").upper()
     bound_instrument = _text(
         instrument_version, name="instrument_version"
@@ -1059,8 +1358,7 @@ def equity_cash_obligation_from_transaction(
 ) -> SettlementObligation:
     """Create exact settlement obligation from canonical booked fill economics."""
 
-    if not isinstance(transaction, JournalTransaction):
-        raise TypeError("transaction must be a JournalTransaction")
+    _require_exact_transaction_graph(transaction)
     if transaction.economic_effective_at is None:
         raise SettlementConflict(
             "settlement-bound fill requires economic_effective_at"
@@ -1088,8 +1386,8 @@ def equity_cash_obligation_from_transaction(
             "source transaction economic_effective_at must be timezone-aware"
         )
     trade_date = trade_instant.astimezone(timezone.utc).date()
-    if not isinstance(rule_binding, SettlementRuleBinding):
-        raise TypeError("rule_binding must be SettlementRuleBinding")
+    if type(rule_binding) is not SettlementRuleBinding:
+        raise TypeError("rule_binding must be exact SettlementRuleBinding")
     if rule_binding.settlement_currency != unit:
         raise SettlementConflict(
             "settlement rule currency does not match source fill"

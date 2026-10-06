@@ -70,6 +70,26 @@ def _admission_text(value: object, field: str) -> str:
 
 
 _MAX_BOOK_CAUSAL_TEXT_UTF8_BYTES = 1024
+_ADAPTER_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+@/-]{0,127}$")
+
+
+def _adapter_version(value: object) -> str:
+    """Admit one exact immutable parser/adapter build identity.
+
+    This is provenance, not provider qualification by possession. The token is
+    intentionally narrow and bounded so it can participate in deterministic
+    event and stream identities without caller-controlled normalization.
+    """
+
+    if (
+        type(value) is not str
+        or value != value.strip()
+        or _ADAPTER_VERSION.fullmatch(value) is None
+    ):
+        raise MarketDataError(
+            "adapter_version must be a canonical bounded ASCII build token"
+        )
+    return value
 
 
 def _book_causal_text(value: object, field: str) -> str:
@@ -219,6 +239,7 @@ class RawMarketUpdate:
     provider_id: str
     venue_id: str
     provider_symbol: str
+    adapter_version: str
     kind: str
     source_event_at: datetime
     available_at: datetime
@@ -238,6 +259,11 @@ class RawMarketUpdate:
                 field,
                 _admission_text(getattr(self, field), field),
             )
+        object.__setattr__(
+            self,
+            "adapter_version",
+            _adapter_version(self.adapter_version),
+        )
         kind = _admission_text(self.kind, "kind").upper()
         if kind not in KINDS:
             raise MarketDataError("kind is unsupported")
@@ -297,6 +323,7 @@ class RawMarketUpdate:
 @dataclass(frozen=True)
 class NormalizedMarketEvent:
     event_id: str
+    adapter_version: str
     instrument_version: str
     kind: str
     source_event_at: datetime
@@ -317,6 +344,7 @@ class NormalizedMarketEvent:
     def to_contract_dict(self) -> dict[str, Any]:
         result = {
             "event_id": self.event_id,
+            "adapter_version": self.adapter_version,
             "instrument_version": self.instrument_version,
             "kind": self.kind,
             "source_event_at": _utc_text(self.source_event_at),
@@ -529,8 +557,9 @@ class MarketNormalizer:
             tuple[str, str, str, str, int], datetime
         ] = {}
         self._sequence_source_identity: dict[
-            tuple[str, str, str, str, int], tuple[str, str, datetime]
+            tuple[str, ...], tuple[str, str, datetime, str]
         ] = {}
+        self._stream_adapter_version: dict[tuple[str, ...], str] = {}
         self._seen_revision: dict[
             tuple[str, str, str, str, int, int], tuple[str, str]
         ] = {}
@@ -1614,6 +1643,7 @@ class MarketNormalizer:
             provider_id=update.provider_id,
             venue_id=update.venue_id,
             provider_symbol=update.provider_symbol,
+            adapter_version=update.adapter_version,
             kind=update.kind,
             source_event_at=update.source_event_at,
             available_at=update.available_at,
@@ -1643,6 +1673,23 @@ class MarketNormalizer:
             update.provider_symbol,
             stream,
         )
+        adapter_generation_identity = (
+            "NO_GENERATION"
+            if update.stream_generation is None
+            else f"GENERATION:{update.stream_generation}"
+        )
+        adapter_generation_key = (*stream_key, adapter_generation_identity)
+        if update.source_sequence is not None:
+            bound_adapter = self._stream_adapter_version.get(
+                adapter_generation_key
+            )
+            if (
+                bound_adapter is not None
+                and bound_adapter != update.adapter_version
+            ):
+                raise SequenceConflict(
+                    "adapter_version changed within active stream generation"
+                )
         book_kind = update.kind in {"BOOK_SNAPSHOT", "BOOK_DELTA"}
         bound_streams = {
             bound_stream
@@ -1756,11 +1803,7 @@ class MarketNormalizer:
         has_unqualified_provider_continuity = (
             has_provider_continuity_fields or provider_qualified_stream
         )
-        generation_identity = (
-            "NO_GENERATION"
-            if update.stream_generation is None
-            else f"GENERATION:{update.stream_generation}"
-        )
+        generation_identity = adapter_generation_identity
         sequence_state_key = (
             stream_key
             if update.stream_generation is None
@@ -1823,6 +1866,7 @@ class MarketNormalizer:
                 instrument_version_id,
                 update.kind,
                 update.source_event_at,
+                update.adapter_version,
             )
             existing_source_identity = self._sequence_source_identity.get(
                 sequence_identity
@@ -1839,6 +1883,7 @@ class MarketNormalizer:
                 _canonical(
                     {
                         "instrument_version": instrument_version_id,
+                        "adapter_version": update.adapter_version,
                         "kind": update.kind,
                         "source_event_at": _utc_text(update.source_event_at),
                         "available_at": _utc_text(update.available_at),
@@ -2059,6 +2104,7 @@ class MarketNormalizer:
                 update.venue_id,
                 update.provider_symbol,
                 stream,
+                update.adapter_version,
                 (
                     str(update.stream_generation)
                     if update.stream_generation is not None
@@ -2086,6 +2132,7 @@ class MarketNormalizer:
             )
         event = NormalizedMarketEvent(
             event_id=event_id,
+            adapter_version=update.adapter_version,
             instrument_version=self._instrument_version_id(instrument),
             kind=update.kind,
             source_event_at=update.source_event_at,
@@ -2114,4 +2161,9 @@ class MarketNormalizer:
                     sequence_identity=sequence_identity,
                     revision_identity=revision_identity,
                 )
+        if update.source_sequence is not None:
+            self._stream_adapter_version.setdefault(
+                adapter_generation_key,
+                update.adapter_version,
+            )
         return event

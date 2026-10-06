@@ -84,6 +84,67 @@ class PostSendBuiltinNamespaceAuthorityTests(unittest.TestCase):
                 ["SubmissionPrepared", "SubmissionSending"],
             )
 
+    def test_postsend_added_builtin_name_is_removed_and_fails_closed(self):
+        poison_name = "__autotrade_dispatch_test_extra_builtin__"
+        self.assertNotIn(poison_name, builtins.__dict__)
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            outbound = 0
+
+            def poisoned_transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                builtins.__dict__[poison_name] = object()
+                return ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+
+            try:
+                first = self._dispatch(
+                    dispatcher,
+                    "builtin-extra-name-a1",
+                    poisoned_transport,
+                )
+                self.assertEqual(first.status, "UNKNOWN")
+                self.assertEqual(
+                    first.reason,
+                    "dispatcher_authority_changed_after_send_barrier",
+                )
+                self.assertNotIn(poison_name, builtins.__dict__)
+                self.assertEqual(
+                    [
+                        event["event_type"]
+                        for event in self._events(
+                            path,
+                            dispatcher,
+                            "builtin-extra-name-a1",
+                        )
+                    ],
+                    ["SubmissionPrepared", "SubmissionSending"],
+                )
+
+                second = self._dispatch(
+                    dispatcher,
+                    "builtin-extra-name-a2",
+                    lambda _client_order_id, _request, final_guard: (
+                        final_guard(),
+                        ExactJsonTransportResponse(
+                            b'{"accepted":true}',
+                            http_status=200,
+                        ),
+                    )[1],
+                )
+                self.assertEqual(second.status, "SENT")
+                self.assertEqual(second.reason, "sent_confirmed")
+                self.assertEqual(outbound, 1)
+                self.assertNotIn(poison_name, builtins.__dict__)
+            finally:
+                builtins.__dict__.pop(poison_name, None)
+
     def test_unlisted_standard_builtin_binding_is_restored_for_next_dispatch(self):
         original_object = builtins.object
 

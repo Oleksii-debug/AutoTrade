@@ -4,15 +4,16 @@
 
 - Section: 2 — dependencies / rights / provenance / supply chain.
 - Canonical work package: WP-03 dependency-policy.
-- Exact starting main: `536002f84421eb073e267084ab60bd5829473485`.
-- Current repair PR: #2197.
-- Current repair head at this finding: `4a4822c6425a9e1100ca73a26a8a6bb737b3cc14`.
+- Canonical convergence PR: #2202.
+- Exact convergence base: `main@8495a66cf7d8979c5e8b3811c2088523ed147bf1`.
+- #2202 is the single current-main successor that supersedes stacked #2197 and #2199.
+- Its initial convergence tree is byte-identical to #2199 tree `45549029aabfb0f2e9a90d3d5a00a2f22a9923cf`.
 
 Section 0 remains closed and is not reopened by this work.
 
 ## Current-main authority already present
 
-Current main already contains materially newer WP-03/supply-chain authority than historical #2141/#1942:
+Current main plus #2202 contains the canonical WP-03 source-side dependency and NuGet-rights authority:
 
 - strict NuGet lock parsing and exact target-aware Direct/Transitive graph identities;
 - exact NuGet SHA-512 content hashes;
@@ -20,49 +21,66 @@ Current main already contains materially newer WP-03/supply-chain authority than
 - imported MSBuild PackageReference fail-closed boundaries;
 - exact .NET SDK `10.0.100` with roll-forward disabled;
 - hash-locked Python development dependencies;
-- explicit Python `3.12.10` CI pinning on canonical workflows;
-- WebView2 package-rights policy and restored-package license verification;
+- explicit Python `3.12.10` and explicit GitHub-hosted OS routing in canonical workflows;
 - deterministic release dependency manifest generation/checking;
-- WP-64 supply-chain qualification primitives binding SBOM/provenance/dependency-lock/component/rights/advisory evidence to exact release identity.
+- Desktop.Client transitive WebView2 lock synchronized to the Desktop direct lock;
+- exact WebView2 package identity represented in the generated release dependency manifest;
+- path-safe restored NuGet identity resolution;
+- exact restored `.nupkg` SHA-512 verification against the lock graph;
+- nuspec id/version plus reviewed license/notice bound to the exact restored artifact;
+- canonical `NUGET_PACKAGES` authority;
+- locked restore and restored-rights verification required in the same actual GitHub Actions job;
+- bypass controls, duplicate/missing verification targets and post-verification re-restore fail closed;
+- restored package-rights verification covers both AutoTrade.Contracts and AutoTrade.Desktop;
+- WP-64 supply-chain qualification primitives already exist and remain the terminal release/supply-chain trust owner.
 
-Historical #2141 is superseded and was closed rather than replayed onto this stronger current-main authority.
+Historical #2141, #2188, #2197 and #2199 are not separate merge authorities after #2202 convergence.
 
-## Concrete defects repaired by #2197
+## Source-side defects closed by the #2202 lineage
 
-1. `tests/Desktop.Client/packages.lock.json` was stale at Microsoft.Web.WebView2 `1.0.4191.47` while the referenced Desktop project and direct lock use `1.0.4258.31`.
-2. The committed release dependency manifest reported no .NET package dependencies although current source has an exact WebView2 PackageReference.
-3. No focused repository regression required Desktop.Client's transitive WebView2 lock to match the Desktop direct lock identity and NuGet content hash.
-4. The WP03 qualification document still claimed mutable Python `3.12` workflow selection even though canonical workflows already use exact `3.12.10`.
+1. Desktop.Client's transitive Microsoft.Web.WebView2 lock no longer disagrees with the Desktop direct lock.
+2. The release dependency manifest no longer falsely reports an empty .NET package graph while WebView2 is referenced.
+3. Focused regression coverage prevents Desktop.Client lock identity/content-hash drift.
+4. The WP03 gate no longer claims mutable Python `3.12` selection; canonical workflows use exact `3.12.10`.
+5. Restored NuGet rights are checked against the actual locked package bytes, nuspec identity, reviewed license and notice rather than filename presence or sibling hash text alone.
+6. Package-bearing projects cannot satisfy the gate by placing restore and rights verification in different jobs or by attaching skip/failure-suppression controls to the verifier step.
+7. Section-2 current source state is durably recorded in one current-main convergence lineage.
 
-The repair retains all fail-closed legal/advisory/release blockers. No missing evidence is converted into PASS/APPROVED.
+No dependency, license, advisory, model/data right or release state is promoted to APPROVED merely by these source controls.
 
 ## Remaining Section-2 blockers
 
-### Source / composition work
+### Release composition / mapping
 
-- exact release-composition evidence is absent;
-- exact model/data/news rights evidence is absent;
-- exact dependency-advisory qualification evidence is absent;
-- no frozen-release SBOM artifact is materialized;
-- the current rights gate treats the complete inspected-component catalog as qualification scope. Do not weaken that gate until an explicit authenticated mapping exists from release-composition distributed components to provenance component identities.
+- exact final release composition evidence is absent;
+- no authenticated mapping yet binds the actually distributed release component set to the corresponding `provenance/components.json` identities;
+- until that mapping exists, the complete inspected-component catalog remains fail-closed qualification scope and must not be silently narrowed.
 
 ### Rights / external evidence
 
-- Autosport first-party migration is owner-authorized for development, but the complete contributor/release-distribution rights chain remains unresolved;
-- Nika Core is semantic adaptation rather than a runtime dependency, but its release-rights provenance remains explicitly unresolved;
-- inspected LEAN, WhiteBit.Net, CryptoExchange.Net and Alpaca candidates remain release-blocked until an exact selected composition plus dependency-graph, notice and advisory evidence exists.
+- exact model/data/news use and redistribution rights evidence is absent;
+- Autosport first-party migration is owner-authorized for development, but complete contributor/release-distribution rights chain evidence remains unresolved;
+- Nika Core is semantic adaptation rather than a runtime dependency, but release-rights provenance remains unresolved;
+- inspected LEAN, WhiteBit.Net, CryptoExchange.Net and Alpaca candidates remain release-blocked until an exact selected composition plus dependency-graph, required-notice and rights evidence exists.
 
-These states are blockers, not permission to invent a permissive license or infer rights from public repository visibility.
+### Advisory / frozen-release evidence
+
+- exact dependency-advisory qualification evidence is absent;
+- no final frozen-release SBOM artifact is materialized and independently bound to the delivered release;
+- terminal advisory/supply-chain PASS remains owned by the existing WP-64 signed qualification authority and must not be replaced by a WP-03 self-attestation.
+
+These are blockers, not permission to infer rights from public repository visibility or to manufacture a permissive license.
 
 ## Completion rule
 
-Section 2 is not DONE merely because parsers/tests exist. Closure requires the canonical WP-03 gate to represent the exact selected dependency/reuse scope and every actually imported/distributed byte to have:
+Section 2 is DONE only when the canonical selected/distributed scope is explicit and every actually imported or distributed byte has:
 
 - exact source/package identity and lock;
 - rights/license basis and required notices;
+- exact release-composition mapping to provenance identity;
 - advisory review bound to the exact dependency graph;
 - model/data/news rights where applicable;
-- deterministic SBOM/provenance evidence bound to the exact release source;
+- deterministic SBOM/provenance evidence bound to the exact frozen release;
 - no unresolved rights represented as APPROVED.
 
-Provider/PAPER/LIVE, economic-edge, signed-release and physical NVDA qualification remain separate gates.
+Provider/PAPER/LIVE, economic-edge, signed-release authorization and physical NVDA qualification remain separate gates.

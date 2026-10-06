@@ -664,6 +664,28 @@ class VerticalSliceTests(unittest.TestCase):
         self.assertEqual(observed, expected)
         self.assertEqual(observed, Decimal("1.23456790"))
 
+    def test_run_configuration_initial_issue_is_create_once(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "run-configuration.json"
+            first = {
+                "schema_version": 1,
+                "configuration_digest": "a" * 64,
+                "configuration": {"symbol": "SIM"},
+            }
+            second = {
+                "schema_version": 1,
+                "configuration_digest": "b" * 64,
+                "configuration": {"symbol": "OTHER"},
+            }
+
+            self.assertTrue(pipeline_module._create_json_once(path, first))
+            first_bytes = path.read_bytes()
+            self.assertFalse(pipeline_module._create_json_once(path, second))
+            self.assertEqual(path.read_bytes(), first_bytes)
+            self.assertEqual(json.loads(first_bytes), first)
+
     def test_run_configuration_identity_ignores_mutable_module_aliases(self):
         import mvp.autotrade_mvp.pipeline as pipeline_module
 

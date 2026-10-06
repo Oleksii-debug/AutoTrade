@@ -1926,6 +1926,8 @@ def _install_direct_trading_write_execution_authority():
     canonical_redirect_request = _NoRedirectHandler.redirect_request
     canonical_request_digest = _direct_trading_write_request_digest
     request_digest_code = canonical_request_digest.__code__
+    canonical_require_signed_request = _require_signed_http_request
+    require_signed_request_code = canonical_require_signed_request.__code__
     canonical_sha256 = sha256
     canonical_json_module = json
     canonical_json_dumps = json.dumps
@@ -2002,6 +2004,8 @@ def _install_direct_trading_write_execution_authority():
             or canonical_json_module.dumps is not canonical_json_dumps
             or _direct_trading_write_request_digest is not canonical_request_digest
             or canonical_request_digest.__code__ is not request_digest_code
+            or _require_signed_http_request is not canonical_require_signed_request
+            or canonical_require_signed_request.__code__ is not require_signed_request_code
             or _DIRECT_TRADING_WRITE_TRANSPORT_IDENTITY != transport_identity
             or _DIRECT_TRADING_WRITE_NETWORK_POLICY_IDENTITY != network_policy_identity
         )

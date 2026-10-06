@@ -705,6 +705,53 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             with self.subTest(helper=helper.__name__):
                 self.assertIsNone(helper.__kwdefaults__)
 
+    def test_submission_consumer_rejects_rebound_issuer_verifier_without_callback(self):
+        prepared = prepared_futures_request(
+            "kraken-futures-rebound-issuer-verifier",
+            provider_environment="LIVE",
+        )
+        with patch(
+            "mvp.autotrade_mvp.kraken_futures.require_canonical_kraken_futures_prepared_request",
+            side_effect=AssertionError("rebound issuer verifier executed"),
+        ) as rebound:
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "prepared response authority is unavailable",
+            ):
+                parse_submission_response(
+                    attempt_id=str(uuid4()),
+                    prepared_request=prepared,
+                    observation=None,
+                    transport_ambiguous=True,
+                )
+        rebound.assert_not_called()
+
+    def test_preparation_rejects_in_place_provider_domain_map_mutation(self):
+        mutations = (
+            (
+                kraken_futures_module.KRAKEN_FUTURES_BASE_URLS,
+                {"LIVE": "https://attacker.invalid"},
+            ),
+            (
+                kraken_futures_module._RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT,
+                {"LIVE": "PAPER"},
+            ),
+            (
+                kraken_futures_module.KRAKEN_FUTURES_ENDPOINTS,
+                {"PLACE_ORDER": "/attacker/sendorder"},
+            ),
+        )
+        for mapping, mutation in mutations:
+            with self.subTest(mutation=mutation), patch.dict(mapping, mutation):
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "prepared request authority changed",
+                ):
+                    prepared_futures_request(
+                        "kraken-futures-mutated-provider-domain-map",
+                        provider_environment="LIVE",
+                    )
+
     def test_submission_consumer_rejects_post_mint_prepared_digest_retarget(self):
         prepared = prepared_futures_request(
             "kraken-futures-post-mint-digest-retarget",

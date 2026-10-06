@@ -1212,6 +1212,40 @@ def _bybit_option_delivery_query_integer(value: object, *, name: str) -> int:
 
 
 
+def _bybit_option_delivery_expiry_text(value: object, *, name: str) -> str:
+    if (
+        type(value) is not str
+        or re.fullmatch(r"[0-3][0-9][A-Z]{3}[0-9]{2}", value) is None
+    ):
+        raise ProviderCoreError(
+            f"Bybit option delivery query {name} is non-canonical"
+        )
+    day = int(value[:2], 10)
+    month = value[2:5]
+    year = 2000 + int(value[5:], 10)
+    month_days = {
+        "JAN": 31,
+        "FEB": 29 if (
+            year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+        ) else 28,
+        "MAR": 31,
+        "APR": 30,
+        "MAY": 31,
+        "JUN": 30,
+        "JUL": 31,
+        "AUG": 31,
+        "SEP": 30,
+        "OCT": 31,
+        "NOV": 30,
+        "DEC": 31,
+    }
+    if day < 1 or day > month_days.get(month, 0):
+        raise ProviderCoreError(
+            f"Bybit option delivery query {name} is a non-existent calendar date"
+        )
+    return value
+
+
 def _bybit_option_delivery_decimal_text(
     value: object,
     *,
@@ -1351,13 +1385,32 @@ def parse_option_delivery_page(
             else None
         )
     )
-    requested_exp_date = query.get("expDate")
-    if requested_exp_date is not None and (
-        type(requested_exp_date) is not str
-        or re.fullmatch(r"[0-3][0-9][A-Z]{3}[0-9]{2}", requested_exp_date) is None
+    requested_limit = query.get("limit")
+    if requested_limit is not None:
+        requested_limit = _bybit_option_delivery_query_integer(
+            requested_limit,
+            name="limit",
+        )
+        if not 1 <= requested_limit <= 50:
+            raise ProviderCoreError(
+                "Bybit option delivery query limit must be between 1 and 50"
+            )
+
+    requested_cursor = query.get("cursor")
+    if requested_cursor is not None and (
+        type(requested_cursor) is not str
+        or not requested_cursor
+        or _BYBIT_OPTION_DELIVERY_CURSOR_RE.fullmatch(requested_cursor) is None
     ):
         raise ProviderCoreError(
-            "Bybit option delivery query expDate is non-canonical"
+            "Bybit option delivery query cursor is non-canonical"
+        )
+
+    requested_exp_date = query.get("expDate")
+    if requested_exp_date is not None:
+        requested_exp_date = _bybit_option_delivery_expiry_text(
+            requested_exp_date,
+            name="expDate",
         )
 
     envelope = _mapping(observation.payload, name="response")
@@ -1375,6 +1428,10 @@ def parse_option_delivery_page(
     if not isinstance(rows, (list, tuple)):
         raise ProviderCoreError(
             "Bybit option delivery result.list must be an array"
+        )
+    if requested_limit is not None and len(rows) > requested_limit:
+        raise ProviderCoreError(
+            "Bybit option delivery response exceeds requested limit"
         )
 
     next_cursor = result.get("nextPageCursor")

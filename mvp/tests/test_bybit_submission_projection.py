@@ -236,11 +236,11 @@ class AuthenticatedBybitSubmissionProjectionTests(unittest.TestCase):
             # generic ArtifactStore.  That storage integrity is deliberately
             # not a provider-origin issuer and must not widen PAPER OMS state.
             artifacts.publish_bytes(
-                artifact_id="caller-prepublished-provider-response",
+                artifact_id=str(uuid4()),
                 data=b'{"retCode":0,"retMsg":"OK"}',
                 media_type="application/json",
                 rights={"storage": True, "export": False},
-                source_refs=["provider-write:caller-authored"],
+                source_refs=["https://provider.example.test/caller-authored"],
                 metadata={
                     "provider_id": "BYBIT",
                     "account_id": "bybit-account",

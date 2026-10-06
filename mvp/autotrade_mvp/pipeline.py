@@ -693,9 +693,27 @@ def run_vertical_slice(
         evidence = recorded_evidence
     else:
         evidence = fresh_evidence
-    if (evidence.get("input_hash") != fresh_evidence["input_hash"]
-            or evidence.get("order_id") != fresh_evidence["order_id"]
-            or evidence.get("fill_id") != fresh_evidence["fill_id"]):
+    # Replay may legitimately report the operational risk outcome as
+    # "already_filled", while the first durable evidence keeps the original
+    # admission result. Everything that describes the decision or financial
+    # result must still match the freshly reconstructed durable state.
+    replay_bound_fields = (
+        "schema_version",
+        "evidence_id",
+        "input_hash",
+        "decision",
+        "decision_reason",
+        "order_id",
+        "fill_id",
+        "cash",
+        "position",
+        "equity",
+        "reconciled",
+    )
+    if any(
+        evidence.get(field) != fresh_evidence[field]
+        for field in replay_bound_fields
+    ):
         raise ValueError("Checkpoint evidence conflicts with this episode")
     evidence_ids.add(evidence["evidence_id"])
     evidence_records[evidence_id] = evidence

@@ -1101,6 +1101,29 @@ class IbkrWebAdapterTests(unittest.TestCase):
 
 
 
+    def test_tws_execution_correction_maps_to_stable_reconciliation_identity(self):
+        correction = IbkrExecutionEvidence.create(
+            execution_id="0000e0d5.6576fd38.01.02",
+            permanent_order_id=778899,
+            account_id="U1234567",
+            quantity="2",
+            price="99",
+        )
+        fill = execution_to_reconciliation_fill(
+            correction,
+            environment="PAPER",
+            client_order_id="at-ibkr-correction",
+            expected_account_id="U1234567",
+            instrument="AAPL-CONID-265598:v1",
+            fee_amount="0.30",
+            fee_currency="USD",
+            trade_time="2026-09-24T20:00:01Z",
+        )
+        self.assertEqual(
+            fill.provider_execution_id,
+            "0000e0d5.6576fd38.01.01",
+        )
+
     def test_execution_evidence_accepts_zero_perm_id_for_external_activity(self):
         execution = IbkrExecutionEvidence.create(
             execution_id="external.1.01",
@@ -1449,7 +1472,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 self.assertEqual(len(fills), 1)
                 self.assertEqual(
                     fills[0].provider_execution_id,
-                    "0000e0d5.6576fd38.01.02",
+                    "0000e0d5.6576fd38.01.01",
                 )
                 self.assertEqual(fills[0].quantity, Decimal("2"))
                 self.assertEqual(fills[0].price, Decimal("99"))
@@ -1478,6 +1501,46 @@ class IbkrWebAdapterTests(unittest.TestCase):
             tuple(fill.provider_execution_id for fill in reverse),
         )
         self.assertEqual(forward[0].provider_execution_id, "0000e0d5.6576fd38.02.01")
+
+        initial_only = parse_web_api_trades(
+            ibkr_trade_observation([base]),
+            instrument_versions_by_conid={265598: "AAPL:v1"},
+            fee_currency_by_execution_id=fees,
+        )
+        correction_only = parse_web_api_trades(
+            ibkr_trade_observation([corrected]),
+            instrument_versions_by_conid={265598: "AAPL:v1"},
+            fee_currency_by_execution_id=fees,
+        )
+        self.assertEqual(
+            initial_only[0].provider_execution_id,
+            correction_only[0].provider_execution_id,
+        )
+        self.assertEqual(
+            correction_only[0].provider_execution_id,
+            "0000e0d5.6576fd38.01.01",
+        )
+
+        independent_partial = dict(
+            base,
+            execution_id="0000e0d5.6576fd38.03.01",
+            order_ref="at-ibkr-partial-3",
+        )
+        independent = parse_web_api_trades(
+            ibkr_trade_observation([base, independent_partial]),
+            instrument_versions_by_conid={265598: "AAPL:v1"},
+            fee_currency_by_execution_id={
+                **fees,
+                "0000e0d5.6576fd38.03.01": "USD",
+            },
+        )
+        self.assertEqual(
+            {fill.provider_execution_id for fill in independent},
+            {
+                "0000e0d5.6576fd38.01.01",
+                "0000e0d5.6576fd38.03.01",
+            },
+        )
 
         ambiguous = dict(
             corrected,

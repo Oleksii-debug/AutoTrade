@@ -158,6 +158,23 @@ def _execution_correction_identity(
     return family, (len(normalized_revision), normalized_revision)
 
 
+def _stable_execution_id(execution_id: str) -> str:
+    """Map IBKR correction revisions onto one durable execution identity.
+
+    IBKR documents corrections by changing only the digits after the final
+    period (for example .02 correcting .01). AutoTrade's durable correction
+    authority requires one provider_execution_id across revisions, so numeric
+    IBKR revisions normalize to the .01 root. The exact raw ExecId remains in
+    the immutable provider-response evidence referenced by the fill.
+    """
+
+    correction = _execution_correction_identity(execution_id)
+    if correction is None:
+        return execution_id
+    family, _revision_key = correction
+    return family + ".01"
+
+
 def validate_coid(value: str) -> str:
     coid = _text(value, name="cOID")
     if _COID.fullmatch(coid) is None:
@@ -1459,7 +1476,7 @@ def parse_web_api_trades(
             provider_id="IBKR",
             account_id=account,
             environment=environment,
-            provider_execution_id=execution_id,
+            provider_execution_id=_stable_execution_id(execution_id),
             client_order_id=client_id,
             instrument=instrument,
             side=side,
@@ -1572,7 +1589,7 @@ def execution_to_reconciliation_fill(
         provider_id="IBKR",
         account_id=account,
         environment=environment,
-        provider_execution_id=execution_id,
+        provider_execution_id=_stable_execution_id(execution_id),
         client_order_id=client_id,
         instrument=_text(instrument, name="instrument"),
         quantity=execution_quantity,

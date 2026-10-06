@@ -947,6 +947,8 @@ def _install_provider_submission_observation_authority(binding_projection):
     binding_type = SubmissionResponseBinding
     error_type = ProviderCoreError
     canonical_type = type
+    canonical_type_setattr = canonical_type.__setattr__
+    canonical_type_getattribute = canonical_type.__getattribute__
     canonical_id = id
     canonical_tuple = tuple
     canonical_len = len
@@ -990,7 +992,25 @@ def _install_provider_submission_observation_authority(binding_projection):
     canonical_weakref_module = weakref
     canonical_weakref_ref = weakref.ref
     provider_ids = frozenset(PROVIDERS)
+    sensitive_observation_fields = canonical_frozenset(
+        (
+            "response_binding",
+            "provider_id",
+            "account_id",
+            "environment",
+            "client_order_id",
+            "response_sha256",
+            "observed_at",
+            "request_sha256",
+            "endpoint",
+            "capability_snapshot_ids",
+            "instrument_versions",
+            "evidence_ref",
+            "payload",
+        )
+    )
     states: dict[int, tuple[object, tuple[object, ...]]] = {}
+    observation_require_scope_code = None
 
     def authority_changed():
         raise error_type("provider submission observation authority is unavailable")
@@ -1001,6 +1021,14 @@ def _install_provider_submission_observation_authority(binding_projection):
             or SubmissionResponseBinding is not binding_type
             or ProviderCoreError is not error_type
             or type is not canonical_type
+            or canonical_type.__setattr__ is not canonical_type_setattr
+            or canonical_type.__getattribute__ is not canonical_type_getattribute
+            or canonical_type_getattribute(observation_type, "__getattribute__")
+            is not observation_getattribute
+            or canonical_type_getattribute(observation_type, "require_scope")
+            is not observation_require_scope
+            or observation_require_scope_code is None
+            or observation_require_scope.__code__ is not observation_require_scope_code
             or id is not canonical_id
             or tuple is not canonical_tuple
             or len is not canonical_len
@@ -1142,6 +1170,7 @@ def _install_provider_submission_observation_authority(binding_projection):
                 "environment": binding["environment"],
                 "account_id": binding["account_id"],
                 "sent_at": binding["sent_at"],
+                "observed_at": binding["sent_at"],
                 "response_sha256": binding["response_sha256"],
                 "response_encoding": binding["response_encoding"],
                 "terminal_state": binding["terminal_state"],
@@ -1157,6 +1186,89 @@ def _install_provider_submission_observation_authority(binding_projection):
                 "payload": current[5],
             }
         )
+
+    def observation_require_scope(
+        value,
+        *,
+        provider_id,
+        endpoint,
+        prepared_request_sha256,
+        capability_snapshot_ids,
+        instrument_versions,
+        account_id=None,
+        environment=None,
+        client_order_id=None,
+    ):
+        # Scope admission is itself financial/provider authority. Keep it inside
+        # the closure-backed registry instead of trusting a replaceable class
+        # method or derived property after the observation has been minted.
+        projection = provider_submission_observation_projection(value)
+        if canonical_text(provider_id, "provider_id").upper() != projection["provider_id"]:
+            raise error_type("provider-write provenance provider mismatch")
+        if canonical_text(endpoint, "endpoint") != projection["endpoint"]:
+            raise error_type("provider-write provenance endpoint mismatch")
+        if (
+            canonical_text(prepared_request_sha256, "prepared_request_sha256")
+            != projection["request_sha256"]
+        ):
+            raise error_type("provider-write provenance request digest mismatch")
+        if (
+            canonical_text_tuple(
+                capability_snapshot_ids,
+                "capability_snapshot_ids",
+            )
+            != projection["capability_snapshot_ids"]
+        ):
+            raise error_type("provider-write provenance capability mismatch")
+        if (
+            canonical_text_tuple(
+                instrument_versions,
+                "instrument_versions",
+            )
+            != projection["instrument_versions"]
+        ):
+            raise error_type("provider-write provenance instrument mismatch")
+        if (
+            account_id is not None
+            and canonical_text(account_id, "account_id") != projection["account_id"]
+        ):
+            raise error_type("provider-write provenance account mismatch")
+        if (
+            environment is not None
+            and canonical_text(environment, "environment").upper()
+            != projection["environment"]
+        ):
+            raise error_type("provider-write provenance environment mismatch")
+        if (
+            client_order_id is not None
+            and canonical_text(client_order_id, "client_order_id")
+            != projection["client_order_id"]
+        ):
+            raise error_type("provider-write provenance client-order mismatch")
+
+    def observation_getattribute(value, name):
+        # Frozen dataclass syntax is not an authority boundary: object.__setattr__
+        # can still retarget stored fields. Route every normal read of the
+        # authority-bearing observation payload/scope through the external
+        # issuance registry so post-mint relabelling fails before consumption.
+        if canonical_type(name) is canonical_str:
+            if name == "require_scope":
+                implementation_changed()
+            if name in sensitive_observation_fields:
+                return provider_submission_observation_projection(value)[name]
+        return object_getattribute(value, name)
+
+    observation_require_scope_code = observation_require_scope.__code__
+    canonical_type_setattr(
+        observation_type,
+        "require_scope",
+        observation_require_scope,
+    )
+    canonical_type_setattr(
+        observation_type,
+        "__getattribute__",
+        observation_getattribute,
+    )
 
     def observe_submission_json_response(
         *,

@@ -439,6 +439,7 @@ class ProviderCoreTests(unittest.TestCase):
             self.assertIsInstance(observation, ProviderSubmissionObservation)
             self.assertEqual(observation.payload["orderId"], "provider-1")
             self.assertEqual(observation.response_sha256, binding.response_sha256)
+            self.assertEqual(observation.observed_at, binding.sent_at)
             self.assertEqual(observation.request_sha256, request_sha)
             observation.require_scope(
                 provider_id="BYBIT",
@@ -450,6 +451,167 @@ class ProviderCoreTests(unittest.TestCase):
                 environment="SIMULATION",
                 client_order_id=binding.client_order_id,
             )
+
+
+    def test_submission_observation_rejects_post_mint_scope_retargeting(self):
+        with TemporaryDirectory() as directory:
+            binding, request_sha = self._durable_submission_binding(directory)
+            observation = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+            )
+
+            object.__setattr__(observation, "endpoint", "/v5/order/cancel")
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "provider submission observation authority is unavailable",
+            ):
+                observation.require_scope(
+                    provider_id="BYBIT",
+                    endpoint="/v5/order/cancel",
+                    prepared_request_sha256=request_sha,
+                    capability_snapshot_ids=("cap-1",),
+                    instrument_versions=("BTCUSD:v1",),
+                    account_id="acct",
+                    environment="SIMULATION",
+                    client_order_id=binding.client_order_id,
+                )
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "provider submission observation authority is unavailable",
+            ):
+                _ = observation.payload
+
+            post_scope = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+            )
+            post_scope.require_scope(
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+                account_id="acct",
+                environment="SIMULATION",
+                client_order_id=binding.client_order_id,
+            )
+            object.__setattr__(post_scope, "payload", {"orderId": "forged"})
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "provider submission observation authority is unavailable",
+            ):
+                _ = post_scope.payload
+
+    def test_submission_observation_rejects_scope_method_rebinding(self):
+        with TemporaryDirectory() as directory:
+            binding, request_sha = self._durable_submission_binding(directory)
+            observation = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+            )
+
+            with patch.object(
+                ProviderSubmissionObservation,
+                "require_scope",
+                lambda *_args, **_kwargs: None,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "provider submission observation authority is unavailable",
+                ):
+                    observation.require_scope(
+                        provider_id="ALPACA",
+                        endpoint="/v2/orders",
+                        prepared_request_sha256=request_sha,
+                        capability_snapshot_ids=("cap-1",),
+                        instrument_versions=("BTCUSD:v1",),
+                        account_id="acct",
+                        environment="SIMULATION",
+                        client_order_id=binding.client_order_id,
+                    )
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "provider submission observation authority is unavailable",
+                ):
+                    _ = observation.payload
+
+    def test_submission_observation_scope_barrier_rejects_attribute_lookup_rebinding(self):
+        with TemporaryDirectory() as directory:
+            binding, request_sha = self._durable_submission_binding(directory)
+            observation = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+            )
+
+            with patch.object(
+                ProviderSubmissionObservation,
+                "__getattribute__",
+                object.__getattribute__,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "provider submission observation authority is unavailable",
+                ):
+                    observation.require_scope(
+                        provider_id="BYBIT",
+                        endpoint="/v5/order/create",
+                        prepared_request_sha256=request_sha,
+                        capability_snapshot_ids=("cap-1",),
+                        instrument_versions=("BTCUSD:v1",),
+                        account_id="acct",
+                        environment="SIMULATION",
+                        client_order_id=binding.client_order_id,
+                    )
+
+    def test_submission_observation_rejects_accessor_replacement_before_scope_use(self):
+        with TemporaryDirectory() as directory:
+            binding, request_sha = self._durable_submission_binding(directory)
+            observation = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+            )
+
+            with patch.object(
+                ProviderSubmissionObservation,
+                "__getattribute__",
+                object.__getattribute__,
+            ):
+                object.__setattr__(observation, "endpoint", "/v5/order/cancel")
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "provider submission observation authority is unavailable",
+                ):
+                    observation.require_scope(
+                        provider_id="BYBIT",
+                        endpoint="/v5/order/cancel",
+                        prepared_request_sha256=request_sha,
+                        capability_snapshot_ids=("cap-1",),
+                        instrument_versions=("BTCUSD:v1",),
+                        account_id="acct",
+                        environment="SIMULATION",
+                        client_order_id=binding.client_order_id,
+                    )
 
     def test_submission_observation_rejects_runtime_binding_projection_rebinding(self):
         with TemporaryDirectory() as directory:

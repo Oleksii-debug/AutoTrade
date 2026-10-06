@@ -21,6 +21,11 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from weakref import ref as weakref_ref
 
 from .capabilities import CapabilityError, CapabilitySnapshot
+from .bybit_fee_currency_authority import (
+    BybitExecutionFeeCurrencyAuthority,
+    BybitFeeCurrencyAuthorityError,
+    project_bybit_execution_fee_currency_authority,
+)
 from .instruments import (
     InstrumentRegistry,
     InstrumentRegistryError,
@@ -1412,7 +1417,7 @@ def parse_executions(
     observation: ProviderResponseObservation,
     *,
     instrument_versions: Mapping[str, str],
-    qualified_fee_currencies: Mapping[str, str] | None = None,
+    fee_currency_authorities: tuple[BybitExecutionFeeCurrencyAuthority, ...] = (),
 ) -> tuple[ProviderFillEvidence, ...]:
     """Map one authenticated, exact-byte Bybit execution read into fills."""
 
@@ -1514,11 +1519,27 @@ def parse_executions(
         instrument_versions,
         name="instrument_versions",
     )
-    if qualified_fee_currencies is not None:
-        qualified_fee_currencies = exact_text_mapping_snapshot(
-            qualified_fee_currencies,
-            name="qualified_fee_currencies",
+    if type(fee_currency_authorities) is not tuple:
+        raise ProviderCoreError(
+            "fee_currency_authorities must be an exact tuple of qualified authorities"
         )
+    fee_authority_by_instrument = {}
+    for authority_value in fee_currency_authorities:
+        try:
+            authority_projection = (
+                project_bybit_execution_fee_currency_authority(authority_value)
+            )
+        except (TypeError, BybitFeeCurrencyAuthorityError) as error:
+            raise ProviderCoreError(
+                "Bybit execution fee-currency authority is not canonically issued"
+            ) from error
+        if authority_projection.instrument_version in fee_authority_by_instrument:
+            raise ProviderCoreError(
+                "Bybit execution fee-currency authority is ambiguous for instrument"
+            )
+        fee_authority_by_instrument[
+            authority_projection.instrument_version
+        ] = authority_projection
 
     by_execution: dict[str, ProviderFillEvidence] = {}
     for index, value in enumerate(rows):
@@ -1603,38 +1624,6 @@ def parse_executions(
             )
 
         provider_fee_currency = row.get("feeCurrency")
-        if provider_fee_currency is None or provider_fee_currency == "":
-            if qualified_fee_currencies is None:
-                raise ProviderCoreError(
-                    "Bybit execution fee currency is unresolved; qualified "
-                    "fee-currency evidence is required"
-                )
-            try:
-                qualified_fee_currency = qualified_fee_currencies[instrument]
-            except KeyError as error:
-                raise ProviderCoreError(
-                    "Bybit execution fee currency is unresolved for instrument"
-                ) from error
-            if (
-                type(qualified_fee_currency) is not str
-                or not qualified_fee_currency
-                or qualified_fee_currency != qualified_fee_currency.strip()
-                or qualified_fee_currency != qualified_fee_currency.upper()
-            ):
-                raise ProviderCoreError(
-                    "qualified fee currency must be canonical exact text"
-                )
-            fee_currency = qualified_fee_currency
-        else:
-            if (
-                type(provider_fee_currency) is not str
-                or provider_fee_currency != provider_fee_currency.strip()
-                or provider_fee_currency != provider_fee_currency.upper()
-            ):
-                raise ProviderCoreError(
-                    "Bybit execution fee currency must be canonical exact text"
-                )
-            fee_currency = provider_fee_currency
 
         provider_side = row.get("side")
         if (
@@ -1692,6 +1681,50 @@ def parse_executions(
                 "Bybit execution execTime is outside supported UTC range"
             ) from error
 
+        fee_authority = fee_authority_by_instrument.get(instrument)
+        authority_evidence_ref = None
+        if fee_authority is not None:
+            try:
+                fee_authority.require_execution_scope(
+                    provider_id="BYBIT",
+                    runtime_environment=environment,
+                    account_id=account_id,
+                    entity_id=binding.entity_id,
+                    capability_snapshot_id=binding.capability_snapshot_id,
+                    category=query_category,
+                    instrument_version=instrument,
+                    provider_symbol=symbol,
+                    trade_time=trade_time,
+                )
+            except BybitFeeCurrencyAuthorityError as error:
+                raise ProviderCoreError(str(error)) from error
+            authority_evidence_ref = fee_authority.evidence_ref
+
+        if provider_fee_currency is None or provider_fee_currency == "":
+            if fee_authority is None:
+                raise ProviderCoreError(
+                    "Bybit execution fee currency is unresolved; exact qualified "
+                    "provider/instrument fee-currency authority is required"
+                )
+            fee_currency = fee_authority.fee_currency
+        else:
+            if (
+                type(provider_fee_currency) is not str
+                or provider_fee_currency != provider_fee_currency.strip()
+                or provider_fee_currency != provider_fee_currency.upper()
+            ):
+                raise ProviderCoreError(
+                    "Bybit execution fee currency must be canonical exact text"
+                )
+            fee_currency = provider_fee_currency
+            if (
+                fee_authority is not None
+                and fee_currency != fee_authority.fee_currency
+            ):
+                raise ProviderCoreError(
+                    "Bybit execution provider fee currency conflicts with qualified rule"
+                )
+
         fill = ProviderFillEvidence.create(
             provider_id="BYBIT",
             account_id=account_id,
@@ -1705,7 +1738,11 @@ def parse_executions(
             fee_amount=bounded_economics["execFee"],
             fee_currency=fee_currency,
             trade_time=trade_time,
-            evidence_refs=(observation.evidence_ref,),
+            evidence_refs=(
+                (observation.evidence_ref,)
+                if authority_evidence_ref is None
+                else (observation.evidence_ref, authority_evidence_ref)
+            ),
         )
         previous = by_execution.get(execution_id)
         if previous is not None and previous != fill:
@@ -1718,7 +1755,7 @@ def parse_executions(
 
 
 BYBIT_EXECUTION_PARSER_IDENTITY = "BYBIT_EXECUTION_V5_JSON_V1"
-BYBIT_EXECUTION_PARSER_VERSION = "1.0.0"
+BYBIT_EXECUTION_PARSER_VERSION = "1.1.0"
 BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST = (
     "sha256:"
     + sha256(
@@ -1769,11 +1806,18 @@ BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST = (
                     "execTime": "BOUNDED_INTEGER_TEXT_SUPPORTED_UTC_RANGE",
                 },
                 "fee_currency": (
-                    "EXACT_UPPERCASE_PROVIDER_TEXT_OR_EXACT_TEXT_MAPPING_"
-                    "FALLBACK_ONLY_WHEN_PROVIDER_FIELD_EMPTY"
+                    "EXACT_UPPERCASE_PROVIDER_TEXT_OR_Q_CAPABILITY_INSTRUMENT_BOUND_"
+                    "AUTHORITY_FALLBACK_ONLY_WHEN_PROVIDER_FIELD_EMPTY"
+                ),
+                "fee_currency_reconciliation": (
+                    "WHEN_QUALIFIED_RULE_IS_SUPPLIED_NONEMPTY_PROVIDER_CURRENCY_"
+                    "MUST_MATCH_EXACT_RULE_CURRENCY"
                 ),
                 "fee_currency_fallback_authority": (
-                    "NOT_ESTABLISHED_BY_PARSER_CONTRACT"
+                    "SEALED_Q_CAPABILITY_INSTRUMENT_RULE_CAMPAIGN_IDENTITY"
+                ),
+                "fee_currency_authority_evidence": (
+                    "QUALIFIED_AUTHORITY_IDENTITY_ADDED_TO_FILL_EVIDENCE_REFS"
                 ),
                 "extra_fees": "FAIL_CLOSED_WHEN_ECONOMICALLY_NONEMPTY",
                 "duplicate_execution_id": "IDENTICAL_OR_FAIL_CLOSED",

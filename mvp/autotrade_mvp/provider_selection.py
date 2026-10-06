@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import re
-from typing import Callable, Iterable
+from typing import Callable
 from weakref import ref as weakref_ref
 
 from .capabilities import CapabilityError, CapabilitySnapshot
@@ -430,7 +430,7 @@ def _unsupported_features(request: ProviderRouteRequest) -> frozenset[str]:
 
 def _select_provider_impl(
     request: ProviderRouteRequest,
-    candidates: Iterable[ProviderCandidate],
+    candidates: list[ProviderCandidate] | tuple[ProviderCandidate, ...],
     *,
     at: datetime,
     capability_registry: DurableCapabilityRegistry,
@@ -451,7 +451,12 @@ def _select_provider_impl(
         )
 
     point = _instant(at, "at")
-    materialized = tuple(candidates)
+    if type(candidates) is tuple:
+        materialized = candidates
+    elif type(candidates) is list:
+        materialized = tuple(candidates)
+    else:
+        raise TypeError("candidates must be an exact list or tuple")
     if any(type(candidate) is not ProviderCandidate for candidate in materialized):
         raise TypeError("candidates must contain exact ProviderCandidate values")
     identities = [candidate.identity for candidate in materialized]
@@ -604,7 +609,7 @@ def _install_provider_selector(
 
     def select_provider(
         request: ProviderRouteRequest,
-        candidates: Iterable[ProviderCandidate],
+        candidates: list[ProviderCandidate] | tuple[ProviderCandidate, ...],
         *,
         at: datetime,
         capability_registry: DurableCapabilityRegistry,

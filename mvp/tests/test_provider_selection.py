@@ -180,6 +180,14 @@ class _HostileTimezone(tzinfo):
         raise AssertionError("hostile timezone callback executed")
 
 
+class _HostileCandidateList(list):
+    calls = 0
+
+    def __iter__(self):
+        type(self).calls += 1
+        raise AssertionError("hostile candidate iterator executed")
+
+
 class ProviderSelectionTests(unittest.TestCase):
     def authorities(self, directory: str, *, unsupported=()):
         journal = JournalStore(Path(directory) / "journal.sqlite3")
@@ -240,6 +248,35 @@ class ProviderSelectionTests(unittest.TestCase):
                 )
 
             self.assertEqual(_HostileTimezone.calls, 0)
+
+    def test_selection_rejects_executable_candidate_container_before_iteration(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            _HostileCandidateList.calls = 0
+            hostile_candidates = _HostileCandidateList([candidate()])
+
+            with self.assertRaisesRegex(TypeError, "exact list or tuple"):
+                select_provider(
+                    request(),
+                    hostile_candidates,
+                    at=NOW,
+                    capability_registry=capabilities,
+                    qualification_registry=qualifications,
+                )
+
+            self.assertEqual(_HostileCandidateList.calls, 0)
+
+    def test_selection_accepts_exact_tuple_candidate_population(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            result = select_provider(
+                request(),
+                (candidate(),),
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            self.assertEqual(result.status, "SELECTED_UNAMBIGUOUS")
 
     def test_candidate_contains_no_caller_capability_or_qualification_authority(self):
         route = candidate()

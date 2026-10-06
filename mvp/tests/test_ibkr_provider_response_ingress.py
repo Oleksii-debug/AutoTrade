@@ -1,5 +1,6 @@
 import unittest
 
+from mvp.autotrade_mvp.provider_core import ProviderResponseObservation
 from mvp.autotrade_mvp.ibkr_web import (
     IbkrWebAdapterError,
     parse_cancel_response,
@@ -47,6 +48,14 @@ class _ExecutableList(list):
         raise AssertionError("provider sequence callback executed")
 
 
+class _ExecutableObservation(ProviderResponseObservation):
+    scope_called = False
+
+    def require_scope(self, **kwargs):
+        type(self).scope_called = True
+        raise AssertionError("forged observation scope callback executed")
+
+
 class IbkrProviderResponseIngressTests(unittest.TestCase):
     def setUp(self):
         _ExecutableDict.get_called = False
@@ -54,6 +63,7 @@ class IbkrProviderResponseIngressTests(unittest.TestCase):
         _ExecutableStr.strip_called = False
         _EqualityTrap.eq_called = False
         _ExecutableList.iter_called = False
+        _ExecutableObservation.scope_called = False
 
     def test_submission_parser_rejects_executable_mapping_before_callbacks(self):
         with self.assertRaisesRegex(TypeError, "exact object"):
@@ -182,6 +192,18 @@ class IbkrProviderResponseIngressTests(unittest.TestCase):
                 payload={"error": _StringificationTrap()},
             )
         self.assertFalse(_StringificationTrap.str_called)
+
+    def test_trade_reconciliation_rejects_observation_subclass_before_callbacks(self):
+        forged = object.__new__(_ExecutableObservation)
+        from mvp.autotrade_mvp.ibkr_web import parse_web_api_trades
+
+        with self.assertRaisesRegex(TypeError, "exact ProviderResponseObservation"):
+            parse_web_api_trades(
+                forged,
+                instrument_versions_by_conid={265598: "AAPL:v1"},
+                fee_currency_by_execution_id={"exec-1": "USD"},
+            )
+        self.assertFalse(_ExecutableObservation.scope_called)
 
     def test_documented_ack_reply_and_reject_shapes_still_parse(self):
         ack = parse_order_submission_response(

@@ -943,27 +943,31 @@ def parse_web_api_trades(
     explicit evidence because the trades row does not canonically carry it.
     """
 
-    if not isinstance(observation, ProviderResponseObservation):
-        raise TypeError("observation must be ProviderResponseObservation")
+    if type(observation) is not ProviderResponseObservation:
+        raise TypeError("observation must be exact ProviderResponseObservation")
     observation.require_scope(
         provider_id="IBKR",
         surface=Surface.AUTHENTICATED_READ,
         endpoint="/iserver/account/trades",
     )
     payload = observation.payload
-    if not isinstance(payload, (list, tuple)):
-        raise IbkrWebAdapterError("trades response must be an array")
-    if not isinstance(instrument_versions_by_conid, Mapping):
-        raise TypeError("instrument_versions_by_conid must be a mapping")
-    if not isinstance(fee_currency_by_execution_id, Mapping):
-        raise TypeError("fee_currency_by_execution_id must be a mapping")
+    if type(payload) is not tuple:
+        raise IbkrWebAdapterError(
+            "trades response must be the canonical frozen JSON array"
+        )
+    if type(instrument_versions_by_conid) is not dict:
+        raise TypeError("instrument_versions_by_conid must be an exact dict")
+    if type(fee_currency_by_execution_id) is not dict:
+        raise TypeError("fee_currency_by_execution_id must be an exact dict")
     account = observation.account_id
     environment = observation.environment
     by_execution: dict[str, ProviderFillEvidence] = {}
 
     for index, raw in enumerate(payload):
-        if not isinstance(raw, Mapping):
-            raise IbkrWebAdapterError(f"trades[{index}] must be an object")
+        if type(raw) is not MappingProxyType:
+            raise IbkrWebAdapterError(
+                f"trades[{index}] must be a canonical frozen JSON object"
+            )
         execution_id = _text(raw.get("execution_id"), name="execution_id")
         raw_account = raw.get("account", raw.get("accountCode"))
         observed_account = _text(raw_account, name="trade.account")

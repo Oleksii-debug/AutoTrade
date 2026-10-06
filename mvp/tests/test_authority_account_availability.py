@@ -1,5 +1,6 @@
 from copy import deepcopy
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -31,6 +32,10 @@ from mvp.autotrade_mvp.reconciliation_journal import (
     record_reconciliation_checkpoint,
 )
 from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy
+from mvp.autotrade_mvp.settlement import (
+    BuyingPowerEvidence,
+    SettlementAccountScope,
+)
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 
@@ -168,9 +173,34 @@ def _checkpoint(
     reconciliation_id="availability-authority",
     snapshot_id="availability-snapshot",
     force_incomplete=False,
+    margin_credit=None,
 ):
     if available_cash is None:
         available_cash = cash
+    available_resources = {"CASH:USD": available_cash}
+    resource_details = None
+    if margin_credit is not None:
+        buying_power = BuyingPowerEvidence(
+            evidence_id=f"{snapshot_id}-margin-credit",
+            scope=SettlementAccountScope(
+                provider_id=PROVIDER_ID,
+                account_id=ACCOUNT_ID,
+                environment=ENVIRONMENT,
+            ),
+            currency="USD",
+            additional_credit=margin_credit,
+            observed_at=datetime(
+                2026, 9, 24, 18, 0, 20, tzinfo=timezone.utc
+            ),
+            valid_until=datetime(
+                2026, 9, 24, 18, 2, 0, tzinfo=timezone.utc
+            ),
+            evidence_refs=(f"provider:{snapshot_id}:margin-credit",),
+        )
+        available_resources[buying_power.resource_key] = margin_credit
+        resource_details = {
+            buying_power.resource_key: buying_power.resource_detail(),
+        }
     result = reconcile_account(
         provider_id=PROVIDER_ID,
         account_id=ACCOUNT_ID,
@@ -202,9 +232,10 @@ def _checkpoint(
             query_started_at="2026-09-24T18:00:00Z",
             query_completed_at="2026-09-24T18:00:30Z",
             valid_until="2026-09-24T18:02:00Z",
-            available_resources={"CASH:USD": available_cash},
+            available_resources=available_resources,
             provider_as_of="2026-09-24T18:00:30Z",
             evidence_refs=(f"provider:{snapshot_id}",),
+            resource_details=resource_details,
         ),
     )
     if force_incomplete:
@@ -513,6 +544,192 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 "50",
             )
             self.assertEqual(_dispatch(authority, admitted), (True, "allowed"))
+
+
+    def test_configured_margin_credit_is_separate_from_settled_cash(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            settlement, economic = _capital_authorities(
+                store,
+                directory,
+                amount="50",
+            )
+            authority = AuthorityService(
+                store,
+                settlement_book=settlement,
+                economic_book=economic,
+            )
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(
+                store,
+                available_cash="1000",
+                margin_credit="250",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+
+            admitted = _admit(
+                authority,
+                reservations,
+                checkpoint,
+                reservation_requirements={
+                    "CASH:USD": "40",
+                    "MARGIN_CREDIT:USD": "200",
+                },
+                reservation_available={
+                    "CASH:USD": "1000",
+                    "MARGIN_CREDIT:USD": "250",
+                },
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("40"),
+            )
+            self.assertEqual(
+                reservations.total_reserved("MARGIN_CREDIT:USD"),
+                Decimal("200"),
+            )
+
+            risk_event = store.load_events(
+                "risk_decision",
+                admitted.risk_decision_id,
+            )[0]
+            capital = risk_event["payload"][
+                "reservation_availability_evidence"
+            ]["settlement_capital_adjustment"]
+            self.assertEqual(
+                capital["resources"]["CASH:USD"],
+                {
+                    "provider_available": "1000",
+                    "local_available": "50",
+                    "effective_available": "50",
+                },
+            )
+            self.assertEqual(
+                capital["resources"]["MARGIN_CREDIT:USD"],
+                {
+                    "provider_available": "250",
+                    "local_available": "250",
+                    "effective_available": "250",
+                },
+            )
+
+            reservation_event = [
+                event
+                for event in store.load_events(
+                    "reservation_book",
+                    reservations.scope_id,
+                )
+                if event["payload"].get("operation") == "RESERVE"
+            ][0]
+            self.assertEqual(
+                reservation_event["payload"]["request"]["available"],
+                {
+                    "CASH:USD": "50",
+                    "MARGIN_CREDIT:USD": "250",
+                },
+            )
+            self.assertEqual(_dispatch(authority, admitted), (True, "allowed"))
+
+    def test_margin_credit_never_increases_cash_capacity(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            settlement, economic = _capital_authorities(
+                store,
+                directory,
+                amount="50",
+            )
+            authority = AuthorityService(
+                store,
+                settlement_book=settlement,
+                economic_book=economic,
+            )
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(
+                store,
+                available_cash="1000",
+                margin_credit="250",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Insufficient CASH:USD",
+            ):
+                _admit(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    reservation_requirements={"CASH:USD": "60"},
+                )
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+            self.assertEqual(
+                reservations.total_reserved("MARGIN_CREDIT:USD"),
+                Decimal("0"),
+            )
+
+    def test_dispatch_rechecks_margin_credit_as_separate_capital(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            settlement, economic = _capital_authorities(
+                store,
+                directory,
+                amount="50",
+            )
+            authority = AuthorityService(
+                store,
+                settlement_book=settlement,
+                economic_book=economic,
+            )
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(
+                store,
+                available_cash="1000",
+                margin_credit="250",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            admitted = _admit(
+                authority,
+                reservations,
+                checkpoint,
+                reservation_requirements={
+                    "CASH:USD": "40",
+                    "MARGIN_CREDIT:USD": "200",
+                },
+                reservation_available={
+                    "CASH:USD": "1000",
+                    "MARGIN_CREDIT:USD": "250",
+                },
+            )
+            self.assertEqual(_dispatch(authority, admitted), (True, "allowed"))
+
+            _checkpoint(
+                store,
+                available_cash="1000",
+                margin_credit="100",
+                observed_at="2026-09-24T18:01:10Z",
+                reconciliation_id="availability-margin-credit-reduced",
+                snapshot_id="availability-margin-credit-reduced",
+            )
+            self.assertEqual(
+                _dispatch(authority, admitted),
+                (False, "financial_evidence_invalid"),
+            )
 
     def test_admission_rejects_local_economic_truth_after_provider_query_started(self):
         with TemporaryDirectory() as directory:

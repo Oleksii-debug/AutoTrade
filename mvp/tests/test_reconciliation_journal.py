@@ -122,6 +122,25 @@ def reconciliation(**overrides):
 
 
 class ReconciliationJournalTests(unittest.TestCase):
+
+    def test_margin_credit_requires_typed_buying_power_evidence(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "MARGIN_CREDIT resources require typed buying-power evidence",
+        ):
+            ResourceAvailabilityEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                snapshot_id="margin-credit-missing-detail",
+                query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+                provider_as_of="2026-09-24T18:59:59Z",
+                valid_until="2026-09-24T19:05:00Z",
+                available_resources={"MARGIN_CREDIT:USD": "250"},
+                evidence_refs=("provider:margin-credit-missing-detail",),
+            )
+
     def test_checkpoint_writer_rejects_journal_store_subclass_before_callbacks(self):
         class ExplosiveJournalStore(JournalStore):
             calls = 0

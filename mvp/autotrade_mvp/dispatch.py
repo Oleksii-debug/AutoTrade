@@ -2518,6 +2518,7 @@ class GuardedDispatcher:
         snapshot_setattr = setattr
         snapshot_type = type
         snapshot_tuple = tuple
+        snapshot_dict = dict
         snapshot_len = len
         snapshot_module_globals = globals()
         snapshot_module_globals_get = snapshot_module_globals.get
@@ -2562,6 +2563,24 @@ class GuardedDispatcher:
             "__code__",
             None,
         )
+        decoder_json_loads_defaults = snapshot_getattr(
+            decoder_json_loads,
+            "__defaults__",
+            None,
+        )
+        decoder_json_loads_kwdefaults = snapshot_getattr(
+            decoder_json_loads,
+            "__kwdefaults__",
+            None,
+        )
+        if snapshot_type(decoder_json_loads_kwdefaults) is not snapshot_dict:
+            raise RuntimeError(
+                "exact JSON decoder default authority is unavailable"
+            )
+        decoder_json_loads_kwdefault_items = snapshot_tuple(
+            decoder_json_loads_kwdefaults.items()
+        )
+        decoder_json_decoder = decoder_json_namespace_get("JSONDecoder")
         decoder_json_decode_error = decoder_json_namespace_get(
             "JSONDecodeError"
         )
@@ -2672,6 +2691,39 @@ class GuardedDispatcher:
 
             if decoder_json_namespace_get("loads") is not decoder_json_loads:
                 decoder_json_namespace_set("loads", decoder_json_loads)
+                changed = True
+            if (
+                snapshot_getattr(
+                    decoder_json_loads,
+                    "__defaults__",
+                    None,
+                )
+                is not decoder_json_loads_defaults
+            ):
+                snapshot_setattr(
+                    decoder_json_loads,
+                    "__defaults__",
+                    decoder_json_loads_defaults,
+                )
+                changed = True
+            current_json_loads_kwdefaults = snapshot_getattr(
+                decoder_json_loads,
+                "__kwdefaults__",
+                None,
+            )
+            if (
+                snapshot_type(current_json_loads_kwdefaults) is not snapshot_dict
+                or snapshot_tuple(current_json_loads_kwdefaults.items())
+                != decoder_json_loads_kwdefault_items
+            ):
+                snapshot_setattr(
+                    decoder_json_loads,
+                    "__kwdefaults__",
+                    snapshot_dict(decoder_json_loads_kwdefault_items),
+                )
+                changed = True
+            if decoder_json_namespace_get("JSONDecoder") is not decoder_json_decoder:
+                decoder_json_namespace_set("JSONDecoder", decoder_json_decoder)
                 changed = True
             if (
                 decoder_json_namespace_get("JSONDecodeError")

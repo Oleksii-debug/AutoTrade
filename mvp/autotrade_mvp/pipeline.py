@@ -157,6 +157,7 @@ def handle_journal_event(root: Path, symbol: str, evidence: dict) -> None:
     timestamp = _utc_z(evidence["recorded_at"])
     payload = {
         "evidence_id": evidence["evidence_id"],
+        "checkpoint_configuration_digest": evidence["checkpoint_configuration_digest"],
         "input_hash": evidence["input_hash"],
         "decision": evidence["decision"],
         "decision_reason": evidence["decision_reason"],

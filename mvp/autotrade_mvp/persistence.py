@@ -385,7 +385,8 @@ class JournalStore(_JournalStoreImpl):
             raise TypeError("referenced_event_ids must be exact canonical text tuple")
         if len(set(referenced_event_ids)) != len(referenced_event_ids):
             raise ValueError("referenced_event_ids must be unique")
-        request_hash = _impl.payload_digest(request)
+        request_snapshot = _impl._detach_json_value(request)
+        request_hash = _impl.payload_digest(request_snapshot)
 
         with self._connect() as connection:
             connection.execute("BEGIN")

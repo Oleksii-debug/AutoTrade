@@ -111,6 +111,34 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
                 store.append_event(candidate)
             self.assertEqual(store.current_journal_sequence(), 0)
 
+    def test_load_command_event_batch_rejects_executable_request_before_authority_read(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            request = {"action": "ORDER.SUBMIT"}
+            store.commit_command(
+                command_id="cmd-load-hostile-request",
+                actor="operator",
+                environment="PAPER",
+                idempotency_key="key-load-hostile-request",
+                request=request,
+                result={"status": "ACCEPTED"},
+                state_version=1,
+                events=[(_event("evt-load-hostile-request"), None)],
+            )
+            before = store.whole_store_state_counts()
+            with self.assertRaisesRegex(
+                TypeError,
+                "persistent JSON values must use exact built-in JSON containers and scalars",
+            ):
+                store.load_command_event_batch(
+                    command_id="cmd-load-hostile-request",
+                    actor="operator",
+                    environment="PAPER",
+                    idempotency_key="key-load-hostile-request",
+                    request=_HostileDict(request),
+                )
+            self.assertEqual(store.whole_store_state_counts(), before)
+
     def test_commit_command_rejects_executable_request_before_any_durable_mutation(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

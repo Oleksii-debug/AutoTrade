@@ -665,7 +665,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 )
 
     def test_submission_response_rejects_durable_provider_environment_scope_mismatch(self):
-        for scoped_provider_environment in ("DEMO", "testnet", " TESTNET "):
+        for scoped_provider_environment in ("DEMO",):
             with self.subTest(
                 scoped_provider_environment=scoped_provider_environment
             ):
@@ -682,7 +682,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                     submission_scope_provider_environment=scoped_provider_environment,
                     intent_id=(
                         "bybit-provider-domain-mismatch-"
-                        + scoped_provider_environment.strip().lower()
+                        + scoped_provider_environment.lower()
                     ),
                 )
                 with self.assertRaisesRegex(
@@ -693,6 +693,30 @@ class BybitV5AdapterTests(unittest.TestCase):
                         attempt_id=attempt,
                         prepared_request=prepared,
                         observation=observation,
+                    )
+
+        for noncanonical_provider_environment in ("testnet", " TESTNET "):
+            with self.subTest(
+                noncanonical_provider_environment=noncanonical_provider_environment
+            ):
+                with self.assertRaises(ProviderCoreError):
+                    self._durable_write_observation(
+                        {
+                            "retCode": 0,
+                            "retMsg": "OK",
+                            "result": {
+                                "orderId": "provider-domain-noncanonical",
+                                "orderLinkId": "__CLIENT__",
+                            },
+                        },
+                        provider_environment="TESTNET",
+                        submission_scope_provider_environment=(
+                            noncanonical_provider_environment
+                        ),
+                        intent_id=(
+                            "bybit-provider-domain-noncanonical-"
+                            + noncanonical_provider_environment.strip().lower()
+                        ),
                     )
 
     def test_submission_response_rejects_non_2xx_sent_binding(self):

@@ -567,6 +567,52 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertFalse(any(root.glob(".autotrade-backup-*")))
 
+    def test_runtime_checkpoint_journal_replacement_before_publish_aborts_backup(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_autonomous_sources(root)
+            target = root / "backup"
+            journal = state / "journal.sqlite3"
+            replacement = root / "late-replacement-journal.sqlite3"
+            with closing(sqlite3.connect(journal)) as source_db:
+                with closing(sqlite3.connect(replacement)) as replacement_db:
+                    source_db.backup(replacement_db)
+                    replacement_db.commit()
+
+            original_fsync_tree = backup_module._fsync_directory_tree
+            injected = False
+
+            def fsync_then_replace_journal(stage_root):
+                nonlocal injected
+                result = original_fsync_tree(stage_root)
+                if (
+                    not injected
+                    and Path(stage_root).name.startswith(".autotrade-backup-")
+                ):
+                    injected = True
+                    replacement.replace(journal)
+                    for suffix in ("-wal", "-shm"):
+                        try:
+                            Path(str(journal) + suffix).unlink()
+                        except FileNotFoundError:
+                            pass
+                return result
+
+            with patch.object(
+                backup_module,
+                "_fsync_directory_tree",
+                side_effect=fsync_then_replace_journal,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "journal generation changed before backup commit",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
     def test_runtime_checkpoint_created_after_staging_fsync_aborts_backup(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

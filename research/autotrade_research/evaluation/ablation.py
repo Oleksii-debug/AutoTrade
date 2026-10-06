@@ -1838,21 +1838,21 @@ class AblationQualificationAuthority:
             instrument_family=instrument_family,
         )
         snapshot.verify_integrity()
-        completeness = ScientificRegistry.completeness(
+        completeness = ScientificRegistry.trial_completeness_evidence(
             scientific_registry,
             protocol_id,
         )
         population = RegisteredAblationPopulation(
             protocol_digest=protocol_hash,
             population_digest=snapshot.root_hash,
-            stopping_rule_digest=completeness["stopping_rules_hash"],
+            stopping_rule_digest=completeness.stopping_rules_hash,
             source_revision=source_revision,
             registered_at_utc=registered_at,
             evaluation_cutoff_utc=causal_cutoff,
             population_unit_ids=tuple(
                 sorted(row["episode_id"] for row in snapshot.rows)
             ),
-            complete=True,
+            complete=completeness.complete,
         )
         outcomes = tuple(
             AblationQualificationAuthority._load_outcome(
@@ -1874,7 +1874,7 @@ class AblationQualificationAuthority:
                     registered_at_utc=registered_at,
                     evaluation_cutoff_utc=population.evaluation_cutoff_utc,
                     population_unit_ids=population.population_unit_ids,
-                    complete=True,
+                    complete=population.complete,
                 )
         return population, outcomes
 

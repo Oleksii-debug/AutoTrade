@@ -278,6 +278,133 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 permission_scope="ORDER.READ",
             )
 
+    def test_provider_observation_instance_scope_shadow_is_rejected_before_dispatch(self):
+        source = sealed_dividend()
+        calls = []
+
+        def forged_scope(**_kwargs):
+            calls.append("called")
+            raise AssertionError("shadowed source require_scope must not execute")
+
+        object.__setattr__(source, "require_scope", forged_scope)
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "observation callback must not be shadowed",
+        ):
+            resolve(source)
+        self.assertEqual(calls, [])
+
+    def test_query_binding_instance_scope_shadow_is_rejected_before_dispatch(self):
+        source = sealed_dividend()
+        calls = []
+
+        def forged_scope(**_kwargs):
+            calls.append("called")
+            raise AssertionError("shadowed binding require_scope must not execute")
+
+        object.__setattr__(source.query_binding, "require_scope", forged_scope)
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "binding callback must not be shadowed",
+        ):
+            resolve(source)
+        self.assertEqual(calls, [])
+
+    def test_mutated_provider_payload_fails_before_hostile_mapping_dispatch(self):
+        source = sealed_dividend()
+
+        class HostilePayload(dict):
+            calls = 0
+
+            def _explode(self):
+                type(self).calls += 1
+                raise AssertionError("mutated payload must not be inspected")
+
+            def __iter__(self):
+                self._explode()
+
+            def items(self):
+                self._explode()
+
+            def get(self, *_args, **_kwargs):
+                self._explode()
+
+            def __getitem__(self, _key):
+                self._explode()
+
+        hostile = HostilePayload()
+        object.__setattr__(source, "payload", hostile)
+
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "provider observation authority mismatch",
+        ):
+            resolve(source)
+        self.assertEqual(HostilePayload.calls, 0)
+
+    def test_mutated_query_binding_fails_before_polymorphic_text_dispatch(self):
+        source = sealed_dividend()
+
+        class HostileText(str):
+            calls = 0
+
+            def strip(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("mutated query text must not dispatch")
+
+            def upper(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("mutated query text must not dispatch")
+
+        object.__setattr__(
+            source.query_binding,
+            "endpoint",
+            HostileText(ENDPOINT),
+        )
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "provider observation authority mismatch",
+        ):
+            resolve(source)
+        self.assertEqual(HostileText.calls, 0)
+
+    def test_late_module_global_provider_projection_decoys_do_not_run(self):
+        source = sealed_dividend()
+        calls = []
+        original_projection = (
+            corporate_action_evidence_module.provider_response_observation_projection
+        )
+        original_scope = (
+            corporate_action_evidence_module.provider_response_observation_require_scope
+        )
+
+        def forged_projection(_source):
+            calls.append("projection")
+            raise AssertionError("late projection decoy must not execute")
+
+        def forged_scope(_source, **_kwargs):
+            calls.append("scope")
+            raise AssertionError("late scope decoy must not execute")
+
+        corporate_action_evidence_module.provider_response_observation_projection = (
+            forged_projection
+        )
+        corporate_action_evidence_module.provider_response_observation_require_scope = (
+            forged_scope
+        )
+        try:
+            accepted = resolve(source)
+        finally:
+            corporate_action_evidence_module.provider_response_observation_projection = (
+                original_projection
+            )
+            corporate_action_evidence_module.provider_response_observation_require_scope = (
+                original_scope
+            )
+
+        self.assertEqual(calls, [])
+        self.assertEqual(accepted.evidence_ref, source.evidence_ref)
+
     def test_instrument_registry_subclass_is_rejected_before_registry_dispatch(self):
         class ForgedRegistry(InstrumentRegistry):
             def exact(self, _version_ref):

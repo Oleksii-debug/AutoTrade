@@ -308,6 +308,35 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 "_require_ibkr_brokerage_session_observation",
             )
 
+    def test_session_financial_guard_does_not_delegate_readiness_to_mutable_class_method(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        session = ready_session(connected=False)
+        original = IbkrBrokerageSessionStatus.require_trade_ready
+        IbkrBrokerageSessionStatus.require_trade_ready = lambda _self: None
+        try:
+            with self.assertRaisesRegex(
+                IbkrWebAdapterError,
+                "brokerage session is disconnected",
+            ):
+                prepare_normalized_order(
+                    intent,
+                    client_order_id="at-class-readiness-rebind",
+                    capability=capability(),
+                    session=session,
+                    at=NOW,
+                    maximum_session_age_seconds=30,
+                )
+        finally:
+            IbkrBrokerageSessionStatus.require_trade_ready = original
+
     def test_session_parser_rejects_runtime_endpoint_authority_rebinding(self):
         observation = ibkr_session_observation(
             {

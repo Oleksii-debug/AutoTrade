@@ -20,8 +20,12 @@ from threading import Lock
 from types import MappingProxyType
 from typing import Callable, Mapping
 from urllib.parse import parse_qs, unquote, urlsplit
+from uuid import UUID
+
+from contracts.bindings.python.common_scalars import is_valid_common_scalar
 
 from .durable_host_api import JournalBackedHostCommandStore
+from .host_actions import SUPPORTED_HOST_ACTIONS
 from .host_api import EventGap, command_result_payload, operation_result_payload
 from .persistence import JournalStore
 from .security import SecurityBoundary, _authenticated_origin
@@ -66,6 +70,71 @@ _SINGLETON_REQUEST_HEADERS = (
     "Content-Type",
     "Accept",
 )
+
+_UI_COMMAND_FIELDS = frozenset(
+    {
+        "command_id",
+        "expected_state_version",
+        "idempotency_key",
+        "actor",
+        "session",
+        "account_id",
+        "environment",
+        "action",
+        "payload",
+    }
+)
+_SESSION_REFERENCE = re.compile(r"^sid-[0-9a-f]{64}$")
+
+
+def _validate_ui_command_contract(command: Mapping[str, object]) -> None:
+    """Enforce the canonical contract-v5 UiCommand shape at HTTP ingress."""
+
+    if type(command) is not dict:
+        raise ValueError("UiCommand must be a JSON object")
+    fields = set(command)
+    if fields != _UI_COMMAND_FIELDS:
+        raise ValueError("UiCommand fields do not match the canonical contract")
+
+    command_id = command.get("command_id")
+    if type(command_id) is not str:
+        raise ValueError("UiCommand command_id must be a UUID string")
+    try:
+        UUID(command_id)
+    except (ValueError, AttributeError) as error:
+        raise ValueError("UiCommand command_id must be a UUID string") from error
+
+    if not is_valid_common_scalar(
+        "Sequence", command.get("expected_state_version")
+    ):
+        raise ValueError(
+            "UiCommand expected_state_version must be a canonical Sequence"
+        )
+
+    idempotency_key = command.get("idempotency_key")
+    if (
+        type(idempotency_key) is not str
+        or not 1 <= len(idempotency_key) <= 128
+    ):
+        raise ValueError(
+            "UiCommand idempotency_key must contain 1 to 128 characters"
+        )
+
+    for field in ("actor", "account_id"):
+        value = command.get(field)
+        if type(value) is not str or len(value) < 1:
+            raise ValueError(f"UiCommand {field} must be non-empty text")
+
+    session = command.get("session")
+    if type(session) is not str or _SESSION_REFERENCE.fullmatch(session) is None:
+        raise ValueError("UiCommand session must be a canonical SessionReference")
+
+    if not is_valid_common_scalar("Environment", command.get("environment")):
+        raise ValueError("UiCommand environment must be a canonical Environment")
+    if command.get("action") not in SUPPORTED_HOST_ACTIONS:
+        raise ValueError("UiCommand action is not supported by the canonical contract")
+    if type(command.get("payload")) is not dict:
+        raise ValueError("UiCommand payload must be a JSON object")
 
 
 def public_session_reference(token: str) -> str:
@@ -519,6 +588,7 @@ class AuthenticatedHostApplication:
 
             if method == "POST" and path == "/api/v1/commands":
                 command = self._parse_body(body, normalized_headers)
+                _validate_ui_command_contract(command)
                 if command.get("actor") != principal.actor:
                     raise PermissionError("Command actor is not authenticated")
                 if command.get("session") != principal.session:

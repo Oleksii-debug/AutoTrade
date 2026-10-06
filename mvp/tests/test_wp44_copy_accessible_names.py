@@ -19,8 +19,10 @@ class _CopyButtonParser(HTMLParser):
         attributes = dict(attrs)
         button_id = attributes.get("id")
         if button_id not in {
+            "permissions-copy",
             "strategy-copy",
             "portfolio-copy",
+            "operations-copy",
             "risk-copy",
             "jobs-copy",
             "event-history-copy",
@@ -47,8 +49,10 @@ class CopyButtonAccessibleNameTests(unittest.TestCase):
         parser.feed(INDEX.read_text(encoding="utf-8"))
 
         expected_scope_terms = {
+            "permissions-copy": ("permission", "capability"),
             "strategy-copy": ("strategy", "decision"),
             "portfolio-copy": ("portfolio",),
+            "operations-copy": ("host", "operation"),
             "risk-copy": ("risk", "authority"),
             "jobs-copy": ("research", "replay"),
             "event-history-copy": ("host", "event"),

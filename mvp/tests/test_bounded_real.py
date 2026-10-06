@@ -1,4 +1,5 @@
 import hashlib
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from uuid import NAMESPACE_URL, uuid5
@@ -290,6 +291,40 @@ class BoundedRealQualificationTests(unittest.TestCase):
                     store,
                     evidence_root=authoritative_root,
                 )
+
+    def test_verifier_rejects_polymorphic_root_before_virtual_dispatch(self):
+        touched: list[str] = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile evidence-root normalization")
+
+            def __fspath__(self):
+                touched.append("text-fspath")
+                raise AssertionError("hostile evidence-root path conversion")
+
+        class HostilePath(type(Path())):
+            def __fspath__(self):
+                touched.append("path-fspath")
+                raise AssertionError("hostile evidence-root path conversion")
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            for root in (
+                HostileText(directory),
+                HostilePath(directory),
+            ):
+                with self.subTest(root_type=type(root).__name__):
+                    with self.assertRaisesRegex(
+                        TypeError,
+                        "evidence_root must be an exact string or Path",
+                    ):
+                        artifact_store_evidence_verifier(
+                            store,
+                            evidence_root=root,
+                        )
+        self.assertEqual(touched, [])
 
     def test_self_published_complete_store_is_not_terminal_trust(self):
         bounded = envelope()

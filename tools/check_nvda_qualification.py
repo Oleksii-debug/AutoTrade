@@ -24,7 +24,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     parse_signed_qualification_attestation,
     verify_qualification_attestation,
 )
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts import ArtifactStore
 
 DEFAULT_REQUIREMENTS = ROOT / "qualification" / "nvda" / "requirements.json"
 DEFAULT_STATUS = ROOT / "qualification" / "nvda" / "status.json"
@@ -349,36 +349,7 @@ def validate_trusted_nvda_qualification(
             for item in required
         )
     )
-    if tuple(receipt.attestation.requirement_ids) != requirement_ids:
-        raise NvdaQualificationError(
-            "signed NVDA attestation requirements do not match the canonical workflow set"
-        )
-    release_artifact_id = receipt.attestation.release_artifact_id
-    if release_artifact_id is None:
-        raise NvdaQualificationError(
-            "signed NVDA attestation must bind the delivered release artifact"
-        )
-    if release_artifact_id != result["release_artifact_id"]:
-        raise NvdaQualificationError(
-            "signed NVDA attestation release identity does not match the observed release artifact"
-        )
-    if receipt.attestation.release_artifact_sha256 != release_artifact_sha256:
-        raise NvdaQualificationError(
-            "signed NVDA attestation release digest does not match the delivered artifact"
-        )
-    exact_refs = [
-        ref
-        for ref in receipt.attestation.evidence_refs
-        if (
-            ref.sha256 == evidence_sha256
-            and ref.evidence_kind == NVDA_EVIDENCE_KIND
-            and ref.source_sha == result["source_sha"]
-        )
-    ]
-    if len(exact_refs) != 1:
-        raise NvdaQualificationError(
-            "signed NVDA attestation must resolve the exact raw NVDA evidence payload"
-        )
+    release_artifact_id = result["release_artifact_id"]
 
     accepted = None
     for requirement_id in requirement_ids:
@@ -421,6 +392,33 @@ def validate_trusted_nvda_qualification(
             )
     if accepted is None:
         raise NvdaQualificationError("signed NVDA qualification has no requirements")
+    if tuple(accepted.requirement_ids) != requirement_ids:
+        raise NvdaQualificationError(
+            "signed NVDA attestation requirements do not match the canonical workflow set"
+        )
+    if accepted.release_artifact_id != release_artifact_id:
+        raise NvdaQualificationError(
+            "signed NVDA attestation release identity does not match the observed release artifact"
+        )
+    if accepted.release_artifact_sha256 != release_artifact_sha256:
+        raise NvdaQualificationError(
+            "signed NVDA attestation release digest does not match the delivered artifact"
+        )
+    exact_refs = [
+        ref
+        for ref in accepted.evidence_refs
+        if (
+            ref.sha256 == evidence_sha256
+            and ref.evidence_kind == NVDA_EVIDENCE_KIND
+            and ref.source_sha == result["source_sha"]
+        )
+    ]
+    if len(exact_refs) != 1:
+        raise NvdaQualificationError(
+            "signed NVDA attestation must resolve the exact raw NVDA evidence payload"
+        )
+    evidence_artifact_id = exact_refs[0].artifact_id
+
     return {
         **result,
         "qualified": True,
@@ -432,6 +430,7 @@ def validate_trusted_nvda_qualification(
         "release_artifact_id": release_artifact_id,
         "artifact_sha256": release_artifact_sha256,
         "evidence_sha256": evidence_sha256,
+        "evidence_artifact_id": evidence_artifact_id,
     }
 
 
@@ -543,6 +542,7 @@ def main() -> int:
                     "artifact_sha256",
                     "release_artifact_id",
                     "evidence_sha256",
+                    "evidence_artifact_id",
                     "attestation_id",
                     "attestation_digest",
                     "policy_id",

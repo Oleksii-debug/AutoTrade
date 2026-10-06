@@ -20,6 +20,7 @@ class ReconciliationBorrowCompletionGateTests(unittest.TestCase):
             locate_id="locate-1",
             provider_revision="revision-1",
             capacity_quantity=Decimal("10"),
+            quantity_unit="share",
             hard_to_borrow=False,
             observed_at="2026-09-24T18:00:00Z",
             effective_at="2026-09-24T17:59:00Z",

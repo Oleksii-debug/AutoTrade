@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.autotrade.local/5.0.0/ui.schema.json",
+  "$id": "https://schemas.autotrade.local/6.0.0/ui.schema.json",
   "title": "AutoTrade host/UI contracts",
   "$defs": {
     "UiSnapshot": {
@@ -26,8 +26,7 @@
           "$ref": "common.schema.json#/$defs/Sequence"
         },
         "event_cursor": {
-          "type": "string",
-          "minLength": 1
+          "$ref": "common.schema.json#/$defs/Sequence"
         },
         "server_time": {
           "$ref": "common.schema.json#/$defs/UtcInstant"

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, Inexact, Rounded, localcontext
 import unittest
 
@@ -75,6 +75,192 @@ def aggregate(
 
 
 class SpecialistDagTests(unittest.TestCase):
+
+
+    def test_outer_collection_subclasses_are_rejected_before_iteration(self):
+        calls = []
+
+        class HostileList(list):
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("caller iterator must not execute")
+
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "specs must be an exact built-in list or tuple",
+        ):
+            plan_specialists(
+                HostileList([spec("a", "g1")]),
+                input_snapshot_id="cut-1",
+                available_inputs=(),
+                total_budget="1",
+            )
+        self.assertEqual(calls, [])
+
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "available_inputs must be an exact built-in list or tuple",
+        ):
+            plan_specialists(
+                [spec("a", "g1")],
+                input_snapshot_id="cut-1",
+                available_inputs=HostileList(["price"]),
+                total_budget="1",
+            )
+        self.assertEqual(calls, [])
+
+        specs = [spec("a", "g1")]
+        plan = full_plan(specs)
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "runs must be an exact built-in list or tuple",
+        ):
+            aggregate(
+                specs,
+                HostileList([run("a", "0.5")]),
+                plan=plan,
+            )
+        self.assertEqual(calls, [])
+
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "blocking_critique_terms must be an exact built-in list or tuple",
+        ):
+            aggregate(
+                specs,
+                [run("a", "0.5")],
+                plan=plan,
+                blocking_critique_terms=HostileList(["future leakage"]),
+            )
+        self.assertEqual(calls, [])
+
+    def test_generators_are_rejected_before_their_body_executes(self):
+        calls = []
+
+        def hostile_specs():
+            calls.append("specs")
+            yield spec("a", "g1")
+
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "specs must be an exact built-in list or tuple",
+        ):
+            plan_specialists(
+                hostile_specs(),
+                input_snapshot_id="cut-1",
+                available_inputs=(),
+                total_budget="1",
+            )
+        self.assertEqual(calls, [])
+
+        def hostile_runs():
+            calls.append("runs")
+            yield run("a", "0.5")
+
+        specs = [spec("a", "g1")]
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "runs must be an exact built-in list or tuple",
+        ):
+            aggregate(
+                specs,
+                hostile_runs(),
+                plan=full_plan(specs),
+            )
+        self.assertEqual(calls, [])
+
+    def test_time_ingress_rejects_custom_tzinfo_without_callbacks(self):
+        calls = []
+
+        class HostileTz(tzinfo):
+            def utcoffset(self, dt):
+                calls.append("utcoffset")
+                raise AssertionError("caller timezone callback must not execute")
+
+            def dst(self, dt):
+                calls.append("dst")
+                raise AssertionError("caller timezone callback must not execute")
+
+            def fromutc(self, dt):
+                calls.append("fromutc")
+                raise AssertionError("caller timezone callback must not execute")
+
+        hostile_time = datetime(2026, 9, 24, 18, tzinfo=HostileTz())
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "built-in timezone",
+        ):
+            SpecialistRun(
+                role_id="hostile-time",
+                input_snapshot_id="cut-1",
+                direction="LONG",
+                score="0.5",
+                confidence="1",
+                evidence_refs=("evidence:hostile-time",),
+                cost="0",
+                completed_at=hostile_time,
+            )
+        self.assertEqual(calls, [])
+
+        specs = [spec("a", "g1")]
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "built-in timezone",
+        ):
+            aggregate(
+                specs,
+                [run("a", "0.5")],
+                plan=full_plan(specs),
+                decision_deadline=hostile_time,
+            )
+        self.assertEqual(calls, [])
+
+    def test_time_ingress_preserves_builtin_fixed_offset_normalization(self):
+        fixed = timezone(timedelta(hours=2))
+        local_time = datetime(2026, 9, 24, 20, tzinfo=fixed)
+        result = SpecialistRun(
+            role_id="fixed-offset",
+            input_snapshot_id="cut-1",
+            direction="LONG",
+            score="0.5",
+            confidence="1",
+            evidence_refs=("evidence:fixed-offset",),
+            cost="0",
+            completed_at=local_time,
+        )
+        self.assertEqual(result.completed_at, NOW)
+
+    def test_mutated_run_custom_timezone_is_rejected_on_aggregation_readmission(self):
+        calls = []
+
+        class HostileTz(tzinfo):
+            def utcoffset(self, dt):
+                calls.append("utcoffset")
+                raise AssertionError("caller timezone callback must not execute")
+
+            def dst(self, dt):
+                calls.append("dst")
+                raise AssertionError("caller timezone callback must not execute")
+
+        value = run("a", "0.5")
+        object.__setattr__(
+            value,
+            "completed_at",
+            datetime(2026, 9, 24, 18, tzinfo=HostileTz()),
+        )
+        specs = [spec("a", "g1")]
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "built-in timezone",
+        ):
+            aggregate(
+                specs,
+                [value],
+                plan=full_plan(specs),
+                decision_deadline=NOW,
+            )
+        self.assertEqual(calls, [])
+
     def test_string_collections_cannot_masquerade_as_specialist_evidence(self):
         with self.assertRaisesRegex(SpecialistDagError, "required_inputs must be a tuple"):
             SpecialistSpec(
@@ -310,6 +496,44 @@ class SpecialistDagTests(unittest.TestCase):
             )
         self.assertEqual(low_precision, high_precision)
         self.assertEqual(low_precision, Decimal("0.000000009"))
+
+
+    def test_zero_confidence_group_has_no_numerical_influence(self):
+        specs = [
+            spec("signal", "independent"),
+            spec("zero", "zero-confidence"),
+        ]
+        result = aggregate(
+            specs,
+            [
+                run("signal", "1", confidence="1"),
+                run("zero", "-1", confidence="0"),
+            ],
+            plan=full_plan(specs),
+            decision_deadline=NOW,
+        )
+        self.assertEqual(result.score, Decimal("1"))
+        self.assertEqual(result.direction, "LONG")
+        self.assertEqual(result.accepted_roles, ("signal", "zero"))
+
+    def test_all_zero_confidence_groups_are_flat_without_division(self):
+        specs = [
+            spec("long", "g1"),
+            spec("short", "g2"),
+        ]
+        result = aggregate(
+            specs,
+            [
+                run("long", "1", confidence="0"),
+                run("short", "-1", confidence="0"),
+            ],
+            plan=full_plan(specs),
+            decision_deadline=NOW,
+        )
+        self.assertEqual(result.score, Decimal("0"))
+        self.assertEqual(result.direction, "FLAT")
+        self.assertEqual(result.accepted_roles, ("long", "short"))
+        self.assertFalse(result.live_authority_granted)
 
     def test_correlated_clones_do_not_outvote_independent_group(self):
         specs = [
@@ -594,6 +818,40 @@ class SpecialistDagTests(unittest.TestCase):
                 plan=forged,
                 decision_deadline=NOW,
             )
+
+    def test_dag_plan_class_equality_rebinding_cannot_self_authenticate(self):
+        specs = [spec("a", "g1")]
+        canonical = full_plan(specs)
+        forged = DagPlan(
+            canonical.input_snapshot_id,
+            (),
+            (("a", "budget_exceeded"),),
+            Decimal("0"),
+            canonical.available_inputs,
+            canonical.total_budget,
+        )
+        calls = []
+        original = type.__getattribute__(DagPlan, "__eq__")
+
+        def hostile_eq(left, right):
+            calls.append((left, right))
+            return True
+
+        type.__setattr__(DagPlan, "__eq__", hostile_eq)
+        try:
+            with self.assertRaisesRegex(
+                SpecialistDagError,
+                "canonical planner output",
+            ):
+                aggregate(
+                    specs,
+                    [run("a", "0.5")],
+                    plan=forged,
+                    decision_deadline=NOW,
+                )
+        finally:
+            type.__setattr__(DagPlan, "__eq__", original)
+        self.assertEqual(calls, [])
 
     def test_mutated_spec_is_readmitted_before_planning(self):
         value = spec("a", "g1", cost="1")

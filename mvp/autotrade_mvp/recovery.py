@@ -15,7 +15,21 @@ from typing import Iterable
 from uuid import NAMESPACE_URL, uuid5
 
 from .dispatch import submission_attempt_aggregate_id
-from .persistence import JournalStore, payload_digest
+from .persistence import (
+    JournalStore,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
+from .sender_gate import journal_sender_gate
+from .store_identity import (
+    JournalStoreIdentity,
+    require_exact_journal_store_identity,
+)
+from .recovery_clock_incident import (
+    append_clock_trust_transition,
+    clock_incident_generation as durable_clock_incident_generation,
+    clock_trusted_after_replay,
+)
 from .reconciliation_journal import load_reconciliation_checkpoint_for_readiness
 
 
@@ -144,11 +158,17 @@ class RecoveryController:
         owner_store: JournalStore | None = None,
         owner_scope: str = "default",
     ) -> None:
-        if owner_store is not None and not isinstance(owner_store, JournalStore):
-            raise TypeError("owner_store must be JournalStore or None")
         if not isinstance(owner_scope, str) or not owner_scope.strip():
             raise ValueError("owner_scope is required")
         self._owner_store = owner_store
+        self._owner_store_identity: JournalStoreIdentity | None = (
+            None
+            if owner_store is None
+            else require_exact_journal_store_authority(
+                owner_store,
+                subject="recovery owner JournalStore",
+            )
+        )
         self._owner_scope = owner_scope.strip()
         self.state = HostState.STOPPED
         self.owner: OwnerFence | None = None
@@ -164,7 +184,14 @@ class RecoveryController:
             tuple[str, str, str, str, str],
         ] = {}
         self.storage_writable = True
-        self.clock_trusted = True
+        self.clock_trusted = (
+            True
+            if owner_store is None
+            else clock_trusted_after_replay(
+                owner_store,
+                owner_scope=self._owner_scope,
+            )
+        )
         self.provider_reconciled = False
 
     @staticmethod
@@ -177,11 +204,55 @@ class RecoveryController:
 
         return self._owner_scope
 
+    def _selected_journal_identity(self) -> JournalStoreIdentity:
+        identity = self._owner_store_identity
+        if identity is None:
+            raise PermissionError("Recovery controller has no durable journal authority")
+        return require_exact_journal_store_identity(
+            identity,
+            subject="selected recovery journal identity",
+        )
+
+    def _journal_store_authority(self) -> JournalStore:
+        if self._owner_store is None:
+            raise PermissionError("Recovery controller has no durable journal authority")
+        expected = self._selected_journal_identity()
+        identity = require_exact_journal_store_authority(
+            self._owner_store,
+            subject="recovery owner JournalStore",
+        )
+        if identity != expected:
+            raise PermissionError("recovery journal authority changed")
+        return self._owner_store
+
+    @property
+    def durable_owner_store_identity(self) -> JournalStoreIdentity | None:
+        """Return the pinned physical JournalStore identity, if durable."""
+
+        if self._owner_store is None:
+            return None
+        self._journal_store_authority()
+        return self._selected_journal_identity()
+
     @property
     def durable_owner_store_path(self) -> Path | None:
-        """Return the exact journal path backing sender fencing, if durable."""
+        """Return the selected journal path backing sender fencing, if durable."""
 
-        return None if self._owner_store is None else self._owner_store.path
+        if self._owner_store is None:
+            return None
+        self._journal_store_authority()
+        return Path(self._selected_journal_identity().canonical_path)
+
+    @property
+    def clock_incident_generation(self) -> int:
+        """Return the durable clock invalidation generation, not UTC authority."""
+
+        if self._owner_store is None:
+            return 0
+        return durable_clock_incident_generation(
+            self._journal_store_authority(),
+            owner_scope=self._owner_scope,
+        )
 
     def durable_owner_chain(self) -> tuple[OwnerFence, ...]:
         """Read and validate the complete monotonic sender-fence chain.
@@ -192,7 +263,9 @@ class RecoveryController:
 
         if self._owner_store is None:
             return ()
-        events = self._owner_store.load_events(
+        store = self._journal_store_authority()
+        events = JournalStore.load_events(
+            store,
             self._OWNER_AGGREGATE_TYPE,
             self._owner_scope,
         )
@@ -255,7 +328,9 @@ class RecoveryController:
                 f"{self._owner_scope!r}/{owner.epoch}/{owner.owner_id!r}",
             )
         )
-        self._owner_store.append_event(
+        store = self._journal_store_authority()
+        JournalStore.append_event(
+            store,
             {
                 "event_id": event_id,
                 "event_type": self._OWNER_EVENT_TYPE,
@@ -281,16 +356,24 @@ class RecoveryController:
         if self.owner is not None:
             raise RuntimeError("Host already has an owner")
         normalized_owner = owner_id.strip()
-        durable = self._latest_durable_owner()
-        next_epoch = 1 if durable is None else durable.epoch + 1
-        candidate = OwnerFence(owner_id=normalized_owner, epoch=next_epoch)
-        self._append_durable_owner(candidate)
-        self.owner = candidate
-        self.state = HostState.RECOVERING
-        self.provider_reconciled = False
-        self.reason_codes = {"startup_reconciliation_required"}
-        self._recover_scoped_submission_uncertainty_from_owner_scope()
-        return self.owner
+        with journal_sender_gate(self._owner_store):
+            durable = self._latest_durable_owner()
+            if self._owner_store is not None and durable is not None:
+                raise PermissionError(
+                    "Durable owner already exists; independently authorized takeover is required"
+                )
+            next_epoch = 1 if durable is None else durable.epoch + 1
+            candidate = OwnerFence(
+                owner_id=normalized_owner,
+                epoch=next_epoch,
+            )
+            self._append_durable_owner(candidate)
+            self.owner = candidate
+            self.state = HostState.RECOVERING
+            self.provider_reconciled = False
+            self.reason_codes = {"startup_reconciliation_required"}
+            self._recover_scoped_submission_uncertainty_from_owner_scope()
+            return self.owner
 
     @staticmethod
     def _normalized_submission_scope(
@@ -389,6 +472,92 @@ class RecoveryController:
             )
         return sequence
 
+    @staticmethod
+    def _validated_submission_sender_identity(
+        aggregate_events: list[dict[str, object]],
+    ) -> int:
+        """Prove one sender/client identity across a durable submission chain.
+
+        Journal byte integrity does not prove that a later event still belongs
+        to the sender that durably prepared the attempt.  Recovery therefore
+        treats the Prepared envelope/payload as the sender identity authority
+        and rejects any cross-epoch, cross-token or cross-client tail before it
+        mutates unresolved-send or readiness state.
+        """
+
+        prepared = aggregate_events[0]
+        prepared_payload = prepared.get("payload")
+        if not isinstance(prepared_payload, dict):
+            raise RuntimeError("SubmissionPrepared payload is invalid")
+
+        envelope_epoch = prepared.get("owner_epoch")
+        if (
+            type(envelope_epoch) is not str
+            or not envelope_epoch.isdigit()
+            or int(envelope_epoch) <= 0
+            or envelope_epoch != str(int(envelope_epoch))
+        ):
+            raise RuntimeError("SubmissionPrepared owner epoch is invalid")
+        prepared_epoch = prepared_payload.get("owner_epoch")
+        if (
+            type(prepared_epoch) is not int
+            or isinstance(prepared_epoch, bool)
+            or prepared_epoch <= 0
+            or prepared_epoch != int(envelope_epoch)
+        ):
+            raise RuntimeError(
+                "SubmissionPrepared payload owner epoch does not match envelope"
+            )
+        owner_token = prepared_payload.get("owner_token")
+        client_order_id = prepared_payload.get("client_order_id")
+        if not isinstance(owner_token, str) or not owner_token.strip():
+            raise RuntimeError("SubmissionPrepared owner token is invalid")
+        if not isinstance(client_order_id, str) or not client_order_id.strip():
+            raise RuntimeError("SubmissionPrepared client order identity is invalid")
+
+        for event in aggregate_events:
+            if event.get("owner_epoch") != envelope_epoch:
+                raise RuntimeError(
+                    "Submission journal owner epoch changed within one attempt"
+                )
+            event_payload = event.get("payload")
+            if not isinstance(event_payload, dict):
+                raise RuntimeError("Submission journal event payload is invalid")
+            if event_payload.get("client_order_id") != client_order_id:
+                raise RuntimeError(
+                    "Submission journal client order identity changed within one attempt"
+                )
+
+            # Sending is the outbound barrier and must repeat the exact durable
+            # sender identity. Other event kinds may omit owner fields, but if
+            # they carry them they may not contradict Prepared.
+            if event.get("event_type") == "SubmissionSending":
+                if event_payload.get("owner_epoch") != prepared_epoch:
+                    raise RuntimeError(
+                        "SubmissionSending owner epoch does not match Prepared"
+                    )
+                if event_payload.get("owner_token") != owner_token:
+                    raise RuntimeError(
+                        "SubmissionSending owner token does not match Prepared"
+                    )
+            else:
+                if (
+                    "owner_epoch" in event_payload
+                    and event_payload.get("owner_epoch") != prepared_epoch
+                ):
+                    raise RuntimeError(
+                        "Submission event payload owner epoch does not match Prepared"
+                    )
+                if (
+                    "owner_token" in event_payload
+                    and event_payload.get("owner_token") != owner_token
+                ):
+                    raise RuntimeError(
+                        "Submission event payload owner token does not match Prepared"
+                    )
+
+        return prepared_epoch
+
     def recover_durable_submission_uncertainty(
         self,
         *,
@@ -410,8 +579,10 @@ class RecoveryController:
             environment,
             account_id,
         )
-        events = self._owner_store.load_events_by_aggregate_type(
-            "submission_attempt"
+        store = self._journal_store_authority()
+        events = JournalStore.load_events_by_aggregate_type(
+            store,
+            "submission_attempt",
         )
         grouped: dict[str, list[dict[str, object]]] = {}
         for event in events:
@@ -467,6 +638,9 @@ class RecoveryController:
             }:
                 continue
 
+            sender_owner_epoch = self._validated_submission_sender_identity(
+                aggregate_events
+            )
             attempt_id = payload.get("attempt_id")
             if not isinstance(attempt_id, str) or not attempt_id.strip():
                 opaque = "legacy_submission:" + aggregate_id
@@ -486,20 +660,13 @@ class RecoveryController:
                 raise RuntimeError(
                     "Ambiguous submission lacks durable reconciliation identity"
                 )
-            owner_epoch_raw = last.get("owner_epoch")
-            if (
-                not isinstance(owner_epoch_raw, str)
-                or not owner_epoch_raw.isdigit()
-                or int(owner_epoch_raw) <= 0
-            ):
-                raise RuntimeError("Ambiguous submission owner epoch is invalid")
             event_id = last.get("event_id")
             if not isinstance(event_id, str) or not event_id:
                 raise RuntimeError("Ambiguous submission evidence identity is invalid")
 
             binding = (
                 str(intent_id).strip(),
-                int(owner_epoch_raw),
+                sender_owner_epoch,
                 (event_id,),
             )
             existing = self._unresolved_send_bindings.get(attempt_id)
@@ -553,8 +720,9 @@ class RecoveryController:
                 "Reconciliation cannot establish readiness without durable journal"
             )
 
+        store = self._journal_store_authority()
         checkpoint = load_reconciliation_checkpoint_for_readiness(
-            self._owner_store,
+            store,
             reconciliation_id=reconciliation_id,
             provider_id=provider_id,
             account_id=account_id,
@@ -789,9 +957,38 @@ class RecoveryController:
             self.reason_codes.add("startup_reconciliation_required")
         self._recompute_state()
 
-    def set_clock_trusted(self, trusted: bool) -> None:
+    def set_clock_trusted(
+        self,
+        trusted: bool,
+        *,
+        reason_code: str | None = None,
+        evidence_ref: str | None = None,
+    ) -> None:
         if type(trusted) is not bool:
             raise TypeError("trusted must be a boolean")
+        if self._owner_store is not None and trusted != self.clock_trusted:
+            if self.owner is None:
+                raise PermissionError(
+                    "Durable clock trust transition requires an active recovery owner"
+                )
+            append_clock_trust_transition(
+                self._journal_store_authority(),
+                owner_scope=self._owner_scope,
+                owner_id=self.owner.owner_id,
+                owner_epoch=self.owner.epoch,
+                trusted=trusted,
+                reason_code=(
+                    reason_code
+                    if reason_code is not None
+                    else (
+                        "clock-trust-restored"
+                        if trusted
+                        else "clock-untrusted"
+                    )
+                ),
+                evidence_ref=evidence_ref,
+                committed_at=self._now(),
+            )
         self.clock_trusted = trusted
         if trusted:
             self.reason_codes.discard("clock_untrusted")
@@ -884,6 +1081,10 @@ class RecoveryController:
             raise TypeError("reconciled must be a boolean")
         if normalized_owner == self.owner.owner_id:
             raise ValueError("New owner must differ from current owner")
+        if self._owner_store is not None:
+            raise PermissionError(
+                "Durable owner transfer requires independently issued takeover evidence"
+            )
         if not old_sender_fenced:
             raise PermissionError("Old sender must be externally fenced")
         if (

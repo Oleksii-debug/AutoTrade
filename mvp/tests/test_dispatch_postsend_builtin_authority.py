@@ -936,6 +936,89 @@ class PostSendBuiltinAuthorityTests(unittest.TestCase):
             )
 
 
+    def test_post_send_dispatcher_method_code_mutation_is_restored_and_unknown(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original_events = GuardedDispatcher._events
+            original_code = original_events.__code__
+            probe = []
+            outbound = 0
+            dispatch_module._dispatcher_executable_probe = probe
+
+            def forged_events(self, attempt_id):
+                _dispatcher_executable_probe.append(attempt_id)
+                raise AssertionError("forged dispatcher method code executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                original_events.__code__ = forged_events.__code__
+                return response
+
+            try:
+                first = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-dispatcher-code-a1",
+                    transport=transport,
+                )
+                self.assertIs(GuardedDispatcher._events, original_events)
+                self.assertIs(original_events.__code__, original_code)
+            finally:
+                original_events.__code__ = original_code
+                vars(dispatch_module).pop("_dispatcher_executable_probe", None)
+
+            self.assertEqual(probe, [])
+            self.assertEqual(outbound, 1)
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(
+                first.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-dispatcher-code-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
+            restarted = GuardedDispatcher(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner-b",
+            )
+            replay = restarted.dispatch(
+                attempt_id="postsend-dispatcher-code-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T18:15:01Z",
+                authority_check=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not re-authorize")),
+                transport_send=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("restart must not resend")),
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(replay.status, "UNKNOWN")
+            self.assertEqual(
+                replay.reason,
+                "recovered_after_send_barrier_without_terminal_result",
+            )
+            self.assertEqual(probe, [])
+            self.assertEqual(outbound, 1)
+
     def test_transport_helper_rebinding_before_final_guard_is_zero_wire(self):
         surfaces = (
             "_canonical_journal_authority_snapshot",

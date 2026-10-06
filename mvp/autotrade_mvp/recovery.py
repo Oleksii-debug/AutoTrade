@@ -15,7 +15,16 @@ from typing import Iterable
 from uuid import NAMESPACE_URL, uuid5
 
 from .dispatch import submission_attempt_aggregate_id
-from .persistence import JournalStore, payload_digest
+from .persistence import (
+    JournalStore,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
+from .sender_gate import journal_sender_gate
+from .store_identity import (
+    JournalStoreIdentity,
+    require_exact_journal_store_identity,
+)
 from .reconciliation_journal import load_reconciliation_checkpoint_for_readiness
 
 
@@ -144,11 +153,17 @@ class RecoveryController:
         owner_store: JournalStore | None = None,
         owner_scope: str = "default",
     ) -> None:
-        if owner_store is not None and not isinstance(owner_store, JournalStore):
-            raise TypeError("owner_store must be JournalStore or None")
         if not isinstance(owner_scope, str) or not owner_scope.strip():
             raise ValueError("owner_scope is required")
         self._owner_store = owner_store
+        self._owner_store_identity: JournalStoreIdentity | None = (
+            None
+            if owner_store is None
+            else require_exact_journal_store_authority(
+                owner_store,
+                subject="recovery owner JournalStore",
+            )
+        )
         self._owner_scope = owner_scope.strip()
         self.state = HostState.STOPPED
         self.owner: OwnerFence | None = None
@@ -177,11 +192,44 @@ class RecoveryController:
 
         return self._owner_scope
 
+    def _selected_journal_identity(self) -> JournalStoreIdentity:
+        identity = self._owner_store_identity
+        if identity is None:
+            raise PermissionError("Recovery controller has no durable journal authority")
+        return require_exact_journal_store_identity(
+            identity,
+            subject="selected recovery journal identity",
+        )
+
+    def _journal_store_authority(self) -> JournalStore:
+        if self._owner_store is None:
+            raise PermissionError("Recovery controller has no durable journal authority")
+        expected = self._selected_journal_identity()
+        identity = require_exact_journal_store_authority(
+            self._owner_store,
+            subject="recovery owner JournalStore",
+        )
+        if identity != expected:
+            raise PermissionError("recovery journal authority changed")
+        return self._owner_store
+
+    @property
+    def durable_owner_store_identity(self) -> JournalStoreIdentity | None:
+        """Return the pinned physical JournalStore identity, if durable."""
+
+        if self._owner_store is None:
+            return None
+        self._journal_store_authority()
+        return self._selected_journal_identity()
+
     @property
     def durable_owner_store_path(self) -> Path | None:
-        """Return the exact journal path backing sender fencing, if durable."""
+        """Return the selected journal path backing sender fencing, if durable."""
 
-        return None if self._owner_store is None else self._owner_store.path
+        if self._owner_store is None:
+            return None
+        self._journal_store_authority()
+        return Path(self._selected_journal_identity().canonical_path)
 
     def durable_owner_chain(self) -> tuple[OwnerFence, ...]:
         """Read and validate the complete monotonic sender-fence chain.

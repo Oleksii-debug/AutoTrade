@@ -492,5 +492,134 @@ class JsonDecoderTransitiveAuthorityTests(unittest.TestCase):
             )
 
 
+
+    def test_transport_cannot_replace_json_decoder_decode_defaults(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            decoder = dispatch_module.json.JSONDecoder
+            decode = decoder.__dict__["decode"]
+            original_defaults = decode.__defaults__
+            forged_calls = 0
+
+            def forged_whitespace(_text, _index):
+                nonlocal forged_calls
+                forged_calls += 1
+                raise AssertionError("forged JSONDecoder.decode default executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                decode.__defaults__ = (forged_whitespace,)
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "json-decoder-decode-default-retarget",
+                    transport,
+                )
+                self.assertIs(decode.__defaults__, original_defaults)
+                self.assertEqual(forged_calls, 0)
+            finally:
+                decode.__defaults__ = original_defaults
+
+            self._assert_unknown_after_send(
+                path,
+                dispatcher,
+                "json-decoder-decode-default-retarget",
+                result,
+            )
+
+    def test_transport_cannot_mutate_json_decoder_init_kwdefaults_in_place(self):
+        class TrapEquality:
+            calls = 0
+
+            def __eq__(self, _other):
+                type(self).calls += 1
+                raise AssertionError("transport-controlled equality executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            decoder = dispatch_module.json.JSONDecoder
+            decoder_init = decoder.__dict__["__init__"]
+            original_kwdefaults = decoder_init.__kwdefaults__
+            self.assertIs(type(original_kwdefaults), dict)
+            baseline = dict(original_kwdefaults)
+            original_strict = original_kwdefaults["strict"]
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                original_kwdefaults["strict"] = TrapEquality()
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "json-decoder-init-kwdefault-retarget",
+                    transport,
+                )
+                self.assertIs(decoder_init.__kwdefaults__, original_kwdefaults)
+                self.assertIs(
+                    decoder_init.__kwdefaults__["strict"],
+                    original_strict,
+                )
+                self.assertEqual(TrapEquality.calls, 0)
+            finally:
+                decoder_init.__kwdefaults__ = original_kwdefaults
+                original_kwdefaults.clear()
+                original_kwdefaults.update(baseline)
+
+            self._assert_unknown_after_send(
+                path,
+                dispatcher,
+                "json-decoder-init-kwdefault-retarget",
+                result,
+            )
+            self.assertEqual(TrapEquality.calls, 0)
+
+    def test_transport_cannot_replace_json_decoder_raw_decode_defaults(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            decoder = dispatch_module.json.JSONDecoder
+            raw_decode = decoder.__dict__["raw_decode"]
+            original_defaults = raw_decode.__defaults__
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                raw_decode.__defaults__ = (1,)
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "json-decoder-raw-decode-default-retarget",
+                    transport,
+                )
+                self.assertIs(raw_decode.__defaults__, original_defaults)
+            finally:
+                raw_decode.__defaults__ = original_defaults
+
+            self._assert_unknown_after_send(
+                path,
+                dispatcher,
+                "json-decoder-raw-decode-default-retarget",
+                result,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

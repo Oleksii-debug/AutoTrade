@@ -931,10 +931,15 @@ def python_runtime_dependencies() -> list[dict[str, str]]:
         version = project.get("version")
         if (
             not isinstance(name, str)
+            or not name
+            or name != name.strip()
+            or not isinstance(version, str)
+            or not version
+            or version != version.strip()
             or PIN.fullmatch(f"{name}=={version}") is None
         ):
             raise ValueError(f"Python project identity is not exact: {path}")
-        return name, str(version), project
+        return name, version, project
 
     root_name, root_version, _ = project_identity(ROOT / "pyproject.toml")
     _, _, research_project = project_identity(ROOT / "research" / "pyproject.toml")

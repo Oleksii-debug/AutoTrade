@@ -947,10 +947,38 @@ def observe_submission_json_response(
         "instrument_versions": list(instruments),
     }
     actual_scope = _thaw_json(binding["submission_scope"])
-    if actual_scope != expected_scope:
+    if type(actual_scope) is not dict:
+        raise ProviderCoreError("durable submission scope is non-canonical")
+    if any(actual_scope.get(key) != value for key, value in expected_scope.items()):
         raise ProviderCoreError(
             "durable submission scope does not match prepared provider request"
         )
+
+    # Provider-route and financial authority may extend the prepared-request
+    # scope. Those extensions remain authenticated by submission_scope_hash and
+    # therefore by this observation's evidence_ref; this neutral verifier owns
+    # only the prepared-request axes plus cross-layer identities it can prove
+    # from the durable response binding itself.
+    financial_scope = {
+        "provider_id": provider,
+        "account_id": binding["account_id"],
+        "environment": binding["environment"],
+    }
+    for key, value in financial_scope.items():
+        if key in actual_scope and actual_scope[key] != value:
+            raise ProviderCoreError(
+                "durable submission financial scope does not match response binding"
+            )
+    for key in (
+        "capability_snapshot_id",
+        "provider_route_capability_snapshot_id",
+    ):
+        if key in actual_scope and (
+            len(capabilities) != 1 or actual_scope[key] != capabilities[0]
+        ):
+            raise ProviderCoreError(
+                "durable submission capability scope does not match prepared request"
+            )
 
     identity_material = json.dumps(
         {

@@ -1522,4 +1522,10 @@ def qualify_recovery_release(
         qualification_trust_root_id=(
             None if accepted is None else accepted.trust_root_id
         ),
+        recovery_policy_requirement=recovery_policy_subject_requirement(policy),
+        _verification_policy=policy,
+        _verification_evidence=tuple(by_scenario.values()),
+        _verification_store=evidence_store,
+        _verification_root=evidence_root,
+        _verification_receipt=qualification_receipt,
     )

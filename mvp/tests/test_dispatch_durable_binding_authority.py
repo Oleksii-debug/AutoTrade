@@ -185,6 +185,42 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             submission_scope={"endpoint": "/orders"},
         )
 
+    def test_sending_recovery_race_revalidates_winning_terminal_history(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            store = JournalStore(path)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="restart-owner",
+            )
+            complete = dispatcher._events("binding-type-a1")
+            sending_history = complete[:2]
+            corrupt_terminal = json.loads(canonical_json(complete))
+            corrupt_terminal[-1]["payload"]["client_order_id"] = "forged-client-order-id"
+            reads = [sending_history, corrupt_terminal]
+
+            def raced_events(_attempt_id):
+                self.assertTrue(reads)
+                return reads.pop(0)
+
+            def lose_terminal_race(**_kwargs):
+                raise ValueError("simulated aggregate-version race")
+
+            dispatcher._events = raced_events
+            dispatcher._append = lose_terminal_race
+
+            result = dispatcher._recover_existing(
+                attempt_id="binding-type-a1",
+                client_order_id=sending_history[0]["payload"]["client_order_id"],
+                now="2026-10-06T14:00:02Z",
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "durable_submission_history_invalid")
+            self.assertEqual(reads, [])
+
     def test_runtime_recovery_rejects_non_contiguous_aggregate_versions(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

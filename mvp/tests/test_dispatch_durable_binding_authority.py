@@ -4,6 +4,8 @@ import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 
+import mvp.autotrade_mvp.dispatch as dispatch_module
+
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
@@ -11,10 +13,17 @@ from mvp.autotrade_mvp.dispatch import (
     _event_id,
     _identity_digest,
     load_submission_response_binding,
+    require_canonical_submission_response_binding,
     stable_client_order_id,
     submission_attempt_aggregate_id,
+    submission_response_binding_projection,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
+from mvp.autotrade_mvp.provider_core import (
+    ProviderCoreError,
+    observe_submission_json_response,
+    provider_submission_observation_projection,
+)
 
 
 class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
@@ -3376,6 +3385,418 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 _factory_token=dispatch_module._SUBMISSION_RESPONSE_BINDING_TOKEN,
             )
         self.assertEqual(TrapDict.callbacks, 0)
+
+    def test_importable_binding_token_cannot_mint_response_authority(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            binding = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-type-a1",
+            )
+            projected = submission_response_binding_projection(binding)
+            require_canonical_submission_response_binding(binding)
+            self.assertEqual(projected["terminal_state"], "SENT")
+            self.assertEqual(projected["response_encoding"], "utf-8-json")
+            self.assertIsNone(projected["ambiguity_reason"])
+            self.assertIsNone(projected["retry_disposition"])
+
+            forged = SubmissionResponseBinding(
+                attempt_id=projected["attempt_id"],
+                aggregate_id=projected["aggregate_id"],
+                provider=projected["provider"],
+                request_hash=projected["request_hash"],
+                client_order_id=projected["client_order_id"],
+                environment=projected["environment"],
+                account_id=projected["account_id"],
+                prepared_at=projected["prepared_at"],
+                sent_at=projected["sent_at"],
+                submission_scope=dict(projected["submission_scope"]),
+                submission_scope_hash=projected["submission_scope_hash"],
+                response_bytes=projected["response_bytes"],
+                response_sha256=projected["response_sha256"],
+                http_status=projected["http_status"],
+                _factory_token=dispatch_module._SUBMISSION_RESPONSE_BINDING_TOKEN,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "submission response binding authority is unavailable",
+            ):
+                submission_response_binding_projection(forged)
+
+            clone = object.__new__(SubmissionResponseBinding)
+            for name in (
+                "attempt_id",
+                "aggregate_id",
+                "provider",
+                "request_hash",
+                "client_order_id",
+                "environment",
+                "account_id",
+                "prepared_at",
+                "sent_at",
+                "submission_scope",
+                "submission_scope_hash",
+                "response_bytes",
+                "response_sha256",
+                "http_status",
+                "terminal_state",
+                "response_encoding",
+                "ambiguity_reason",
+                "retry_disposition",
+                "_factory_token",
+            ):
+                object.__setattr__(
+                    clone,
+                    name,
+                    object.__getattribute__(binding, name),
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "submission response binding authority is unavailable",
+            ):
+                require_canonical_submission_response_binding(clone)
+
+    def test_binding_projection_preserves_durable_unknown_reconciliation_metadata(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            result = dispatcher.dispatch(
+                attempt_id="binding-unknown-a1",
+                intent_id="intent-unknown-1",
+                intent_hash="sha256:" + "2" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(
+                        b'{"accepted":false}',
+                        http_status=200,
+                        requires_reconciliation=True,
+                        ambiguity_reason="provider_response_ambiguous",
+                    ),
+                )[1],
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+
+            binding = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-unknown-a1",
+            )
+            projected = submission_response_binding_projection(binding)
+            self.assertEqual(projected["terminal_state"], "UNKNOWN")
+            self.assertEqual(projected["response_encoding"], "utf-8-json")
+            self.assertEqual(
+                projected["ambiguity_reason"],
+                "provider_response_ambiguous",
+            )
+            self.assertEqual(
+                projected["retry_disposition"],
+                "RECONCILE_FIRST",
+            )
+
+    def test_binding_projection_rejects_post_load_retargeting_and_restart_remints(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            first = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-type-a1",
+            )
+            first_projection = submission_response_binding_projection(first)
+
+            restarted = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-type-a1",
+            )
+            restarted_projection = submission_response_binding_projection(restarted)
+            self.assertEqual(
+                restarted_projection["response_sha256"],
+                first_projection["response_sha256"],
+            )
+            self.assertIsNot(restarted, first)
+
+            object.__setattr__(first, "provider", "forged-provider")
+            with self.assertRaisesRegex(
+                ValueError,
+                "submission response binding authority is unavailable",
+            ):
+                submission_response_binding_projection(first)
+
+            object.__setattr__(restarted, "shadow_authority", "forged")
+            with self.assertRaisesRegex(
+                ValueError,
+                "submission response binding authority is unavailable",
+            ):
+                require_canonical_submission_response_binding(restarted)
+
+    def test_restart_binding_composes_into_authenticated_provider_observation(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            request = {"side": "BUY", "symbol": "BTCUSDT"}
+            request_sha = (
+                "sha256:"
+                + sha256(canonical_json(request).encode("utf-8")).hexdigest()
+            )
+            scope = {
+                "endpoint": "/v5/order/create",
+                "prepared_request_sha256": request_sha,
+                "capability_snapshot_ids": ["cap-1"],
+                "instrument_versions": ["BTCUSDT:v1"],
+                "provider_environment": "TESTNET",
+            }
+            store = JournalStore(path)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            result = dispatcher.dispatch(
+                attempt_id="provider-observation-sent-a1",
+                intent_id="intent-provider-observation-sent",
+                intent_hash="sha256:" + "7" * 64,
+                provider="BYBIT",
+                request=request,
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(
+                        b'{"retCode":0,"result":{"orderId":"provider-1"}}',
+                        http_status=200,
+                    ),
+                )[1],
+                submission_scope=scope,
+            )
+            self.assertEqual(result.status, "SENT")
+
+            binding = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="provider-observation-sent-a1",
+            )
+            observation = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSDT:v1",),
+            )
+            projected = provider_submission_observation_projection(observation)
+            self.assertEqual(projected["terminal_state"], "SENT")
+            self.assertEqual(projected["provider_id"], "BYBIT")
+            self.assertEqual(projected["attempt_id"], "provider-observation-sent-a1")
+            self.assertEqual(projected["response_encoding"], "utf-8-json")
+            self.assertEqual(projected["payload"]["retCode"], 0)
+            self.assertEqual(
+                projected["payload"]["result"]["orderId"],
+                "provider-1",
+            )
+            self.assertEqual(
+                projected["submission_scope_hash"],
+                submission_response_binding_projection(binding)[
+                    "submission_scope_hash"
+                ],
+            )
+
+    def test_restart_unknown_binding_cannot_be_promoted_to_provider_observation(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            request = {"side": "BUY", "symbol": "BTCUSDT"}
+            request_sha = (
+                "sha256:"
+                + sha256(canonical_json(request).encode("utf-8")).hexdigest()
+            )
+            scope = {
+                "endpoint": "/v5/order/create",
+                "prepared_request_sha256": request_sha,
+                "capability_snapshot_ids": ["cap-1"],
+                "instrument_versions": ["BTCUSDT:v1"],
+                "provider_environment": "TESTNET",
+            }
+            store = JournalStore(path)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            result = dispatcher.dispatch(
+                attempt_id="provider-observation-unknown-a1",
+                intent_id="intent-provider-observation-unknown",
+                intent_hash="sha256:" + "8" * 64,
+                provider="BYBIT",
+                request=request,
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(
+                        b'{"retCode":0,"result":{"orderId":"ambiguous"}}',
+                        http_status=200,
+                        requires_reconciliation=True,
+                        ambiguity_reason="provider_response_ambiguous",
+                    ),
+                )[1],
+                submission_scope=scope,
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+
+            binding = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="provider-observation-unknown-a1",
+            )
+            projected = submission_response_binding_projection(binding)
+            self.assertEqual(projected["terminal_state"], "UNKNOWN")
+            self.assertEqual(
+                projected["ambiguity_reason"],
+                "provider_response_ambiguous",
+            )
+            self.assertEqual(
+                projected["retry_disposition"],
+                "RECONCILE_FIRST",
+            )
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "requires definitive SENT response",
+            ):
+                observe_submission_json_response(
+                    response_binding=binding,
+                    provider_id="BYBIT",
+                    endpoint="/v5/order/create",
+                    prepared_request_sha256=request_sha,
+                    capability_snapshot_ids=("cap-1",),
+                    instrument_versions=("BTCUSDT:v1",),
+                )
+
+    def test_importable_binding_token_forgery_cannot_mint_provider_observation(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            request = {"side": "BUY", "symbol": "BTCUSDT"}
+            request_sha = (
+                "sha256:"
+                + sha256(canonical_json(request).encode("utf-8")).hexdigest()
+            )
+            scope = {
+                "endpoint": "/v5/order/create",
+                "prepared_request_sha256": request_sha,
+                "capability_snapshot_ids": ["cap-1"],
+                "instrument_versions": ["BTCUSDT:v1"],
+                "provider_environment": "TESTNET",
+            }
+            dispatcher = GuardedDispatcher(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            dispatcher.dispatch(
+                attempt_id="provider-observation-forgery-a1",
+                intent_id="intent-provider-observation-forgery",
+                intent_hash="sha256:" + "9" * 64,
+                provider="BYBIT",
+                request=request,
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(
+                        b'{"retCode":0,"result":{"orderId":"provider-1"}}',
+                        http_status=200,
+                    ),
+                )[1],
+                submission_scope=scope,
+            )
+            canonical = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="provider-observation-forgery-a1",
+            )
+            projected = submission_response_binding_projection(canonical)
+            forged = SubmissionResponseBinding(
+                attempt_id=projected["attempt_id"],
+                aggregate_id=projected["aggregate_id"],
+                provider=projected["provider"],
+                request_hash=projected["request_hash"],
+                client_order_id=projected["client_order_id"],
+                environment=projected["environment"],
+                account_id=projected["account_id"],
+                prepared_at=projected["prepared_at"],
+                sent_at=projected["sent_at"],
+                submission_scope=dict(projected["submission_scope"]),
+                submission_scope_hash=projected["submission_scope_hash"],
+                response_bytes=projected["response_bytes"],
+                response_sha256=projected["response_sha256"],
+                http_status=projected["http_status"],
+                terminal_state=projected["terminal_state"],
+                response_encoding=projected["response_encoding"],
+                ambiguity_reason=projected["ambiguity_reason"],
+                retry_disposition=projected["retry_disposition"],
+                _factory_token=dispatch_module._SUBMISSION_RESPONSE_BINDING_TOKEN,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "submission response binding authority is unavailable",
+            ):
+                observe_submission_json_response(
+                    response_binding=forged,
+                    provider_id="BYBIT",
+                    endpoint="/v5/order/create",
+                    prepared_request_sha256=request_sha,
+                    capability_snapshot_ids=("cap-1",),
+                    instrument_versions=("BTCUSDT:v1",),
+                )
+
+    def test_binding_authority_rejects_runtime_token_rebinding_and_recovers(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            binding = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-type-a1",
+            )
+            before = submission_response_binding_projection(binding)
+            original = dispatch_module._SUBMISSION_RESPONSE_BINDING_TOKEN
+            try:
+                dispatch_module._SUBMISSION_RESPONSE_BINDING_TOKEN = object()
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "submission response binding authority is unavailable",
+                ):
+                    submission_response_binding_projection(binding)
+            finally:
+                dispatch_module._SUBMISSION_RESPONSE_BINDING_TOKEN = original
+            after = submission_response_binding_projection(binding)
+            self.assertEqual(
+                after["response_sha256"],
+                before["response_sha256"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

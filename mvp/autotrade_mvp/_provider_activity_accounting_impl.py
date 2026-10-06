@@ -2285,34 +2285,6 @@ def _require_same_financial_journal_generation(
     return other_store
 
 
-def _make_durable_provider_economic_audit_digest(
-    *,
-    _digest_payload=payload_digest,
-    _getattribute=object.__getattribute__,
-):
-    """Bind the durable facade digest primitive selected at module import."""
-
-    def audit_digest(self) -> str:
-        authority = _require_durable_provider_economic_book_authority(self)
-        projection = _getattribute(self, "_book")
-        return _digest_payload(
-            {
-                "schema_version": "1.0.0",
-                "environment": authority.environment,
-                "account_id": authority.account_id,
-                "economic_book_digest": projection.audit_digest(),
-            }
-        )
-
-    return audit_digest
-
-
-_durable_provider_economic_audit_digest = (
-    _make_durable_provider_economic_audit_digest()
-)
-del _make_durable_provider_economic_audit_digest
-
-
 class DurableProviderEconomicBook(ScopedEconomicBook):
     """JournalStore-backed provider/account economic book.
 
@@ -2383,34 +2355,6 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             environment=environment,
             provider_environment=provider_environment,
         )
-
-    @property
-    def transactions(self) -> tuple[JournalTransaction, ...]:
-        _require_durable_provider_economic_book_authority(self)
-        projection = object.__getattribute__(self, "_book")
-        return projection.transactions
-
-    def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
-        _require_durable_provider_economic_book_authority(self)
-        projection = object.__getattribute__(self, "_book")
-        return projection.balance(ledger_account, asset_or_currency)
-
-    def cash(self, currency: str) -> Decimal:
-        _require_durable_provider_economic_book_authority(self)
-        projection = object.__getattribute__(self, "_book")
-        return projection.cash(currency)
-
-    def position(self, instrument: str) -> Decimal:
-        _require_durable_provider_economic_book_authority(self)
-        projection = object.__getattribute__(self, "_book")
-        return projection.position(instrument)
-
-    def fee_expense(self, currency: str) -> Decimal:
-        _require_durable_provider_economic_book_authority(self)
-        projection = object.__getattribute__(self, "_book")
-        return projection.fee_expense(currency)
-
-    audit_digest = _durable_provider_economic_audit_digest
 
     def _events(self) -> list[dict[str, Any]]:
         authority = _require_durable_provider_economic_book_authority(self)
@@ -2962,9 +2906,6 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         return inserted
 
 
-del _durable_provider_economic_audit_digest
-
-
 (
     _durable_provider_economic_book_authority_is_registered,
     _require_durable_provider_economic_book_authority,
@@ -2972,6 +2913,73 @@ del _durable_provider_economic_audit_digest
     _reload_durable_provider_economic_book,
 ) = _install_durable_provider_economic_book_authority()
 del _install_durable_provider_economic_book_authority
+
+
+def _make_durable_provider_economic_read_facade(
+    require_authority,
+    *,
+    _getattribute=object.__getattribute__,
+    _digest_payload=payload_digest,
+):
+    """Bind durable read authority and digest primitives selected at import."""
+
+    def projection(self):
+        authority = require_authority(self)
+        return authority, _getattribute(self, "_book")
+
+    def transactions(self):
+        _authority, book = projection(self)
+        return book.transactions
+
+    def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
+        _authority, book = projection(self)
+        return book.balance(ledger_account, asset_or_currency)
+
+    def cash(self, currency: str) -> Decimal:
+        _authority, book = projection(self)
+        return book.cash(currency)
+
+    def position(self, instrument: str) -> Decimal:
+        _authority, book = projection(self)
+        return book.position(instrument)
+
+    def fee_expense(self, currency: str) -> Decimal:
+        _authority, book = projection(self)
+        return book.fee_expense(currency)
+
+    def audit_digest(self) -> str:
+        authority, book = projection(self)
+        return _digest_payload(
+            {
+                "schema_version": "1.0.0",
+                "environment": authority.environment,
+                "account_id": authority.account_id,
+                "economic_book_digest": book.audit_digest(),
+            }
+        )
+
+    return (
+        property(transactions),
+        balance,
+        cash,
+        position,
+        fee_expense,
+        audit_digest,
+    )
+
+
+(
+    DurableProviderEconomicBook.transactions,
+    DurableProviderEconomicBook.balance,
+    DurableProviderEconomicBook.cash,
+    DurableProviderEconomicBook.position,
+    DurableProviderEconomicBook.fee_expense,
+    DurableProviderEconomicBook.audit_digest,
+) = _make_durable_provider_economic_read_facade(
+    _require_durable_provider_economic_book_authority
+)
+del _make_durable_provider_economic_read_facade
+
 
 def commit_economic_batch_with_reservation_consumption(
     economic_book: DurableProviderEconomicBook,

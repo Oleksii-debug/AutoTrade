@@ -1462,6 +1462,58 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertFalse((root / "learning-evidence.jsonl").exists())
             self.assertEqual(list(root.glob("journal.sqlite3*")), [])
 
+    def test_resume_revalidates_risk_rejection_reason_before_tail_repair(self):
+        with TemporaryDirectory() as directory:
+            first = run_vertical_slice(
+                [100, 101, 102, 103],
+                directory,
+                max_notional="10",
+            )
+            self.assertEqual(first.status, "risk_rejected")
+            root = Path(directory)
+            checkpoint_path = root / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            evidence_id = checkpoint["evidence_ids"][0]
+            record = checkpoint["evidence_records"][evidence_id]
+            self.assertEqual(record["risk_outcome"], "max_notional")
+            self.assertIsNone(record["order_id"])
+            record["risk_outcome"] = "max_position"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            (root / "learning-evidence.jsonl").unlink()
+            for journal_path in root.glob("journal.sqlite3*"):
+                journal_path.unlink()
+
+            checkpoint_before = checkpoint_path.read_bytes()
+            with self.assertRaisesRegex(
+                ValueError,
+                "Checkpoint replay risk rejection does not match bound risk admission",
+            ):
+                run_vertical_slice(
+                    [103, 102, 101, 100],
+                    directory,
+                    max_notional="10",
+                )
+
+            self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertFalse((root / "learning-evidence.jsonl").exists())
+            self.assertEqual(list(root.glob("journal.sqlite3*")), [])
+
+    def test_replay_reexecutes_risk_gate_for_rejected_episode(self):
+        with TemporaryDirectory() as directory:
+            result = run_vertical_slice(
+                [100, 101, 102, 103],
+                directory,
+                max_notional="10",
+            )
+            self.assertEqual(result.status, "risk_rejected")
+            self.assertTrue(verify_replay(directory))
+            with patch(
+                "mvp.autotrade_mvp.pipeline.handle_risk",
+                return_value=(False, "max_position"),
+            ):
+                self.assertFalse(verify_replay(directory))
+
     def test_resume_rejects_rebound_intent_identity_before_tail_repair(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

@@ -855,7 +855,7 @@
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
       "proposed_status": "IN_PROGRESS",
-      "status_note": "Guarded durable dispatch is present on main with persist-before-send, final authority recheck, deterministic client identity, timeout/crash UNKNOWN handling and no blind resend. Remaining work: qualified real-provider transport seams, quota interception and crash-at-every-send-point qualification."
+      "status_note": "Source acceptance is implemented on canonical PR #2313 at exact head 36a38b2b333eb26e79357c7dbe629566ed7b5d6f: persist-before-send, final authority/sender/capability fences, stable client identity, no-blind-retry UNKNOWN recovery, exact response replay, WP-19 provider-neutral lifecycle interlock, WP-20 durable ambiguous-send recovery, direct write/read receipt provenance, unified Host/provider journal identity, Host-pin/direct-wire conjunction, quota-wait expiry/supersession zero-wire qualification, and post-I/O direct-read capability recheck. Remaining blocker to DONE is terminal exact-head hosted qualification; baseline/provider-free/dotnet/reconvergence/full Verify are queued and are not PASS. Positive provider-specific Host/wire -> durable PROVIDER_ORIGIN and real provider campaign remain downstream under #652 and are not part of this provider-neutral source-completion claim."
     },
     {
       "id": "WP-19",

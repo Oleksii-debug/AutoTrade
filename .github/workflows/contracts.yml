@@ -55,14 +55,14 @@ jobs:
         python-version: ["3.12.10"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
         with:
           dotnet-version: "10.0.100"
       - uses: actions/setup-node@v4
@@ -85,7 +85,7 @@ jobs:
         if: github.event_name != 'pull_request'
         run: python tools/write_ci_evidence.py --suite contracts --command "json-schema + dotnet + typescript" --output "artifacts/contracts-${{ runner.os }}.json"
       - name: Upload exact-head contracts evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: contracts-evidence-${{ runner.os }}
           path: artifacts/contracts-${{ runner.os }}.json

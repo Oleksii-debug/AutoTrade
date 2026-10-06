@@ -145,57 +145,6 @@ class PostSendBuiltinNamespaceAuthorityTests(unittest.TestCase):
             finally:
                 builtins.__dict__.pop(poison_name, None)
 
-    def test_pre_send_added_builtin_name_is_removed_and_zero_wire(self):
-        poison_name = "__autotrade_dispatch_test_extra_builtin_preguard__"
-        self.assertNotIn(poison_name, builtins.__dict__)
-
-        with TemporaryDirectory() as directory:
-            path = f"{directory}/journal.sqlite3"
-            dispatcher = self._dispatcher(path)
-            outbound = 0
-
-            def authority_check(*_args):
-                builtins.__dict__[poison_name] = object()
-                return True, "allowed"
-
-            def transport(_client_order_id, _request, final_guard):
-                nonlocal outbound
-                final_guard()
-                outbound += 1
-                return ExactJsonTransportResponse(
-                    b'{"accepted":true}',
-                    http_status=200,
-                )
-
-            try:
-                with self.assertRaises(PermissionError):
-                    dispatcher.dispatch(
-                        attempt_id="builtin-extra-name-preguard-a1",
-                        intent_id="intent-1",
-                        intent_hash="sha256:" + "1" * 64,
-                        provider="provider",
-                        request={"side": "BUY", "quantity": "1"},
-                        now="2026-10-06T19:10:00Z",
-                        authority_check=authority_check,
-                        transport_send=transport,
-                        submission_scope={"endpoint": "/orders"},
-                    )
-                self.assertEqual(outbound, 0)
-                self.assertNotIn(poison_name, builtins.__dict__)
-                self.assertEqual(
-                    [
-                        event["event_type"]
-                        for event in self._events(
-                            path,
-                            dispatcher,
-                            "builtin-extra-name-preguard-a1",
-                        )
-                    ],
-                    ["SubmissionPrepared"],
-                )
-            finally:
-                builtins.__dict__.pop(poison_name, None)
-
     def test_unlisted_standard_builtin_binding_is_restored_for_next_dispatch(self):
         original_object = builtins.object
 

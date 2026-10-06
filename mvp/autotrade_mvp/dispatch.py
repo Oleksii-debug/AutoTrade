@@ -409,6 +409,12 @@ def _install_journal_store_authority():
         "append_event": store_type.append_event,
         "load_events": store_type.load_events,
     }
+    class_mro = store_type.__mro__
+    class_surfaces = tuple(
+        (base, tuple(base.__dict__.items()))
+        for base in class_mro
+        if base is not object
+    )
     if identity_descriptor is None:
         raise RuntimeError("submission journal identity authority is unavailable")
 
@@ -422,6 +428,18 @@ def _install_journal_store_authority():
                 raise RuntimeError(
                     f"submission journal operation changed: {operation_name}"
                 )
+        if store_type.__mro__ != class_mro:
+            raise RuntimeError("submission journal class authority changed")
+        for base, members in class_surfaces:
+            current = base.__dict__
+            if len(current) != len(members):
+                raise RuntimeError("submission journal class authority changed")
+            for member_name, member in members:
+                if (
+                    member_name not in current
+                    or current[member_name] is not member
+                ):
+                    raise RuntimeError("submission journal class authority changed")
         if type(store) is not store_type:
             raise TypeError("store must be the canonical JournalStore")
         state = canonical_vars(store)
@@ -450,7 +468,13 @@ def _install_journal_store_authority():
         snapshot(store)
         if type(operation_name) is not str or operation_name not in operations:
             raise TypeError("unsupported submission journal operation")
-        return operations[operation_name](store, *args, **kwargs)
+        result = operations[operation_name](store, *args, **kwargs)
+        # Revalidate after the call as well. The captured append/load function
+        # still performs dynamic class dispatch internally (_connect,
+        # _decode_event_row, SCHEMA_VERSION, etc.); a persistent class mutation
+        # during the operation must never be accepted as submission authority.
+        snapshot(store)
+        return result
 
     return snapshot, call
 

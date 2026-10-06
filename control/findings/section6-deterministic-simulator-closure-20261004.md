@@ -147,8 +147,9 @@ Focused regressions now cover both Prepared/send race orders (BLOCKED wins
 and Sending wins), repeated Prepared recovery owners converging through durable
 truth, concurrent recovery owners racing from the same SubmissionSending cut
 and converging on one SubmissionUnknown terminal, no repeated recovery authority
-call, hostile integer lease input, and the exact microsecond expiry boundary
-immediately before and at lease expiration.
+call, hostile integer lease input, very large exact-integer lease values without
+timedelta overflow, and the exact microsecond expiry boundary immediately before
+and at lease expiration.
 
 These changes preserve the fail-closed rule: before `SubmissionSending`, an
 expired Prepared can be proven zero-wire and BLOCKED; once `SubmissionSending`

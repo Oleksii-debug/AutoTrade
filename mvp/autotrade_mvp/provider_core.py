@@ -715,31 +715,31 @@ class ProviderSubmissionObservation:
 
     @property
     def provider_id(self) -> str:
-        return submission_response_binding_projection(self.response_binding)["provider"].upper()
+        return provider_submission_observation_projection(self)["provider_id"]
 
     @property
     def account_id(self) -> str:
-        return submission_response_binding_projection(self.response_binding)["account_id"]
+        return provider_submission_observation_projection(self)["account_id"]
 
     @property
     def environment(self) -> str:
-        return submission_response_binding_projection(self.response_binding)["environment"]
+        return provider_submission_observation_projection(self)["environment"]
 
     @property
     def client_order_id(self) -> str:
-        return submission_response_binding_projection(self.response_binding)["client_order_id"]
+        return provider_submission_observation_projection(self)["client_order_id"]
 
     @property
     def response_sha256(self) -> str:
-        return submission_response_binding_projection(self.response_binding)["response_sha256"]
+        return provider_submission_observation_projection(self)["response_sha256"]
 
     @property
     def observed_at(self) -> str:
-        return submission_response_binding_projection(self.response_binding)["sent_at"]
+        return provider_submission_observation_projection(self)["sent_at"]
 
     @property
     def request_sha256(self) -> str:
-        return submission_response_binding_projection(self.response_binding)["request_hash"]
+        return provider_submission_observation_projection(self)["request_sha256"]
 
     def require_scope(
         self,
@@ -753,26 +753,32 @@ class ProviderSubmissionObservation:
         environment: str | None = None,
         client_order_id: str | None = None,
     ) -> None:
-        if _text(provider_id, "provider_id").upper() != self.provider_id:
+        projection = provider_submission_observation_projection(self)
+        if _text(provider_id, "provider_id").upper() != projection["provider_id"]:
             raise ProviderCoreError("provider-write provenance provider mismatch")
-        if _text(endpoint, "endpoint") != self.endpoint:
+        if _text(endpoint, "endpoint") != projection["endpoint"]:
             raise ProviderCoreError("provider-write provenance endpoint mismatch")
-        if prepared_request_sha256 != self.request_sha256:
+        if prepared_request_sha256 != projection["request_sha256"]:
             raise ProviderCoreError("provider-write provenance request digest mismatch")
-        if tuple(capability_snapshot_ids) != self.capability_snapshot_ids:
+        if tuple(capability_snapshot_ids) != projection["capability_snapshot_ids"]:
             raise ProviderCoreError("provider-write provenance capability mismatch")
-        if tuple(instrument_versions) != self.instrument_versions:
+        if tuple(instrument_versions) != projection["instrument_versions"]:
             raise ProviderCoreError("provider-write provenance instrument mismatch")
-        if account_id is not None and _text(account_id, "account_id") != self.account_id:
+        if (
+            account_id is not None
+            and _text(account_id, "account_id") != projection["account_id"]
+        ):
             raise ProviderCoreError("provider-write provenance account mismatch")
         if (
             environment is not None
-            and _text(environment, "environment").upper() != self.environment
+            and _text(environment, "environment").upper()
+            != projection["environment"]
         ):
             raise ProviderCoreError("provider-write provenance environment mismatch")
         if (
             client_order_id is not None
-            and _text(client_order_id, "client_order_id") != self.client_order_id
+            and _text(client_order_id, "client_order_id")
+            != projection["client_order_id"]
         ):
             raise ProviderCoreError("provider-write provenance client-order mismatch")
 
@@ -1053,15 +1059,23 @@ def _install_provider_submission_observation_authority(binding_projection):
             raise error_type(f"{name} must be unique")
         return normalized
 
+    field_names = (
+        "response_binding",
+        "endpoint",
+        "capability_snapshot_ids",
+        "instrument_versions",
+        "evidence_ref",
+        "payload",
+    )
+    exact_field_names = canonical_frozenset(field_names)
+
     def raw_snapshot(value):
-        return (
-            object_getattribute(value, "response_binding"),
-            object_getattribute(value, "endpoint"),
-            object_getattribute(value, "capability_snapshot_ids"),
-            object_getattribute(value, "instrument_versions"),
-            object_getattribute(value, "evidence_ref"),
-            object_getattribute(value, "payload"),
-        )
+        state = object_getattribute(value, "__dict__")
+        if canonical_type(state) is not canonical_dict:
+            authority_changed()
+        if canonical_frozenset(state) != exact_field_names:
+            authority_changed()
+        return canonical_tuple(state[name] for name in field_names)
 
     def prune():
         for object_id, (value_ref, _snapshot) in canonical_tuple(states.items()):
@@ -1112,11 +1126,10 @@ def _install_provider_submission_observation_authority(binding_projection):
             or current[5] is not expected[5]
         ):
             authority_changed()
-        return value
+        return expected
 
     def provider_submission_observation_projection(value):
-        require_canonical_provider_submission_observation(value)
-        current = raw_snapshot(value)
+        current = require_canonical_provider_submission_observation(value)
         binding = canonical_binding_projection(current[0])
         return mapping_proxy_type(
             {

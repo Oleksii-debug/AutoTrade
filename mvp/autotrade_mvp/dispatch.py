@@ -359,36 +359,67 @@ def submission_attempt_aggregate_id(
     )
 
 
-def _canonical_journal_authority_snapshot(
-    store: JournalStore,
-) -> tuple[object, object]:
-    """Validate the narrow canonical JournalStore instance/generation seam.
+def _install_journal_store_authority():
+    """Freeze submission journal dispatch to canonical class operations."""
 
-    JournalStore currently has exactly two initialized instance fields. Any
-    additional per-instance attribute can shadow an authority-bearing class
-    method (load_events/append_event/_connect/etc.). Reject that entire class
-    of caller mutation instead of maintaining an open-ended method blacklist.
-    The returned path + physical store identity let long-lived dispatchers
-    detect replacement of the selected backing generation.
-    """
-
-    if type(store) is not JournalStore:
-        raise TypeError("store must be the canonical JournalStore")
-    state = vars(store)
-    class_owned_names = {
-        name
-        for base in JournalStore.__mro__
-        for name in base.__dict__
+    store_type = JournalStore
+    canonical_getattr = getattr
+    canonical_vars = vars
+    identity_descriptor = store_type.__dict__.get("store_identity")
+    operations = {
+        "append_event": store_type.append_event,
+        "load_events": store_type.load_events,
     }
-    if class_owned_names.intersection(state):
-        raise TypeError("canonical JournalStore instance state is shadowed")
-    if "path" not in state or "_store_identity" not in state:
-        raise TypeError("canonical JournalStore backing state is unavailable")
-    path = state["path"]
-    identity = JournalStore.store_identity.__get__(store, JournalStore)
-    if getattr(identity, "canonical_path", None) != str(path):
-        raise PermissionError("canonical JournalStore backing identity changed")
-    return path, identity
+    if identity_descriptor is None:
+        raise RuntimeError("submission journal identity authority is unavailable")
+
+    def snapshot(store: JournalStore) -> tuple[object, object]:
+        if JournalStore is not store_type:
+            raise RuntimeError("submission journal class authority changed")
+        if store_type.__dict__.get("store_identity") is not identity_descriptor:
+            raise RuntimeError("submission journal identity authority changed")
+        for operation_name, operation in operations.items():
+            if canonical_getattr(store_type, operation_name, None) is not operation:
+                raise RuntimeError(
+                    f"submission journal operation changed: {operation_name}"
+                )
+        if type(store) is not store_type:
+            raise TypeError("store must be the canonical JournalStore")
+        state = canonical_vars(store)
+        class_owned_names = {
+            name
+            for base in store_type.__mro__
+            for name in base.__dict__
+        }
+        if class_owned_names.intersection(state):
+            raise TypeError("canonical JournalStore instance state is shadowed")
+        if "path" not in state or "_store_identity" not in state:
+            raise TypeError("canonical JournalStore backing state is unavailable")
+        path = state["path"]
+        identity = identity_descriptor.__get__(store, store_type)
+        if canonical_getattr(identity, "canonical_path", None) != str(path):
+            raise PermissionError("canonical JournalStore backing identity changed")
+        return path, identity
+
+    def call(
+        store: JournalStore,
+        operation_name: str,
+        /,
+        *args,
+        **kwargs,
+    ):
+        snapshot(store)
+        if type(operation_name) is not str or operation_name not in operations:
+            raise TypeError("unsupported submission journal operation")
+        return operations[operation_name](store, *args, **kwargs)
+
+    return snapshot, call
+
+
+_canonical_journal_authority_snapshot, _journal_store_call = (
+    _install_journal_store_authority()
+)
+del _install_journal_store_authority
 
 
 def load_submission_response_binding(
@@ -412,7 +443,7 @@ def load_submission_response_binding(
     )
     # Resolve the method from the canonical class after rejecting all instance
     # shadow state; never dispatch through a caller-attached load_events.
-    events = JournalStore.load_events(store, "submission_attempt", aggregate_id)
+    events = _journal_store_call(store, "load_events", "submission_attempt", aggregate_id)
     if not events:
         raise ValueError("durable submission attempt was not found")
     event_types = [event.get("event_type") for event in events]
@@ -822,8 +853,9 @@ class GuardedDispatcher:
 
     def _events(self, attempt_id: str) -> list[dict[str, Any]]:
         store = self._journal_store_authority()
-        return JournalStore.load_events(
+        return _journal_store_call(
             store,
+            "load_events",
             "submission_attempt",
             self._aggregate_id(attempt_id),
         )
@@ -838,8 +870,9 @@ class GuardedDispatcher:
         now: str,
     ):
         store = self._journal_store_authority()
-        return JournalStore.append_event(
+        return _journal_store_call(
             store,
+            "append_event",
             _envelope(
                 scope_key=self.scope_key,
                 aggregate_id=self._aggregate_id(attempt_id),

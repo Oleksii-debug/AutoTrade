@@ -294,6 +294,67 @@ class DispatchReconciliationAttemptIdentityTests(unittest.TestCase):
                     aggregate_ids={"caller-alias": aggregate_id},
                 )
 
+    def test_recovery_rejects_hash_valid_nonmonotonic_event_chronology(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            aggregate_id = "legacy-nonmonotonic-history"
+            prepared = {
+                "intent_id": "legacy-intent",
+                "provider": "TEST_PROVIDER",
+                "account_id": "acct",
+                "environment": "SIMULATION",
+                "client_order_id": "legacy-client",
+                "prepared_at": "2026-10-06T14:00:00Z",
+            }
+            unknown = {
+                "client_order_id": "legacy-client",
+                "reason": "transport_result_ambiguous",
+            }
+            for version, event_type, payload, timestamp in (
+                (
+                    1,
+                    "SubmissionPrepared",
+                    prepared,
+                    "2026-10-06T14:00:00Z",
+                ),
+                (
+                    2,
+                    "SubmissionUnknown",
+                    unknown,
+                    "2026-10-06T13:59:59Z",
+                ),
+            ):
+                store.append_event(
+                    {
+                        "event_id": f"nonmonotonic-{version}",
+                        "event_type": event_type,
+                        "schema_version": "1.0.0",
+                        "aggregate_type": "submission_attempt",
+                        "aggregate_id": aggregate_id,
+                        "aggregate_version": str(version),
+                        "host_id": "local-mvp",
+                        "owner_epoch": "1",
+                        "environment": "SIMULATION",
+                        "occurred_at": timestamp,
+                        "observed_at": timestamp,
+                        "committed_at": timestamp,
+                        "correlation_id": "nonmonotonic-correlation",
+                        "causation_id": None,
+                        "payload": payload,
+                        "payload_hash": payload_digest(payload),
+                        "evidence_refs": [],
+                    }
+                )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "chronology is not monotonic",
+            ):
+                unknown_submissions_from_dispatch(
+                    store,
+                    attempt_ids=(aggregate_id,),
+                )
+
     def test_recovery_rejects_hash_valid_impossible_terminal_history(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

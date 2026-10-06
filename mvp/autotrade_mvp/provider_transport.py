@@ -1678,6 +1678,15 @@ _DIRECT_TRADING_WRITE_NETWORK_POLICY_IDENTITY = "sha256:" + sha256(
 ).hexdigest()
 
 
+_DIRECT_AUTHENTICATED_READ_TRANSPORT_IDENTITY = (
+    "autotrade.provider_transport.UrllibJsonWireClient:"
+    "direct-authenticated-read:v1"
+)
+_DIRECT_AUTHENTICATED_READ_NETWORK_POLICY_IDENTITY = (
+    _DIRECT_TRADING_WRITE_NETWORK_POLICY_IDENTITY
+)
+
+
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
 class DirectTradingWriteExecutionReceipt:
     """Closure-authorized proof of one exact direct trading HTTP response.
@@ -1696,6 +1705,31 @@ class DirectTradingWriteExecutionReceipt:
         raise ProviderTransportError(
             "direct trading-write receipt is minted only by canonical wire execution"
         )
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
+class DirectAuthenticatedReadExecutionReceipt:
+    """Closure-authorized proof of one exact direct authenticated read."""
+
+    transport_identity: str
+    network_policy_identity: str
+    request_sha256: str
+    http_status: int
+    response_sha256: str
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        raise ProviderTransportError(
+            "direct authenticated-read receipt is minted only by canonical wire "
+            "execution"
+        )
+
+
+def direct_authenticated_read_transport_identity() -> str:
+    return _DIRECT_AUTHENTICATED_READ_TRANSPORT_IDENTITY
+
+
+def direct_authenticated_read_network_policy_identity() -> str:
+    return _DIRECT_AUTHENTICATED_READ_NETWORK_POLICY_IDENTITY
 
 
 def direct_trading_write_transport_identity() -> str:
@@ -1724,6 +1758,36 @@ def _direct_trading_write_request_digest(request: SignedHttpRequest) -> str:
     }
     return "sha256:" + sha256(
         json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _direct_authenticated_read_request_digest(
+    request: AuthenticatedReadHttpRequest,
+    _require=_require_authenticated_read_http_request,
+    _sha256=sha256,
+    _json_dumps=json.dumps,
+) -> str:
+    method, url, headers, body, timeout_seconds = _require(request)
+    material = {
+        "method": method,
+        "url_sha256": "sha256:" + _sha256(url.encode("utf-8")).hexdigest(),
+        "headers_sha256": "sha256:"
+        + _sha256(
+            _json_dumps(
+                dict(sorted(dict(headers).items())),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        "body_sha256": "sha256:" + _sha256(body).hexdigest(),
+        "timeout_seconds": timeout_seconds,
+    }
+    return "sha256:" + _sha256(
+        _json_dumps(
+            material,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
     ).hexdigest()
 
 
@@ -2499,6 +2563,284 @@ def _bind_direct_trading_write_receipt_access(snapshot_impl):
 )
 del _bind_direct_trading_write_receipt_access
 del _direct_trading_write_execution_receipt_state
+
+
+def _install_direct_authenticated_read_execution_authority(
+    require_direct_client,
+    request_digest,
+):
+    """Reuse the canonical direct client authority for authenticated reads.
+
+    The receipt is closure-minted only after the exact canonical send wrapper
+    returns one AuthenticatedReadWireResponse. It proves direct transport
+    execution only; it is not provider-origin or financial-state authority.
+    """
+
+    receipts: dict[int, tuple[object, object, tuple[str, str, str, int, str]]] = {}
+
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_int = int
+    canonical_bytes = bytes
+    canonical_object = object
+    canonical_getattr = getattr
+    canonical_sha256 = sha256
+    weakref = weakref_ref
+
+    client_type = UrllibJsonWireClient
+    request_type = AuthenticatedReadHttpRequest
+    response_type = AuthenticatedReadWireResponse
+    receipt_type = DirectAuthenticatedReadExecutionReceipt
+    transport_error = ProviderTransportError
+    canonical_require_client = require_direct_client
+    canonical_request_digest = request_digest
+    request_digest_code = canonical_request_digest.__code__
+    transport_identity = _DIRECT_AUTHENTICATED_READ_TRANSPORT_IDENTITY
+    network_policy_identity = _DIRECT_AUTHENTICATED_READ_NETWORK_POLICY_IDENTITY
+
+    def implementation_changed() -> bool:
+        return (
+            UrllibJsonWireClient is not client_type
+            or AuthenticatedReadHttpRequest is not request_type
+            or AuthenticatedReadWireResponse is not response_type
+            or DirectAuthenticatedReadExecutionReceipt is not receipt_type
+            or type is not canonical_type
+            or id is not canonical_id
+            or tuple is not canonical_tuple
+            or int is not canonical_int
+            or bytes is not canonical_bytes
+            or object is not canonical_object
+            or getattr is not canonical_getattr
+            or sha256 is not canonical_sha256
+            or weakref_ref is not weakref
+            or require_direct_trading_write_client is not canonical_require_client
+            or _direct_authenticated_read_request_digest
+            is not canonical_request_digest
+            or canonical_request_digest.__code__ is not request_digest_code
+            or _DIRECT_AUTHENTICATED_READ_TRANSPORT_IDENTITY
+            != transport_identity
+            or _DIRECT_AUTHENTICATED_READ_NETWORK_POLICY_IDENTITY
+            != network_policy_identity
+        )
+
+    def prune() -> None:
+        for object_id, state in canonical_tuple(receipts.items()):
+            if state[0]() is None:
+                receipts.pop(object_id, None)
+
+    def eligible_client(client: object) -> bool:
+        if implementation_changed() or canonical_type(client) is not client_type:
+            return False
+        try:
+            return canonical_require_client(client) is client
+        except transport_error:
+            return False
+
+    def mint(
+        client: object,
+        request: object,
+        response: object,
+    ) -> DirectAuthenticatedReadExecutionReceipt | None:
+        if (
+            implementation_changed()
+            or canonical_type(request) is not request_type
+            or canonical_type(response) is not response_type
+            or not eligible_client(client)
+        ):
+            return None
+        request_sha256 = canonical_request_digest(request)
+        response_body = canonical_object.__getattribute__(response, "body")
+        http_status = canonical_object.__getattribute__(response, "http_status")
+        if (
+            canonical_type(response_body) is not canonical_bytes
+            or canonical_type(http_status) is not canonical_int
+            or not 100 <= http_status <= 599
+        ):
+            raise transport_error(
+                "direct authenticated-read response is not canonical"
+            )
+        response_sha256 = (
+            "sha256:" + canonical_sha256(response_body).hexdigest()
+        )
+        receipt = canonical_object.__new__(receipt_type)
+        values = (
+            transport_identity,
+            network_policy_identity,
+            request_sha256,
+            http_status,
+            response_sha256,
+        )
+        for field_name, field_value in zip(
+            (
+                "transport_identity",
+                "network_policy_identity",
+                "request_sha256",
+                "http_status",
+                "response_sha256",
+            ),
+            values,
+        ):
+            canonical_object.__setattr__(receipt, field_name, field_value)
+        prune()
+        receipts[canonical_id(receipt)] = (
+            weakref(receipt),
+            weakref(response),
+            values,
+        )
+        canonical_object.__setattr__(
+            response,
+            "_direct_authenticated_read_execution_receipt",
+            receipt,
+        )
+        return receipt
+
+    def snapshot(
+        receipt: object,
+    ) -> tuple[str, str, str, int, str, object | None]:
+        if implementation_changed() or canonical_type(receipt) is not receipt_type:
+            raise transport_error(
+                "canonical direct authenticated-read execution receipt is required"
+            )
+        prune()
+        state = receipts.get(canonical_id(receipt))
+        if state is None or state[0]() is not receipt:
+            raise transport_error(
+                "direct authenticated-read receipt construction authority "
+                "is unavailable"
+            )
+        values = state[2]
+        current = canonical_tuple(
+            canonical_object.__getattribute__(receipt, name)
+            for name in (
+                "transport_identity",
+                "network_policy_identity",
+                "request_sha256",
+                "http_status",
+                "response_sha256",
+            )
+        )
+        if current != values:
+            raise transport_error(
+                "direct authenticated-read receipt changed after wire execution"
+            )
+        return (*values, state[1]())
+
+    return eligible_client, mint, snapshot
+
+
+(
+    _direct_authenticated_read_client_is_eligible,
+    _mint_direct_authenticated_read_execution_receipt,
+    _direct_authenticated_read_execution_receipt_state,
+) = _install_direct_authenticated_read_execution_authority(
+    require_direct_trading_write_client,
+    _direct_authenticated_read_request_digest,
+)
+del _install_direct_authenticated_read_execution_authority
+
+
+def _bind_direct_authenticated_read_send(
+    send_impl,
+    eligible_client,
+    mint_receipt,
+):
+    request_type = AuthenticatedReadHttpRequest
+    canonical_type = type
+
+    def send(self, request):
+        eligible_before_send = (
+            canonical_type(request) is request_type
+            and eligible_client(self)
+        )
+        response = send_impl(self, request)
+        if eligible_before_send:
+            mint_receipt(self, request, response)
+        return response
+
+    return send
+
+
+UrllibJsonWireClient.send = _bind_direct_authenticated_read_send(
+    UrllibJsonWireClient.send,
+    _direct_authenticated_read_client_is_eligible,
+    _mint_direct_authenticated_read_execution_receipt,
+)
+del _bind_direct_authenticated_read_send
+del _direct_authenticated_read_client_is_eligible
+del _mint_direct_authenticated_read_execution_receipt
+
+
+def _bind_direct_authenticated_read_receipt_access(snapshot_impl):
+    response_type = AuthenticatedReadWireResponse
+    receipt_type = DirectAuthenticatedReadExecutionReceipt
+    canonical_type = type
+    canonical_getattr = getattr
+    canonical_sha256 = sha256
+    mapping_proxy = MappingProxyType
+    transport_error = ProviderTransportError
+    object_getattribute = object.__getattribute__
+
+    def direct_authenticated_read_execution_receipt(
+        response: AuthenticatedReadWireResponse,
+    ) -> DirectAuthenticatedReadExecutionReceipt:
+        if canonical_type(response) is not response_type:
+            raise transport_error(
+                "exact authenticated-read wire response is required"
+            )
+        receipt = canonical_getattr(
+            response,
+            "_direct_authenticated_read_execution_receipt",
+            None,
+        )
+        values = snapshot_impl(receipt)
+        if values[5] is not response:
+            raise transport_error(
+                "direct authenticated-read receipt is not bound to exact response"
+            )
+        status = object_getattribute(response, "http_status")
+        raw = object_getattribute(response, "body")
+        if (
+            values[3] != status
+            or values[4] != "sha256:" + canonical_sha256(raw).hexdigest()
+        ):
+            raise transport_error(
+                "direct authenticated-read receipt does not match exact response"
+            )
+        return receipt
+
+    def direct_authenticated_read_execution_receipt_snapshot(
+        receipt: DirectAuthenticatedReadExecutionReceipt,
+    ) -> Mapping[str, object]:
+        if canonical_type(receipt) is not receipt_type:
+            raise transport_error(
+                "canonical direct authenticated-read execution receipt is required"
+            )
+        values = snapshot_impl(receipt)
+        return mapping_proxy(
+            {
+                "transport_identity": values[0],
+                "network_policy_identity": values[1],
+                "request_sha256": values[2],
+                "http_status": values[3],
+                "response_sha256": values[4],
+            }
+        )
+
+    return (
+        direct_authenticated_read_execution_receipt,
+        direct_authenticated_read_execution_receipt_snapshot,
+    )
+
+
+(
+    direct_authenticated_read_execution_receipt,
+    direct_authenticated_read_execution_receipt_snapshot,
+) = _bind_direct_authenticated_read_receipt_access(
+    _direct_authenticated_read_execution_receipt_state
+)
+del _bind_direct_authenticated_read_receipt_access
+del _direct_authenticated_read_execution_receipt_state
 
 
 def _install_direct_trading_exact_response_authority(

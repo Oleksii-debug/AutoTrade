@@ -81,13 +81,14 @@ Before WP-01 may be recorded COMPLETE:
 3. exact-head `baseline` terminal SUCCESS;
 4. exact-head `research-primitives` terminal SUCCESS;
 5. exact-head dual-OS `Verify AutoTrade` terminal SUCCESS;
-6. current main re-read with candidate behind 0, or a path-safe reconvergence followed by fresh exact-head qualification;
-7. no unresolved review blocker;
-8. merge #1440;
-9. close #1225 as completed;
-10. update `control/work-packages/bank.json` and `control/qualification.json` from their stale WP-01 IN_PROGRESS state to exact merged evidence.
+6. exact-head `reconvergence-integrity` terminal SUCCESS;
+7. current main re-read with candidate behind 0, or a path-safe reconvergence followed by fresh exact-head qualification;
+8. no unresolved review blocker;
+9. merge #1440;
+10. close #1225 as completed;
+11. update `control/work-packages/bank.json` and `control/qualification.json` from their stale WP-01 IN_PROGRESS state to exact merged evidence.
 
-At this evidence cut the hosted workflows for `68b20a2...` exist but are queued. Queued is not PASS.
+At this evidence cut the five head-SHA workflows for `68b20a2...` are queued and the `pull_request_target` reconvergence-integrity run 37460431269 exists with its guard job queued and no runner assigned. Queued/pending is not PASS.
 
 ## Boundary
 

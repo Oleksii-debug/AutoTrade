@@ -1039,7 +1039,11 @@ class UrllibJsonWireClient:
 
     def _bounded_body(self, raw: bytes, *, max_bytes: int) -> bytes:
         try:
-            return require_provider_response_bytes(raw, max_bytes=max_bytes)
+            return require_provider_response_bytes(
+                raw,
+                max_bytes=max_bytes,
+                allow_empty=True,
+            )
         except (TypeError, ValueError) as error:
             raise ProviderTransportError("invalid or oversized provider HTTP response") from error
 
@@ -1134,9 +1138,13 @@ class UrllibJsonWireClient:
                 http_status=http_error_status,
                 body=raw,
             )
-        if type(raw) is not bytes or not raw:
+        if type(raw) is not bytes:
             raise ProviderTransportError(
-                "provider returned an empty or non-byte response"
+                "provider returned a non-byte response"
+            )
+        if is_authenticated_read and not raw:
+            raise ProviderTransportError(
+                "authenticated-read provider returned an empty response"
             )
         if is_authenticated_read:
             if http_status is None:

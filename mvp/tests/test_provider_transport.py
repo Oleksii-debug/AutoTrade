@@ -4685,6 +4685,38 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
         self.assertEqual(opener.calls, 1)
         self.assertEqual(stream.sizes, [5])
 
+    def test_empty_http_error_body_is_preserved_for_guarded_write_only(self):
+        class EmptyErrorOpener:
+            def open(self, request, *_args, **_kwargs):
+                raise HTTPError(
+                    request.full_url,
+                    503,
+                    "service unavailable",
+                    {},
+                    BytesIO(b""),
+                )
+
+        client = UrllibJsonWireClient(max_response_bytes=8)
+        client._opener = EmptyErrorOpener()
+        write_response = client.send(self.request())
+        self.assertIs(type(write_response), TradingWireResponse)
+        self.assertEqual(write_response.http_status, 503)
+        self.assertEqual(write_response.body, b"")
+
+        client = UrllibJsonWireClient(max_response_bytes=8)
+        client._opener = EmptyErrorOpener()
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "invalid or oversized authenticated-read response",
+        ):
+            client.send(
+                AuthenticatedReadHttpRequest(
+                    url="https://api.example.test/read",
+                    headers={"X-API-KEY": "synthetic"},
+                    timeout_seconds=2,
+                )
+            )
+
     def test_http_error_uses_same_captured_budget_when_live_field_mutates_during_read(self):
         class MutatingBytesIO(BytesIO):
             def __init__(self, client, data, mutate_to):

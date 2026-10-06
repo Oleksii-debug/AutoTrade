@@ -42,6 +42,58 @@ def cash_transaction(*, transaction_id: str = "cash-1", amount: str = "10"):
 
 
 class DurableProviderEconomicBookAuthorityTests(unittest.TestCase):
+    def test_bybit_provider_environment_separates_durable_book_identity(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            testnet = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="acct-authority",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            demo = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="acct-authority",
+                environment="PAPER",
+                provider_environment="DEMO",
+            )
+
+            self.assertEqual(testnet.provider_environment, "TESTNET")
+            self.assertEqual(demo.provider_environment, "DEMO")
+            self.assertNotEqual(testnet.book_id, demo.book_id)
+            self.assertEqual(
+                JournalStore.load_events(
+                    store,
+                    "economic_book",
+                    testnet.book_id,
+                ),
+                [],
+            )
+            self.assertEqual(
+                JournalStore.load_events(
+                    store,
+                    "economic_book",
+                    demo.book_id,
+                ),
+                [],
+            )
+
+    def test_bybit_durable_book_requires_explicit_provider_environment(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "requires explicit provider_environment",
+            ):
+                DurableProviderEconomicBook(
+                    store,
+                    provider_id="BYBIT",
+                    account_id="acct-authority",
+                    environment="PAPER",
+                )
+
     def test_journal_store_subclass_is_rejected_before_replay(self):
         with TemporaryDirectory() as directory:
             class HostileStore(JournalStore):

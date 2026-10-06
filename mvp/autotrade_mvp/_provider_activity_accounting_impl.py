@@ -2001,6 +2001,7 @@ def _install_durable_provider_economic_book_authority():
                 provider_id=object.__getattribute__(value, "provider_id"),
                 account_id=object.__getattribute__(value, "account_id"),
                 environment=object.__getattribute__(value, "environment"),
+                provider_environment=provider_environment_value,
             ),
         )
         state = object.__getattribute__(value, "__dict__")
@@ -2313,10 +2314,9 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         previously frozen historical cut must supply that cut's recorded
         visibility_journal_sequence explicitly.
 
-        Current main does not yet retain exact provider_environment in this
-        durable book.  BYBIT PAPER/LIVE therefore remains too ambiguous for
-        terminal provider-cost evidence and is rejected here until the shared
-        provider-domain migration lands.
+        The durable book identity retains exact provider_environment. BYBIT
+        historical cuts therefore remain separated across TESTNET, DEMO and
+        MAINNET and legacy ambiguous scope cannot silently alias a new book.
         """
 
         if type(aggregate_version) is not int or aggregate_version <= 0:

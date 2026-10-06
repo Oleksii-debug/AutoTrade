@@ -1748,7 +1748,7 @@ def _direct_trading_write_request_digest(request: SignedHttpRequest) -> str:
         "headers_sha256": "sha256:"
         + sha256(
             json.dumps(
-                dict(sorted(dict(headers).items())),
+                _dict(_sorted(_dict(headers).items())),
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode("utf-8")
@@ -1766,6 +1766,8 @@ def _direct_authenticated_read_request_digest(
     _require=_require_authenticated_read_http_request,
     _sha256=sha256,
     _json_dumps=json.dumps,
+    _dict=dict,
+    _sorted=sorted,
 ) -> str:
     method, url, headers, body, timeout_seconds = _require(request)
     material = {
@@ -2586,6 +2588,7 @@ def _install_direct_authenticated_read_execution_authority(
     canonical_object = object
     canonical_getattr = getattr
     canonical_sha256 = sha256
+    canonical_zip = zip
     weakref = weakref_ref
 
     client_type = UrllibJsonWireClient
@@ -2613,10 +2616,13 @@ def _install_direct_authenticated_read_execution_authority(
             or object is not canonical_object
             or getattr is not canonical_getattr
             or sha256 is not canonical_sha256
+            or zip is not canonical_zip
             or weakref_ref is not weakref
             or require_direct_trading_write_client is not canonical_require_client
-            or _direct_authenticated_read_request_digest
-            is not canonical_request_digest
+            or (
+                _direct_authenticated_read_request_digest
+                is not canonical_request_digest
+            )
             or canonical_request_digest.__code__ is not request_digest_code
             or _DIRECT_AUTHENTICATED_READ_TRANSPORT_IDENTITY
             != transport_identity
@@ -2671,7 +2677,7 @@ def _install_direct_authenticated_read_execution_authority(
             http_status,
             response_sha256,
         )
-        for field_name, field_value in zip(
+        for field_name, field_value in canonical_zip(
             (
                 "transport_identity",
                 "network_policy_identity",

@@ -64,6 +64,11 @@ class _HostileInt(int):
         raise AssertionError("hostile int comparison must not execute")
 
 
+class _HostileTuple(tuple):
+    def __iter__(self):
+        raise AssertionError("hostile tuple iteration must not execute")
+
+
 def causal_evidence(
     *,
     evidence_id="base-input",
@@ -320,6 +325,53 @@ class AblationTests(unittest.TestCase):
                 cost=1,
                 elapsed=10,
                 components=("wire-story-group-7", "wire-story-group-7"),
+            )
+
+    def test_evidence_container_subclasses_are_rejected_before_iteration(self):
+        with self.assertRaisesRegex(TypeError, "exact immutable tuple"):
+            AblationOutcome(
+                case_id="hostile-components",
+                input_fingerprint=FINGERPRINT_A,
+                variant="FULL",
+                utility=Decimal("1"),
+                cost=Decimal("0"),
+                elapsed_ms=1,
+                deadline_ms=100,
+                components=_HostileTuple(("base",)),
+                input_cutoff_utc=CUT,
+                decision_utc=CUT,
+                outcome_available_utc=CUT + timedelta(hours=1),
+                input_evidence=(causal_evidence(),),
+            )
+
+        with self.assertRaisesRegex(TypeError, "input_evidence"):
+            outcome(
+                variant="FULL",
+                utility=1,
+                cost=0,
+                elapsed=10,
+                components=("base",),
+                input_evidence=_HostileTuple((causal_evidence(),)),
+            )
+
+    def test_causal_evidence_subclass_cannot_enter_outcome_authority(self):
+        class ForgedEvidence(CausalInputEvidence):
+            pass
+
+        forged = ForgedEvidence(
+            evidence_id="forged",
+            content_digest=FINGERPRINT_B,
+            component_id="base",
+            available_utc=CUT,
+        )
+        with self.assertRaisesRegex(TypeError, "exact CausalInputEvidence"):
+            outcome(
+                variant="FULL",
+                utility=1,
+                cost=0,
+                elapsed=10,
+                components=("base",),
+                input_evidence=(forged,),
             )
 
     def test_deadline_integer_subclasses_are_rejected_before_comparison(self):

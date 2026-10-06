@@ -367,6 +367,23 @@ class SemanticWebClientContractTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, js)
 
+    def test_snapshot_jobs_reject_non_object_entries_before_render(self):
+        js = APP.read_text(encoding="utf-8")
+        parser = js[
+            js.index("function parseCanonicalSnapshot"):
+            js.index("function parseCommandResult")
+        ]
+        self.assertIn("!Array.isArray(snapshot.jobs)", parser)
+        self.assertIn("snapshot.jobs.some((item) =>", parser)
+        self.assertIn(
+            '!item || typeof item !== "object" || Array.isArray(item)',
+            parser,
+        )
+        self.assertIn(
+            'throw new Error("jobs must be an array of objects")',
+            parser,
+        )
+
     def test_snapshot_environment_and_time_fail_closed_before_commands_enable(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("function canonicalEnvironment(value, name)", js)

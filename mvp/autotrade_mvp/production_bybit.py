@@ -619,7 +619,15 @@ class ProductionBybitOrderSender:
         self._require_send_authority()
 
         def terminal_guard() -> None:
+            # A quota gate may block for long enough that host/recovery/domain
+            # authority changes before the dispatcher's irreversible
+            # SubmissionSending barrier.  Recheck product wire authority first
+            # so a known-unsent revoked action remains pre-barrier/zero-wire.
+            self._require_wire_authority()
             final_guard()
+            # The dispatcher callback itself is caller-reachable composition.
+            # Recheck once more immediately after it so callback-time retargeting
+            # cannot cross the terminal I/O boundary.
             self._require_wire_authority()
 
         transport_call = self.__transport_call

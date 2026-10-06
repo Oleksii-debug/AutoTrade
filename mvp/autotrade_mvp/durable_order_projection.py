@@ -33,9 +33,10 @@ from autotrade_runtime.artifacts import (
 )
 
 from .dispatch import (
-    _decode_exact_json_bytes,
     _has_exact_response_markers,
+    load_submission_response_binding,
     submission_attempt_aggregate_id,
+    submission_response_binding_projection,
 )
 from .order_projection import (
     OrderBookProjection,
@@ -1256,35 +1257,59 @@ class DurableOrderBookProjection:
                 terminal_seen = True
                 payload = event.get("payload")
                 if isinstance(payload, dict) and _has_exact_response_markers(payload):
-                    if payload.get("response_encoding") != "utf-8-json":
+                    # WP-18 proves that one exact provider response returned for
+                    # this exact send. It does *not* prove the provider-specific
+                    # lifecycle meaning of those bytes. Revalidate the sealed
+                    # durable binding here, then keep the generic order
+                    # projection UNKNOWN until a provider-specific authenticated
+                    # normalizer supplies ACCEPTED/REJECTED evidence. In
+                    # particular, transport success/HTTP 2xx must never be
+                    # promoted to acknowledgement or fill authority.
+                    try:
+                        with journal_store_authority_scope(store, identity):
+                            binding = load_submission_response_binding(
+                                store,
+                                environment=self.environment,
+                                account_id=self.account_id,
+                                attempt_id=attempt,
+                            )
+                        bound = submission_response_binding_projection(binding)
+                    except (KeyError, TypeError, ValueError, RuntimeError) as error:
                         raise OrderProjectionConflict(
-                            "exact submission response evidence is invalid"
-                        )
-                    raw_text = payload.get("response_text")
-                    expected_hash = payload.get("response_sha256")
+                            "exact submission response binding is invalid"
+                        ) from error
                     if (
-                        type(raw_text) is not str
-                        or not raw_text
-                        or type(expected_hash) is not str
+                        bound.get("terminal_state") != "SENT"
+                        or bound.get("attempt_id") != attempt
+                        or bound.get("client_order_id") != client_order_id
+                        or bound.get("environment") != self.environment
+                        or bound.get("account_id") != self.account_id
+                        or type(bound.get("provider")) is not str
+                        or bound["provider"].upper() != provider
                     ):
                         raise OrderProjectionConflict(
-                            "exact submission response evidence is unavailable"
+                            "exact submission response binding differs from durable attempt"
                         )
-                    try:
-                        raw = raw_text.encode("utf-8", errors="strict")
-                        if "sha256:" + sha256(raw).hexdigest() != expected_hash:
-                            raise ValueError("exact submission response SHA mismatch")
-                        response = _decode_exact_json_bytes(raw)
-                    except (UnicodeError, ValueError, TypeError) as error:
-                        raise OrderProjectionConflict(
-                            "exact submission response evidence is invalid"
-                        ) from error
-                else:
-                    response = (
-                        payload.get("response")
-                        if isinstance(payload, dict)
-                        else None
+                    results.append(
+                        self.acknowledge(
+                            event_key=event_key,
+                            client_order_id=client_order_id,
+                            attempt_id=attempt,
+                            status="UNKNOWN",
+                            committed_at=committed_at,
+                        )
                     )
+                    continue
+
+                # Historical marker-free rows may already contain one
+                # provider-neutral normalized lifecycle result. Preserve this
+                # compatibility path, but do not use it for the canonical exact
+                # WP-18 response contract above.
+                response = (
+                    payload.get("response")
+                    if isinstance(payload, dict)
+                    else None
+                )
                 if not isinstance(response, Mapping):
                     raise OrderProjectionConflict(
                         "submission sent response must be an object"
@@ -1315,6 +1340,39 @@ class DurableOrderBookProjection:
                         "submission attempt has multiple terminal outcomes"
                     )
                 terminal_seen = True
+                payload = event.get("payload")
+                if isinstance(payload, dict) and _has_exact_response_markers(payload):
+                    # Ambiguous post-SEND bytes remain transport evidence only,
+                    # but replay must still revalidate the exact durable WP-18
+                    # response binding before projecting UNKNOWN. Otherwise a
+                    # malformed/substituted terminal row could cross the stable
+                    # WP-18 -> WP-19 handoff without exact-response authority.
+                    try:
+                        with journal_store_authority_scope(store, identity):
+                            binding = load_submission_response_binding(
+                                store,
+                                environment=self.environment,
+                                account_id=self.account_id,
+                                attempt_id=attempt,
+                            )
+                        bound = submission_response_binding_projection(binding)
+                    except (KeyError, TypeError, ValueError, RuntimeError) as error:
+                        raise OrderProjectionConflict(
+                            "exact submission response binding is invalid"
+                        ) from error
+                    if (
+                        bound.get("terminal_state") != "UNKNOWN"
+                        or bound.get("retry_disposition") != "RECONCILE_FIRST"
+                        or bound.get("attempt_id") != attempt
+                        or bound.get("client_order_id") != client_order_id
+                        or bound.get("environment") != self.environment
+                        or bound.get("account_id") != self.account_id
+                        or type(bound.get("provider")) is not str
+                        or bound["provider"].upper() != provider
+                    ):
+                        raise OrderProjectionConflict(
+                            "exact ambiguous response binding differs from durable attempt"
+                        )
                 results.append(
                     self.acknowledge(
                         event_key=event_key,

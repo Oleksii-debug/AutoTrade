@@ -213,7 +213,11 @@ def _bind_authenticated_bybit_submission_projection():
     
         observed = _provider_submission_observation_projection(observation)
         evidence = normalized.get("evidence")
-        if _type(evidence) is not _list_type or _len(evidence) != 1 or _type(evidence[0]) is not _dict_type:
+        if (
+            _type(evidence) is not _list_type
+            or _len(evidence) != 1
+            or _type(evidence[0]) is not _dict_type
+        ):
             raise _error_type(
                 "Bybit normalized lifecycle result lacks one canonical evidence reference"
             )
@@ -271,6 +275,10 @@ def _bind_authenticated_bybit_submission_projection():
                     "rights_id": rights_id,
                 },
             )
+            if _type(manifest) is not _dict_type:
+                raise _error_type(
+                    "provider evidence publication returned non-canonical manifest"
+                )
             if (
                 manifest.get("artifact_id") != evidence_ref["artifact_id"]
                 or manifest.get("sha256") != evidence_ref["sha256"]

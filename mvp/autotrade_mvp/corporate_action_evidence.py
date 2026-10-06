@@ -388,9 +388,12 @@ def _authoritative_corporate_action_operations():
 
     states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
     state_lock = threading.RLock()
+    canonical_action_type = AuthoritativeCorporateAction
+    canonical_event_type = CorporateEvent
+    canonical_event_create = CorporateEvent.create
 
     def event_snapshot(event: CorporateEvent) -> tuple[object, ...]:
-        if type(event) is not CorporateEvent:
+        if type(event) is not canonical_event_type:
             raise CorporateActionEvidenceError(
                 "authoritative corporate action requires exact CorporateEvent"
             )
@@ -481,7 +484,7 @@ def _authoritative_corporate_action_operations():
         state: tuple[object, ...],
     ) -> AuthoritativeCorporateAction:
         event_state = state[0]
-        event = CorporateEvent.create(
+        event = canonical_event_create(
             event_id=event_state[0],
             instrument_id=event_state[1],
             instrument_version=event_state[2],
@@ -492,7 +495,7 @@ def _authoritative_corporate_action_operations():
             source_sequence=event_state[7],
             effective_at=event_state[8],
         )
-        return AuthoritativeCorporateAction(
+        return canonical_action_type(
             event=event,
             evidence_ref=state[1],
             provider_id=state[2],
@@ -519,7 +522,7 @@ def _authoritative_corporate_action_operations():
             states.pop(object_id, None)
 
     def register(value: AuthoritativeCorporateAction) -> None:
-        if type(value) is not AuthoritativeCorporateAction:
+        if type(value) is not canonical_action_type:
             raise TypeError(
                 "issued corporate action must be exact AuthoritativeCorporateAction"
             )
@@ -537,7 +540,7 @@ def _authoritative_corporate_action_operations():
     def require(
         value: AuthoritativeCorporateAction,
     ) -> AuthoritativeCorporateAction:
-        if type(value) is not AuthoritativeCorporateAction:
+        if type(value) is not canonical_action_type:
             raise TypeError(
                 "accepted must be canonical AuthoritativeCorporateAction"
             )
@@ -581,6 +584,9 @@ def _resolve_authoritative_corporate_action_impl(
     _register_authority,
     _provider_projection,
     _provider_require_scope,
+    _instrument_registry_type,
+    _corporate_event_create,
+    _authoritative_action_type,
 ) -> AuthoritativeCorporateAction:
     """Resolve one accepted event exclusively from sealed provider evidence.
 
@@ -604,7 +610,7 @@ def _resolve_authoritative_corporate_action_impl(
     reference = _text(evidence_ref, "evidence_ref")
     if not callable(evidence_resolver):
         raise TypeError("evidence_resolver must be callable")
-    if type(instrument_registry) is not InstrumentRegistry:
+    if type(instrument_registry) is not _instrument_registry_type:
         raise TypeError("instrument_registry must be exact InstrumentRegistry")
     if any(name in vars(instrument_registry) for name in ("exact", "at")):
         raise TypeError("instrument_registry lookup methods must not be shadowed")
@@ -705,8 +711,10 @@ def _resolve_authoritative_corporate_action_impl(
         f"{observation.instrument_id}@{observation.instrument_version}"
     )
     try:
-        instrument = InstrumentRegistry.exact(instrument_registry, version_ref)
-        effective_instrument = InstrumentRegistry.at(
+        instrument = _instrument_registry_type.exact(
+            instrument_registry, version_ref
+        )
+        effective_instrument = _instrument_registry_type.at(
             instrument_registry,
             observation.instrument_id,
             observation.effective_at,
@@ -778,7 +786,7 @@ def _resolve_authoritative_corporate_action_impl(
         "payload": dict(observation.payload),
     }
     provenance_digest = payload_digest(provenance)
-    event = CorporateEvent.create(
+    event = _corporate_event_create(
         event_id=observation.external_event_id,
         instrument_id=observation.instrument_id,
         instrument_version=observation.instrument_version,
@@ -792,7 +800,7 @@ def _resolve_authoritative_corporate_action_impl(
         source_sequence=observation.source_sequence,
         payload=dict(observation.payload),
     )
-    accepted = AuthoritativeCorporateAction(
+    accepted = _authoritative_action_type(
         event=event,
         evidence_ref=projection["evidence_ref"],
         provider_id=observation.provider_id,
@@ -818,6 +826,9 @@ def _bind_authoritative_corporate_action_resolver(
     register_authority,
     provider_projection,
     provider_require_scope,
+    instrument_registry_type,
+    corporate_event_create,
+    authoritative_action_type,
 ):
     def resolve_authoritative_corporate_action(
         evidence_ref: str,
@@ -846,6 +857,9 @@ def _bind_authoritative_corporate_action_resolver(
             _register_authority=register_authority,
             _provider_projection=provider_projection,
             _provider_require_scope=provider_require_scope,
+            _instrument_registry_type=instrument_registry_type,
+            _corporate_event_create=corporate_event_create,
+            _authoritative_action_type=authoritative_action_type,
         )
 
     return resolve_authoritative_corporate_action
@@ -856,6 +870,9 @@ resolve_authoritative_corporate_action = _bind_authoritative_corporate_action_re
     _register_authoritative_corporate_action,
     provider_response_observation_projection,
     provider_response_observation_require_scope,
+    InstrumentRegistry,
+    CorporateEvent.create,
+    AuthoritativeCorporateAction,
 )
 del _bind_authoritative_corporate_action_resolver
 del _resolve_authoritative_corporate_action_impl

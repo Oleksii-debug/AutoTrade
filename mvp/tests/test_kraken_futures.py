@@ -210,6 +210,41 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             )
         self.assertEqual(callbacks, [])
 
+    def test_preparation_rejects_rebound_bool_authority_before_callback(self):
+        callbacks = []
+
+        class HostileReduceOnly:
+            def __bool__(self):
+                callbacks.append(True)
+                raise AssertionError("hostile reduce_only callback executed")
+
+        with patch(
+            "mvp.autotrade_mvp.kraken_futures.bool",
+            HostileReduceOnly,
+            create=True,
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "prepared request authority changed",
+            ):
+                prepare_order_request(
+                    capability=futures_write_capability(
+                        account_id="futures-account",
+                        environment="PAPER",
+                    ),
+                    account_id="futures-account",
+                    provider_environment="DEMO",
+                    instrument_version="PI_XBTUSD@v1",
+                    at=NOW_DT,
+                    symbol="PI_XBTUSD",
+                    side="BUY",
+                    order_type="MARKET",
+                    size="1",
+                    client_order_id="futures-rebound-bool",
+                    reduce_only=HostileReduceOnly(),
+                )
+        self.assertEqual(callbacks, [])
+
     def test_payload_numeric_admission_uses_shared_bounded_exact_authority(self):
         arguments = dict(environment="LIVE", symbol="PI_XBTUSD", side="BUY",
                          order_type="LIMIT", size="1.0001", price="70000.01",

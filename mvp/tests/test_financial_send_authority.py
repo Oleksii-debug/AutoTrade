@@ -55,12 +55,17 @@ def exact_request():
 
 
 def exact_scope():
+    request, _body_sha = exact_request()
     return {
         "provider_id": "BYBIT",
         "account_id": "account-1",
         "environment": "PAPER",
         "provider_environment": "TESTNET",
         "capability_snapshot_id": "capability-1",
+        "endpoint": "/v5/order/create",
+        "prepared_request_sha256": payload_digest(request),
+        "capability_snapshot_ids": ["capability-1"],
+        "instrument_versions": ["7"],
     }
 
 

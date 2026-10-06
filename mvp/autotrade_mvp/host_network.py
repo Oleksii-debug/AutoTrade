@@ -16,10 +16,12 @@ import ipaddress
 import json
 import re
 import ssl
-from threading import Lock
+from threading import Lock, BoundedSemaphore
 from types import MappingProxyType
 from typing import Callable, Mapping
 from urllib.parse import parse_qs, unquote, urlsplit
+
+from contracts.bindings.python.common_scalars import is_valid_common_scalar
 
 from .durable_host_api import JournalBackedHostCommandStore
 from .host_api import EventGap, command_result_payload, operation_result_payload
@@ -57,6 +59,12 @@ _SNAPSHOT_FIELDS = {
 }
 _PERMISSION_SUMMARY_FIELDS = {"actor", "session", "role", "capabilities"}
 _PERMISSION_SUMMARY_REQUIRED_FIELDS = {"actor", "session", "role"}
+
+
+class SnapshotTemporarilyUnavailable(RuntimeError):
+    """A valid state read cannot currently obtain one coherent authority snapshot."""
+
+
 _SINGLETON_REQUEST_HEADERS = (
     "Authorization",
     "X-AutoTrade-Actor",
@@ -65,6 +73,7 @@ _SINGLETON_REQUEST_HEADERS = (
     "Content-Length",
     "Content-Type",
     "Accept",
+    "Cookie",
 )
 
 
@@ -242,6 +251,7 @@ class AuthenticatedHostApplication:
         if not callable(snapshot_provider):
             raise TypeError("snapshot_provider must be callable")
         self.security_boundary = security_boundary
+        self._journal = journal
         self.host_id = host_id.strip()
         self.public_origin = _authenticated_origin(public_origin)
         self._principal_resolver = principal_resolver
@@ -279,7 +289,14 @@ class AuthenticatedHostApplication:
                     result = self.store.execute_authority_operation(operation_id)
                 except (TypeError, ValueError, OverflowError):
                     current = self.store.get_operation(operation_id)
-                    if current.phase in self.store.TERMINAL_PHASES:
+                    if (
+                        current.phase in self.store.TERMINAL_PHASES
+                        or current.phase == "UNKNOWN"
+                    ):
+                        # UNKNOWN is deliberately resumable, but the state
+                        # machine forbids UNKNOWN -> UNKNOWN rewrites. A repeated
+                        # recoverable execution fault must preserve the first
+                        # durable uncertainty rather than crash host startup.
                         result = current
                     else:
                         result = self.store.update_operation(
@@ -337,23 +354,55 @@ class AuthenticatedHostApplication:
         principal: HostPrincipal,
         authenticated_role: str,
     ) -> Mapping[str, object]:
-        durable = self.store.snapshot()
-        projected = self._snapshot_provider(
-            MappingProxyType(dict(durable)),
-            SnapshotPrincipal(
-                actor=principal.actor,
-                session=principal.session,
-                role=authenticated_role,
-            ),
-        )
+        # UiSnapshot is one operator observation, not a loose collection of
+        # individually valid reads. Pin the global append-only journal cut
+        # across both the durable Host projection and the product projector so
+        # cash/risk/orders/jobs cannot be assembled from different moments.
+        #
+        # A concurrent append does not make the request itself invalid. Retry a
+        # small bounded number of times on a fresh cut so normal write traffic
+        # cannot starve the operator UI after one harmless race. Every candidate
+        # is still discarded unless the journal remains unchanged for the whole
+        # projection; persistent churn therefore continues to fail closed.
+        for _snapshot_attempt in range(4):
+            journal_cut = self._journal.current_journal_sequence()
+            durable = self.store.snapshot()
+            projected = self._snapshot_provider(
+                MappingProxyType(dict(durable)),
+                SnapshotPrincipal(
+                    actor=principal.actor,
+                    session=principal.session,
+                    role=authenticated_role,
+                ),
+            )
+            if self._journal.current_journal_sequence() == journal_cut:
+                break
+        else:
+            raise SnapshotTemporarilyUnavailable("Journal changed during UiSnapshot projection")
         if not isinstance(projected, Mapping):
             raise TypeError("snapshot_provider must return a mapping")
         payload = dict(projected)
         if set(payload) != _SNAPSHOT_FIELDS:
             raise ValueError("UiSnapshot fields do not match the canonical contract")
-        for field in ("state_version", "event_cursor", "account_id", "environment"):
-            if str(payload[field]) != str(durable[field]):
-                raise ValueError(f"UiSnapshot {field} does not match durable host truth")
+        for field in ("state_version", "event_cursor"):
+            value = payload[field]
+            if (
+                not is_valid_common_scalar("Sequence", value)
+                or value != durable[field]
+            ):
+                raise ValueError(
+                    f"UiSnapshot {field} does not match canonical durable host truth"
+                )
+        if payload["account_id"] != durable["account_id"]:
+            raise ValueError("UiSnapshot account_id does not match durable host truth")
+        environment = payload["environment"]
+        if (
+            not is_valid_common_scalar("Environment", environment)
+            or environment != durable["environment"]
+        ):
+            raise ValueError(
+                "UiSnapshot environment does not match canonical durable host truth"
+            )
         if payload["host_id"] != self.host_id:
             raise ValueError("UiSnapshot host_id does not match the configured host")
         for field in (
@@ -555,6 +604,8 @@ class AuthenticatedHostApplication:
                 if set(query) - {"after"} or len(query.get("after", ["0"])) != 1:
                     return _error(400, "INVALID_EVENT_CURSOR")
                 after = query.get("after", ["0"])[0]
+                if not is_valid_common_scalar("Sequence", after):
+                    return _error(400, "INVALID_EVENT_CURSOR")
                 events = tuple(
                     self._event_payload(event)
                     for event in self.store.events_after(after)
@@ -596,6 +647,12 @@ class AuthenticatedHostApplication:
                     "resnapshot": "/api/v1/state",
                 },
                 headers=(("Cache-Control", "no-store"),),
+            )
+        except SnapshotTemporarilyUnavailable:
+            return _json_response(
+                503,
+                {"error": "SNAPSHOT_BUSY", "retryable": True},
+                headers=(("Cache-Control", "no-store"), ("Retry-After", "1")),
             )
         except PermissionError:
             return _error(403, "AUTHENTICATION_OR_AUTHORIZATION_FAILED")
@@ -653,7 +710,8 @@ class _HostRequestHandler(BaseHTTPRequestHandler):
         self.send_response(response.status)
         self.send_header("Content-Type", response.content_type)
         self.send_header("Content-Length", str(len(response.body)))
-        self.send_header("X-Content-Type-Options", "nosniff")
+        if not any(name.lower() == "x-content-type-options" for name, _ in response.headers):
+            self.send_header("X-Content-Type-Options", "nosniff")
         for name, value in response.headers:
             self.send_header(name, value)
         self.end_headers()
@@ -691,9 +749,13 @@ class AuthenticatedHostServer(ThreadingHTTPServer):
         application: AuthenticatedHostApplication,
         *,
         tls_context: ssl.SSLContext | None = None,
+        max_concurrent_requests: int = 32,
     ) -> None:
         if not isinstance(application, AuthenticatedHostApplication):
             raise TypeError("application must be AuthenticatedHostApplication")
+        if type(max_concurrent_requests) is not int or not 1 <= max_concurrent_requests <= 1024:
+            raise ValueError("max_concurrent_requests must be a bounded positive integer")
+        self._request_slots = BoundedSemaphore(max_concurrent_requests)
         host, _ = server_address
         if tls_context is None and not _is_loopback_bind(host):
             raise ValueError("Plain HTTP host transport must bind to loopback only")
@@ -722,3 +784,44 @@ class AuthenticatedHostServer(ThreadingHTTPServer):
             # when startup recovery or TLS setup fails closed.
             self.server_close()
             raise
+
+    def process_request(self, request, client_address):
+        if not self._request_slots.acquire(blocking=False):
+            # Reject before parsing/admission. The client retains its exact
+            # command identity and may recover/retry it after backpressure.
+            body = b'{"error":"HOST_OVERLOADED","accepted":false}'
+            response = (b'HTTP/1.0 503 Service Unavailable\r\nContent-Type: application/json\r\n'
+                b'Cache-Control: no-store\r\nRetry-After: 1\r\nConnection: close\r\nContent-Length: '
+                + str(len(body)).encode() + b'\r\n\r\n' + body)
+            try:
+                import socket
+                import time
+                request.settimeout(0.1)
+                request.sendall(response)
+                request.shutdown(socket.SHUT_WR)
+                # Leave the receive half open briefly while the client finishes
+                # its already-sent request. Closing with unread POST bytes can
+                # reset TCP and erase the explicit overload response.
+                deadline = time.monotonic() + 0.1
+                remaining = _MAX_BODY_BYTES + 65536
+                while remaining > 0 and time.monotonic() < deadline:
+                    chunk = request.recv(min(65536, remaining))
+                    if not chunk: break
+                    remaining -= len(chunk)
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            request.settimeout(10)
+            super().process_request(request, client_address)
+        except BaseException:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()

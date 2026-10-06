@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import (
@@ -18,7 +19,9 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustPolicy,
     SignedQualificationAttestation,
     TrustRoot,
+    verify_qualification_attestation,
 )
+import mvp.autotrade_mvp.windows_update as windows_update_module
 from mvp.autotrade_mvp.release_candidate import (
     ReleaseArtifactEvidence,
     ReleaseCandidateDecision,
@@ -96,7 +99,10 @@ def _trust_root():
         verifier_id="autotrade.trust.verifier",
         public_modulus_hex=format(_RSA_N, "x"),
         public_exponent=65537,
-        allowed_scopes=(QualificationScope("RELEASE", "FREEZE"),),
+        allowed_scopes=(
+            QualificationScope("RELEASE", "FREEZE"),
+            QualificationScope("RECOVERY", "UPDATE"),
+        ),
         valid_from="2026-09-01T00:00:00Z",
     )
 
@@ -278,6 +284,203 @@ def rehashed_plan(plan: WindowsUpdatePlan, mutate) -> WindowsUpdatePlan:
 
 
 class WindowsUpdatePlanTests(unittest.TestCase):
+    def _publish_update_artifact(
+        self,
+        *,
+        source_sha,
+        label,
+        media_type,
+        evidence_kind,
+    ):
+        identity = f"windows-update-wp50:{source_sha}:{label}"
+        artifact_id = str(uuid5(NAMESPACE_URL, identity))
+        data = ("windows-update-evidence:" + identity).encode("utf-8")
+        digest = "sha256:" + sha256(data).hexdigest()
+        self.store.publish_bytes(
+            artifact_id=artifact_id,
+            data=data,
+            media_type=media_type,
+            rights={"storage": True, "export": False},
+            source_refs=[f"git:{source_sha}"],
+            metadata={"evidence_kind": evidence_kind},
+        )
+        return artifact_id, digest
+
+    def _update_receipt(self, evidence, *, requirement, refs):
+        attestation = QualificationAttestation(
+            attestation_id=str(
+                uuid5(
+                    NAMESPACE_URL,
+                    "windows-update-wp50:"
+                    + evidence.source_sha
+                    + ":"
+                    + requirement,
+                )
+            ),
+            source_sha=evidence.source_sha,
+            domain="RECOVERY",
+            gate="UPDATE",
+            package_id="WP-50",
+            protocol_id="windows-update-evidence-v1",
+            protocol_version="1.0.0",
+            requirement_ids=("windows-update-evidence-authority", requirement),
+            evidence_refs=tuple(refs),
+            producer_id=self.trust_root.producer_id,
+            verifier_id=self.trust_root.verifier_id,
+            trust_root_id=self.trust_root.root_id,
+            runner_id="windows-update-wp50-runner",
+            harness_version="1.0.0",
+            started_at="2026-10-04T13:00:00Z",
+            completed_at="2026-10-04T13:01:00Z",
+            signed_at="2026-10-04T13:02:00Z",
+            result="PASS",
+            unresolved_limits=(),
+        )
+        return SignedQualificationAttestation(attestation, _sign(attestation))
+
+    def _qualified_backup(
+        self,
+        *,
+        source_sha=CURRENT_SOURCE,
+        journal_schema_version=1,
+        verification_status="PASS",
+        reconciliation_required_after_restore=True,
+    ):
+        artifact_id, digest = self._publish_update_artifact(
+            source_sha=source_sha,
+            label=(
+                "backup:"
+                + str(journal_schema_version)
+                + ":"
+                + verification_status
+                + ":"
+                + str(reconciliation_required_after_restore)
+            ),
+            media_type=windows_update_module.WINDOWS_UPDATE_BACKUP_MEDIA_TYPE,
+            evidence_kind=windows_update_module.WINDOWS_UPDATE_BACKUP_EVIDENCE_KIND,
+        )
+        raw = BackupEvidence(
+            manifest_sha256=digest,
+            source_sha=source_sha,
+            journal_schema_version=journal_schema_version,
+            verification_status=verification_status,
+            reconciliation_required_after_restore=reconciliation_required_after_restore,
+            evidence_artifact_id=artifact_id,
+        )
+        requirement = windows_update_module.backup_evidence_subject_requirement(raw)
+        receipt = self._update_receipt(
+            raw,
+            requirement=requirement,
+            refs=(
+                EvidenceArtifactRef(
+                    artifact_id=artifact_id,
+                    sha256=digest,
+                    media_type=windows_update_module.WINDOWS_UPDATE_BACKUP_MEDIA_TYPE,
+                    evidence_kind=windows_update_module.WINDOWS_UPDATE_BACKUP_EVIDENCE_KIND,
+                    source_sha=source_sha,
+                ),
+            ),
+        )
+        return BackupEvidence(
+            manifest_sha256=raw.manifest_sha256,
+            source_sha=raw.source_sha,
+            journal_schema_version=raw.journal_schema_version,
+            verification_status=raw.verification_status,
+            reconciliation_required_after_restore=raw.reconciliation_required_after_restore,
+            evidence_artifact_id=raw.evidence_artifact_id,
+            qualification_receipt=receipt,
+        )
+
+    def _qualified_migration(
+        self,
+        *,
+        source_sha=CANDIDATE_SOURCE,
+        from_schema_version=1,
+        to_schema_version=2,
+        verification_status="PASS",
+        rollback_mode="RESTORE_PRE_UPDATE_BACKUP",
+    ):
+        forward_id, forward_digest = self._publish_update_artifact(
+            source_sha=source_sha,
+            label=(
+                "migration:"
+                + str(from_schema_version)
+                + ":"
+                + str(to_schema_version)
+                + ":"
+                + rollback_mode
+            ),
+            media_type=windows_update_module.WINDOWS_UPDATE_MIGRATION_MEDIA_TYPE,
+            evidence_kind=windows_update_module.WINDOWS_UPDATE_MIGRATION_EVIDENCE_KIND,
+        )
+        reverse_id = None
+        reverse_digest = None
+        refs = [
+            EvidenceArtifactRef(
+                artifact_id=forward_id,
+                sha256=forward_digest,
+                media_type=windows_update_module.WINDOWS_UPDATE_MIGRATION_MEDIA_TYPE,
+                evidence_kind=windows_update_module.WINDOWS_UPDATE_MIGRATION_EVIDENCE_KIND,
+                source_sha=source_sha,
+            )
+        ]
+        if rollback_mode == "REVERSIBLE_MIGRATION":
+            reverse_id, reverse_digest = self._publish_update_artifact(
+                source_sha=source_sha,
+                label=(
+                    "reverse-migration:"
+                    + str(to_schema_version)
+                    + ":"
+                    + str(from_schema_version)
+                ),
+                media_type=windows_update_module.WINDOWS_UPDATE_MIGRATION_MEDIA_TYPE,
+                evidence_kind=(
+                    windows_update_module.
+                    WINDOWS_UPDATE_REVERSE_MIGRATION_EVIDENCE_KIND
+                ),
+            )
+            refs.append(
+                EvidenceArtifactRef(
+                    artifact_id=reverse_id,
+                    sha256=reverse_digest,
+                    media_type=windows_update_module.WINDOWS_UPDATE_MIGRATION_MEDIA_TYPE,
+                    evidence_kind=(
+                        windows_update_module.
+                        WINDOWS_UPDATE_REVERSE_MIGRATION_EVIDENCE_KIND
+                    ),
+                    source_sha=source_sha,
+                )
+            )
+        raw = MigrationEvidence(
+            from_schema_version=from_schema_version,
+            to_schema_version=to_schema_version,
+            source_sha=source_sha,
+            evidence_sha256=forward_digest,
+            verification_status=verification_status,
+            rollback_mode=rollback_mode,
+            reverse_evidence_sha256=reverse_digest,
+            evidence_artifact_id=forward_id,
+            reverse_evidence_artifact_id=reverse_id,
+        )
+        requirement = windows_update_module.migration_evidence_subject_requirement(raw)
+        receipt = self._update_receipt(
+            raw,
+            requirement=requirement,
+            refs=tuple(refs),
+        )
+        return MigrationEvidence(
+            from_schema_version=raw.from_schema_version,
+            to_schema_version=raw.to_schema_version,
+            source_sha=raw.source_sha,
+            evidence_sha256=raw.evidence_sha256,
+            verification_status=raw.verification_status,
+            rollback_mode=raw.rollback_mode,
+            reverse_evidence_sha256=raw.reverse_evidence_sha256,
+            evidence_artifact_id=raw.evidence_artifact_id,
+            reverse_evidence_artifact_id=raw.reverse_evidence_artifact_id,
+            qualification_receipt=receipt,
+        )
+
     def setUp(self):
         self._tempdir = TemporaryDirectory()
         self.evidence_root = self._tempdir.name
@@ -294,6 +497,24 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             expected_policy_id=self.trust_policy.policy_id,
             expected_policy_version=self.trust_policy.policy_version,
         )
+
+        def canonical_update_verify(receipt_arg, **kwargs):
+            return verify_qualification_attestation(
+                receipt_arg,
+                policy=self.trust_policy,
+                expected_policy_id=self.trust_policy.policy_id,
+                expected_policy_version=self.trust_policy.policy_version,
+                **kwargs,
+            )
+
+        self._update_verify_patcher = patch.object(
+            windows_update_module,
+            "verify_canonical_qualification_attestation",
+            side_effect=canonical_update_verify,
+        )
+        self._update_verify_patcher.start()
+        self.addCleanup(self._update_verify_patcher.stop)
+
         self.current = frozen_release(
             self.store,
             self.evidence_root,
@@ -312,16 +533,200 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             CANDIDATE_SOURCE,
             5,
         )
-        self.backup = BackupEvidence(
-            manifest_sha256="sha256:" + "c" * 64,
+        self.backup = self._qualified_backup()
+
+    def tearDown(self):
+        self._tempdir.cleanup()
+
+    def test_unsigned_backup_pass_cannot_make_plan_ready(self):
+        unsigned = BackupEvidence(
+            manifest_sha256=self.backup.manifest_sha256,
             source_sha=CURRENT_SOURCE,
             journal_schema_version=1,
             verification_status="PASS",
             reconciliation_required_after_restore=True,
+            evidence_artifact_id=self.backup.evidence_artifact_id,
+        )
+        decision = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=unsigned,
+            trust=self.trust,
+        )
+        self.assertEqual(decision.status, "BLOCKED")
+        self.assertIn(
+            "pre_update_backup_authority_unverified",
+            decision.reasons,
         )
 
-    def tearDown(self):
-        self._tempdir.cleanup()
+    def test_unsigned_migration_pass_cannot_make_plan_ready(self):
+        qualified = self._qualified_migration()
+        unsigned = MigrationEvidence(
+            from_schema_version=qualified.from_schema_version,
+            to_schema_version=qualified.to_schema_version,
+            source_sha=qualified.source_sha,
+            evidence_sha256=qualified.evidence_sha256,
+            verification_status="PASS",
+            rollback_mode=qualified.rollback_mode,
+            evidence_artifact_id=qualified.evidence_artifact_id,
+        )
+        decision = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=2,
+            backup_evidence=self.backup,
+            migration_evidence=unsigned,
+            trust=self.trust,
+        )
+        self.assertEqual(decision.status, "BLOCKED")
+        self.assertIn(
+            "migration_evidence_authority_unverified",
+            decision.reasons,
+        )
+
+    def test_ready_plan_binds_signed_backup_qualification_and_revalidates_it(self):
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+            trust=self.trust,
+        )
+        payload = json.loads(plan.plan_json)
+        qualification = payload["pre_update_backup"]["qualification"]
+        self.assertEqual(
+            qualification["subject_requirement"],
+            windows_update_module.backup_evidence_subject_requirement(self.backup),
+        )
+        self.assertEqual(
+            qualification["receipt"]["attestation"]["result"],
+            "PASS",
+        )
+        checkpoint = start_update_checkpoint(plan, trust=self.trust)
+        self.assertEqual(checkpoint.plan_sha256, plan.plan_sha256)
+
+        forged = rehashed_plan(
+            plan,
+            lambda body: body["pre_update_backup"]["qualification"].__setitem__(
+                "subject_requirement",
+                "windows-update-backup/sha256:" + "0" * 64,
+            ),
+        )
+        with self.assertRaisesRegex(
+            WindowsUpdateError,
+            "qualification identity is not canonical",
+        ):
+            start_update_checkpoint(forged, trust=self.trust)
+
+    def test_signed_backup_receipt_must_cover_exact_artifact_identity(self):
+        wrong_raw = BackupEvidence(
+            manifest_sha256=self.backup.manifest_sha256,
+            source_sha=self.backup.source_sha,
+            journal_schema_version=self.backup.journal_schema_version,
+            verification_status=self.backup.verification_status,
+            reconciliation_required_after_restore=(
+                self.backup.reconciliation_required_after_restore
+            ),
+            evidence_artifact_id=str(
+                uuid5(NAMESPACE_URL, "different-backup-artifact")
+            ),
+        )
+        receipt = self._update_receipt(
+            wrong_raw,
+            requirement=windows_update_module.backup_evidence_subject_requirement(
+                wrong_raw
+            ),
+            refs=(
+                EvidenceArtifactRef(
+                    artifact_id=self.backup.evidence_artifact_id,
+                    sha256=self.backup.manifest_sha256,
+                    media_type=windows_update_module.WINDOWS_UPDATE_BACKUP_MEDIA_TYPE,
+                    evidence_kind=windows_update_module.WINDOWS_UPDATE_BACKUP_EVIDENCE_KIND,
+                    source_sha=self.backup.source_sha,
+                ),
+            ),
+        )
+        wrong = BackupEvidence(
+            manifest_sha256=wrong_raw.manifest_sha256,
+            source_sha=wrong_raw.source_sha,
+            journal_schema_version=wrong_raw.journal_schema_version,
+            verification_status=wrong_raw.verification_status,
+            reconciliation_required_after_restore=(
+                wrong_raw.reconciliation_required_after_restore
+            ),
+            evidence_artifact_id=wrong_raw.evidence_artifact_id,
+            qualification_receipt=receipt,
+        )
+        decision = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=wrong,
+            trust=self.trust,
+        )
+        self.assertEqual(decision.status, "BLOCKED")
+        self.assertIn(
+            "pre_update_backup_authority_unverified",
+            decision.reasons,
+        )
+
+    def test_signed_migration_receipt_must_cover_exact_artifact_identity(self):
+        qualified = self._qualified_migration()
+        wrong_raw = MigrationEvidence(
+            from_schema_version=qualified.from_schema_version,
+            to_schema_version=qualified.to_schema_version,
+            source_sha=qualified.source_sha,
+            evidence_sha256=qualified.evidence_sha256,
+            verification_status=qualified.verification_status,
+            rollback_mode=qualified.rollback_mode,
+            evidence_artifact_id=str(
+                uuid5(NAMESPACE_URL, "different-migration-artifact")
+            ),
+        )
+        receipt = self._update_receipt(
+            wrong_raw,
+            requirement=windows_update_module.migration_evidence_subject_requirement(
+                wrong_raw
+            ),
+            refs=(
+                EvidenceArtifactRef(
+                    artifact_id=qualified.evidence_artifact_id,
+                    sha256=qualified.evidence_sha256,
+                    media_type=windows_update_module.WINDOWS_UPDATE_MIGRATION_MEDIA_TYPE,
+                    evidence_kind=windows_update_module.WINDOWS_UPDATE_MIGRATION_EVIDENCE_KIND,
+                    source_sha=qualified.source_sha,
+                ),
+            ),
+        )
+        wrong = MigrationEvidence(
+            from_schema_version=wrong_raw.from_schema_version,
+            to_schema_version=wrong_raw.to_schema_version,
+            source_sha=wrong_raw.source_sha,
+            evidence_sha256=wrong_raw.evidence_sha256,
+            verification_status=wrong_raw.verification_status,
+            rollback_mode=wrong_raw.rollback_mode,
+            evidence_artifact_id=wrong_raw.evidence_artifact_id,
+            qualification_receipt=receipt,
+        )
+        decision = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=2,
+            backup_evidence=self.backup,
+            migration_evidence=wrong,
+            trust=self.trust,
+        )
+        self.assertEqual(decision.status, "BLOCKED")
+        self.assertIn(
+            "migration_evidence_authority_unverified",
+            decision.reasons,
+        )
 
     def test_trust_context_rejects_mismatched_independent_root(self):
         with TemporaryDirectory() as other_root:
@@ -562,14 +967,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
         self.assertIsNone(decision.plan_json)
 
     def test_verified_schema_transition_binds_candidate_source_and_rollback(self):
-        migration = MigrationEvidence(
-            from_schema_version=1,
-            to_schema_version=2,
-            source_sha=CANDIDATE_SOURCE,
-            evidence_sha256="sha256:" + "d" * 64,
-            verification_status="PASS",
-            rollback_mode="RESTORE_PRE_UPDATE_BACKUP",
-        )
+        migration = self._qualified_migration()
         decision = build_windows_update_plan(
             current_release=self.current,
             candidate_release=self.candidate,
@@ -1134,14 +1532,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
 
 
     def test_restart_assessment_uses_observed_state_not_checkpoint_hope(self):
-        migration = MigrationEvidence(
-            from_schema_version=1,
-            to_schema_version=2,
-            source_sha=CANDIDATE_SOURCE,
-            evidence_sha256="sha256:" + "d" * 64,
-            verification_status="PASS",
-            rollback_mode="RESTORE_PRE_UPDATE_BACKUP",
-        )
+        migration = self._qualified_migration()
         plan = build_windows_update_plan(
             current_release=self.current,
             candidate_release=self.candidate,
@@ -1230,14 +1621,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
         )
 
     def test_restart_during_rollback_never_resumes_forward_update(self):
-        migration = MigrationEvidence(
-            from_schema_version=1,
-            to_schema_version=2,
-            source_sha=CANDIDATE_SOURCE,
-            evidence_sha256="sha256:" + "d" * 64,
-            verification_status="PASS",
-            rollback_mode="RESTORE_PRE_UPDATE_BACKUP",
-        )
+        migration = self._qualified_migration()
         plan = build_windows_update_plan(
             current_release=self.current,
             candidate_release=self.candidate,
@@ -1324,14 +1708,8 @@ class WindowsUpdatePlanTests(unittest.TestCase):
                 reverse_evidence_sha256="sha256:" + "d" * 64,
             )
 
-        migration = MigrationEvidence(
-            from_schema_version=1,
-            to_schema_version=2,
-            source_sha=CANDIDATE_SOURCE,
-            evidence_sha256="sha256:" + "d" * 64,
-            verification_status="PASS",
+        migration = self._qualified_migration(
             rollback_mode="REVERSIBLE_MIGRATION",
-            reverse_evidence_sha256="sha256:" + "e" * 64,
         )
         plan = build_windows_update_plan(
             current_release=self.current,
@@ -1346,7 +1724,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
         payload = json.loads(plan.plan_json)
         self.assertEqual(
             payload["migration_evidence"]["reverse_evidence_sha256"],
-            "sha256:" + "e" * 64,
+            migration.reverse_evidence_sha256,
         )
         self.assertEqual(
             payload["rollback"]["mode"],
@@ -1440,14 +1818,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
                     start_update_checkpoint(forged , trust=self.trust)
 
     def test_rehashed_migration_evidence_cannot_bypass_schema_gates(self):
-        migration = MigrationEvidence(
-            from_schema_version=1,
-            to_schema_version=2,
-            source_sha=CANDIDATE_SOURCE,
-            evidence_sha256="sha256:" + "d" * 64,
-            verification_status="PASS",
-            rollback_mode="RESTORE_PRE_UPDATE_BACKUP",
-        )
+        migration = self._qualified_migration()
         plan = build_windows_update_plan(
             current_release=self.current,
             candidate_release=self.candidate,
@@ -1542,6 +1913,377 @@ class WindowsUpdatePlanTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(WindowsUpdateError, "cannot grant trading authority"):
             start_update_checkpoint(forged , trust=self.trust)
+
+
+    def test_polymorphic_update_evidence_scalars_fail_without_callbacks(self):
+        class HostileText(str):
+            callbacks = 0
+
+            def _trip(self, *_args, **_kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("hostile text callback executed")
+
+            strip = _trip
+            upper = _trip
+            encode = _trip
+            __eq__ = _trip
+            __hash__ = _trip
+
+        class HostileInt(int):
+            callbacks = 0
+
+            def __le__(self, _other):
+                type(self).callbacks += 1
+                raise AssertionError("hostile integer comparison executed")
+
+            def __eq__(self, _other):
+                type(self).callbacks += 1
+                raise AssertionError("hostile integer equality executed")
+
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            BackupEvidence(
+                manifest_sha256="sha256:" + "c" * 64,
+                source_sha=CURRENT_SOURCE,
+                journal_schema_version=1,
+                verification_status=HostileText("PASS"),
+                reconciliation_required_after_restore=True,
+            )
+        self.assertEqual(HostileText.callbacks, 0)
+
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            MigrationEvidence(
+                from_schema_version=1,
+                to_schema_version=2,
+                source_sha=CANDIDATE_SOURCE,
+                evidence_sha256="sha256:" + "d" * 64,
+                verification_status="PASS",
+                rollback_mode=HostileText("RESTORE_PRE_UPDATE_BACKUP"),
+            )
+        self.assertEqual(HostileText.callbacks, 0)
+
+        HostileInt.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            BackupEvidence(
+                manifest_sha256="sha256:" + "c" * 64,
+                source_sha=CURRENT_SOURCE,
+                journal_schema_version=HostileInt(1),
+                verification_status="PASS",
+                reconciliation_required_after_restore=True,
+            )
+        self.assertEqual(HostileInt.callbacks, 0)
+
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            WindowsUpdatePlan(
+                status=HostileText("PLAN_READY"),
+                reasons=(),
+                plan_json="{}",
+                plan_sha256="sha256:" + "0" * 64,
+            )
+        self.assertEqual(HostileText.callbacks, 0)
+
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            WindowsUpdateCheckpoint(
+                plan_sha256="sha256:" + "0" * 64,
+                update_completed_steps=(HostileText("QUIESCE_NEW_ADMISSIONS"),),
+            )
+        self.assertEqual(HostileText.callbacks, 0)
+
+    def test_polymorphic_trust_inputs_fail_before_path_or_policy_callbacks(self):
+        class HostileText(str):
+            callbacks = 0
+
+            def strip(self, *_args, **_kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("hostile strip callback executed")
+
+            def __fspath__(self):
+                type(self).callbacks += 1
+                raise AssertionError("hostile path callback executed")
+
+        HostileText.callbacks = 0
+        with self.assertRaises(TypeError):
+            WindowsUpdateTrustContext(
+                evidence_store=self.store,
+                evidence_root=HostileText(self.evidence_root),
+                qualification_policy=self.trust_policy,
+                expected_policy_id=self.trust_policy.policy_id,
+                expected_policy_version=self.trust_policy.policy_version,
+            )
+        self.assertEqual(HostileText.callbacks, 0)
+
+        class HostilePolicy(QualificationTrustPolicy):
+            pass
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact QualificationTrustPolicy",
+        ):
+            WindowsUpdateTrustContext(
+                evidence_store=self.store,
+                evidence_root=self.evidence_root,
+                qualification_policy=HostilePolicy(
+                    policy_version="2026.09",
+                    roots=(self.trust_root,),
+                ),
+                expected_policy_id=self.trust_policy.policy_id,
+                expected_policy_version=self.trust_policy.policy_version,
+            )
+
+    def test_tampered_frozen_release_text_never_executes_before_rejection(self):
+        class HostileText(str):
+            callbacks = 0
+
+            def _trip(self, *_args, **_kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("hostile frozen-release callback executed")
+
+            strip = _trip
+            encode = _trip
+            __eq__ = _trip
+            __hash__ = _trip
+
+        forged_manifest = unsafe_frozen_decision(self.current)
+        object.__setattr__(
+            forged_manifest,
+            "manifest_json",
+            HostileText(self.current.manifest_json),
+        )
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            build_windows_update_plan(
+                current_release=forged_manifest,
+                candidate_release=self.candidate,
+                current_journal_schema_version=1,
+                candidate_journal_schema_version=1,
+                backup_evidence=self.backup,
+                trust=self.trust,
+            )
+        self.assertEqual(HostileText.callbacks, 0)
+
+        forged_policy = unsafe_frozen_decision(self.current)
+        object.__setattr__(
+            forged_policy,
+            "qualification_policy_id",
+            HostileText(self.current.qualification_policy_id),
+        )
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            build_windows_update_plan(
+                current_release=forged_policy,
+                candidate_release=self.candidate,
+                current_journal_schema_version=1,
+                candidate_journal_schema_version=1,
+                backup_evidence=self.backup,
+                trust=self.trust,
+            )
+        self.assertEqual(HostileText.callbacks, 0)
+
+    def test_hostile_checkpoint_inputs_fail_without_callback_execution(self):
+        class HostileText(str):
+            callbacks = 0
+
+            def _trip(self, *_args, **_kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("hostile checkpoint callback executed")
+
+            strip = _trip
+            upper = _trip
+            encode = _trip
+            __eq__ = _trip
+            __hash__ = _trip
+
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+            trust=self.trust,
+        )
+        checkpoint = start_update_checkpoint(plan, trust=self.trust)
+
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            advance_update_checkpoint(
+                plan,
+                checkpoint,
+                HostileText("VERIFY_CANDIDATE_SIGNATURE_AND_EXACT_HASH"),
+                trust=self.trust,
+            )
+        self.assertEqual(HostileText.callbacks, 0)
+
+        serialized = serialize_update_checkpoint(checkpoint)
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            restore_update_checkpoint(
+                plan,
+                HostileText(serialized),
+                trust=self.trust,
+            )
+        self.assertEqual(HostileText.callbacks, 0)
+
+
+    def test_post_construction_evidence_tamper_fails_before_callbacks(self):
+        class HostileText(str):
+            callbacks = 0
+
+            def _trip(self, *_args, **_kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("tampered evidence callback executed")
+
+            strip = _trip
+            upper = _trip
+            encode = _trip
+            __eq__ = _trip
+            __hash__ = _trip
+
+        forged_backup = BackupEvidence(
+            manifest_sha256="sha256:" + "c" * 64,
+            source_sha=CURRENT_SOURCE,
+            journal_schema_version=1,
+            verification_status="PASS",
+            reconciliation_required_after_restore=True,
+        )
+        object.__setattr__(
+            forged_backup,
+            "verification_status",
+            HostileText("PASS"),
+        )
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            build_windows_update_plan(
+                current_release=self.current,
+                candidate_release=self.candidate,
+                current_journal_schema_version=1,
+                candidate_journal_schema_version=1,
+                backup_evidence=forged_backup,
+                trust=self.trust,
+            )
+        self.assertEqual(HostileText.callbacks, 0)
+
+        forged_migration = MigrationEvidence(
+            from_schema_version=1,
+            to_schema_version=2,
+            source_sha=CANDIDATE_SOURCE,
+            evidence_sha256="sha256:" + "d" * 64,
+            verification_status="PASS",
+            rollback_mode="RESTORE_PRE_UPDATE_BACKUP",
+        )
+        object.__setattr__(
+            forged_migration,
+            "evidence_sha256",
+            HostileText("sha256:" + "d" * 64),
+        )
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            build_windows_update_plan(
+                current_release=self.current,
+                candidate_release=self.candidate,
+                current_journal_schema_version=1,
+                candidate_journal_schema_version=2,
+                backup_evidence=self.backup,
+                migration_evidence=forged_migration,
+                trust=self.trust,
+            )
+        self.assertEqual(HostileText.callbacks, 0)
+
+    def test_post_construction_checkpoint_tamper_is_revalidated(self):
+        class HostileText(str):
+            callbacks = 0
+
+            def _trip(self, *_args, **_kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("tampered checkpoint callback executed")
+
+            strip = _trip
+            upper = _trip
+            encode = _trip
+            __eq__ = _trip
+            __hash__ = _trip
+
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+            trust=self.trust,
+        )
+        checkpoint = start_update_checkpoint(plan, trust=self.trust)
+        object.__setattr__(
+            checkpoint,
+            "update_completed_steps",
+            (HostileText("VERIFY_CANDIDATE_SIGNATURE_AND_EXACT_HASH"),),
+        )
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            advance_update_checkpoint(
+                plan,
+                checkpoint,
+                "QUIESCE_NEW_ADMISSIONS",
+                trust=self.trust,
+            )
+        self.assertEqual(HostileText.callbacks, 0)
+
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            serialize_update_checkpoint(checkpoint)
+        self.assertEqual(HostileText.callbacks, 0)
+
+    def test_post_construction_plan_and_trust_tamper_fail_closed(self):
+        class HostileText(str):
+            callbacks = 0
+
+            def _trip(self, *_args, **_kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("tampered authority callback executed")
+
+            strip = _trip
+            encode = _trip
+            __eq__ = _trip
+            __hash__ = _trip
+
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+            trust=self.trust,
+        )
+        object.__setattr__(plan, "plan_json", HostileText(plan.plan_json))
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            start_update_checkpoint(plan, trust=self.trust)
+        self.assertEqual(HostileText.callbacks, 0)
+
+        forged_trust = WindowsUpdateTrustContext(
+            evidence_store=self.store,
+            evidence_root=self.evidence_root,
+            qualification_policy=self.trust_policy,
+            expected_policy_id=self.trust_policy.policy_id,
+            expected_policy_version=self.trust_policy.policy_version,
+        )
+        object.__setattr__(
+            forged_trust,
+            "expected_policy_id",
+            HostileText(self.trust_policy.policy_id),
+        )
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            build_windows_update_plan(
+                current_release=self.current,
+                candidate_release=self.candidate,
+                current_journal_schema_version=1,
+                candidate_journal_schema_version=1,
+                backup_evidence=self.backup,
+                trust=forged_trust,
+            )
+        self.assertEqual(HostileText.callbacks, 0)
 
 
 if __name__ == "__main__":

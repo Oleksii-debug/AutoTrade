@@ -24,7 +24,10 @@
   ]);
   const HOST_ACTION_ROLES = Object.freeze({
     BLOCK_NEW_EXPOSURE: new Set(["OWNER", "OPERATOR"]),
-    REVOKE_AUTHORITY: new Set(["OWNER"])
+    REVOKE_AUTHORITY: new Set(["OWNER"]),
+    START_SIMULATION: new Set(["OWNER", "OPERATOR"]),
+    RECOVER_SIMULATION: new Set(["OWNER", "OPERATOR"]),
+    BACKUP_SIMULATION: new Set(["OWNER"])
   });
 
   const TABLE_TOOLS = Object.freeze([
@@ -754,6 +757,30 @@
     queuePoliteAnnouncement(message);
   }
 
+  function invalidateSnapshotAuthority() {
+    state.snapshotReady = false;
+    state.sessionIdentity = null;
+    state.accountId = null;
+    state.environment = null;
+    setCommandAvailability(false);
+  }
+
+  function isSnapshotBusy(error) {
+    return error !== null && typeof error === "object" &&
+      error.status === 503 &&
+      error.code === "SNAPSHOT_BUSY" &&
+      error.retryable === true;
+  }
+
+  function reportSnapshotBusy() {
+    invalidateSnapshotAuthority();
+    const message =
+      "Host snapshot is temporarily busy while durable state changes; waiting for one coherent snapshot. " +
+      "Commands remain blocked and displayed values may be stale.";
+    text("freshness", message);
+    queuePoliteAnnouncement(message);
+  }
+
   async function jsonFetch(url, options = {}) {
     const response = await fetch(url, {
       credentials: "same-origin",
@@ -766,8 +793,21 @@
       ...options
     });
     if (!response.ok) {
+      let errorBody = null;
+      try {
+        const contentType = response.headers.get("Content-Type") || "";
+        if (contentType.includes("application/json")) {
+          errorBody = await response.json();
+        }
+      } catch {
+        errorBody = null;
+      }
       const error = new Error(`Host request failed with status ${response.status}`);
       error.status = response.status;
+      if (errorBody && typeof errorBody === "object" && !Array.isArray(errorBody)) {
+        if (typeof errorBody.error === "string") error.code = errorBody.error;
+        if (errorBody.retryable === true) error.retryable = true;
+      }
       throw error;
     }
     return response.json();
@@ -1007,28 +1047,26 @@
         await refreshSnapshot();
       }
     } catch (error) {
-      if (error.status === 409 || error.status === 410) {
+      if (isSnapshotBusy(error)) {
+        reportSnapshotBusy();
+      } else if (error.status === 409 || error.status === 410) {
         try {
           await refreshSnapshot({announceRefresh: true});
-        } catch {
-          state.snapshotReady = false;
-          state.sessionIdentity = null;
-          state.accountId = null;
-          state.environment = null;
-          setCommandAvailability(false);
-          text(
-            "freshness",
-            "Host synchronization gap could not be recovered; displayed values may be stale.");
-          announce(
-            "Host synchronization gap recovery failed. Commands remain blocked until a fresh canonical snapshot is available.",
-            true);
+        } catch (recoveryError) {
+          if (isSnapshotBusy(recoveryError)) {
+            reportSnapshotBusy();
+          } else {
+            invalidateSnapshotAuthority();
+            text(
+              "freshness",
+              "Host synchronization gap could not be recovered; displayed values may be stale.");
+            announce(
+              "Host synchronization gap recovery failed. Commands remain blocked until a fresh canonical snapshot is available.",
+              true);
+          }
         }
       } else {
-        state.snapshotReady = false;
-        state.sessionIdentity = null;
-        state.accountId = null;
-        state.environment = null;
-        setCommandAvailability(false);
+        invalidateSnapshotAuthority();
         text("freshness", "Host synchronization unavailable; displayed values may be stale.");
         announce("Host synchronization failed. Displayed values may be stale.", true);
       }
@@ -1160,15 +1198,17 @@
       byId("command-result").focus();
       try {
         await refreshSnapshot();
-      } catch {
-        state.snapshotReady = false;
-        state.sessionIdentity = null;
-        state.accountId = null;
-        state.environment = null;
-        setCommandAvailability(false);
-        announce(
-          "Host state refresh failed after the command response. The confirmed command response remains unchanged.",
-          true);
+      } catch (refreshError) {
+        if (isSnapshotBusy(refreshError)) {
+          reportSnapshotBusy();
+          queuePoliteAnnouncement(
+            "The confirmed command response remains unchanged while the host retries a coherent state snapshot.");
+        } else {
+          invalidateSnapshotAuthority();
+          announce(
+            "Host state refresh failed after the command response. The confirmed command response remains unchanged.",
+            true);
+        }
       }
     } catch {
       state.snapshotReady = false;
@@ -1189,20 +1229,30 @@
 
   async function refreshStateFromUser() {
     const button = byId("refresh-state");
+    const restoreKeyboardFocus = button !== null && document.activeElement === button;
     if (button) button.disabled = true;
     try {
       await refreshSnapshot();
       announce("Host state refreshed from the canonical snapshot.");
-    } catch {
-      state.snapshotReady = false;
-      state.sessionIdentity = null;
-      state.accountId = null;
-      state.environment = null;
-      setCommandAvailability(false);
-      text("freshness", "Host unavailable; displayed values may be stale.");
-      announce("Host state refresh failed. Displayed values may be stale.", true);
+    } catch (error) {
+      if (isSnapshotBusy(error)) {
+        reportSnapshotBusy();
+      } else {
+        invalidateSnapshotAuthority();
+        text("freshness", "Host unavailable; displayed values may be stale.");
+        announce("Host state refresh failed. Displayed values may be stale.", true);
+      }
     } finally {
-      if (button) button.disabled = false;
+      if (button) {
+        button.disabled = false;
+        const active = document.activeElement;
+        if (restoreKeyboardFocus && (
+            active === button ||
+            active === document.body ||
+            active === document.documentElement)) {
+          button.focus();
+        }
+      }
     }
   }
 
@@ -1215,15 +1265,26 @@
     byId("refresh-state").addEventListener("click", refreshStateFromUser);
     setCommandAvailability(false);
     try {
+      const pairingCode = new URLSearchParams(window.location.hash.slice(1)).get("pair");
+      if (pairingCode !== null) {
+        await jsonFetch(HOST_API.route("pairLocalSession"), {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({pairing_code: pairingCode})
+        });
+        // Keep a retryable one-time code in the fragment until the host has
+        // actually confirmed pairing. The fragment is not sent in HTTP
+        // requests, and successful pairing removes it immediately.
+        window.history.replaceState(null, "", window.location.pathname);
+      }
       await refreshSnapshot();
-    } catch {
-      state.snapshotReady = false;
-      state.sessionIdentity = null;
-      state.accountId = null;
-      state.environment = null;
-      setCommandAvailability(false);
-      text("freshness", "Host unavailable; no current state has been confirmed.");
-      announce("Host unavailable. No current state has been confirmed.", true);
+    } catch (error) {
+      if (isSnapshotBusy(error)) {
+        reportSnapshotBusy();
+      } else {
+        invalidateSnapshotAuthority();
+        text("freshness", "Host unavailable; no current state has been confirmed.");
+        announce("Host unavailable. No current state has been confirmed.", true);
+      }
     }
     window.setInterval(pollEvents, 2000);
   }
@@ -1249,16 +1310,16 @@
     try {
       await refreshSnapshot();
       announce("Host state refreshed after page restoration.");
-    } catch {
-      state.snapshotReady = false;
-      state.sessionIdentity = null;
-      state.accountId = null;
-      state.environment = null;
-      setCommandAvailability(false);
-      text("freshness", "Host unavailable after page restoration; displayed values may be stale.");
-      announce(
-        "Host synchronization failed after page restoration. Commands remain blocked.",
-        true);
+    } catch (error) {
+      if (isSnapshotBusy(error)) {
+        reportSnapshotBusy();
+      } else {
+        invalidateSnapshotAuthority();
+        text("freshness", "Host unavailable after page restoration; displayed values may be stale.");
+        announce(
+          "Host synchronization failed after page restoration. Commands remain blocked.",
+          true);
+      }
     } finally {
       restoreFocusAfterPageRestore();
     }

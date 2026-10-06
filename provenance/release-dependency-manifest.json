@@ -31,9 +31,18 @@
     {
       "code": "DEPENDENCY_ADVISORY_EVIDENCE_MISSING",
       "detail": "Exact release dependency graph has no qualified vulnerability/advisory review."
+    },
+    {
+      "code": "DOTNET_LOCK_WORKFLOW_PATH_MISSING",
+      "detail": "NuGet lock-file changes must trigger the canonical .NET workflow."
     }
   ],
-  "dotnet_package_dependencies": [],
+  "dotnet_package_dependencies": [
+    {
+      "name": "Microsoft.Web.WebView2",
+      "version": "1.0.4191.47"
+    }
+  ],
   "dotnet_sdk": "10.0.100",
   "inspected_components": [
     {

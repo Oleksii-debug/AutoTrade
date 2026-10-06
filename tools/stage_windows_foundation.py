@@ -408,6 +408,16 @@ def _parse_composition(composition_bytes: bytes) -> dict[str, object]:
     return composition
 
 
+def _validate_expected_source_sha(value: object) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str or _GIT_OBJECT_ID.fullmatch(value) is None:
+        raise FoundationStagingError(
+            "expected_source_sha must be an exact lowercase Git object id"
+        )
+    return value
+
+
 def _composition_index(components: object) -> tuple[dict[str, dict[str, object]], set[str]]:
     if type(components) is not list:
         raise FoundationStagingError("composition components must be an array")
@@ -1150,12 +1160,14 @@ def _stage_source_controlled_components_unserialized(
     composition_path: Path,
     source_root: Path,
     descriptors: tuple[_SourceControlledComponent, ...],
+    expected_source_sha: str | None = None,
     staging_authority=None,
     posix_staging_authority: int | None = None,
     posix_composition_authority: int | None = None,
 ) -> tuple[dict[str, str], ...]:
     """Internal TCB used only with reviewed, module-owned descriptor sets."""
 
+    expected_source_sha = _validate_expected_source_sha(expected_source_sha)
     descriptors = _validate_descriptors(descriptors)
     source_root_baseline = _require_git_root(source_root)
     _require_exact_directory(staging, label="staging")
@@ -1184,6 +1196,10 @@ def _stage_source_controlled_components_unserialized(
     composition = _parse_composition(original_composition_bytes)
     source_sha = composition["source_sha"]
     assert isinstance(source_sha, str)
+    if expected_source_sha is not None and source_sha != expected_source_sha:
+        raise FoundationStagingError(
+            "composition source_sha does not match expected_source_sha"
+        )
     existing_by_path, existing_ids = _composition_index(composition.get("components"))
 
     prepared: list[tuple[_SourceControlledComponent, bytes, dict[str, str], Path, bool]] = []
@@ -1463,9 +1479,11 @@ def _stage_source_controlled_components(
     composition_path: Path,
     source_root: Path,
     descriptors: tuple[_SourceControlledComponent, ...],
+    expected_source_sha: str | None = None,
 ) -> tuple[dict[str, str], ...]:
     """Run one serialized preflight -> component publish -> manifest commit."""
 
+    expected_source_sha = _validate_expected_source_sha(expected_source_sha)
     with _composition_publish_transaction(
         composition_path.parent
     ) as composition_authority:
@@ -1482,6 +1500,7 @@ def _stage_source_controlled_components(
                     composition_path=composition_path,
                     source_root=source_root,
                     descriptors=descriptors,
+                    expected_source_sha=expected_source_sha,
                     staging_authority=staging_authority,
                 )
 
@@ -1497,6 +1516,7 @@ def _stage_source_controlled_components(
                 composition_path=composition_path,
                 source_root=source_root,
                 descriptors=descriptors,
+                expected_source_sha=expected_source_sha,
                 posix_staging_authority=posix_staging_authority,
                 posix_composition_authority=composition_authority,
             )
@@ -1507,6 +1527,7 @@ def stage_windows_foundation(
     staging: Path,
     composition_path: Path,
     source_root: Path = ROOT,
+    expected_source_sha: str | None = None,
 ) -> tuple[dict[str, str], ...]:
     """Stage exact committed foundation bytes and bind them into composition authority."""
 
@@ -1515,6 +1536,7 @@ def stage_windows_foundation(
         composition_path=composition_path,
         source_root=source_root,
         descriptors=_REQUIRED,
+        expected_source_sha=expected_source_sha,
     )
 
 
@@ -1523,12 +1545,14 @@ def main() -> int:
     parser.add_argument("--staging", required=True, type=Path)
     parser.add_argument("--composition", required=True, type=Path)
     parser.add_argument("--source-root", type=Path, default=ROOT)
+    parser.add_argument("--expected-source-sha")
     args = parser.parse_args()
     try:
         result = stage_windows_foundation(
             staging=args.staging,
             composition_path=args.composition,
             source_root=args.source_root,
+            expected_source_sha=args.expected_source_sha,
         )
     except FoundationStagingError as error:
         print(str(error), file=sys.stderr)

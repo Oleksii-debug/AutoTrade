@@ -369,6 +369,60 @@ class DurableReservationBookTests(unittest.TestCase):
         self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("50"))
         self.assertEqual(restarted.version, 3)
 
+    def test_mark_unknown_simulation_time_is_frozen_and_environment_scoped(self):
+        frozen = "2026-10-03T00:00:03.000001Z"
+        simulation = DurableReservationBook(
+            self.store,
+            environment="SIMULATION",
+            account_id="paper-account",
+        )
+        with patch(
+            "mvp.autotrade_mvp.durable_reservations._now",
+            return_value="2026-10-03T00:00:02.000001Z",
+        ):
+            simulation.reserve(
+                command_id="cmd-sim-reserve",
+                idempotency_key="idem-sim-reserve",
+                reservation_id="r-sim",
+                intent_id="i-sim",
+                requirements={"CASH:USD": "70"},
+                available={"CASH:USD": "100"},
+            )
+        with patch(
+            "mvp.autotrade_mvp.durable_reservations._now",
+            side_effect=AssertionError("explicit simulation time must not read wall clock"),
+        ):
+            simulation.mark_unknown(
+                command_id="cmd-unknown-frozen",
+                idempotency_key="idem-unknown-frozen",
+                reservation_id="r-sim",
+                simulation_time=frozen,
+            )
+
+        events = self.store.load_events("reservation_book", simulation.scope_id)
+        self.assertEqual(events[-1]["payload"]["operation"], "MARK_UNKNOWN")
+        self.assertEqual(events[-1]["committed_at"], frozen)
+        restarted = DurableReservationBook(
+            self.store,
+            environment="SIMULATION",
+            account_id="paper-account",
+        )
+        self.assertEqual(restarted.get("r-sim").state, "UNKNOWN")
+        self.assertEqual(restarted.version, 2)
+
+        paper = self.book()
+        self.reserve(paper)
+        before = paper.version
+        with self.assertRaisesRegex(ValueError, "SIMULATION-only"):
+            paper.mark_unknown(
+                command_id="cmd-paper-forged-time",
+                idempotency_key="idem-paper-forged-time",
+                reservation_id="r1",
+                simulation_time=frozen,
+            )
+        self.assertEqual(paper.version, before)
+        self.assertEqual(paper.get("r1").state, "WORKING")
+
     def test_evidenced_terminal_resolution_survives_restart(self):
         first = self.book()
         self.reserve(first)

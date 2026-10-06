@@ -288,8 +288,10 @@ class JournalBackedHostCommandStore:
         expected_raw = self._required_text(command, "expected_state_version")
         if "payload" not in command or not isinstance(command["payload"], dict):
             raise ValueError("payload must be an object")
-        if not expected_raw.isdigit():
-            raise ValueError("expected_state_version must be a sequence")
+        if not is_valid_common_scalar("Sequence", expected_raw):
+            raise ValueError(
+                "expected_state_version must be a canonical Sequence"
+            )
         request_origin = self._request_origin_provider()
         if not isinstance(request_origin, str) or not request_origin.strip():
             raise PermissionError("Current request origin is unavailable")
@@ -436,8 +438,7 @@ class JournalBackedHostCommandStore:
             return self._command_result(saved_result)
 
         current = self.state_version
-        expected = int(expected_raw)
-        if expected != current:
+        if expected_raw != str(current):
             conflict = CommandResult(
                 command_id=command_id,
                 status="CONFLICT",
@@ -907,13 +908,22 @@ class JournalBackedHostCommandStore:
         }
 
     def events_after(self, after: str | int) -> tuple[HostEvent, ...]:
-        try:
+        current = self.state_version
+        if isinstance(after, str):
+            if not is_valid_common_scalar("Sequence", after):
+                raise ValueError("Cursor must be a canonical Sequence")
+            current_text = str(current)
+            if len(after) > len(current_text) or (
+                len(after) == len(current_text) and after > current_text
+            ):
+                raise ValueError("Cursor is ahead of host state")
             cursor = int(after)
-        except (TypeError, ValueError) as error:
-            raise ValueError("Cursor must be an integer sequence") from error
+        elif type(after) is int:
+            cursor = after
+        else:
+            raise ValueError("Cursor must be a canonical Sequence")
         if cursor < 0:
             raise ValueError("Cursor must be non-negative")
-        current = self.state_version
         if cursor > current:
             raise ValueError("Cursor is ahead of host state")
 

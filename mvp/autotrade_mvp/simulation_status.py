@@ -571,6 +571,8 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
             "ending_position": canonical_decimal_text(position),
             "trade_count": len(status["fills"]), "reconciled": True,
             "valuation_status": "CASH_ONLY" if valued else "MARK_UNAVAILABLE",
+            "max_drawdown": "0" if valued else None,
+            "drawdown_status": "CASH_ONLY" if valued else "MARK_UNAVAILABLE",
             "economic_edge_claim": "UNPROVEN_SIMULATION_ONLY",
             "journal_sequence": str(cut),
         }

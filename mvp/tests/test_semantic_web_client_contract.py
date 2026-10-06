@@ -141,6 +141,38 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("window.setTimeout", js)
         self.assertIn("while (history.children.length > 50)", js)
 
+    def test_snapshot_busy_is_structured_retryable_and_accessibly_fail_closed(self):
+        js = APP.read_text(encoding="utf-8")
+        fetch = js[js.index("async function jsonFetch"):js.index("function renderOperation")]
+        self.assertIn('const contentType = response.headers.get("Content-Type") || ""', fetch)
+        self.assertIn("errorBody = await response.json()", fetch)
+        self.assertIn("error.code = errorBody.error", fetch)
+        self.assertIn("error.retryable = true", fetch)
+
+        classifier = js[js.index("function isSnapshotBusy"):js.index("function reportSnapshotBusy")]
+        self.assertIn('error.status === 503', classifier)
+        self.assertIn('error.code === "SNAPSHOT_BUSY"', classifier)
+        self.assertIn("error.retryable === true", classifier)
+
+        busy = js[js.index("function reportSnapshotBusy"):js.index("async function jsonFetch")]
+        self.assertIn("invalidateSnapshotAuthority();", busy)
+        self.assertIn("Commands remain blocked", busy)
+        self.assertIn("waiting for one coherent snapshot", busy)
+        self.assertIn("queuePoliteAnnouncement(message)", busy)
+        self.assertNotIn("announce(message", busy)
+
+        poll = js[js.index("async function pollEvents()"):js.index("function newCommandPayload")]
+        self.assertIn("if (isSnapshotBusy(error))", poll)
+        self.assertIn("reportSnapshotBusy();", poll)
+        self.assertLess(
+            poll.index("if (isSnapshotBusy(error))"),
+            poll.index("Host synchronization failed. Displayed values may be stale."),
+        )
+
+        refresh = js[js.index("async function refreshStateFromUser"):js.index("async function start")]
+        self.assertIn("if (isSnapshotBusy(error))", refresh)
+        self.assertIn("reportSnapshotBusy();", refresh)
+
     def test_event_gap_forces_snapshot_instead_of_inventing_continuity(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("error.status === 409 || error.status === 410", js)
@@ -154,18 +186,17 @@ class SemanticWebClientContractTests(unittest.TestCase):
             "await refreshSnapshot({announceRefresh: true})",
             catch_index,
         )
-        nested_catch = js.index("} catch {", recovery_index)
-        blocked = js.index("setCommandAvailability(false)", nested_catch)
-        snapshot_unready = js.index("state.snapshotReady = false", nested_catch)
-        identity_cleared = js.index("state.sessionIdentity = null", nested_catch)
-        self.assertGreater(nested_catch, recovery_index)
-        self.assertGreater(blocked, nested_catch)
-        self.assertGreater(snapshot_unready, nested_catch)
-        self.assertGreater(identity_cleared, nested_catch)
-        self.assertIn(
+        nested_catch = js.index("} catch (recoveryError) {", recovery_index)
+        fail_closed = js.index("invalidateSnapshotAuthority();", nested_catch)
+        failure_message = js.index(
             "Host synchronization gap recovery failed. Commands remain blocked",
-            js[nested_catch:blocked + 500],
+            nested_catch,
         )
+        next_branch = js.index("} else {", failure_message)
+        self.assertGreater(nested_catch, recovery_index)
+        self.assertGreater(fail_closed, nested_catch)
+        self.assertGreater(failure_message, fail_closed)
+        self.assertLess(failure_message, next_branch)
 
     def test_successful_http_response_still_rejects_internal_cursor_gap(self):
         js = APP.read_text(encoding="utf-8")

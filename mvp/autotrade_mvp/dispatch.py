@@ -921,6 +921,16 @@ class GuardedDispatcher:
             )
         ):
             return False
+        prepared_scope = prepared_payload.get("submission_scope")
+        prepared_scope_hash = prepared_payload.get("submission_scope_hash")
+        if (
+            type(prepared_scope) is not dict
+            or type(prepared_scope_hash) is not str
+            or "sha256:"
+            + sha256(canonical_json(prepared_scope).encode("utf-8")).hexdigest()
+            != prepared_scope_hash
+        ):
+            return False
         return tuple(event_types) in {
             ("SubmissionPrepared",),
             ("SubmissionPrepared", "SubmissionBlocked"),
@@ -1165,6 +1175,7 @@ class GuardedDispatcher:
             "client_order_id": client_order_id,
             "environment": self.environment,
             "account_id": self.account_id,
+            "submission_scope": scope_dict,
             "submission_scope_hash": submission_scope_hash,
         }
         existing = self._events(attempt_id)

@@ -102,6 +102,28 @@ class AuthenticatedReadHttpRequestTests(unittest.TestCase):
 
         self.assertEqual(ExecutableReadRequest.callbacks, 0)
 
+    def test_wire_client_rejects_unconstructed_exact_request_zero_wire(self):
+        class Opener:
+            def __init__(self):
+                self.calls = 0
+
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                raise AssertionError("wire must not be reached")
+
+        forged = object.__new__(AuthenticatedReadHttpRequest)
+        client = UrllibJsonWireClient(max_response_bytes=1024)
+        opener = Opener()
+        client._opener = opener
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "lacks construction authority",
+        ):
+            client.send(forged)
+
+        self.assertEqual(opener.calls, 0)
+
     def test_wire_client_rejects_post_construction_read_request_mutation_zero_wire(self):
         class Opener:
             def __init__(self):

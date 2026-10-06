@@ -210,5 +210,33 @@ class AccessibleStatusTests(unittest.TestCase):
         self.assertIn("Economic edge: unproven", running)
 
 
+    def test_control_text_cannot_break_plain_text_status_contract(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "symbol": "SIM\x1b[31m",
+                "initial_cash": "1000\nforged status",
+                "evidence_count": 1,
+                "fills": {},
+                "state_format": "canonical_journal",
+                "episode_id": "episode\rforged",
+                "session_status": "RUNNING",
+                "active_reservations": [
+                    {
+                        "remaining": {"CASH:USD": "10\tforged"},
+                        "state": "ACTIVE",
+                    }
+                ],
+            }
+        )
+        self.assertIn("Instrument: Unavailable", text)
+        self.assertIn("Initial capital: Unavailable", text)
+        self.assertIn("Episode: Unavailable", text)
+        self.assertIn("Reserved CASH:USD: Unavailable; state: ACTIVE", text)
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("forged status", text)
+        self.assertNotIn("\t", text)
+
+
 if __name__ == "__main__":
     unittest.main()

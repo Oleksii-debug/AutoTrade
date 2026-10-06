@@ -23,7 +23,7 @@ from .diagnostics import build_diagnostic_snapshot
 from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import require_current_reconciliation_checkpoint
 from .recovery import HostState, OwnerFence, RecoveryController
-from .store_identity import require_database_identity
+from .store_identity import observe_database_identity, require_database_identity
 from .simulation_runtime_checkpoint import (
     AutonomousRuntimeCheckpointError,
     checkpoint_path as autonomous_runtime_checkpoint_path,
@@ -1172,9 +1172,11 @@ def create_backup(
             )
         runtime_checkpoint_digest_at_cut = digest_after
         try:
-            runtime_checkpoint_source_store_identity = JournalStore(
+            # Capture backing authority without opening the JournalStore runtime:
+            # backup preflight must not initialize or migrate the source database.
+            runtime_checkpoint_source_store_identity = observe_database_identity(
                 journal_source
-            ).store_identity
+            )
         except (OSError, RuntimeError, ValueError) as error:
             raise BackupError(
                 "Autonomous runtime checkpoint source journal identity is unavailable"

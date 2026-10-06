@@ -24,6 +24,17 @@ The repository and both .NET qualification workflows now select SDK `10.0.100` e
 
 `python tools/check_dependency_composition.py --require-qualified` is the release-enforcement mode. It returns a non-zero exit code whenever any composition blocker remains. Release automation must use this strict form; report mode is not release approval.
 
-## Remaining reproducibility blocker
+## Current reproducibility state
 
-Five Python CI workflows still select the mutable minor line `3.12` rather than one qualified cross-platform patch runtime. The audit reports each as `NON_EXACT_CI_PYTHON_VERSION`. This is intentionally unresolved until a Windows/Linux-compatible exact runtime is selected and qualification evidence exists; the gate must not invent a portable patch pin.
+The former mutable Python `3.12` CI blocker is resolved on current main. Baseline, contracts, control-plane, dotnet-foundation, futures, provider-free product, recovery, research, science, Verify AutoTrade and zero-model qualification now resolve Python through the exact patch runtime `3.12.10`; matrix workflows pin `python-version: ["3.12.10"]`. GitHub-hosted OS selection is also explicit for the canonical dual-OS matrices (`ubuntu-22.04` / `windows-2025`).
+
+The remaining WP-03 blockers are evidence/composition boundaries, not mutable Python runtime selection:
+
+- exact release composition evidence is absent;
+- model/data/news rights evidence is absent;
+- first-party Autosport/Nika release-distribution rights chain remains unresolved;
+- inspected candidate external components remain release-blocked until exact composition/notice/advisory evidence exists;
+- exact release dependency advisory evidence is absent;
+- the generated release dependency manifest must stay synchronized with every package-bearing source project and committed lock graph.
+
+These blockers remain fail-closed and must not be converted into APPROVED/PASS without the corresponding evidence.

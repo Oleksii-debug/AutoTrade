@@ -903,7 +903,7 @@
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
       "proposed_status": "IN_PROGRESS",
-      "status_note": "Order lifecycle projection is integrated on main at d412fde8c64f22595142c646c524449b70d4dc28, including ACK != fill, partial fill/cancel, correction/bust and overfill/OCO violation handling. Remaining work: provider-normalized event integration, restart projection rebuild and broader lifecycle qualification."
+      "status_note": "Provider-free internal OMS/order-projection lifecycle is closed on main through Section 14 / PR #1629, including durable restart rebuild, retained registration identity, amendment/OCO conservation, aggregate scope seals and hostile-caller trust-boundary hardening. WP-19 remains IN_PROGRESS only for provider-normalized financial-event integration, real-provider/reconciliation lifecycle qualification and release evidence."
     },
     {
       "id": "WP-20",
@@ -1841,7 +1841,7 @@
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
       "proposed_status": "IN_PROGRESS",
-      "status_note": "Continual-candidate retention foundation is present on main in research/autotrade_research/learning/retention.py with protected/recent regime matrices, delayed-label inconclusive handling and independent science/risk promotion gates. Remaining work: actual bounded update pipelines, drift calibration, evidence-bound gate references and production candidate generation."
+      "status_note": "Section 15 causal learning-wave coordination and isolated candidate validation are integrated on main through PR #1630, with causal pause/candidate cuts, disjoint validation populations, immutable resolution evidence and fail-closed executable-caller ingress. Continual retention foundation is also present. WP-38 remains IN_PROGRESS for actual bounded update pipelines, drift calibration, retention hardening/qualification, evidence-bound gate references and production candidate generation."
     },
     {
       "id": "WP-39",

@@ -24,6 +24,7 @@ from .provider_core import (
     ProviderResponseObservation,
     ProviderSubmissionObservation,
     Surface,
+    provider_response_observation_require_scope,
     provider_submission_observation_projection,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
@@ -1391,14 +1392,15 @@ def parse_trade_activities(
 
     if not isinstance(observation, ProviderResponseObservation):
         raise TypeError("observation must be ProviderResponseObservation")
-    observation.require_scope(
+    projection = provider_response_observation_require_scope(
+        observation,
         provider_id="ALPACA",
         surface=Surface.ACTIVITIES,
         endpoint="/v2/account/activities/FILL",
     )
-    activities = observation.payload
-    account_id = observation.account_id
-    environment = observation.environment
+    activities = projection["payload"]
+    account_id = projection["account_id"]
+    environment = projection["environment"]
     if not isinstance(activities, (list, tuple)):
         raise AlpacaAdapterError("activities must be an array")
     for name, mapping in (
@@ -1455,7 +1457,7 @@ def parse_trade_activities(
             trade_time=_utc_text(
                 raw.get("transaction_time"), name="transaction_time"
             ),
-            evidence_refs=(observation.evidence_ref,),
+            evidence_refs=(projection["evidence_ref"],),
         )
         previous = by_activity.get(activity_id)
         if previous is not None and previous != fill:

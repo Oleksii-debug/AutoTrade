@@ -13,6 +13,7 @@ public partial class MainWindow : Window
 {
     private readonly IEmergencyHostClient _hostClient;
     private readonly IEmergencyHostSessionProvider? _sessionProvider;
+    private readonly IAsyncDisposable? _ownedRuntime;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly DispatcherTimer _hostRefreshTimer = new()
     {
@@ -26,6 +27,8 @@ public partial class MainWindow : Window
     private WebView2? _productWebView;
     private long _webGeneration;
     private bool _trustedWebDocumentActive;
+    private bool _closingOwnedRuntime;
+    private bool _ownedRuntimeStopped;
 
     private enum HostDisplayFreshness
     {
@@ -49,12 +52,18 @@ public partial class MainWindow : Window
 
     internal MainWindow(
         IEmergencyHostClient hostClient,
-        IEmergencyHostSessionProvider? sessionProvider = null)
+        IEmergencyHostSessionProvider? sessionProvider = null,
+        IAsyncDisposable? ownedRuntime = null)
     {
         _hostClient = hostClient ?? throw new ArgumentNullException(nameof(hostClient));
         _sessionProvider = sessionProvider;
+        _ownedRuntime = ownedRuntime;
         InitializeComponent();
         _hostRefreshTimer.Tick += HostRefreshTimer_Tick;
+        if (_ownedRuntime is not null)
+        {
+            Closing += MainWindow_Closing;
+        }
         ConnectionStatus.Text = "Host unavailable; new exposure cannot be confirmed blocked from this window.";
     }
 
@@ -358,6 +367,47 @@ public partial class MainWindow : Window
         {
             ReloadWebButton.Focus();
         }
+    }
+
+    private async void MainWindow_Closing(
+        object? sender,
+        System.ComponentModel.CancelEventArgs e)
+    {
+        if (_ownedRuntime is null || _ownedRuntimeStopped)
+        {
+            return;
+        }
+
+        e.Cancel = true;
+        if (_closingOwnedRuntime)
+        {
+            return;
+        }
+
+        _closingOwnedRuntime = true;
+        _hostRefreshTimer.Stop();
+        _lifetime.Cancel();
+        DisposeWebExperience();
+        FocusWebButton.IsEnabled = false;
+        ReloadWebButton.IsEnabled = false;
+        SetLiveRegionText(
+            WebExperienceStatus,
+            "Stopping the local AutoTrade host and draining accepted work.");
+
+        try
+        {
+            await _ownedRuntime.DisposeAsync();
+        }
+        catch (Exception)
+        {
+            SetLiveRegionText(
+                WebExperienceStatus,
+                "Local host stop failed. Durable state requires recovery on the next launch.");
+        }
+
+        _ownedRuntimeStopped = true;
+        _closingOwnedRuntime = false;
+        Close();
     }
 
     private void MainWindow_Closed(object? sender, EventArgs e)

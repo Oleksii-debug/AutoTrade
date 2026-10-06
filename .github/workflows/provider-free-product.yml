@@ -1,0 +1,130 @@
+name: provider-free-product
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "mvp/**"
+      - "research/autotrade_research/**"
+      - "autotrade_*/**"
+      - "src/**"
+      - "web/**"
+      - "contracts/**"
+      - "tools/build_provider_free_candidate.py"
+      - "packaging/windows/**"
+      - "tests/Product/**"
+      - "tests/Host.Process/**"
+      - ".github/workflows/provider-free-product.yml"
+
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+env:
+  AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+
+jobs:
+  browser-scenario:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: python -m pip install --require-hashes -r requirements-dev.txt
+      - run: npm ci --ignore-scripts
+        working-directory: tests/Product
+      - run: npx playwright install --with-deps chromium
+        working-directory: tests/Product
+      - run: python -m unittest mvp.tests.test_provider_free_product mvp.tests.test_provider_free_candidate_builder -v
+        env:
+          PYTHONPATH: research:.
+      - run: npm test
+        working-directory: tests/Product
+      - run: python tools/write_ci_evidence.py --suite provider-free-whole-product-browser --command "real host + keyboard + half-fill process crash + restart + backup + restore" --output artifacts/product-browser.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: provider-free-browser-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/product-browser.json
+          if-no-files-found: error
+
+  windows-candidate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.100'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --locked-mode
+      - run: dotnet publish src/AutoTrade.Desktop/AutoTrade.Desktop.csproj -c Release -r win-x64 --self-contained true --no-restore -p:SourceRevisionId=${{ env.AUTOTRADE_SOURCE_SHA }} -p:ContinuousIntegrationBuild=true -o artifacts/desktop
+      - run: python tools/write_ci_evidence.py --suite provider-free-desktop-publish --command "locked self-contained win-x64 Desktop publish" --output artifacts/desktop/desktop-build-evidence.json
+      - name: Bind Desktop PASS evidence to exact publish payload
+        run: >-
+          python -c "from pathlib import Path; from tools.build_provider_free_candidate import bind_publish_evidence; bind_publish_evidence(Path('artifacts/desktop'), executable='AutoTrade.Desktop.exe', evidence_name='desktop-build-evidence.json')"
+      - run: dotnet restore src/AutoTrade.Host/AutoTrade.Host.csproj -r win-x64
+      - run: dotnet publish src/AutoTrade.Host/AutoTrade.Host.csproj -c Release -r win-x64 --self-contained true --no-restore -p:SourceRevisionId=${{ env.AUTOTRADE_SOURCE_SHA }} -p:ContinuousIntegrationBuild=true -o artifacts/host
+      - run: python tools/write_ci_evidence.py --suite provider-free-host-publish --command "self-contained win-x64 Host publish; default authority fail-closed" --output artifacts/host/host-build-evidence.json
+      - name: Bind Host PASS evidence to exact publish payload
+        run: >-
+          python -c "from pathlib import Path; from tools.build_provider_free_candidate import bind_publish_evidence; bind_publish_evidence(Path('artifacts/host'), executable='AutoTrade.Host.exe', evidence_name='host-build-evidence.json')"
+      - run: dotnet run --project tests/Host.Process/Host.Process.csproj -c Release
+      - name: Download exact candidate runtime inputs
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip -OutFile artifacts/python.zip
+          Invoke-WebRequest https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.4191.47/microsoft.web.webview2.1.0.4191.47.nupkg -OutFile artifacts/webview.nupkg
+      - name: Compose through canonical source staging and bundle builder
+        run: python -m tools.build_provider_free_candidate --source-sha ${{ env.AUTOTRADE_SOURCE_SHA }} --desktop-publish artifacts/desktop --host-publish artifacts/host --python-archive artifacts/python.zip --webview-archive artifacts/webview.nupkg --work artifacts/candidate-work --output artifacts/AutoTrade-ZERO-win-x64.zip
+      - run: npm ci --ignore-scripts
+        working-directory: tests/Product
+      - run: npx playwright install chromium
+        working-directory: tests/Product
+      - name: Extract the actual archive and exercise Desktop file preflight
+        shell: pwsh
+        run: |
+          Expand-Archive -LiteralPath artifacts/AutoTrade-ZERO-win-x64.zip -DestinationPath 'artifacts/installed candidate with spaces'
+          dotnet run --project tests/Product/InventoryProbe/InventoryProbe.csproj -c Release -- 'artifacts/installed candidate with spaces/payload' --exercise
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prove packaged Host fails closed before listener bind
+        shell: pwsh
+        run: |
+          $hostExe = (Resolve-Path 'artifacts/installed candidate with spaces/payload/host/AutoTrade.Host.exe').Path
+          $stderr = 'artifacts/host-startup-blocked.txt'
+          & $hostExe 2> $stderr
+          if ($LASTEXITCODE -ne 78) { throw "Packaged Host did not return authority-unavailable exit 78: $LASTEXITCODE" }
+          if (-not (Select-String -LiteralPath $stderr -Pattern 'AUTOTRADE_HOST_STARTUP_BLOCKED' -Quiet)) { throw 'Packaged Host did not emit the fail-closed startup marker.' }
+      - name: Test the extracted isolated Python and frozen product with keyboard
+        shell: pwsh
+        run: |
+          $env:AUTOTRADE_PYTHON = (Resolve-Path 'artifacts/installed candidate with spaces/payload/runtime/python/python.exe').Path
+          $env:AUTOTRADE_PRODUCT_ROOT = (Resolve-Path 'artifacts/installed candidate with spaces/payload/product').Path
+          node tests/Product/provider-free-browser.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet run --project tests/Product/InventoryProbe/InventoryProbe.csproj -c Release -- 'artifacts/installed candidate with spaces/payload'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - run: python tools/write_ci_evidence.py --suite provider-free-packaged-windows-browser --command "embedded isolated Python + packaged Desktop + packaged fail-closed Host + keyboard + crash + restart + backup + restore" --output artifacts/product-packaged-Windows.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoTrade-ZERO-UNQUALIFIED-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: |
+            artifacts/AutoTrade-ZERO-win-x64.zip
+            artifacts/AutoTrade-ZERO-win-x64.zip.sha256
+            artifacts/product-packaged-Windows.json
+            artifacts/host-startup-blocked.txt
+            artifacts/candidate-work/candidate-result.json
+          if-no-files-found: error

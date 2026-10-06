@@ -30,6 +30,7 @@ PROTECTED_SENTINELS = frozenset(
         ".github/workflows/contracts.yml",
         ".github/workflows/control-plane.yml",
         ".github/workflows/dotnet-foundation.yml",
+        ".github/workflows/provider-free-product.yml",
         ".github/workflows/futures-qualification.yml",
         ".github/workflows/lean-adoption.yml",
         ".github/workflows/reconvergence-integrity.yml",

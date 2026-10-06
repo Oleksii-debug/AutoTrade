@@ -33,7 +33,9 @@ from mvp.autotrade_mvp.provider_route_reads import (
     ProviderRouteReadError,
     QualifiedProviderReadQueryBinding,
     QualifiedProviderResponseObservation,
+    execute_qualified_provider_read,
     observe_qualified_provider_json_response,
+    qualify_provider_response_observation,
     prepare_qualified_provider_read,
     qualified_read_parser_semantic_claim,
     qualified_read_route_semantic_claim,
@@ -506,6 +508,46 @@ class ProviderRouteReadTests(unittest.TestCase):
                 surface=Surface.AUTHENTICATED_READ,
                 permission_scope="ACCOUNT.READ",
             )
+
+    def test_qualified_transport_composition_preserves_exact_base_binding(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(directory)
+            binding = self.prepare(route, capabilities, qualifications)
+            seen = []
+
+            def transport(base_binding):
+                seen.append(base_binding)
+                return observe_authenticated_json_response(
+                    query_binding=base_binding,
+                    http_status=200,
+                    response_bytes=b'{"retCode":0,"result":{"equity":"10.25"}}',
+                    observed_at=NOW + timedelta(seconds=1),
+                )
+
+            response = execute_qualified_provider_read(
+                query_binding=binding,
+                transport=transport,
+            )
+
+            self.assertEqual(seen, [binding.query_binding])
+            self.assertIs(response.query_binding, binding)
+            self.assertIs(response.observation.query_binding, binding.query_binding)
+
+            other = self.prepare(route, capabilities, qualifications)
+            foreign = observe_authenticated_json_response(
+                query_binding=other.query_binding,
+                http_status=200,
+                response_bytes=b'{"retCode":0}',
+                observed_at=NOW + timedelta(seconds=1),
+            )
+            with self.assertRaisesRegex(
+                ProviderRouteReadError,
+                "exact qualified read binding",
+            ):
+                qualify_provider_response_observation(
+                    query_binding=binding,
+                    observation=foreign,
+                )
 
     def test_qualified_read_and_response_constructors_are_sealed(self):
         with TemporaryDirectory() as directory:

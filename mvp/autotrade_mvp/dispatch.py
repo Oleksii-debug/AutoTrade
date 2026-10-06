@@ -204,6 +204,10 @@ class SubmissionResponseBinding:
     submission_scope_hash: str
     response_bytes: bytes
     response_sha256: str
+    response_encoding: str = "utf-8-json"
+    terminal_state: str = "SENT"
+    ambiguity_reason: str | None = None
+    retry_disposition: str | None = None
     http_status: int | None = None
     _factory_token: object = field(default=None, repr=False, compare=False)
 
@@ -243,6 +247,39 @@ class SubmissionResponseBinding:
             != self.response_sha256
         ):
             raise ValueError("durable provider response digest mismatch")
+        if self.response_encoding == "utf-8-json":
+            _decode_exact_json_bytes(self.response_bytes)
+        elif self.response_encoding != "hex":
+            raise ValueError("unsupported durable provider response encoding")
+        if type(self.terminal_state) is not str:
+            raise TypeError("terminal_state must be a string")
+        terminal_state = self.terminal_state.strip().upper()
+        if terminal_state not in {"SENT", "UNKNOWN"}:
+            raise ValueError("terminal_state must be SENT or UNKNOWN")
+        object.__setattr__(self, "terminal_state", terminal_state)
+        if terminal_state == "UNKNOWN":
+            if (
+                type(self.ambiguity_reason) is not str
+                or not self.ambiguity_reason.strip()
+            ):
+                raise ValueError(
+                    "UNKNOWN durable response requires an ambiguity_reason"
+                )
+            if self.retry_disposition != "RECONCILE_FIRST":
+                raise ValueError(
+                    "UNKNOWN durable response must remain RECONCILE_FIRST"
+                )
+            object.__setattr__(
+                self,
+                "ambiguity_reason",
+                self.ambiguity_reason.strip(),
+            )
+        elif self.ambiguity_reason is not None or self.retry_disposition is not None:
+            raise ValueError(
+                "SENT durable response cannot carry UNKNOWN retry semantics"
+            )
+        if self.response_encoding == "hex" and terminal_state != "UNKNOWN":
+            raise ValueError("hex provider response must remain UNKNOWN")
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -564,6 +601,28 @@ def load_submission_response_binding(
         )
     if "sha256:" + sha256(response_bytes).hexdigest() != response_sha256:
         raise ValueError("durable provider response digest mismatch")
+    terminal_state = (
+        "UNKNOWN" if sent.get("event_type") == "SubmissionUnknown" else "SENT"
+    )
+    ambiguity_reason = None
+    retry_disposition = None
+    if terminal_state == "UNKNOWN":
+        ambiguity_reason = sent_payload.get("reason")
+        retry_disposition = sent_payload.get("retry_disposition")
+        if (
+            type(ambiguity_reason) is not str
+            or not ambiguity_reason.strip()
+            or retry_disposition != "RECONCILE_FIRST"
+        ):
+            raise ValueError(
+                "response-bearing SubmissionUnknown must remain RECONCILE_FIRST"
+            )
+        ambiguity_reason = ambiguity_reason.strip()
+    elif (
+        sent_payload.get("reason") is not None
+        or sent_payload.get("retry_disposition") is not None
+    ):
+        raise ValueError("SubmissionSent cannot carry UNKNOWN retry semantics")
     http_status = sent_payload.get("http_status")
     if http_status is not None and (
         isinstance(http_status, bool)
@@ -596,6 +655,10 @@ def load_submission_response_binding(
         submission_scope_hash=scope_hash,
         response_bytes=response_bytes,
         response_sha256=response_sha256,
+        response_encoding=response_encoding,
+        terminal_state=terminal_state,
+        ambiguity_reason=ambiguity_reason,
+        retry_disposition=retry_disposition,
         http_status=http_status,
         _factory_token=_SUBMISSION_RESPONSE_BINDING_TOKEN,
     )
@@ -668,6 +731,10 @@ def _install_submission_response_binding_authority(loader):
         "submission_scope_hash",
         "response_bytes",
         "response_sha256",
+        "response_encoding",
+        "terminal_state",
+        "ambiguity_reason",
+        "retry_disposition",
         "http_status",
         "_factory_token",
     )
@@ -787,14 +854,26 @@ def _install_submission_response_binding_authority(loader):
             authority_changed()
         if canonical_type(current[12]) is not canonical_str or current[12] != expected[12]:
             authority_changed()
-        if current[13] is not None:
-            if canonical_type(current[13]) is not canonical_int:
-                authority_changed()
-            if current[13] != expected[13]:
-                authority_changed()
-        elif expected[13] is not None:
+        if canonical_type(current[13]) is not canonical_str or current[13] != expected[13]:
             authority_changed()
-        if current[14] is not binding_token:
+        if canonical_type(current[14]) is not canonical_str or current[14] != expected[14]:
+            authority_changed()
+        for index in (15, 16):
+            if current[index] is not None:
+                if canonical_type(current[index]) is not canonical_str:
+                    authority_changed()
+                if current[index] != expected[index]:
+                    authority_changed()
+            elif expected[index] is not None:
+                authority_changed()
+        if current[17] is not None:
+            if canonical_type(current[17]) is not canonical_int:
+                authority_changed()
+            if current[17] != expected[17]:
+                authority_changed()
+        elif expected[17] is not None:
+            authority_changed()
+        if current[18] is not binding_token:
             authority_changed()
         return value
 

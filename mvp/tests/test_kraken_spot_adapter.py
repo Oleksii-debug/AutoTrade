@@ -10,6 +10,7 @@ from uuid import uuid4
 import mvp.autotrade_mvp.kraken_spot as kraken_spot_module
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
+    CapabilitySnapshot,
     EvidenceVerification,
     derive_capability_snapshot,
 )
@@ -165,6 +166,52 @@ def capability(
 
 
 class KrakenSpotAdapterTests(unittest.TestCase):
+    def test_preparation_revalidates_mutated_order_intent(self):
+        intent = KrakenSpotOrderIntent.create(
+            instrument_version="XBTUSD:v1",
+            pair="XBTUSD",
+            side="BUY",
+            order_type="MARKET",
+            volume="0.01",
+        )
+        object.__setattr__(intent, "post_only", True)
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "post_only"):
+            prepare_spot_order_request(
+                intent,
+                client_order_id="spot-mutated-intent",
+                account_id="spot-account",
+                environment="PAPER",
+                capability=capability(),
+                at=NOW,
+            )
+
+    def test_preparation_rejects_capability_subclass_before_callback(self):
+        callbacks = []
+
+        class HostileCapability(CapabilitySnapshot):
+            def __getattribute__(self, name):
+                callbacks.append(name)
+                raise AssertionError("hostile capability callback executed")
+
+        hostile = object.__new__(HostileCapability)
+        intent = KrakenSpotOrderIntent.create(
+            instrument_version="XBTUSD:v1",
+            pair="XBTUSD",
+            side="BUY",
+            order_type="MARKET",
+            volume="0.01",
+        )
+        with self.assertRaisesRegex(TypeError, "exact CapabilitySnapshot"):
+            prepare_spot_order_request(
+                intent,
+                client_order_id="spot-hostile-cap",
+                account_id="spot-account",
+                environment="PAPER",
+                capability=hostile,
+                at=NOW,
+            )
+        self.assertEqual(callbacks, [])
+
     def test_direct_prepared_request_requires_canonical_factory(self):
         with self.assertRaisesRegex(
             KrakenSpotAdapterError,

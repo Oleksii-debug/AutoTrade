@@ -755,6 +755,24 @@ def _install_kraken_futures_prepared_request_authority(builder):
         time_in_force: str = "GTC",
     ) -> KrakenFuturesPreparedRequest:
         implementation_changed()
+        if canonical_type(capability) is not capability_type:
+            raise type_error("capability must be exact CapabilitySnapshot")
+        if canonical_type(at) is not datetime_type:
+            raise type_error("at must be exact datetime")
+        for name, value in (
+            ("account_id", account_id),
+            ("provider_environment", provider_environment),
+            ("instrument_version", instrument_version),
+            ("symbol", symbol),
+            ("side", side),
+            ("order_type", order_type),
+            ("client_order_id", client_order_id),
+            ("time_in_force", time_in_force),
+        ):
+            if canonical_type(value) is not canonical_str:
+                raise type_error(f"{name} must be exact str")
+        if canonical_type(reduce_only) is not bool:
+            raise type_error("reduce_only must be exact bool")
         prepared = builder(
             capability=capability,
             account_id=account_id,

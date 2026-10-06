@@ -29,6 +29,7 @@ from mvp.autotrade_mvp.fill_accounting import (
 from mvp.autotrade_mvp.reservations import ReservationSnapshot
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
+    CapabilitySnapshot,
     EvidenceVerification,
     derive_capability_snapshot,
 )
@@ -129,6 +130,56 @@ def bound_activity_response(
 
 
 class AlpacaAdapterTests(unittest.TestCase):
+    def test_preparation_revalidates_mutated_order_intent(self):
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        object.__setattr__(intent, "extended_hours", True)
+        with self.assertRaisesRegex(AlpacaAdapterError, "extended_hours"):
+            prepare_order_request(
+                intent,
+                client_order_id="alpaca-mutated-intent",
+                account_id="paper-account",
+                environment="PAPER",
+                capability=capability(),
+                at=NOW,
+            )
+
+    def test_preparation_rejects_capability_subclass_before_callback(self):
+        callbacks = []
+
+        class HostileCapability(CapabilitySnapshot):
+            def __getattribute__(self, name):
+                callbacks.append(name)
+                raise AssertionError("hostile capability callback executed")
+
+        hostile = object.__new__(HostileCapability)
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        with self.assertRaisesRegex(TypeError, "exact CapabilitySnapshot"):
+            prepare_order_request(
+                intent,
+                client_order_id="alpaca-hostile-capability",
+                account_id="paper-account",
+                environment="PAPER",
+                capability=hostile,
+                at=NOW,
+            )
+        self.assertEqual(callbacks, [])
+
     def test_direct_prepared_request_cannot_bypass_scope_or_provenance(self):
         with self.assertRaisesRegex(
             AlpacaAdapterError,

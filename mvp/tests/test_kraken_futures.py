@@ -10,6 +10,7 @@ from uuid import uuid4
 import mvp.autotrade_mvp.kraken_futures as kraken_futures_module
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
+    CapabilitySnapshot,
     EvidenceVerification,
     derive_capability_snapshot,
 )
@@ -185,6 +186,30 @@ def futures_response_bytes(payload) -> bytes:
 
 
 class KrakenFuturesAdapterTests(unittest.TestCase):
+    def test_preparation_rejects_capability_subclass_before_callback(self):
+        callbacks = []
+
+        class HostileCapability(CapabilitySnapshot):
+            def __getattribute__(self, name):
+                callbacks.append(name)
+                raise AssertionError("hostile capability callback executed")
+
+        hostile = object.__new__(HostileCapability)
+        with self.assertRaisesRegex(TypeError, "exact CapabilitySnapshot"):
+            prepare_order_request(
+                capability=hostile,
+                account_id="futures-account",
+                provider_environment="DEMO",
+                instrument_version="PI_XBTUSD@v1",
+                at=NOW_DT,
+                symbol="PI_XBTUSD",
+                side="BUY",
+                order_type="MARKET",
+                size="1",
+                client_order_id="futures-hostile-cap",
+            )
+        self.assertEqual(callbacks, [])
+
     def test_payload_numeric_admission_uses_shared_bounded_exact_authority(self):
         arguments = dict(environment="LIVE", symbol="PI_XBTUSD", side="BUY",
                          order_type="LIMIT", size="1.0001", price="70000.01",

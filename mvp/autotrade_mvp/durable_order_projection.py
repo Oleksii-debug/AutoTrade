@@ -597,22 +597,25 @@ class DurableOrderBookProjection:
     def _requires_provider_evidence(
         operation: object,
         request: Mapping[str, object],
+        _type=type,
+        _str_type=str,
+        _provider_operations=_PROVIDER_EVIDENCE_OPERATIONS,
     ) -> bool:
         if operation == "ACKNOWLEDGE":
             # Callers reach this gate only through canonical request builders or
             # durable JSON replay, so status must already be exact inert text.
-            # Do not pass it through the mutable module-global `str`: rebinding
-            # that builtin could otherwise misclassify ACCEPTED as local UNKNOWN
-            # before the canonical order projection applies the real request.
+            # Retain the canonical builtin identities as definition-time
+            # dependencies: a same-process module-global `str` shadow must not
+            # make ACCEPTED look like local UNKNOWN before _apply() consumes it.
             status = request.get("status")
             return (
-                type(status) is str
+                _type(status) is _str_type
                 and (
                     status in {"ACKNOWLEDGED", "ACCEPTED", "REJECTED"}
                     or request.get("provider_order_id") is not None
                 )
             )
-        return operation in _PROVIDER_EVIDENCE_OPERATIONS
+        return operation in _provider_operations
 
     def _verify_provider_evidence(
         self,

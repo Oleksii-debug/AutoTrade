@@ -111,6 +111,10 @@ async function command(page, action, index) {
 async function exercisePortfolioTableTools(page) {
   stage = "portfolio keyboard tools";
   await tabTo(page, "portfolio-filter");
+  assert.equal(
+    await page.locator("#portfolio-filter").getAttribute("aria-keyshortcuts"),
+    "Escape",
+    "table filter exposes the Escape shortcut to assistive technology");
   await page.keyboard.type("895.696");
   await page.waitForFunction(() => {
     const status = document.querySelector("#portfolio-filter-status")?.textContent || "";

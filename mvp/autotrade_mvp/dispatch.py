@@ -174,18 +174,148 @@ class ExactJsonTransportResponse:
                 raise ValueError(
                     "ambiguity_reason is only valid when reconciliation is required"
                 )
+        _register_exact_transport_response(self)
 
     @property
     def response_text(self) -> str:
+        _require_canonical_exact_transport_response(self)
         return self.response_bytes.decode("utf-8")
 
     @property
     def response_sha256(self) -> str:
+        _require_canonical_exact_transport_response(self)
         return "sha256:" + sha256(self.response_bytes).hexdigest()
 
     @property
     def payload(self) -> Any:
+        _require_canonical_exact_transport_response(self)
         return _decode_exact_json_bytes(self.response_bytes)
+
+
+def _install_exact_transport_response_authority():
+    """Seal provider post-SEND classification to its validated construction state."""
+
+    response_type = ExactJsonTransportResponse
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_bool = bool
+    canonical_int = int
+    canonical_str = str
+    canonical_bytes = bytes
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    canonical_weakref_ref = weakref_ref
+    canonical_require_response_bytes = require_provider_response_bytes
+    require_response_bytes_code = canonical_require_response_bytes.__code__
+    canonical_decode = _decode_exact_json_bytes
+    decode_code = canonical_decode.__code__
+    canonical_hard_response_bytes = HARD_MAX_PROVIDER_RESPONSE_BYTES
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
+    installed: list[object] = []
+
+    def authority_changed():
+        raise ValueError("exact transport response authority is unavailable")
+
+    def implementation_changed():
+        if (
+            ExactJsonTransportResponse is not response_type
+            or type is not canonical_type
+            or id is not canonical_id
+            or tuple is not canonical_tuple
+            or bool is not canonical_bool
+            or int is not canonical_int
+            or str is not canonical_str
+            or bytes is not canonical_bytes
+            or object is not canonical_object
+            or weakref_ref is not canonical_weakref_ref
+            or require_provider_response_bytes is not canonical_require_response_bytes
+            or canonical_require_response_bytes.__code__ is not require_response_bytes_code
+            or _decode_exact_json_bytes is not canonical_decode
+            or canonical_decode.__code__ is not decode_code
+            or type(HARD_MAX_PROVIDER_RESPONSE_BYTES) is not canonical_int
+            or HARD_MAX_PROVIDER_RESPONSE_BYTES != canonical_hard_response_bytes
+            or len(installed) != 2
+            or _register_exact_transport_response is not installed[0]
+            or _require_canonical_exact_transport_response is not installed[1]
+        ):
+            authority_changed()
+
+    def raw_snapshot(value):
+        return (
+            object_getattribute(value, "response_bytes"),
+            object_getattribute(value, "http_status"),
+            object_getattribute(value, "requires_reconciliation"),
+            object_getattribute(value, "ambiguity_reason"),
+        )
+
+    def prune():
+        for object_id, (value_ref, _snapshot) in canonical_tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def register(value):
+        implementation_changed()
+        if canonical_type(value) is not response_type:
+            authority_changed()
+        current = raw_snapshot(value)
+        if canonical_type(current[0]) is not canonical_bytes:
+            authority_changed()
+        if current[1] is not None and canonical_type(current[1]) is not canonical_int:
+            authority_changed()
+        if canonical_type(current[2]) is not canonical_bool:
+            authority_changed()
+        if current[3] is not None and canonical_type(current[3]) is not canonical_str:
+            authority_changed()
+        prune()
+        object_id = canonical_id(value)
+        previous = states.get(object_id)
+        if previous is not None and previous[0]() is not None:
+            authority_changed()
+        states[object_id] = (canonical_weakref_ref(value), current)
+        return value
+
+    def require(value):
+        implementation_changed()
+        if canonical_type(value) is not response_type:
+            authority_changed()
+        prune()
+        state = states.get(canonical_id(value))
+        if state is None or state[0]() is not value:
+            authority_changed()
+        expected = state[1]
+        current = raw_snapshot(value)
+        if (
+            canonical_type(current[0]) is not canonical_bytes
+            or current[0] is not expected[0]
+            or current[1] != expected[1]
+            or canonical_type(current[2]) is not canonical_bool
+            or current[2] is not expected[2]
+            or current[3] != expected[3]
+        ):
+            authority_changed()
+        if current[1] is not None and canonical_type(current[1]) is not canonical_int:
+            authority_changed()
+        if current[3] is not None and canonical_type(current[3]) is not canonical_str:
+            authority_changed()
+        canonical_require_response_bytes(
+            current[0],
+            max_bytes=canonical_hard_response_bytes,
+            allow_empty=current[2],
+        )
+        if not current[2]:
+            canonical_decode(current[0])
+        return value
+
+    installed.extend((register, require))
+    return register, require
+
+
+(
+    _register_exact_transport_response,
+    _require_canonical_exact_transport_response,
+) = _install_exact_transport_response_authority()
+del _install_exact_transport_response_authority
 
 
 @dataclass(frozen=True)
@@ -1688,6 +1818,11 @@ class GuardedDispatcher:
                 raise DispatchBlocked(reason) from error
             barrier_passed = True
 
+        exact_response_type = ExactJsonTransportResponse
+        exact_response_authority = _require_canonical_exact_transport_response
+        response_type_builtin = type
+        response_isinstance_builtin = isinstance
+
         try:
             try:
                 response = transport_send(client_order_id, request_frozen, final_guard)
@@ -1796,7 +1931,14 @@ class GuardedDispatcher:
         terminal_requires_reconciliation = False
         terminal_reason = "sent_confirmed"
         try:
-            if type(response) is ExactJsonTransportResponse:
+            if (
+                ExactJsonTransportResponse is not exact_response_type
+                or _require_canonical_exact_transport_response
+                is not exact_response_authority
+            ):
+                raise ValueError("exact transport response authority changed after send")
+            if response_type_builtin(response) is exact_response_type:
+                exact_response_authority(response)
                 terminal_requires_reconciliation = response.requires_reconciliation
                 if terminal_requires_reconciliation:
                     try:
@@ -1826,7 +1968,7 @@ class GuardedDispatcher:
                     )
                     sent_payload["reason"] = terminal_reason
                     sent_payload["retry_disposition"] = "RECONCILE_FIRST"
-            elif isinstance(response, ExactJsonTransportResponse):
+            elif response_isinstance_builtin(response, exact_response_type):
                 raise TypeError("exact provider response subtype is forbidden")
             else:
                 sent_payload = {

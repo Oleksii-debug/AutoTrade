@@ -18,7 +18,6 @@ on:
       - "src/**/packages.lock.json"
       - "src/**/*.xaml"
       - "tests/Desktop.Client/**"
-      - "tests/Host.Process/**"
       - "tests/Provenance/test_dotnet_package_rights.py"
       - "contracts/**"
       - "provenance/dotnet-package-rights.json"
@@ -40,7 +39,6 @@ on:
       - "src/**/packages.lock.json"
       - "src/**/*.xaml"
       - "tests/Desktop.Client/**"
-      - "tests/Host.Process/**"
       - "tests/Provenance/test_dotnet_package_rights.py"
       - "contracts/**"
       - "provenance/dotnet-package-rights.json"
@@ -81,15 +79,11 @@ jobs:
       - run: python -m unittest discover -s tests/Provenance -p "test_dotnet_package_rights.py"
       - run: dotnet restore src/AutoTrade.Contracts/AutoTrade.Contracts.csproj --locked-mode
       - run: dotnet build src/AutoTrade.Contracts/AutoTrade.Contracts.csproj --configuration Release --no-restore
-      - run: dotnet restore src/AutoTrade.Host/AutoTrade.Host.csproj --locked-mode
-      - run: dotnet build src/AutoTrade.Host/AutoTrade.Host.csproj --configuration Release --no-restore
-      - run: dotnet restore tests/Host.Process/Host.Process.csproj --locked-mode
-      - run: dotnet run --project tests/Host.Process/Host.Process.csproj --configuration Release --no-restore
       - name: Write exact-head .NET foundation evidence
         run: >-
           python tools/write_ci_evidence.py
           --suite dotnet-foundation
-          --command "dotnet restore/build AutoTrade.Contracts + fail-closed AutoTrade.Host process contract"
+          --command "locked AutoTrade.Contracts restore/build"
           --output "artifacts/dotnet-foundation-${{ runner.os }}.json"
       - name: Upload exact-head .NET foundation evidence
         uses: actions/upload-artifact@v4

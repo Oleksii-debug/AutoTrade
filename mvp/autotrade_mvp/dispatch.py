@@ -908,7 +908,7 @@ class GuardedDispatcher:
             (intent_hash, "intent_hash"),
             (provider, "provider"),
         ):
-            if not isinstance(value, str) or not value.strip():
+            if type(value) is not str or not value.strip():
                 raise ValueError(f"{name} is required")
         if not isinstance(request, Mapping):
             raise TypeError("request must be a mapping")

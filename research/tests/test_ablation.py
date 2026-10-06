@@ -119,6 +119,16 @@ def pair(
         if fingerprint is None
         else fingerprint
     )
+    base_evidence = causal_evidence(available=cutoff)
+    target_evidence = causal_evidence(
+        evidence_id=f"target:{case_id}",
+        digest=(
+            "sha256:"
+            + sha256(f"{case_id}:target:agent".encode("utf-8")).hexdigest()
+        ),
+        component="agent",
+        available=cutoff,
+    )
     return AblationPair(
         "agent",
         outcome(
@@ -132,6 +142,7 @@ def pair(
             population_unit=population_unit,
             decision=full_decision,
             cutoff=cutoff,
+            input_evidence=(base_evidence, target_evidence),
         ),
         outcome(
             case_id=case_id,
@@ -144,6 +155,7 @@ def pair(
             population_unit=population_unit,
             decision=ablated_decision,
             cutoff=cutoff,
+            input_evidence=(base_evidence,),
         ),
     )
 
@@ -485,6 +497,72 @@ class AblationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "duplicate target syndication group"):
             summarize_ablation("agent", [first, second])
+
+    def test_target_evidence_identity_cannot_alias_across_cases(self):
+        first_target = causal_evidence(
+            evidence_id="shared-target-evidence",
+            digest=FINGERPRINT_C,
+            component="agent",
+        )
+        second_target = causal_evidence(
+            evidence_id="shared-target-evidence",
+            digest=FINGERPRINT_D,
+            component="agent",
+        )
+        first = pair("identity-a", "1")
+        second = pair("identity-b", "1")
+        first_base = causal_evidence()
+        second_base = causal_evidence(
+            evidence_id="base-b",
+            digest="sha256:" + ("e" * 64),
+        )
+        first = AblationPair(
+            "agent",
+            replace(first.full, input_evidence=(first_base, first_target)),
+            replace(first.ablated, input_evidence=(first_base,)),
+        )
+        second = AblationPair(
+            "agent",
+            replace(second.full, input_evidence=(second_base, second_target)),
+            replace(second.ablated, input_evidence=(second_base,)),
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate target evidence identity"):
+            summarize_ablation("agent", [first, second])
+
+    def test_inferential_value_requires_target_component_causal_evidence(self):
+        base = causal_evidence()
+        unbound_target = AblationPair(
+            "agent",
+            outcome(
+                case_id="target-evidence-missing",
+                variant="FULL",
+                utility=1,
+                cost=0,
+                elapsed=10,
+                components=("base", "agent"),
+                input_evidence=(base,),
+            ),
+            outcome(
+                case_id="target-evidence-missing",
+                variant="ABLATED",
+                utility=0,
+                cost=0,
+                elapsed=10,
+                components=("base",),
+                input_evidence=(base,),
+            ),
+        )
+        result = evaluate_incremental_value(
+            "agent",
+            [unbound_target],
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(
+            result.reason,
+            "missing_target_component_causal_evidence",
+        )
 
     def test_inferential_value_requires_causal_input_evidence(self):
         unbound = AblationPair(

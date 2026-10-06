@@ -839,6 +839,47 @@ class DurableOrderProjectionTests(unittest.TestCase):
                     committed_at=T1,
                 )
 
+    def test_paper_unknown_cannot_bind_provider_order_id_without_origin(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store, environment="PAPER")
+            book.create_order(
+                event_key="create-paper-unknown-provider-id",
+                client_order_id="paper-unknown-provider-id",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "requires sealed provider-origin authority",
+            ):
+                book.acknowledge(
+                    event_key="unknown-with-forged-provider-id",
+                    client_order_id="paper-unknown-provider-id",
+                    provider_order_id="forged-provider-order",
+                    status="UNKNOWN",
+                    committed_at=T1,
+                )
+
+            snapshot = book.order("paper-unknown-provider-id").snapshot()
+            self.assertEqual(snapshot.state, "PENDING")
+            self.assertIsNone(snapshot.provider_order_id)
+
+            # The provider-neutral WP-18 handoff remains valid: UNKNOWN without
+            # a provider-specific order identity is transport/reconciliation
+            # state rather than provider lifecycle authority.
+            result = book.acknowledge(
+                event_key="unknown-without-provider-id",
+                client_order_id="paper-unknown-provider-id",
+                status="UNKNOWN",
+                committed_at=T1,
+            )
+            self.assertEqual(result.snapshot.state, "UNKNOWN")
+            self.assertIsNone(result.snapshot.provider_order_id)
+
     def test_simulation_provider_evidence_must_resolve_in_artifact_store(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

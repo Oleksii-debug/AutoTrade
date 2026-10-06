@@ -600,7 +600,10 @@ class DurableOrderBookProjection:
     ) -> bool:
         if operation == "ACKNOWLEDGE":
             status = str(request.get("status", "")).upper()
-            return status in {"ACKNOWLEDGED", "ACCEPTED", "REJECTED"}
+            return (
+                status in {"ACKNOWLEDGED", "ACCEPTED", "REJECTED"}
+                or request.get("provider_order_id") is not None
+            )
         return operation in _PROVIDER_EVIDENCE_OPERATIONS
 
     def _verify_provider_evidence(

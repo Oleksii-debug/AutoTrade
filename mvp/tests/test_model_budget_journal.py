@@ -7,6 +7,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
+import mvp.autotrade_mvp.model_budget_journal as model_budget_module
 from mvp.autotrade_mvp.model_budget_journal import DurableModelBudget
 from mvp.autotrade_mvp.model_gateway import (
     ModelDescriptor,
@@ -36,13 +37,14 @@ def open_budget(root, *, ceiling="1", budget_id="policy-1", environment="SIMULAT
 ROUTE_NOW = datetime(2026, 9, 24, 21, 45, tzinfo=timezone.utc)
 
 
-def route_request(request_id, *, budget="100"):
+def route_request(request_id, *, budget="100", cancelled=False):
     return ModelRequest(
         request_id=request_id,
         allowed_model_ids=("local",),
         privacy_remote_allowed=False,
         budget_remaining=budget,
         deadline_utc=ROUTE_NOW + timedelta(minutes=5),
+        cancelled=cancelled,
     )
 
 
@@ -82,6 +84,255 @@ class RejectingInitializationJournal(JournalStore):
 
 
 class DurableModelBudgetTests(unittest.TestCase):
+    def test_clock_object_truthiness_is_never_consulted(self):
+        class Clock:
+            truth_calls = 0
+            call_count = 0
+
+            def __bool__(self):
+                type(self).truth_calls += 1
+                raise AssertionError("clock truthiness executed")
+
+            def __call__(self):
+                type(self).call_count += 1
+                return NOW
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            clock = Clock()
+            budget = DurableModelBudget(
+                journal=journal,
+                budget_id="policy-clock",
+                ceiling="1",
+                environment="SIMULATION",
+                clock=clock,
+            )
+            self.assertEqual(Clock.truth_calls, 0)
+            self.assertGreaterEqual(Clock.call_count, 1)
+            self.assertEqual(budget.snapshot().ceiling, Decimal("1"))
+
+    def test_clock_cannot_redirect_clock_text_normalizer(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            canonical_clock_text = model_budget_module._clock_text
+            forged_calls = []
+
+            def hostile_clock():
+                model_budget_module._clock_text = (
+                    lambda _value: forged_calls.append("forged")
+                    or "2099-01-01T00:00:00+00:00"
+                )
+                return NOW
+
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"model budget clock mutated authority:.*module\._clock_text",
+                ):
+                    DurableModelBudget(
+                        journal=journal,
+                        budget_id="policy-clock-text-alias",
+                        ceiling="1",
+                        environment="SIMULATION",
+                        clock=hostile_clock,
+                    )
+            finally:
+                model_budget_module._clock_text = canonical_clock_text
+
+            self.assertEqual(forged_calls, [])
+            self.assertIs(
+                model_budget_module._clock_text,
+                canonical_clock_text,
+            )
+            self.assertEqual(
+                journal.load_events(
+                    "model_budget",
+                    "policy-clock-text-alias",
+                ),
+                [],
+            )
+
+    def test_clock_cannot_redirect_cleanup_through_module_budget_alias(self):
+        class DecoyBudget:
+            restore_calls = 0
+
+            @staticmethod
+            def _restore_clock_authority(*_args, **_kwargs):
+                DecoyBudget.restore_calls += 1
+                raise AssertionError("clock redirected budget cleanup")
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            canonical_budget = model_budget_module.DurableModelBudget
+
+            def hostile_clock():
+                model_budget_module.DurableModelBudget = DecoyBudget
+                return NOW
+
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"model budget clock mutated authority:.*module\.DurableModelBudget",
+                ):
+                    canonical_budget(
+                        journal=journal,
+                        budget_id="policy-module-alias-clock",
+                        ceiling="1",
+                        environment="SIMULATION",
+                        clock=hostile_clock,
+                    )
+            finally:
+                model_budget_module.DurableModelBudget = canonical_budget
+
+            self.assertEqual(DecoyBudget.restore_calls, 0)
+            self.assertIs(
+                model_budget_module.DurableModelBudget,
+                canonical_budget,
+            )
+            self.assertEqual(
+                journal.load_events(
+                    "model_budget",
+                    "policy-module-alias-clock",
+                ),
+                [],
+            )
+
+    def test_initialization_clock_cannot_shadow_journal_append(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            forged_calls = []
+
+            def hostile_clock():
+                journal.append_event = (
+                    lambda *_args, **_kwargs: forged_calls.append("forged")
+                )
+                return NOW
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"model budget clock mutated authority:.*journal\.append_event",
+            ):
+                DurableModelBudget(
+                    journal=journal,
+                    budget_id="policy-hostile-init-clock",
+                    ceiling="1",
+                    environment="SIMULATION",
+                    clock=hostile_clock,
+                )
+
+            self.assertEqual(forged_calls, [])
+            self.assertNotIn("append_event", journal.__dict__)
+            self.assertEqual(
+                journal.load_events(
+                    "model_budget",
+                    "policy-hostile-init-clock",
+                ),
+                [],
+            )
+
+    def test_commit_clock_cannot_redirect_budget_or_journal_authority(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            forged_calls = []
+            armed = False
+            budget = None
+
+            def hostile_clock():
+                if armed:
+                    budget.environment = "LIVE"
+                    budget.journal.commit_command = (
+                        lambda *_args, **_kwargs: forged_calls.append("forged")
+                    )
+                return NOW
+
+            budget = DurableModelBudget(
+                journal=journal,
+                budget_id="policy-1",
+                ceiling="1",
+                environment="SIMULATION",
+                clock=hostile_clock,
+            )
+            before = journal.load_events("model_budget", "policy-1")
+            armed = True
+            with self.assertRaisesRegex(
+                ValueError,
+                "model budget clock mutated authority:",
+            ):
+                budget.reserve("req-hostile-clock", "0.2")
+
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(budget.environment, "SIMULATION")
+            self.assertNotIn("commit_command", journal.__dict__)
+            self.assertEqual(
+                journal.load_events("model_budget", "policy-1"),
+                before,
+            )
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
+    def test_non_callable_clock_fails_before_journal_mutation(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            with self.assertRaisesRegex(TypeError, "clock must be callable"):
+                DurableModelBudget(
+                    journal=journal,
+                    budget_id="policy-bad-clock",
+                    ceiling="1",
+                    environment="SIMULATION",
+                    clock=object(),
+                )
+            self.assertEqual(
+                journal.load_events("model_budget", "policy-bad-clock"),
+                [],
+            )
+
+    def test_hostile_clock_result_is_rejected_before_text_method_or_journal_mutation(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile clock result strip executed")
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            with self.assertRaisesRegex(ValueError, "canonical UTC text"):
+                DurableModelBudget(
+                    journal=journal,
+                    budget_id="policy-hostile-clock-result",
+                    ceiling="1",
+                    environment="SIMULATION",
+                    clock=lambda: HostileText(NOW),
+                )
+            self.assertEqual(HostileText.strip_calls, 0)
+            self.assertEqual(
+                journal.load_events("model_budget", "policy-hostile-clock-result"),
+                [],
+            )
+
+    def test_noncanonical_clock_text_fails_before_journal_mutation(self):
+        invalid_values = (
+            "not-a-time",
+            "2026-09-24T21:45:00",
+            "2026-09-24T23:45:00+02:00",
+            "2026-09-24T21:45:00Z",
+        )
+        for invalid in invalid_values:
+            with self.subTest(invalid=invalid), TemporaryDirectory() as directory:
+                journal = JournalStore(Path(directory) / "journal.db")
+                budget_id = "policy-invalid-clock"
+                with self.assertRaisesRegex(ValueError, "canonical UTC text"):
+                    DurableModelBudget(
+                        journal=journal,
+                        budget_id=budget_id,
+                        ceiling="1",
+                        environment="SIMULATION",
+                        clock=lambda value=invalid: value,
+                    )
+                self.assertEqual(
+                    journal.load_events("model_budget", budget_id),
+                    [],
+                )
+
     def test_initialization_uses_canonical_sequence_text(self):
         with TemporaryDirectory() as directory:
             journal = RecordingJournalStore(Path(directory) / "journal.db")
@@ -113,6 +364,305 @@ class DurableModelBudgetTests(unittest.TestCase):
                     clock=lambda: NOW,
                 )
 
+
+    def test_budget_id_rejects_hostile_text_before_strip(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile strip executed")
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            hostile = HostileText("policy-hostile")
+            with self.assertRaisesRegex(ValueError, "budget_id is required"):
+                DurableModelBudget(
+                    journal=journal,
+                    budget_id=hostile,
+                    ceiling="1",
+                    environment="SIMULATION",
+                    clock=lambda: NOW,
+                )
+            self.assertEqual(HostileText.strip_calls, 0)
+
+    def test_environment_rejects_hostile_text_before_strip(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile strip executed")
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            hostile = HostileText("SIMULATION")
+            with self.assertRaisesRegex(ValueError, "environment must be"):
+                DurableModelBudget(
+                    journal=journal,
+                    budget_id="policy-hostile-environment",
+                    ceiling="1",
+                    environment=hostile,
+                    clock=lambda: NOW,
+                )
+            self.assertEqual(HostileText.strip_calls, 0)
+
+    def test_route_reservation_context_rejects_dict_subclass_before_iteration(self):
+        class HostileDict(dict):
+            items_calls = 0
+
+            def items(self):
+                type(self).items_calls += 1
+                raise AssertionError("hostile items executed")
+
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="1")
+            hostile = HostileDict({"attempt_id": "attempt-1"})
+            with self.assertRaisesRegex(TypeError, "exact dict"):
+                budget.admit_route(
+                    route_policy(),
+                    route_request("route-hostile-context"),
+                    [route_model_descriptor(cost="0.1")],
+                    now_utc=ROUTE_NOW,
+                    reservation_context=hostile,
+                )
+            self.assertEqual(HostileDict.items_calls, 0)
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
+    def test_route_reservation_context_rejects_hostile_key_before_strip(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile strip executed")
+
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="1")
+            hostile_key = HostileText("attempt_id")
+            with self.assertRaisesRegex(TypeError, "keys must be text"):
+                budget.admit_route(
+                    route_policy(),
+                    route_request("route-hostile-key"),
+                    [route_model_descriptor(cost="0.1")],
+                    now_utc=ROUTE_NOW,
+                    reservation_context={hostile_key: "attempt-1"},
+                )
+            self.assertEqual(HostileText.strip_calls, 0)
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
+    def test_route_reservation_context_rejects_hostile_value_before_strip(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile strip executed")
+
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="1")
+            hostile_value = HostileText("attempt-1")
+            with self.assertRaisesRegex(TypeError, "values must be text"):
+                budget.admit_route(
+                    route_policy(),
+                    route_request("route-hostile-value"),
+                    [route_model_descriptor(cost="0.1")],
+                    now_utc=ROUTE_NOW,
+                    reservation_context={"attempt_id": hostile_value},
+                )
+            self.assertEqual(HostileText.strip_calls, 0)
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
+    def test_route_rejects_policy_subclass_before_financial_identity_read(self):
+        class DerivedRoutingPolicy(RoutingPolicy):
+            pass
+
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="1")
+            base = route_policy()
+            derived = DerivedRoutingPolicy(
+                base.mode,
+                allowed_model_ids=base.allowed_model_ids,
+                fixed_model_id=base.fixed_model_id,
+                allow_remote=base.allow_remote,
+                maximum_cost=base.maximum_cost,
+                maximum_latency_ms=base.maximum_latency_ms,
+            )
+            with self.assertRaisesRegex(TypeError, "exact RoutingPolicy"):
+                budget.admit_route(
+                    derived,
+                    route_request("route-derived-policy"),
+                    [route_model_descriptor(cost="0.1")],
+                    now_utc=ROUTE_NOW,
+                )
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
+    def test_route_rejects_request_subclass_before_financial_identity_read(self):
+        class DerivedModelRequest(ModelRequest):
+            pass
+
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="1")
+            base = route_request("route-derived-request")
+            derived = DerivedModelRequest(
+                request_id=base.request_id,
+                allowed_model_ids=base.allowed_model_ids,
+                privacy_remote_allowed=base.privacy_remote_allowed,
+                budget_remaining=base.budget_remaining,
+                deadline_utc=base.deadline_utc,
+                cancelled=base.cancelled,
+            )
+            with self.assertRaisesRegex(TypeError, "exact ModelRequest"):
+                budget.admit_route(
+                    route_policy(),
+                    derived,
+                    [route_model_descriptor(cost="0.1")],
+                    now_utc=ROUTE_NOW,
+                )
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
+    def test_inventory_free_route_outcomes_do_not_enumerate_descriptors(self):
+        class ExplodingInventory:
+            def __iter__(self):
+                raise AssertionError("descriptor inventory must not be touched")
+
+        cases = (
+            (
+                RoutingPolicy(RoutingMode.ZERO, maximum_cost="0"),
+                route_request("route-zero-no-inventory"),
+                RouteStatus.NO_MODEL,
+                "zero_model_policy",
+            ),
+            (
+                route_policy(),
+                route_request("route-cancel-no-inventory", cancelled=True),
+                RouteStatus.REJECTED,
+                "request_cancelled",
+            ),
+        )
+        for policy, request, expected_status, expected_reason in cases:
+            with self.subTest(expected_reason=expected_reason), TemporaryDirectory() as directory:
+                journal, budget = open_budget(directory, ceiling="1")
+                decision = budget.admit_route(
+                    policy,
+                    request,
+                    ExplodingInventory(),
+                    now_utc=ROUTE_NOW,
+                    reservation_context={"attempt_id": "unused"},
+                )
+                self.assertEqual(decision.status, expected_status)
+                self.assertEqual(decision.reason, expected_reason)
+                self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+                self.assertEqual(
+                    [
+                        event["event_type"]
+                        for event in journal.load_events("model_budget", "policy-1")
+                        if event["event_type"] == "ModelRouteReserved"
+                    ],
+                    [],
+                )
+
+    def test_route_rejects_descriptor_subclass_before_financial_identity_read(self):
+        class DerivedModelDescriptor(ModelDescriptor):
+            pass
+
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="1")
+            base = route_model_descriptor(cost="0.1")
+            derived = DerivedModelDescriptor(
+                model_id=base.model_id,
+                provider_id=base.provider_id,
+                revision=base.revision,
+                remote=base.remote,
+                estimated_cost=base.estimated_cost,
+                latency_ms=base.latency_ms,
+                quality_score=base.quality_score,
+            )
+            with self.assertRaisesRegex(TypeError, "exact ModelDescriptor"):
+                budget.admit_route(
+                    route_policy(),
+                    route_request("route-derived-descriptor"),
+                    [derived],
+                    now_utc=ROUTE_NOW,
+                )
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
+    def test_route_rejects_datetime_subclass_before_truth_or_comparison(self):
+        class HostileDatetime(datetime):
+            truth_calls = 0
+            compare_calls = 0
+
+            def __bool__(self):
+                type(self).truth_calls += 1
+                raise AssertionError("hostile datetime truthiness executed")
+
+            def __ge__(self, other):
+                type(self).compare_calls += 1
+                raise AssertionError("hostile datetime comparison executed")
+
+        hostile = HostileDatetime(
+            2026,
+            9,
+            24,
+            21,
+            45,
+            tzinfo=timezone.utc,
+        )
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="1")
+            with self.assertRaisesRegex(ValueError, "exact timezone-aware datetime"):
+                budget.admit_route(
+                    route_policy(),
+                    route_request("route-hostile-now"),
+                    [route_model_descriptor(cost="0.1")],
+                    now_utc=hostile,
+                )
+            self.assertEqual(HostileDatetime.truth_calls, 0)
+            self.assertEqual(HostileDatetime.compare_calls, 0)
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
+    def test_route_detaches_financial_identity_before_journal_callbacks(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory, ceiling="1")
+            policy = route_policy()
+            request = route_request("route-detached-identity", budget="1")
+            descriptor = route_model_descriptor(cost="0.1")
+            canonical_snapshot = budget.snapshot
+            mutated = False
+
+            def mutating_snapshot():
+                nonlocal mutated
+                if not mutated:
+                    mutated = True
+                    object.__setattr__(policy, "allowed_model_ids", ())
+                    object.__setattr__(request, "budget_remaining", Decimal("0"))
+                    object.__setattr__(descriptor, "estimated_cost", Decimal("99"))
+                return canonical_snapshot()
+
+            with patch.object(budget, "snapshot", side_effect=mutating_snapshot):
+                decision = budget.admit_route(
+                    policy,
+                    request,
+                    [descriptor],
+                    now_utc=ROUTE_NOW,
+                    reservation_context={"attempt_id": "attempt-detached"},
+                )
+
+            self.assertTrue(mutated)
+            self.assertEqual(decision.status, RouteStatus.ADMITTED)
+            self.assertEqual(decision.reserved_cost, Decimal("0.1"))
+            event = journal.load_events(
+                "model_budget",
+                "policy-1",
+            )[-1]
+            self.assertEqual(event["event_type"], "ModelRouteReserved")
+            routing_input = event["payload"]["routing_input"]
+            self.assertEqual(routing_input["policy"]["allowed_model_ids"], ["local"])
+            self.assertEqual(routing_input["request"]["budget_cap"], "1")
+            self.assertEqual(
+                routing_input["descriptors"][0]["estimated_cost"],
+                "0.1",
+            )
 
     def test_durable_route_ignores_inflated_caller_budget(self):
         with TemporaryDirectory() as directory:

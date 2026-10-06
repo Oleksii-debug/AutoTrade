@@ -4,8 +4,8 @@ The provider-evidence module owns source authenticity. CorporateActionBook stays
 pure. DurableProviderEconomicBook remains the only economic ledger. This module
 only composes their prepared mutations in one JournalStore transaction.
 
-The first qualified economic mapping is CASH_DIVIDEND. Other action kinds fail
-closed until their exact position/basis/settlement semantics are implemented.
+Qualified durable mappings include CASH_DIVIDEND and long-position SPLIT. Other
+action kinds remain fail closed until their exact economics are implemented.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from .accounting import (
     AccountingConflict,
     JournalTransaction,
     Posting,
+    book_equity_split_adjustment,
     reverse_transaction,
     transaction_digest,
     validate_transaction,
@@ -29,6 +30,7 @@ from .corporate_action_evidence import (
     AuthoritativeCorporateAction,
     CorporateActionEvidenceConflict,
     DurableCorporateActionEvidenceStore,
+    authoritative_corporate_action_projection,
 )
 from .corporate_actions import CorporateActionBook, CorporateEvent, EquityState, Transition
 from .persistence import (
@@ -39,9 +41,10 @@ from .persistence import (
     require_exact_journal_store_authority,
 )
 from .provider_activity_accounting import DurableProviderEconomicBook
+from .reconciliation import ProviderActivityEvidence
 
 
-_SUPPORTED_DURABLE_KINDS = frozenset({"CASH_DIVIDEND"})
+_SUPPORTED_DURABLE_KINDS = frozenset({"CASH_DIVIDEND", "SPLIT"})
 
 
 def _identity(kind: str, *parts: str) -> str:
@@ -61,9 +64,185 @@ def _transaction_id(accepted: AuthoritativeCorporateAction, suffix: str) -> str:
         accepted.account_id,
         accepted.environment,
         accepted.external_event_id,
-        accepted.provenance_digest,
+        accepted.provider_fact_digest,
         suffix,
     )
+
+
+def _corporate_action_reconciliation_id(
+    payload: Mapping[str, object],
+    _identity_fn=_identity,
+    _error_type=CorporateActionEvidenceConflict,
+) -> str:
+    """Bind reconciliation to the stable provider fact, not its observation receipt."""
+
+    required_text = (
+        "provider_id",
+        "account_id",
+        "environment",
+        "external_event_id",
+        "provider_revision",
+        "provider_fact_digest",
+    )
+    for name in required_text:
+        if type(payload.get(name)) is not str or not payload[name]:
+            raise _error_type(
+                f"corporate-action reconciliation {name} is invalid"
+            )
+    correction = payload.get("corrects_external_event_id")
+    if correction is not None and (
+        type(correction) is not str or not correction
+    ):
+        raise _error_type(
+            "corporate-action reconciliation correction identity is invalid"
+        )
+    return _identity_fn(
+        "corporate-action-reconciliation",
+        payload["provider_id"],
+        payload["account_id"],
+        payload["environment"],
+        payload["external_event_id"],
+        payload["provider_revision"],
+        payload["provider_fact_digest"],
+        "" if correction is None else correction,
+    )
+
+
+def _bind_corporate_action_reconciliation_inputs(
+    evidence_store_type,
+    action_type,
+    authority_projection,
+    provider_activity_type,
+    reconciliation_id_fn,
+    evidence_composition,
+    evidence_events,
+    evidence_payload,
+    mapping_type,
+    error_type,
+):
+    def corporate_action_reconciliation_inputs(
+        evidence_store: DurableCorporateActionEvidenceStore,
+        *,
+        provider_actions: tuple[AuthoritativeCorporateAction, ...],
+    ) -> tuple[tuple[str, ...], tuple[ProviderActivityEvidence, ...]]:
+        """Project WP-31 history into the existing account-reconciliation authority.
+
+        Local identities come only from durable accepted evidence. Provider-side
+        activities come only from issuer-verified AuthoritativeCorporateAction
+        objects. Stable provider-fact changes therefore become ordinary
+        missing/unexpected activity mismatches in reconcile_account(); no second
+        reconciliation ledger or verdict engine is introduced here.
+
+        Complete-history/coverage authority remains owned by the caller's existing
+        provider reconciliation cut. This helper deliberately does not fabricate
+        pagination, consistency or provider-origin coverage.
+        """
+
+        if type(evidence_store) is not evidence_store_type:
+            raise TypeError(
+                "evidence_store must be exact DurableCorporateActionEvidenceStore"
+            )
+        if type(provider_actions) is not tuple:
+            raise TypeError("provider_actions must be an exact tuple")
+
+        (
+            _store,
+            _store_identity,
+            provider_id,
+            account_id,
+            environment,
+            _aggregate_id,
+        ) = evidence_composition(evidence_store)
+
+        local_ids = tuple(
+            sorted(
+                reconciliation_id_fn(
+                    evidence_payload(event)
+                )
+                for event in evidence_events(evidence_store)
+            )
+        )
+        if len(local_ids) != len(set(local_ids)):
+            raise error_type(
+                "durable corporate-action reconciliation identities are not unique"
+            )
+
+        activities_by_id: dict[str, ProviderActivityEvidence] = {}
+        for action in provider_actions:
+            if type(action) is not action_type:
+                raise TypeError(
+                    "provider_actions must contain exact AuthoritativeCorporateAction"
+                )
+            projection = authority_projection(action)
+            if (
+                projection["provider_id"] != provider_id
+                or projection["account_id"] != account_id
+                or projection["environment"] != environment
+            ):
+                raise error_type(
+                    "provider corporate-action reconciliation scope mismatch"
+                )
+            if provider_id == "BYBIT":
+                raise error_type(
+                    "BYBIT corporate-action reconciliation requires explicit "
+                    "provider_environment authority"
+                )
+
+            activity_id = reconciliation_id_fn(projection)
+            payload = projection["payload"]
+            if not isinstance(payload, mapping_type):
+                raise error_type(
+                    "provider corporate-action payload projection is invalid"
+                )
+            currency = payload.get("currency")
+            if currency is not None and type(currency) is not str:
+                raise error_type(
+                    "provider corporate-action currency must be exact text"
+                )
+            activity = provider_activity_type(
+                provider_id=provider_id,
+                account_id=account_id,
+                environment=environment,
+                activity_id=activity_id,
+                activity_type=f"CORPORATE_ACTION:{projection['kind']}",
+                origin="EXTERNAL",
+                occurred_at=projection["effective_at"],
+                instrument=projection["instrument_id"],
+                currency=currency,
+            )
+            prior = activities_by_id.get(activity_id)
+            if prior is not None and prior != activity:
+                raise error_type(
+                    "provider corporate-action reconciliation identity conflicts"
+                )
+            activities_by_id[activity_id] = activity
+
+        return (
+            local_ids,
+            tuple(
+                activities_by_id[key]
+                for key in sorted(activities_by_id)
+            ),
+        )
+
+    return corporate_action_reconciliation_inputs
+
+
+corporate_action_reconciliation_inputs = (
+    _bind_corporate_action_reconciliation_inputs(
+        DurableCorporateActionEvidenceStore,
+        AuthoritativeCorporateAction,
+        authoritative_corporate_action_projection,
+        ProviderActivityEvidence,
+        _corporate_action_reconciliation_id,
+        DurableCorporateActionEvidenceStore._composition,
+        DurableCorporateActionEvidenceStore._events,
+        DurableCorporateActionEvidenceStore._payload,
+        Mapping,
+        CorporateActionEvidenceConflict,
+    )
+)
+del _bind_corporate_action_reconciliation_inputs
 
 
 @dataclass(frozen=True)
@@ -275,7 +454,7 @@ def _dividend_transaction(
         cause_event_id=_identity(
             "corporate-action-cause",
             accepted.external_event_id,
-            accepted.provenance_digest,
+            accepted.provider_fact_digest,
             "effect",
         ),
         postings=(
@@ -292,6 +471,89 @@ def _dividend_transaction(
     )
     validate_transaction(transaction)
     return transaction
+
+
+def _split_transaction(
+    accepted: AuthoritativeCorporateAction,
+    transition: Transition,
+    *,
+    order_key: str,
+    corrects_transaction_id: str | None = None,
+    economic_effective_at: str | None = None,
+    observed_at: str | None = None,
+) -> JournalTransaction | None:
+    before = transition.before
+    after = transition.after
+    if (
+        before.borrowed_quantity != 0
+        or before.recalled_quantity != 0
+        or after.borrowed_quantity != 0
+        or after.recalled_quantity != 0
+    ):
+        raise AccountingConflict(
+            "durable split accounting for borrowed/short positions is not qualified"
+        )
+    if before.quantity == after.quantity:
+        return None
+
+    payload = accepted.event.payload
+    try:
+        return book_equity_split_adjustment(
+            transaction_id=_transaction_id(accepted, "effect"),
+            cause_event_id=_identity(
+                "corporate-action-cause",
+                accepted.external_event_id,
+                accepted.provenance_digest,
+                "effect",
+            ),
+            instrument=before.symbol,
+            pre_split_quantity=before.quantity,
+            numerator=payload["numerator"],
+            denominator=payload["denominator"],
+            economic_effective_at=(
+                economic_effective_at
+                or accepted.event.effective_at.isoformat().replace("+00:00", "Z")
+            ),
+            economic_order_key=order_key,
+            observed_at=observed_at or accepted.observed_at,
+            corrects_transaction_id=corrects_transaction_id,
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise AccountingConflict(
+            "split action cannot produce a canonical durable quantity adjustment"
+        ) from error
+
+
+def _effect_transaction(
+    accepted: AuthoritativeCorporateAction,
+    transition: Transition,
+    *,
+    order_key: str,
+    corrects_transaction_id: str | None = None,
+    economic_effective_at: str | None = None,
+    observed_at: str | None = None,
+) -> JournalTransaction | None:
+    if accepted.event.kind == "CASH_DIVIDEND":
+        return _dividend_transaction(
+            accepted,
+            transition,
+            order_key=order_key,
+            corrects_transaction_id=corrects_transaction_id,
+            economic_effective_at=economic_effective_at,
+            observed_at=observed_at,
+        )
+    if accepted.event.kind == "SPLIT":
+        return _split_transaction(
+            accepted,
+            transition,
+            order_key=order_key,
+            corrects_transaction_id=corrects_transaction_id,
+            economic_effective_at=economic_effective_at,
+            observed_at=observed_at,
+        )
+    raise AccountingConflict(
+        f"{accepted.event.kind} has no qualified durable corporate-action accounting mapping"
+    )
 
 
 def _active_for_order_key(
@@ -354,19 +616,12 @@ def _correction_transactions(
             original,
             transaction_id=expected_reversal_id,
             cause_event_id=committed_reversal.cause_event_id,
-            observed_at=accepted.observed_at,
+            observed_at=committed_reversal.observed_at,
         )
         if rebuilt_reversal != committed_reversal:
             raise AccountingConflict(
                 "corporate-action correction reversal conflicts with retained evidence"
             )
-        replacement = _dividend_transaction(
-            accepted,
-            transition,
-            order_key=original.economic_order_key or order_key,
-            corrects_transaction_id=original.transaction_id,
-            economic_effective_at=original.economic_effective_at,
-        )
         committed_replacement = next(
             (
                 item
@@ -374,6 +629,18 @@ def _correction_transactions(
                 if item.transaction_id == expected_replacement_id
             ),
             None,
+        )
+        replacement = _effect_transaction(
+            accepted,
+            transition,
+            order_key=original.economic_order_key or order_key,
+            corrects_transaction_id=original.transaction_id,
+            economic_effective_at=original.economic_effective_at,
+            observed_at=(
+                accepted.observed_at
+                if committed_replacement is None
+                else committed_replacement.observed_at
+            ),
         )
         if replacement is None:
             if committed_replacement is not None:
@@ -404,12 +671,12 @@ def _correction_transactions(
         cause_event_id=_identity(
             "corporate-action-cause",
             accepted.external_event_id,
-            accepted.provenance_digest,
+            accepted.provider_fact_digest,
             "reversal",
         ),
         observed_at=accepted.observed_at,
     )
-    replacement = _dividend_transaction(
+    replacement = _effect_transaction(
         accepted,
         transition,
         order_key=original.economic_order_key or order_key,
@@ -441,13 +708,18 @@ def _economic_transactions(
         )
 
     order_key = _order_key(accepted.external_event_id)
-    transaction = _dividend_transaction(
+    active = _active_for_order_key(economic_book, order_key)
+    retained_observed_at = (
+        active[0].observed_at
+        if exact_retry and len(active) == 1
+        else transaction_observed_at
+    )
+    transaction = _effect_transaction(
         accepted,
         transition,
         order_key=order_key,
-        observed_at=transaction_observed_at,
+        observed_at=retained_observed_at,
     )
-    active = _active_for_order_key(economic_book, order_key)
     if active and not exact_retry:
         raise AccountingConflict(
             "corporate-action economics exist without retained exact source identity"
@@ -513,6 +785,18 @@ def commit_authoritative_corporate_action(
         or evidence_environment != economic_book.environment
     ):
         raise ValueError("corporate-action durable authorities have different scope")
+
+    # Cross the resolver-issuance boundary before any financial interpretation.
+    # The evidence store returns a detached canonical copy reconstructed from its
+    # closure-owned issuance snapshot, so later caller mutation cannot alter the
+    # economic inputs selected for this operation.
+    initial_evidence_plan = (
+        DurableCorporateActionEvidenceStore.prepare_record_mutation(
+            evidence_store,
+            accepted,
+        )
+    )
+    accepted = initial_evidence_plan.accepted
 
     observed_at = datetime.fromisoformat(
         accepted.observed_at.replace("Z", "+00:00")
@@ -678,6 +962,7 @@ def commit_authoritative_corporate_action(
     result = {
         "source_event_id": evidence_plan.event_id,
         "external_event_id": accepted.external_event_id,
+        "provider_fact_digest": accepted.provider_fact_digest,
         "provenance_digest": accepted.provenance_digest,
         "transaction_ids": [item.transaction_id for item in transactions],
         "activation_at": activation_text,
@@ -704,7 +989,7 @@ def commit_authoritative_corporate_action(
                     accepted.account_id,
                     accepted.environment,
                     accepted.external_event_id,
-                    accepted.provenance_digest,
+                    accepted.provider_fact_digest,
                 ]
             ),
         )
@@ -715,7 +1000,7 @@ def commit_authoritative_corporate_action(
         accepted.account_id,
         accepted.environment,
         accepted.external_event_id,
-        accepted.provenance_digest,
+        accepted.provider_fact_digest,
     )
     try:
         with journal_store_authority_scope(store, store_identity):

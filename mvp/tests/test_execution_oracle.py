@@ -506,6 +506,39 @@ class ExecutionOracleTests(unittest.TestCase):
         ):
             assert_conservative_execution(order=o, observation=q, model=m, result=forged)
 
+    def test_oracle_accepts_observed_stop_trigger_with_zero_fill_capacity(self):
+        o = order(
+            order_type="STOP_LIMIT",
+            limit_price="102",
+            stop_price="100",
+            lot_size="5",
+            quantity="10",
+        )
+        q = observation(
+            ask="101",
+            available_volume="0",
+        )
+        m = model()
+        result = simulate_execution(o, q, m)
+        self.assertEqual(result.filled_quantity, Decimal("0"))
+        self.assertTrue(result.triggered)
+        assert_conservative_execution(
+            order=o,
+            observation=q,
+            model=m,
+            result=result,
+        )
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "observed stop trigger cannot be omitted",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=replace(result, triggered=False),
+            )
+
     def test_oracle_accepts_observed_stop_trigger_without_same_observation_fill(self):
         o = order(
             order_type="STOP_LIMIT",

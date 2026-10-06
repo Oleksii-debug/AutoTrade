@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, ROUND_FLOOR, localcontext
 from fractions import Fraction
 from unittest.mock import patch
@@ -12,6 +13,45 @@ from mvp.autotrade_mvp.allocation import (
     allocate_evidence_bound_objective_targets,
     revalidate_evidence_bound_allocation,
 )
+
+
+class _HostileText(str):
+    calls = []
+
+    def strip(self, *args, **kwargs):
+        type(self).calls.append("strip")
+        raise AssertionError("hostile text callback executed")
+
+
+class _MutatingMapping(Mapping):
+    def __init__(self, values, callback):
+        self._values = dict(values)
+        self._callback = callback
+        self.calls = 0
+
+    def __getitem__(self, key):
+        self.calls += 1
+        self._callback()
+        return self._values[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self):
+        return len(self._values)
+
+
+class _SecondPassMutatingIterable:
+    def __init__(self, values, callback):
+        self._values = tuple(values)
+        self._callback = callback
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        if self.iterations > 1:
+            self._callback()
+        return iter(self._values)
 
 
 class EvidenceBoundAllocationTests(unittest.TestCase):
@@ -1175,6 +1215,284 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 policy_version="risk-policy:12",
             )
 
+    def test_environment_text_subclass_is_rejected_before_callback(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        hostile = _HostileText("SIMULATION")
+        _HostileText.calls.clear()
+
+        with self.assertRaisesRegex(ValueError, "allocation environment"):
+            allocate_evidence_bound_objective_targets(
+                (self.candidate(),),
+                self.policy(),
+                objective_evidence={"AAA": objective},
+                market_evidence={"AAA": market},
+                valuation_evidence={"AAA": resolved["valuation:aaa:v1"]},
+                capital_evidence=capital,
+                stress_source_evidence=(stress,),
+                resolved_evidence=resolved,
+                environment=hostile,
+                decision_time=self.DECISION_TIME,
+                policy_version="risk-policy:12",
+            )
+
+        self.assertEqual(_HostileText.calls, [])
+
+    def test_policy_subclass_is_rejected_before_financial_use(self):
+        canonical = self.policy()
+
+        class PolicySubclass(AllocationPolicy):
+            pass
+
+        hostile = PolicySubclass(
+            **{
+                field: getattr(canonical, field)
+                for field in canonical.__dataclass_fields__
+            }
+        )
+        objective, market, capital, stress, resolved = self.bundle()
+
+        with self.assertRaisesRegex(TypeError, "exact AllocationPolicy"):
+            allocate_evidence_bound_objective_targets(
+                (self.candidate(),),
+                hostile,
+                objective_evidence={"AAA": objective},
+                market_evidence={"AAA": market},
+                valuation_evidence={"AAA": resolved["valuation:aaa:v1"]},
+                capital_evidence=capital,
+                stress_source_evidence=(stress,),
+                resolved_evidence=resolved,
+                environment="SIMULATION",
+                decision_time=self.DECISION_TIME,
+                policy_version="risk-policy:12",
+            )
+
+    def test_mapping_snapshot_cannot_rebind_proposal_resolver_authority(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        valuation = resolved["valuation:aaa:v1"]
+        original_resolver = allocation_module._resolve_allocation_evidence
+        forged_calls = []
+
+        def forged_resolver(*args, **kwargs):
+            forged_calls.append("resolver")
+            return original_resolver(*args, **kwargs)
+
+        def retarget_resolver():
+            allocation_module._resolve_allocation_evidence = forged_resolver
+
+        hostile_market = _MutatingMapping(
+            {"AAA": market},
+            retarget_resolver,
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "allocation proposal trust helper changed during input snapshot: "
+                "_resolve_allocation_evidence",
+            ):
+                allocate_evidence_bound_objective_targets(
+                    (self.candidate(),),
+                    self.policy(),
+                    objective_evidence={"AAA": objective},
+                    market_evidence=hostile_market,
+                    valuation_evidence={"AAA": valuation},
+                    capital_evidence=capital,
+                    stress_source_evidence=(stress,),
+                    resolved_evidence=resolved,
+                    environment="SIMULATION",
+                    decision_time=self.DECISION_TIME,
+                    policy_version="risk-policy:12",
+                )
+        finally:
+            allocation_module._resolve_allocation_evidence = original_resolver
+
+        self.assertGreater(hostile_market.calls, 0)
+        self.assertEqual(forged_calls, [])
+
+    def test_mapping_snapshot_cannot_retarget_resolver_code_in_place(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        valuation = resolved["valuation:aaa:v1"]
+        resolver = allocation_module._resolve_allocation_evidence
+        original_code = resolver.__code__
+
+        def forged_resolver(*args, **kwargs):
+            raise AssertionError("retargeted resolver executed")
+
+        def retarget_resolver_code():
+            resolver.__code__ = forged_resolver.__code__
+
+        hostile_market = _MutatingMapping(
+            {"AAA": market},
+            retarget_resolver_code,
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "allocation proposal trust helper changed during input snapshot: "
+                "_resolve_allocation_evidence",
+            ):
+                allocate_evidence_bound_objective_targets(
+                    (self.candidate(),),
+                    self.policy(),
+                    objective_evidence={"AAA": objective},
+                    market_evidence=hostile_market,
+                    valuation_evidence={"AAA": valuation},
+                    capital_evidence=capital,
+                    stress_source_evidence=(stress,),
+                    resolved_evidence=resolved,
+                    environment="SIMULATION",
+                    decision_time=self.DECISION_TIME,
+                    policy_version="risk-policy:12",
+                )
+        finally:
+            resolver.__code__ = original_code
+
+        self.assertGreater(hostile_market.calls, 0)
+
+    def test_candidates_are_materialized_once_before_trust_checkpoint(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        valuation = resolved["valuation:aaa:v1"]
+        original_resolver = allocation_module._resolve_allocation_evidence
+
+        def forged_resolver(*args, **kwargs):
+            raise AssertionError("second-pass resolver retarget executed")
+
+        def retarget_on_second_iteration():
+            allocation_module._resolve_allocation_evidence = forged_resolver
+
+        candidates = _SecondPassMutatingIterable(
+            (self.candidate(),),
+            retarget_on_second_iteration,
+        )
+        try:
+            result = allocate_evidence_bound_objective_targets(
+                candidates,
+                self.policy(),
+                objective_evidence={"AAA": objective},
+                market_evidence={"AAA": market},
+                valuation_evidence={"AAA": valuation},
+                capital_evidence=capital,
+                stress_source_evidence=(stress,),
+                resolved_evidence=resolved,
+                environment="SIMULATION",
+                decision_time=self.DECISION_TIME,
+                policy_version="risk-policy:12",
+            )
+        finally:
+            allocation_module._resolve_allocation_evidence = original_resolver
+
+        self.assertEqual(candidates.iterations, 1)
+        self.assertEqual(result.environment, "SIMULATION")
+
+    def test_mapping_callback_cannot_mutate_verified_objective_before_use(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        forged_horizon = "2026-09-27T18:30:00Z"
+        forged_objective = self.evidence(
+            evidence_id=objective.evidence_id,
+            kind="OBJECTIVE",
+            payload={
+                **dict(objective.payload),
+                "forecast_horizon_end": forged_horizon,
+            },
+        )
+        valuation = resolved["valuation:aaa:v1"]
+        forged_valuation = self.evidence(
+            evidence_id=valuation.evidence_id,
+            kind="VALUATION",
+            payload={
+                **dict(valuation.payload),
+                "holding_cost_horizon_end": forged_horizon,
+            },
+        )
+        resolved = {
+            **resolved,
+            forged_valuation.evidence_id: forged_valuation,
+        }
+
+        def retarget_after_objective_check():
+            object.__setattr__(objective, "payload", forged_objective.payload)
+
+        hostile_market = _MutatingMapping(
+            {"AAA": market},
+            retarget_after_objective_check,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "payload provenance is not sealed",
+        ):
+            allocate_evidence_bound_objective_targets(
+                (self.candidate(),),
+                self.policy(),
+                objective_evidence={"AAA": objective},
+                market_evidence=hostile_market,
+                valuation_evidence={"AAA": forged_valuation},
+                capital_evidence=capital,
+                stress_source_evidence=(stress,),
+                resolved_evidence=resolved,
+                environment="SIMULATION",
+                decision_time=self.DECISION_TIME,
+                policy_version="risk-policy:12",
+            )
+
+        self.assertGreater(hostile_market.calls, 0)
+
+    def test_revalidation_materializes_mapping_before_result_checks(self):
+        bundle = self.bundle()
+        result = self.allocate(bundle=bundle)
+
+        def retarget_result_during_resolution():
+            object.__setattr__(result, "provider_id", "FORGED_PROVIDER")
+            decision_digest = allocation_module._allocation_decision_digest(
+                result.objective,
+                evidence_refs=result.evidence_refs,
+                environment=result.environment,
+                policy_version=result.policy_version,
+                policy_config_digest=result.policy_config_digest,
+                objective_search_config_digest=result.objective_search_config_digest,
+                decision_time=result.decision_time,
+                provider_id=result.provider_id,
+                account_id=result.account_id,
+                instrument_versions=result.instrument_versions,
+                capability_snapshot_ids=result.capability_snapshot_ids,
+                account_snapshot_id=result.account_snapshot_id,
+                reconciliation_run_id=result.reconciliation_run_id,
+                account_state_version=result.account_state_version,
+                reservation_state_version=result.reservation_state_version,
+                reservation_state_digest=result.reservation_state_digest,
+                base_currency=result.base_currency,
+            )
+            object.__setattr__(result, "decision_digest", decision_digest)
+
+        hostile_resolved = _MutatingMapping(
+            bundle[-1],
+            retarget_result_during_resolution,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "provider identity changed after allocation proposal",
+        ):
+            revalidate_evidence_bound_allocation(
+                result,
+                resolved_evidence=hostile_resolved,
+                environment="SIMULATION",
+                as_of="2026-09-25T18:40:00Z",
+                current_policy_version="risk-policy:12",
+                current_policy=self.policy(),
+                current_max_candidate_sets=64,
+                current_provider_id="SIMULATED",
+                current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                current_capability_snapshot_ids={"AAA": "capability:1"},
+                current_account_id="acct:paper:1",
+                current_account_snapshot_id="snapshot:acct:1:v5",
+                current_reconciliation_run_id="reconciliation:acct:1:v5",
+                current_account_state_version=5,
+                current_reservation_state_version=9,
+                current_reservation_state_digest="3" * 64,
+            )
+
+        self.assertGreater(hostile_resolved.calls, 0)
+
     def test_authoritative_resolver_rejects_same_id_with_new_content(self):
         objective, market, capital, stress, resolved = self.bundle()
         altered = self.evidence(
@@ -1398,6 +1716,46 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 policy_version="risk-policy:12",
             )
 
+    def test_revalidation_ignores_result_class_attribute_dispatch(self):
+        bundle = self.bundle()
+        result = self.allocate(bundle=bundle)
+        result_type = type(result)
+        result_type_dict = type.__getattribute__(result_type, "__dict__")
+        self.assertNotIn("__getattribute__", result_type_dict)
+        touched = []
+
+        def forged_getattribute(self, name):
+            touched.append(name)
+            raise AssertionError("forged allocation result attribute dispatch executed")
+
+        result_type.__getattribute__ = forged_getattribute
+        try:
+            self.assertTrue(
+                revalidate_evidence_bound_allocation(
+                    result,
+                    resolved_evidence=bundle[-1],
+                    environment="SIMULATION",
+                    as_of="2026-09-25T18:40:00Z",
+                    current_policy_version="risk-policy:12",
+                    current_policy=self.policy(),
+                    current_max_candidate_sets=64,
+                    current_provider_id="SIMULATED",
+                    current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                    current_capability_snapshot_ids={"AAA": "capability:1"},
+                    current_account_id="acct:paper:1",
+                    current_account_snapshot_id="snapshot:acct:1:v5",
+                    current_reconciliation_run_id="reconciliation:acct:1:v5",
+                    current_account_state_version=5,
+                    current_reservation_state_version=9,
+                    current_reservation_state_digest="3" * 64,
+                )
+            )
+        finally:
+            del result_type.__getattribute__
+
+        self.assertEqual(touched, [])
+
+
     def test_same_policy_version_cannot_hide_policy_configuration_change(self):
         bundle = self.bundle()
         result = self.allocate(bundle=bundle)
@@ -1546,6 +1904,44 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             )
 
 
+    def test_revalidation_reverifies_sealed_payload_provenance(self):
+        bundle = self.bundle()
+        result = self.allocate(bundle=bundle)
+        resolved = dict(bundle[-1])
+        valuation = resolved["valuation:aaa:v1"]
+        original_payload = object.__getattribute__(valuation, "payload")
+        object.__setattr__(
+            valuation,
+            "payload",
+            allocation_module.MappingProxyType({"symbol": "FORGED"}),
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "payload provenance is not sealed",
+            ):
+                revalidate_evidence_bound_allocation(
+                    result,
+                    resolved_evidence=resolved,
+                    environment="SIMULATION",
+                    as_of="2026-09-25T18:40:00Z",
+                    current_policy_version="risk-policy:12",
+                    current_policy=self.policy(),
+                    current_max_candidate_sets=64,
+                    current_provider_id="SIMULATED",
+                    current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                    current_capability_snapshot_ids={"AAA": "capability:1"},
+                    current_account_id="acct:paper:1",
+                    current_account_snapshot_id="snapshot:acct:1:v5",
+                    current_reconciliation_run_id="reconciliation:acct:1:v5",
+                    current_account_state_version=5,
+                    current_reservation_state_version=9,
+                    current_reservation_state_digest="3" * 64,
+                )
+        finally:
+            object.__setattr__(valuation, "payload", original_payload)
+
+
     def test_valuation_evidence_identity_is_part_of_decision_digest(self):
         bundle = self.bundle()
         first = self.allocate(bundle=bundle)
@@ -1588,7 +1984,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
         expiring = self.evidence(
             evidence_id=original.evidence_id,
             kind="VALUATION",
-            payload=original.canonical_payload_snapshot(),
+            payload=original.payload,
             valid_until="2026-09-25T18:35:00Z",
         )
         expiring_resolved = dict(resolved)

@@ -173,6 +173,51 @@ class AuthenticatedBybitSubmissionProjectionTests(unittest.TestCase):
             self.assertEqual(events[-1]["payload"]["request"]["status"], "UNKNOWN")
             self.assertEqual(events[-1]["evidence_refs"], [])
 
+            # Retrying the already-sent attempt cannot convert the same exact
+            # response into lifecycle authority and must not add another
+            # UNKNOWN/evidence mutation.
+            with self.assertRaisesRegex(
+                projection_module.BybitSubmissionProjectionError,
+                "requires sealed PROVIDER_ORIGIN authority",
+            ):
+                project_authenticated_bybit_submission(
+                    book,
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                )
+            self.assertEqual(
+                len(store.load_events("order_projection_book", book.aggregate_id)),
+                3,
+            )
+
+            # Restart must reconstruct the same reconcile-first state without
+            # network I/O and preserve the provider-origin interlock.
+            restarted = DurableOrderBookProjection(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                host_id="host-1",
+                owner_epoch="1",
+                evidence_artifact_store=_artifacts,
+            )
+            restarted_snapshot = restarted.order(client_order_id).snapshot()
+            self.assertEqual(restarted_snapshot.state, "UNKNOWN")
+            self.assertIsNone(restarted_snapshot.provider_order_id)
+            with self.assertRaisesRegex(
+                projection_module.BybitSubmissionProjectionError,
+                "requires sealed PROVIDER_ORIGIN authority",
+            ):
+                project_authenticated_bybit_submission(
+                    restarted,
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                )
+            self.assertEqual(
+                len(store.load_events("order_projection_book", restarted.aggregate_id)),
+                3,
+            )
+
     def test_paper_rejection_requires_sealed_provider_origin_and_stays_unknown(self):
         with TemporaryDirectory() as directory:
             store, _artifacts, book, prepared, attempt, client_order_id = self._sent(

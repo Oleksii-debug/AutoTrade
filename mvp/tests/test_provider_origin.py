@@ -4,6 +4,7 @@ from hashlib import sha256
 from tempfile import TemporaryDirectory
 import unittest
 
+import mvp.autotrade_mvp.provider_origin as provider_origin_module
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import Surface, prepare_authenticated_read_query
 from mvp.autotrade_mvp.provider_origin import (
@@ -134,6 +135,56 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 [event["event_type"] for event in events],
                 ["AuthenticatedReadPrepared"],
             )
+
+    def test_rebound_in_process_predicate_cannot_promote_provider_origin(self):
+        query = authenticated_read_binding()
+        body = b'{"ok":true}'
+        with TemporaryDirectory() as directory:
+            journal = ProviderOriginJournal(
+                JournalStore(f"{directory}/journal.sqlite3")
+            )
+            attempt_id = journal.prepare(
+                query,
+                transport_identity="UrllibJsonWireClient:v1",
+                network_policy_identity="sha256:" + "c" * 64,
+                recorded_at=READ_NOW,
+            )
+            binding = journal._record_test_injected_response(
+                attempt_id,
+                query,
+                http_status=200,
+                response_bytes=body,
+                observed_at=READ_NOW + timedelta(seconds=1),
+            )
+            neutral = observe_test_injected_json_response(
+                response_binding=binding,
+                query_binding=query,
+                accepted_success_statuses=frozenset({200}),
+            )
+
+            original = AuthenticatedReadResponseBinding.require_provider_origin
+            AuthenticatedReadResponseBinding.require_provider_origin = lambda _self: None
+            try:
+                with self.assertRaisesRegex(
+                    ProviderOriginError,
+                    "independently authenticated provider-wire issuer",
+                ):
+                    observe_provider_origin_json_response(
+                        response_binding=binding,
+                        query_binding=query,
+                        accepted_success_statuses=frozenset({200}),
+                    )
+                with self.assertRaisesRegex(
+                    ProviderOriginError,
+                    "independently authenticated provider-wire issuer",
+                ):
+                    provider_origin_module.ProviderOriginObservation(
+                        response_binding=binding,
+                        observation=neutral,
+                        _observation_token=provider_origin_module._OBSERVATION_TOKEN,
+                    )
+            finally:
+                AuthenticatedReadResponseBinding.require_provider_origin = original
 
     def test_prepared_only_attempt_cannot_become_response_binding(self):
         query = authenticated_read_binding()

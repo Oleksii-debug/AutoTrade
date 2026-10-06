@@ -434,24 +434,12 @@ class ProviderOriginObservation:
     _observation_token: InitVar[object | None] = None
 
     def __post_init__(self, _observation_token: object | None) -> None:
-        if _observation_token is not _OBSERVATION_TOKEN:
-            raise ProviderOriginError(
-                "provider-origin observation must come from durable response binding"
-            )
-        if type(self.response_binding) is not AuthenticatedReadResponseBinding:
-            raise ProviderOriginError("response_binding must be exact durable binding")
-        self.response_binding.require_provider_origin()
-        if type(self.observation) is not ProviderResponseObservation:
-            raise ProviderOriginError("observation must be exact ProviderResponseObservation")
-        if self.observation.response_sha256 != self.response_binding.response_sha256:
-            raise ProviderOriginError("observation response digest mismatch")
-        if self.observation.query_binding.query_digest != self.response_binding.query_digest:
-            raise ProviderOriginError("observation query digest mismatch")
-        if (
-            self.observation.query_binding.provider_environment
-            != self.response_binding.provider_environment
-        ):
-            raise ProviderOriginError("observation provider environment mismatch")
+        # This bounded root has no independently authenticated external issuer.
+        # Do not let a private Python token, a rebound method, or a durable local
+        # row become financial PROVIDER_ORIGIN authority.
+        raise ProviderOriginError(
+            "independently authenticated provider-wire issuer is not integrated"
+        )
 
     @property
     def payload(self) -> object:
@@ -801,59 +789,15 @@ def observe_provider_origin_json_response(
     query_binding: AuthenticatedReadQueryBinding,
     accepted_success_statuses: frozenset[int],
 ) -> ProviderOriginObservation:
-    if type(response_binding) is not AuthenticatedReadResponseBinding:
-        raise ProviderOriginError(
-            "response_binding must be exact AuthenticatedReadResponseBinding"
-        )
-    response_binding.require_provider_origin()
-    expected = _query_snapshot(query_binding)
-    if (
-        response_binding.query_digest != expected["query_digest"]
-        or response_binding.provider_id != expected["provider_id"]
-        or response_binding.account_id != expected["account_id"]
-        or response_binding.environment != expected["environment"]
-        or response_binding.provider_environment != expected["provider_environment"]
-        or response_binding.capability_snapshot_id
-        != expected["capability_snapshot_id"]
-        or response_binding.endpoint != expected["endpoint"]
-    ):
-        raise ProviderOriginError(
-            "durable provider response binding does not match exact query"
-        )
-    if (
-        type(accepted_success_statuses) is not frozenset
-        or not accepted_success_statuses
-        or any(
-            type(status) is not int or not 200 <= status <= 299
-            for status in accepted_success_statuses
-        )
-    ):
-        raise ProviderOriginError(
-            "accepted_success_statuses must be an exact non-empty frozenset of 2xx integers"
-        )
-    if response_binding.http_status not in accepted_success_statuses:
-        raise ProviderOriginError(
-            "provider-origin HTTP status is outside the accepted endpoint policy"
-        )
-    observed_at = _parse_utc_text(
-        response_binding.observed_at, name="observed_at"
-    )
-    observation = observe_authenticated_json_response(
-        query_binding=query_binding,
-        http_status=response_binding.http_status,
-        response_bytes=response_binding.response_bytes,
-        observed_at=observed_at,
-    )
-    if type(observation) is not ProviderResponseObservation:
-        raise ProviderOriginError(
-            "provider core returned non-canonical response observation"
-        )
-    return ProviderOriginObservation(
-        response_binding=response_binding,
-        observation=observation,
-        _observation_token=_OBSERVATION_TOKEN,
-    )
+    """Fail closed until an independently authenticated external issuer exists."""
 
+    # The local binding can prove deterministic bytes/scope/restart integrity,
+    # but no ordinary in-process Python predicate can establish provider origin.
+    # In particular, do not delegate this terminal decision to a mutable class
+    # method such as AuthenticatedReadResponseBinding.require_provider_origin.
+    raise ProviderOriginError(
+        "independently authenticated provider-wire issuer is not integrated"
+    )
 
 def observe_test_injected_json_response(
     *,

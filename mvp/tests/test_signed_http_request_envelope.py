@@ -63,6 +63,44 @@ class SignedHttpRequestEnvelopeTests(unittest.TestCase):
                 timeout_seconds=5,
             )
 
+    def test_write_url_rejects_parser_normalized_or_non_ascii_octets(self):
+        hostile_urls = (
+            "https://exa\nmple.com/v1/order",
+            "https://exa\rmple.com/v1/order",
+            "https://exa\tmple.com/v1/order",
+            "https://api.example.test/v1/or\x00der",
+            "https://api.example.test/v1/or\x1fder",
+            "https://api.example.test/v1/or\x7fder",
+            "https://api.example.test/v1/or\u0085der",
+            "https://api.example.test/v1\\order",
+            "https://api.example.test/v1 /order",
+        )
+        for url in hostile_urls:
+            with self.subTest(url=repr(url)):
+                with self.assertRaisesRegex(
+                    ProviderTransportScopeError,
+                    "signed request URL is invalid",
+                ):
+                    SignedHttpRequest(
+                        method="POST",
+                        url=url,
+                        headers={"Content-Type": "application/json"},
+                        body=b"{}",
+                        timeout_seconds=5,
+                    )
+
+        percent_encoded = SignedHttpRequest(
+            method="POST",
+            url="https://api.example.test/v1/order?symbol=%E2%82%AC",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            body=b"",
+            timeout_seconds=5,
+        )
+        self.assertEqual(
+            percent_encoded.url,
+            "https://api.example.test/v1/order?symbol=%E2%82%AC",
+        )
+
     def test_write_headers_and_timeout_fail_before_virtual_callbacks(self):
         class HostileHeaders(dict):
             def items(self):

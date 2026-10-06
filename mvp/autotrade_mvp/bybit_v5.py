@@ -24,6 +24,7 @@ from .capabilities import CapabilityError, CapabilitySnapshot
 from .bybit_fee_currency_authority import (
     BybitExecutionFeeCurrencyAuthority,
     BybitFeeCurrencyAuthorityError,
+    consume_bybit_execution_fee_currency_authority,
     project_bybit_execution_fee_currency_authority,
 )
 from .instruments import (
@@ -1534,6 +1535,7 @@ def parse_executions(
             "fee_currency_authorities must be an exact tuple of qualified authorities"
         )
     fee_authority_by_instrument = {}
+    authority_value_by_instrument = {}
     for authority_value in fee_currency_authorities:
         try:
             authority_projection = (
@@ -1550,6 +1552,9 @@ def parse_executions(
         fee_authority_by_instrument[
             authority_projection.instrument_version
         ] = authority_projection
+        authority_value_by_instrument[
+            authority_projection.instrument_version
+        ] = authority_value
 
     by_execution: dict[str, ProviderFillEvidence] = {}
     for index, value in enumerate(rows):
@@ -1700,7 +1705,8 @@ def parse_executions(
         authority_evidence_ref = None
         if fee_authority is not None:
             try:
-                fee_authority.require_execution_scope(
+                fee_authority = consume_bybit_execution_fee_currency_authority(
+                    authority_value_by_instrument[instrument],
                     provider_id="BYBIT",
                     runtime_environment=environment,
                     account_id=account_id,

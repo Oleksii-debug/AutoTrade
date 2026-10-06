@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.bybit_fee_currency_authority import (
     BybitExecutionFeeCurrencyAuthority,
@@ -556,6 +557,28 @@ class BybitFeeCurrencyAuthorityTests(unittest.TestCase):
                 at=NOW,
             )
         self.assertEqual(callbacks, [])
+
+    def test_execution_scope_consumption_does_not_dispatch_projection_method(self):
+        _instrument, _registry, capability, _qualification, authority = issued_fixture()
+        observation = execution_response(account_capability=capability)
+        callbacks = []
+
+        def forged_scope(*_args, **_kwargs):
+            callbacks.append("require_execution_scope")
+            raise AssertionError("projection method executed")
+
+        with patch.object(
+            BybitExecutionFeeCurrencyProjection,
+            "require_execution_scope",
+            forged_scope,
+        ):
+            fill = parse_executions(
+                observation,
+                instrument_versions={"ETHPERP": INSTRUMENT_REF},
+                fee_currency_authorities=(authority,),
+            )[0]
+        self.assertEqual(callbacks, [])
+        self.assertEqual(fill.fee_currency, "USDT")
 
     def test_returned_projection_is_a_detached_copy(self):
         _instrument, _registry, capability, _qualification, authority = issued_fixture()

@@ -251,6 +251,23 @@ def _identity(kind: str, *parts: str) -> str:
     )
 
 
+def _provider_domain_identity(
+    kind: str,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    provider_environment: str | None,
+    *parts: str,
+) -> str:
+    # Preserve the exact legacy provider-free identity when no qualified
+    # provider domain exists. A concrete domain becomes an additional identity
+    # dimension only when authority binds it.
+    prefix = (provider_id, account_id, environment)
+    if provider_environment is not None:
+        prefix += (provider_environment,)
+    return _identity(kind, *prefix, *parts)
+
+
 @dataclass(frozen=True)
 class OptionLifecycleObservation:
     """One immutable normalized provider/reference lifecycle fact."""
@@ -353,12 +370,11 @@ def canonical_option_lifecycle_observation(
 ) -> dict[str, Any]:
     if not isinstance(observation, OptionLifecycleObservation):
         raise TypeError("observation must be OptionLifecycleObservation")
-    return {
+    payload = {
         "schema_version": "1.0.0",
         "provider_id": observation.provider_id,
         "account_id": observation.account_id,
         "environment": observation.environment,
-        "provider_environment": observation.provider_environment,
         "venue_id": observation.venue_id,
         "instrument_version": observation.instrument_version,
         "external_event_id": observation.external_event_id,
@@ -374,6 +390,9 @@ def canonical_option_lifecycle_observation(
         ),
         "corrects_external_event_id": observation.corrects_external_event_id,
     }
+    if observation.provider_environment is not None:
+        payload["provider_environment"] = observation.provider_environment
+    return payload
 
 
 def _standard_physical_exercise_cash(version: InstrumentVersion) -> Decimal:
@@ -500,12 +519,12 @@ def _economic_transaction(
     corrects_transaction_id: str | None = None,
 ) -> JournalTransaction:
     contract = _contract_from_version(version)
-    transaction_id = _identity(
+    transaction_id = _provider_domain_identity(
         "option-lifecycle-economic",
         observation.provider_id,
         observation.account_id,
         observation.environment,
-        observation.provider_environment or "UNSPECIFIED",
+        observation.provider_environment,
         observation.external_event_id,
     )
 
@@ -755,12 +774,12 @@ class DurableOptionLifecycleAuthority:
             economic_book.book_id,
         )
         self._require_canonical_authorities()
-        self.aggregate_id = _identity(
+        self.aggregate_id = _provider_domain_identity(
             "option-lifecycle-book",
             economic_book.provider_id,
             economic_book.account_id,
             economic_book.environment,
-            self.provider_environment or "UNSPECIFIED",
+            self.provider_environment,
         )
 
     def _require_canonical_authorities(self) -> None:
@@ -1137,12 +1156,12 @@ class DurableOptionLifecycleAuthority:
             old_active_transactions=old_active_transactions,
         )
 
-        lifecycle_event_id = _identity(
+        lifecycle_event_id = _provider_domain_identity(
             "option-lifecycle-event",
             observation.provider_id,
             observation.account_id,
             observation.environment,
-            observation.provider_environment or "UNSPECIFIED",
+            observation.provider_environment,
             observation.external_event_id,
         )
 
@@ -1153,12 +1172,12 @@ class DurableOptionLifecycleAuthority:
             reversal_transactions.append(
                 reverse_transaction(
                     original,
-                    transaction_id=_identity(
+                    transaction_id=_provider_domain_identity(
                         "option-lifecycle-reversal",
                         observation.provider_id,
                         observation.account_id,
                         observation.environment,
-                        observation.provider_environment or "UNSPECIFIED",
+                        observation.provider_environment,
                         observation.external_event_id,
                         original.transaction_id,
                     ),
@@ -1223,7 +1242,6 @@ class DurableOptionLifecycleAuthority:
             "provider_id": observation.provider_id,
             "account_id": observation.account_id,
             "environment": observation.environment,
-            "provider_environment": observation.provider_environment,
             "venue_id": observation.venue_id,
             "instrument_version": observation.instrument_version,
             "instrument_digest": instrument_digest,
@@ -1243,6 +1261,8 @@ class DurableOptionLifecycleAuthority:
             "reversal_transaction_ids": list(reversal_transaction_ids),
             "economic_batch_digest": plan.batch_digest if plan is not None else None,
         }
+        if observation.provider_environment is not None:
+            lifecycle_payload["provider_environment"] = observation.provider_environment
         lifecycle_envelope = {
             "event_id": lifecycle_event_id,
             "event_type": "OptionLifecycleApplied",
@@ -1276,12 +1296,12 @@ class DurableOptionLifecycleAuthority:
                 raise OptionLifecycleConflict("fresh economic plan has no durable event")
             commit_events.append((plan.envelope, "autotrade.economic.events"))
 
-        command_id = _identity(
+        command_id = _provider_domain_identity(
             "option-lifecycle-command",
             observation.provider_id,
             observation.account_id,
             observation.environment,
-            observation.provider_environment or "UNSPECIFIED",
+            observation.provider_environment,
             observation.external_event_id,
         )
         self._require_canonical_authorities()
@@ -1291,9 +1311,13 @@ class DurableOptionLifecycleAuthority:
             actor=self._ACTOR,
             environment=observation.environment,
             idempotency_key=(
-                f"option-lifecycle:{self.aggregate_id}:"
-                f"{observation.provider_environment or 'UNSPECIFIED'}:"
-                f"{observation.external_event_id}"
+                f"option-lifecycle:{self.aggregate_id}:{observation.external_event_id}"
+                if observation.provider_environment is None
+                else (
+                    f"option-lifecycle:{self.aggregate_id}:"
+                    f"{observation.provider_environment}:"
+                    f"{observation.external_event_id}"
+                )
             ),
             request=request,
             result=result,

@@ -2611,6 +2611,57 @@ class GuardedDispatcher:
             raise RuntimeError(
                 "exact JSON decoder method authority is unavailable"
             )
+        decoder_init = decoder_json_decoder_methods[0][1]
+        decoder_runtime_globals = snapshot_getattr(
+            decoder_init,
+            "__globals__",
+            None,
+        )
+        if snapshot_type(decoder_runtime_globals) is not snapshot_dict:
+            raise RuntimeError(
+                "exact JSON decoder runtime globals are unavailable"
+            )
+        decoder_runtime_globals_get = decoder_runtime_globals.get
+        decoder_runtime_globals_set = decoder_runtime_globals.__setitem__
+        decoder_runtime_bindings = snapshot_tuple(
+            (
+                name,
+                decoder_runtime_globals_get(name),
+            )
+            for name in (
+                "JSONObject",
+                "JSONArray",
+                "scanstring",
+                "scanner",
+                "JSONDecodeError",
+            )
+        )
+        if any(value is None for _name, value in decoder_runtime_bindings):
+            raise RuntimeError(
+                "exact JSON decoder runtime authority is unavailable"
+            )
+        decoder_runtime_code_bindings = snapshot_tuple(
+            (
+                value,
+                snapshot_getattr(value, "__code__", None),
+            )
+            for name, value in decoder_runtime_bindings
+            if name in {"JSONObject", "JSONArray", "scanstring"}
+        )
+        decoder_scanner_module = decoder_runtime_globals_get("scanner")
+        decoder_scanner_namespace = vars(decoder_scanner_module)
+        decoder_scanner_namespace_get = decoder_scanner_namespace.get
+        decoder_scanner_namespace_set = decoder_scanner_namespace.__setitem__
+        decoder_make_scanner = decoder_scanner_namespace_get("make_scanner")
+        if decoder_make_scanner is None:
+            raise RuntimeError(
+                "exact JSON scanner authority is unavailable"
+            )
+        decoder_make_scanner_code = snapshot_getattr(
+            decoder_make_scanner,
+            "__code__",
+            None,
+        )
         decoder_json_decode_error = decoder_json_namespace_get(
             "JSONDecodeError"
         )
@@ -2671,6 +2722,16 @@ class GuardedDispatcher:
                     snapshot_dependency_codes,
                 )
                 if code is not None
+            ),
+            *snapshot_tuple(
+                (dependency, code)
+                for dependency, code in decoder_runtime_code_bindings
+                if code is not None
+            ),
+            *(
+                ((decoder_make_scanner, decoder_make_scanner_code),)
+                if decoder_make_scanner_code is not None
+                else ()
             ),
             (decoder_depth_guard, decoder_depth_guard_code),
             (decoder_number_parser, decoder_number_parser_code),
@@ -2779,6 +2840,19 @@ class GuardedDispatcher:
                 changed = True
             if decoder_json_namespace_get("JSONDecoder") is not decoder_json_decoder:
                 decoder_json_namespace_set("JSONDecoder", decoder_json_decoder)
+                changed = True
+            for name, expected in decoder_runtime_bindings:
+                if decoder_runtime_globals_get(name) is not expected:
+                    decoder_runtime_globals_set(name, expected)
+                    changed = True
+            if (
+                decoder_scanner_namespace_get("make_scanner")
+                is not decoder_make_scanner
+            ):
+                decoder_scanner_namespace_set(
+                    "make_scanner",
+                    decoder_make_scanner,
+                )
                 changed = True
             for method_name, expected_method in decoder_json_decoder_methods:
                 if (

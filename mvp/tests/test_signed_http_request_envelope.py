@@ -287,6 +287,62 @@ class SignedHttpRequestEnvelopeTests(unittest.TestCase):
         self.assertEqual(timeout, 5)
 
 
+    def test_wire_preserves_canonical_signed_header_values(self):
+        class Response:
+            status = 200
+
+            def __init__(self):
+                self.body = BytesIO(b'{"accepted":true}')
+
+            def read(self, size=-1):
+                return self.body.read(size)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class Opener:
+            def __init__(self):
+                self.requests = []
+
+            def open(self, request, *, timeout):
+                self.requests.append((request, timeout))
+                return Response()
+
+        request = SignedHttpRequest(
+            method="POST",
+            url="https://api.example.test/v1/order",
+            headers={
+                "Authorization": "Bearer abc+/_-.=~",
+                "X-BAPI-SIGN": "ABCDEF0123456789",
+            },
+            body=b"{}",
+            timeout_seconds=5,
+        )
+        client = UrllibJsonWireClient(max_response_bytes=1024)
+        opener = Opener()
+        client._opener = opener
+
+        response = client.send(request)
+
+        self.assertIs(type(response), TradingWireResponse)
+        outbound, timeout = opener.requests[0]
+        actual_headers = {
+            name.lower(): value
+            for name, value in outbound.header_items()
+        }
+        self.assertEqual(
+            actual_headers["authorization"],
+            "Bearer abc+/_-.=~",
+        )
+        self.assertEqual(
+            actual_headers["x-bapi-sign"],
+            "ABCDEF0123456789",
+        )
+        self.assertEqual(timeout, 5)
+
     def test_wire_rejects_post_construction_signed_request_mutation_zero_wire(self):
         class Opener:
             def __init__(self):

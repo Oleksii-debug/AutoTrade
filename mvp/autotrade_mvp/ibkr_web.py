@@ -135,6 +135,18 @@ def _canonical_web_trade_time(
     return parsed.isoformat().replace("+00:00", "Z")
 
 
+def _execution_correction_identity(
+    execution_id: str,
+) -> tuple[str, tuple[int, str]] | None:
+    """Return IBKR execution correction family/revision without integer coercion."""
+
+    family, separator, revision = execution_id.rpartition(".")
+    if not separator or not family or re.fullmatch(r"[0-9]+", revision) is None:
+        return None
+    normalized_revision = revision.lstrip("0") or "0"
+    return family, (len(normalized_revision), normalized_revision)
+
+
 def validate_coid(value: str) -> str:
     coid = _text(value, name="cOID")
     if _COID.fullmatch(coid) is None:
@@ -1216,6 +1228,10 @@ def parse_web_api_trades(
     account = observation.account_id
     environment = observation.environment
     by_execution: dict[str, ProviderFillEvidence] = {}
+    selected_by_execution_family: dict[
+        tuple[str, str],
+        tuple[tuple[int, str] | None, str, ProviderFillEvidence],
+    ] = {}
 
     for index, raw in enumerate(payload):
         if type(raw) is not MappingProxyType:
@@ -1307,13 +1323,47 @@ def parse_web_api_trades(
             evidence_refs=(observation.evidence_ref,),
         )
         prior = by_execution.get(execution_id)
-        if prior is not None and prior != fill:
-            raise IbkrWebAdapterError(
-                "IBKR execution id appears with conflicting economic content"
-            )
+        if prior is not None:
+            if prior != fill:
+                raise IbkrWebAdapterError(
+                    "IBKR execution id appears with conflicting economic content"
+                )
+            continue
         by_execution[execution_id] = fill
 
-    return tuple(by_execution.values())
+        correction = _execution_correction_identity(execution_id)
+        if correction is None:
+            family_key = ("exact", execution_id)
+            selected_by_execution_family[family_key] = (None, execution_id, fill)
+            continue
+
+        family, revision_key = correction
+        family_key = ("correction", family)
+        selected = selected_by_execution_family.get(family_key)
+        if selected is None:
+            selected_by_execution_family[family_key] = (
+                revision_key,
+                execution_id,
+                fill,
+            )
+            continue
+        selected_revision, selected_execution_id, _selected_fill = selected
+        if selected_revision == revision_key and selected_execution_id != execution_id:
+            raise IbkrWebAdapterError(
+                "IBKR execution correction revision is ambiguous"
+            )
+        if selected_revision is None or revision_key > selected_revision:
+            selected_by_execution_family[family_key] = (
+                revision_key,
+                execution_id,
+                fill,
+            )
+
+    return tuple(
+        selected_fill
+        for _revision, _execution_id, selected_fill
+        in selected_by_execution_family.values()
+    )
 
 
 def execution_to_reconciliation_fill(

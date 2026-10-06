@@ -1032,7 +1032,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 "size": Decimal("0.5"),
                 "price": "220.10",
                 "commission": "-0.35",
-                    "trade_time": "20260924-20:00:01",
+                "trade_time": "20260924-20:00:01",
                 "trade_time_r": 1790280001000,
             }
         ]
@@ -1262,6 +1262,61 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 ibkr_trade_observation([base, dict(base, size="2")]),
                 instrument_versions_by_conid={265598: "AAPL:v1"},
                 fee_currency_by_execution_id={"exec-1": "USD"},
+            )
+
+    def test_web_api_trade_correction_supersedes_prior_revision(self):
+        base = {
+            "execution_id": "0000e0d5.6576fd38.01.01",
+            "order_ref": "at-ibkr-correction",
+            "account": "U1234567",
+            "accountCode": "U1234567",
+            "side": "B",
+            "conid": 265598,
+            "size": "1",
+            "price": "100",
+            "commission": "0.25",
+            "trade_time": "20260924-20:00:01",
+            "trade_time_r": 1790280001000,
+        }
+        corrected = dict(
+            base,
+            execution_id="0000e0d5.6576fd38.01.02",
+            size="2",
+            price="99",
+            commission="0.30",
+        )
+        fees = {
+            "0000e0d5.6576fd38.01.01": "USD",
+            "0000e0d5.6576fd38.01.02": "USD",
+        }
+        for rows in ([base, corrected], [corrected, base]):
+            with self.subTest(order=[row["execution_id"] for row in rows]):
+                fills = parse_web_api_trades(
+                    ibkr_trade_observation(rows),
+                    instrument_versions_by_conid={265598: "AAPL:v1"},
+                    fee_currency_by_execution_id=fees,
+                )
+                self.assertEqual(len(fills), 1)
+                self.assertEqual(
+                    fills[0].provider_execution_id,
+                    "0000e0d5.6576fd38.01.02",
+                )
+                self.assertEqual(fills[0].quantity, Decimal("2"))
+                self.assertEqual(fills[0].price, Decimal("99"))
+                self.assertEqual(fills[0].fee_amount, Decimal("0.30"))
+
+        ambiguous = dict(
+            corrected,
+            execution_id="0000e0d5.6576fd38.01.2",
+        )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "revision is ambiguous"):
+            parse_web_api_trades(
+                ibkr_trade_observation([corrected, ambiguous]),
+                instrument_versions_by_conid={265598: "AAPL:v1"},
+                fee_currency_by_execution_id={
+                    **fees,
+                    "0000e0d5.6576fd38.01.2": "USD",
+                },
             )
 
     def test_web_api_trade_side_is_provider_evidenced_and_fail_closed(self):

@@ -403,6 +403,53 @@ class VerticalSliceTests(unittest.TestCase):
             )
 
 
+    def test_resume_rejects_financial_corruption_before_repairing_latest_evidence(self):
+        with TemporaryDirectory() as directory:
+            run_multi_episode(
+                [[100, 101, 102, 103], [100, 100, 100]],
+                directory,
+            )
+            root = Path(directory)
+            checkpoint_path = root / "checkpoint.json"
+            evidence_path = root / "learning-evidence.jsonl"
+            rows = evidence_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(rows), 2)
+            evidence_path.write_text(rows[0] + "\n", encoding="utf-8")
+
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            self.assertTrue(checkpoint["postings"])
+            checkpoint["postings"][0]["cash_delta"] = "0"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            checkpoint_before = checkpoint_path.read_bytes()
+            evidence_before = evidence_path.read_bytes()
+            journal_before = (root / "journal.sqlite3").read_bytes()
+            intents_before = {
+                path.name: path.read_bytes()
+                for path in (root / "order-intents").glob("*.json")
+            }
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Fill and economic ledger do not reconcile",
+            ):
+                run_vertical_slice(
+                    [103, 102, 101, 100],
+                    directory,
+                )
+
+            self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertEqual(evidence_path.read_bytes(), evidence_before)
+            self.assertEqual((root / "journal.sqlite3").read_bytes(), journal_before)
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in (root / "order-intents").glob("*.json")
+                },
+                intents_before,
+            )
+
+
     def test_checkpoint_ledger_mismatch_is_rejected(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

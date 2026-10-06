@@ -1174,6 +1174,21 @@ def run_vertical_slice(
     state, resumed = handle_restart_recovery(state_dir, starting_cash)
     if resumed:
         _require_checkpoint_configuration(state, financial_configuration)
+        # Tail repair is itself a durable mutation. Authenticate the checkpoint's
+        # financial state and its intent-backed simulated fills before repairing
+        # any missing evidence/journal tail, so corrupt economics cannot cause a
+        # partial replay write before the resume is rejected.
+        preflight_ledger = EconomicLedger(
+            _checkpoint_decimal(state["initial_cash"], name="initial_cash"),
+            list(state.get("postings", [])),
+        )
+        preflight_fills = _restore_simulated_fills(
+            state,
+            root,
+            symbol=symbol,
+            fee_rate=rate,
+        )
+        _reconcile(SimulatedProvider(preflight_fills), preflight_ledger)
         _repair_interrupted_replay(
             root,
             state,

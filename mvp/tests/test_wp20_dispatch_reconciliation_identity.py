@@ -55,7 +55,12 @@ class DispatchReconciliationAttemptIdentityTests(unittest.TestCase):
         return store, aggregate_id
 
     @staticmethod
-    def _append_legacy_unknown(store: JournalStore, aggregate_id: str) -> None:
+    def _append_legacy_unknown(
+        store: JournalStore,
+        aggregate_id: str,
+        *,
+        unknown_client_order_id: str = "legacy-client",
+    ) -> None:
         prepared = {
             "intent_id": "legacy-intent",
             "provider": "TEST_PROVIDER",
@@ -65,7 +70,7 @@ class DispatchReconciliationAttemptIdentityTests(unittest.TestCase):
             "prepared_at": "2026-10-06T14:00:00Z",
         }
         unknown = {
-            "client_order_id": "legacy-client",
+            "client_order_id": unknown_client_order_id,
             "reason": "transport_result_ambiguous",
         }
         for version, event_type, payload in (
@@ -329,6 +334,26 @@ class DispatchReconciliationAttemptIdentityTests(unittest.TestCase):
                 with self.subTest(expected=expected):
                     with self.assertRaisesRegex(ValueError, expected):
                         unknown_submissions_from_dispatch(store, **kwargs)
+
+
+    def test_recovery_rejects_cross_event_client_identity_mismatch(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            aggregate_id = "legacy-attempt-client-mismatch"
+            self._append_legacy_unknown(
+                store,
+                aggregate_id,
+                unknown_client_order_id="forged-client",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "client_order_id does not match SubmissionPrepared",
+            ):
+                unknown_submissions_from_dispatch(
+                    store,
+                    attempt_ids=(aggregate_id,),
+                )
 
 
 if __name__ == "__main__":

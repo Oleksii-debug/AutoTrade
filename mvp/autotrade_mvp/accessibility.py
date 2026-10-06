@@ -86,6 +86,16 @@ def accessible_status_state(status: Any) -> str:
     state = _dict_get_exact(status, "status", "corrupt")
     if type(state) is not str or state not in STATE_TEXT:
         return "corrupt"
+
+    # The current canonical producer always declares canonical_journal while
+    # the retained legacy status has no state_format key.  An explicitly
+    # present unknown/malformed format is therefore damaged canonical state,
+    # not permission to downgrade plausible financial fields to the legacy
+    # rendering path.
+    if _dict_has_exact_key(status, "state_format"):
+        state_format = _dict_get_exact(status, "state_format")
+        if type(state_format) is not str or state_format != "canonical_journal":
+            return "corrupt"
     return state
 
 

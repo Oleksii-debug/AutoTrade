@@ -18,7 +18,11 @@ on:
       - "src/**/packages.lock.json"
       - "src/**/*.xaml"
       - "tests/Desktop.Client/**"
+      - "tests/Provenance/test_dotnet_package_rights.py"
       - "contracts/**"
+      - "provenance/dotnet-package-rights.json"
+      - "provenance/licenses/**"
+      - "tools/dotnet_package_rights.py"
       - ".github/workflows/dotnet-foundation.yml"
   pull_request:
     paths:
@@ -35,7 +39,11 @@ on:
       - "src/**/packages.lock.json"
       - "src/**/*.xaml"
       - "tests/Desktop.Client/**"
+      - "tests/Provenance/test_dotnet_package_rights.py"
       - "contracts/**"
+      - "provenance/dotnet-package-rights.json"
+      - "provenance/licenses/**"
+      - "tools/dotnet_package_rights.py"
       - ".github/workflows/dotnet-foundation.yml"
 
 concurrency:
@@ -67,6 +75,7 @@ jobs:
         with:
           dotnet-version: "10.0.100"
       - run: dotnet --info
+      - run: python tools/dotnet_package_rights.py --check-policy
       # Bootstrap has no NuGet package references yet. WP-03 must add committed
       # package locks and locked-mode before introducing release dependencies.
       - run: dotnet restore src/AutoTrade.Contracts/AutoTrade.Contracts.csproj
@@ -96,6 +105,7 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: "10.0.100"
+      - run: python tools/dotnet_package_rights.py --check-policy
       - run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj
       - run: dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --configuration Release --no-restore
       - run: dotnet restore tests/Desktop.Client/Desktop.Client.csproj

@@ -830,6 +830,11 @@ _registry_calendars_commit = None
 def _install_instrument_registry_version_authority():
     """Keep canonical version history outside caller-writable instance state."""
 
+    registry_type = InstrumentRegistry
+    registry_error = InstrumentRegistryError
+    detach_version = _detached_instrument_version
+    weakref_ref = weakref.ref
+
     authorities: dict[
         int,
         tuple[weakref.ReferenceType, dict[str, list[InstrumentVersion]]],
@@ -845,34 +850,34 @@ def _install_instrument_registry_version_authority():
             authorities.pop(object_id, None)
 
     def bound_state(value: object) -> dict[str, list[InstrumentVersion]]:
-        if type(value) is not InstrumentRegistry:
+        if type(value) is not registry_type:
             raise TypeError("registry must be exact InstrumentRegistry")
         prune_dead()
         entry = authorities.get(id(value))
         if entry is None:
-            raise InstrumentRegistryError("registry version authority is not established")
+            raise registry_error("registry version authority is not established")
         value_ref, state = entry
         current = value_ref()
         if current is value:
             return state
         if current is None:
             authorities.pop(id(value), None)
-            raise InstrumentRegistryError("registry version authority is not established")
-        raise InstrumentRegistryError("registry version authority identity collision")
+            raise registry_error("registry version authority is not established")
+        raise registry_error("registry version authority identity collision")
 
     def initialize(value: object) -> None:
-        if type(value) is not InstrumentRegistry:
+        if type(value) is not registry_type:
             raise TypeError("registry must be exact InstrumentRegistry")
         prune_dead()
         if id(value) in authorities:
-            raise InstrumentRegistryError("registry version authority is already established")
-        authorities[id(value)] = (weakref.ref(value), {})
+            raise registry_error("registry version authority is already established")
+        authorities[id(value)] = (weakref_ref(value), {})
 
     def snapshot(value: object) -> dict[str, list[InstrumentVersion]]:
         state = bound_state(value)
         return {
             instrument_id: [
-                _detached_instrument_version(version)
+                detach_version(version)
                 for version in versions
             ]
             for instrument_id, versions in state.items()
@@ -884,7 +889,7 @@ def _install_instrument_registry_version_authority():
     ) -> tuple[InstrumentVersion, ...]:
         state = bound_state(value)
         return tuple(
-            _detached_instrument_version(version)
+            detach_version(version)
             for version in state.get(instrument_id, ())
         )
 
@@ -894,7 +899,7 @@ def _install_instrument_registry_version_authority():
 
     def commit(value: object, candidate: InstrumentVersion) -> None:
         state = bound_state(value)
-        detached = _detached_instrument_version(candidate)
+        detached = detach_version(candidate)
         versions = list(state.get(detached.instrument_id, ()))
         versions.append(detached)
         versions.sort(key=lambda item: item.version)

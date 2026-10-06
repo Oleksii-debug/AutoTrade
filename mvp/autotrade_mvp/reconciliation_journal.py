@@ -1266,6 +1266,18 @@ def load_account_resource_availability_evidence(
     )
     if len(normalized_evidence_refs) != len(set(normalized_evidence_refs)):
         raise ValueError("resource availability evidence_refs must be unique")
+    provider_ref_set = frozenset(normalized_evidence_refs)
+    for resource, detail in selected_details.items():
+        if not resource.startswith("MARGIN_CREDIT:"):
+            continue
+        buying_power = BuyingPowerEvidence.from_resource_detail(detail)
+        if any(
+            reference not in provider_ref_set
+            for reference in buying_power.evidence_refs
+        ):
+            raise ValueError(
+                "margin-credit evidence_refs are not bound to provider snapshot"
+            )
 
     aggregate_version = checkpoint.get("aggregate_version")
     if type(aggregate_version) is not int or aggregate_version <= 0:

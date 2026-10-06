@@ -424,7 +424,15 @@ class ResourceAvailabilityEvidence:
                 raise ValueError("evidence_refs must be unique")
             refs.append(ref)
         object.__setattr__(self, "evidence_refs", tuple(refs))
-
+        ref_set = frozenset(refs)
+        for resource, detail in normalized_details.items():
+            if not resource.startswith("MARGIN_CREDIT:"):
+                continue
+            buying_power = BuyingPowerEvidence.from_resource_detail(dict(detail))
+            if any(reference not in ref_set for reference in buying_power.evidence_refs):
+                raise ValueError(
+                    "margin-credit evidence_refs must be bound to provider snapshot evidence"
+                )
 
 
 @dataclass(frozen=True)

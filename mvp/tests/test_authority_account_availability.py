@@ -178,6 +178,7 @@ def _checkpoint(
     if available_cash is None:
         available_cash = cash
     available_resources = {"CASH:USD": available_cash}
+    provider_evidence_refs = [f"provider:{snapshot_id}"]
     resource_details = None
     if margin_credit is not None:
         buying_power = BuyingPowerEvidence(
@@ -198,6 +199,7 @@ def _checkpoint(
             evidence_refs=(f"provider:{snapshot_id}:margin-credit",),
         )
         available_resources[buying_power.resource_key] = margin_credit
+        provider_evidence_refs.extend(buying_power.evidence_refs)
         resource_details = {
             buying_power.resource_key: buying_power.resource_detail(),
         }
@@ -234,7 +236,7 @@ def _checkpoint(
             valid_until="2026-09-24T18:02:00Z",
             available_resources=available_resources,
             provider_as_of="2026-09-24T18:00:30Z",
-            evidence_refs=(f"provider:{snapshot_id}",),
+            evidence_refs=tuple(provider_evidence_refs),
             resource_details=resource_details,
         ),
     )

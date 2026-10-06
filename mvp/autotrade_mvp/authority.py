@@ -719,6 +719,7 @@ def _authority_service_capital_operations():
         resources: tuple[str, ...],
         *,
         provider_evidence: Mapping[str, object] | None = None,
+        as_of: datetime | None = None,
         required: bool = False,
     ) -> dict[str, object] | None:
         settlement_book, economic_book = binding(service, required=required)
@@ -868,13 +869,24 @@ def _authority_service_capital_operations():
             raise AuthorityConflict(
                 "settlement capital provider resource details are malformed"
             )
-        projection_at = _instant(
-            _authority_text(
-                provider_evidence.get("snapshot_query_completed_at"),
+        if as_of is None:
+            projection_at = _instant(
+                _authority_text(
+                    provider_evidence.get("snapshot_query_completed_at"),
+                    name="snapshot_query_completed_at",
+                ),
                 name="snapshot_query_completed_at",
-            ),
-            name="snapshot_query_completed_at",
-        )
+            )
+        else:
+            if (
+                type(as_of) is not datetime
+                or as_of.tzinfo is None
+                or as_of.utcoffset() is None
+            ):
+                raise TypeError(
+                    "settlement capital as_of must be an exact timezone-aware datetime"
+                )
+            projection_at = as_of.astimezone(timezone.utc)
         adjustments: dict[str, dict[str, str]] = {}
         for resource in capital_resources:
             raw_provider = provider_available.get(resource)
@@ -5081,6 +5093,7 @@ class AuthorityService:
                     canonical_available,
                     required_resource_names,
                     provider_evidence=availability_evidence,
+                    as_of=_instant(evaluated_at, name="evaluated_at"),
                     required=False,
                 )
                 if capital_cut is not None:
@@ -5869,6 +5882,7 @@ class AuthorityService:
                         current_provider_available,
                         tuple(sorted(risk_requirements)),
                         provider_evidence=current_provider_evidence,
+                        as_of=_instant(now, name="now"),
                         required=True,
                     )
                     assert current_capital is not None

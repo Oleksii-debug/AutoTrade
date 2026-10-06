@@ -164,6 +164,23 @@ class CanonicalEventEnvelopeAdmissionTests(unittest.TestCase):
                     JournalStore(f"{directory}/journal.sqlite3").append_event(envelope).inserted
                 )
 
+    def test_claimed_event_envelope_accepts_schema_valid_lowercase_time_separator(self):
+        with TemporaryDirectory() as directory:
+            envelope = canonical_event()
+            envelope["occurred_at"] = "2026-10-06t13:30:00Z"
+            envelope["observed_at"] = "2026-10-06t13:30:01Z"
+            envelope["committed_at"] = "2026-10-06t13:30:02Z"
+            self.assertTrue(
+                JournalStore(f"{directory}/journal.sqlite3").append_event(envelope).inserted
+            )
+
+    def test_claimed_event_envelope_still_rejects_lowercase_terminal_z(self):
+        with TemporaryDirectory() as directory:
+            envelope = canonical_event()
+            envelope["occurred_at"] = "2026-10-06T13:30:00z"
+            with self.assertRaisesRegex(ValueError, "ending Z"):
+                JournalStore(f"{directory}/journal.sqlite3").append_event(envelope)
+
     def test_claimed_event_envelope_rejects_malformed_evidence_ref(self):
         with TemporaryDirectory() as directory:
             envelope = canonical_event()

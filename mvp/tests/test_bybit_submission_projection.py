@@ -7,6 +7,8 @@ from uuid import uuid4
 
 from autotrade_runtime.artifacts import ArtifactStore
 
+import mvp.autotrade_mvp.bybit_submission_projection as projection_module
+
 from mvp.autotrade_mvp.bybit_submission_projection import (
     project_authenticated_bybit_submission,
 )
@@ -298,6 +300,42 @@ class AuthenticatedBybitSubmissionProjectionTests(unittest.TestCase):
             snapshot = book.order(client_order_id).snapshot()
             self.assertEqual(snapshot.state, "UNKNOWN")
             self.assertIsNone(snapshot.provider_order_id)
+
+
+    def test_post_send_module_alias_rebinding_cannot_mint_fake_ack(self):
+        with TemporaryDirectory() as directory:
+            _store, _artifacts, book, prepared, attempt, _client_order_id = self._sent(
+                directory,
+                {
+                    "retCode": 10001,
+                    "retMsg": "request parameter error",
+                    "result": {},
+                },
+                intent_id="authenticated-alias-firebreak",
+            )
+            original_parser = projection_module.parse_submission_response
+            original_observer = projection_module.observe_submission_json_response
+            projection_module.parse_submission_response = lambda **_kwargs: {
+                "attempt_id": attempt,
+                "outcome": "ACKNOWLEDGED",
+                "client_order_id": prepared.body["orderLinkId"],
+                "provider_order_id": "forged-provider-order",
+                "evidence": [],
+                "retry_disposition": "NEVER",
+            }
+            projection_module.observe_submission_json_response = lambda **_kwargs: object()
+            try:
+                result = projection_module.project_authenticated_bybit_submission(
+                    book,
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                )
+            finally:
+                projection_module.parse_submission_response = original_parser
+                projection_module.observe_submission_json_response = original_observer
+
+            self.assertEqual(result.snapshot.state, "REJECTED")
+            self.assertIsNone(result.snapshot.provider_order_id)
 
 
 if __name__ == "__main__":

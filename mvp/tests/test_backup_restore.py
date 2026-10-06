@@ -778,6 +778,82 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertIsNone(marker["runtime_checkpoint_evidence_sha256"])
             self.assertTrue(restore_requires_reconciliation(restored))
 
+    def test_restore_persists_journal_bound_provenance_before_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            marker = json.loads(
+                (
+                    restored / "RESTORE_RECONCILIATION_REQUIRED.json"
+                ).read_text(encoding="utf-8")
+            )
+            store = JournalStore(restored / "state" / "journal.sqlite3")
+            events = store.load_events("backup_restore", "restore-authority")
+
+            self.assertEqual(len(events), 1)
+            event = events[0]
+            self.assertEqual(event["event_type"], "BackupRestoreStaged")
+            self.assertEqual(event["committed_at"], marker["restored_at"])
+            self.assertEqual(
+                event["payload"]["backup_manifest_sha256"],
+                marker["backup_manifest_sha256"],
+            )
+            self.assertEqual(
+                event["payload"]["runtime_checkpoint_evidence"],
+                marker["runtime_checkpoint_evidence"],
+            )
+            self.assertEqual(
+                event["payload"]["runtime_checkpoint_reconstitution_required"],
+                marker["runtime_checkpoint_reconstitution_required"],
+            )
+            self.assertEqual(
+                event["payload"]["runtime_checkpoint_evidence_sha256"],
+                marker["runtime_checkpoint_evidence_sha256"],
+            )
+            self.assertEqual(
+                event["payload"]["source_owner_scope"],
+                marker["source_owner_scope"],
+            )
+
+    def test_restore_marker_cannot_override_journal_bound_manifest_identity(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            marker_path = restored / "RESTORE_RECONCILIATION_REQUIRED.json"
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker["backup_manifest_sha256"] = "sha256:" + ("0" * 64)
+            marker_path.write_text(
+                json.dumps(
+                    marker,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertTrue(restore_requires_reconciliation(restored))
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "conflicts with durable journal provenance",
+            ):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=None,
+                    reconciliation_checkpoint_event_id="unused",
+                    fencing_evidence=(),
+                    completed_at=marker["restored_at"],
+                )
+            self.assertFalse(
+                (restored / "RESTORE_RECONCILIATION_COMPLETE.json").exists()
+            )
+
     def test_journal_bound_restore_marker_cannot_downgrade_to_legacy(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

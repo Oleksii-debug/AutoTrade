@@ -367,18 +367,17 @@ def assert_conservative_execution(
             "AMBIGUOUS_NO_FILL requires BAR causal ambiguity"
         )
 
-    if model.data_fidelity == "BAR":
+    if model.data_fidelity == "BAR" and market_time > arrival:
         if observation.interval_start is None:
             raise ExecutionOracleError(
-                "BAR result requires interval_start for causal classification"
+                "post-arrival BAR result requires interval_start for causal classification"
             )
         interval_start_for_status = _instant(
             observation.interval_start,
             name="interval_start",
         )
         if (
-            market_time > arrival
-            and interval_start_for_status < arrival
+            interval_start_for_status < arrival
             and result.status != "AMBIGUOUS_NO_FILL"
         ):
             raise ExecutionOracleError(

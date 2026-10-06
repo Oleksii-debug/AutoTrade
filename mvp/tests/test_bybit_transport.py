@@ -216,6 +216,45 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
         self.assertEqual(observation.payload["retCode"], 0)
         self.assertEqual(len(wire.requests), 1)
 
+    def test_read_capability_supersession_during_quota_wait_blocks_secret_and_wire(self):
+        capability, binding = self.binding()
+        events = []
+        wire = RecordingWire(events)
+        now = [READ_AT]
+        holder = {}
+
+        def quota(*_args):
+            events.append("quota")
+            replacement = read_capability(
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_version="BTCUSDT@v1",
+                provider_environment="TESTNET",
+                permission_scopes=("ORDER.READ",),
+                at=READ_AT + timedelta(milliseconds=500),
+            )
+            holder["registry"].add(replacement)
+            now[0] = READ_AT + timedelta(seconds=1)
+
+        transport, resolver, registry = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=wire,
+            quota_gate=quota,
+            clock_utc=lambda: now[0],
+        )
+        holder["registry"] = registry
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "current capability",
+        ):
+            transport(binding)
+
+        self.assertEqual(events, ["quota", "capability"])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+
     def test_read_capability_expiry_during_quota_wait_blocks_secret_and_wire(self):
         capability, binding = self.binding()
         events = []

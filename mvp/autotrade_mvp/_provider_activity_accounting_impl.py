@@ -1604,6 +1604,7 @@ class ProviderEconomicCut:
     provider_id: str
     account_id: str
     environment: str
+    provider_environment: str
     book_id: str
     aggregate_version: int
     journal_sequence: int
@@ -1628,6 +1629,7 @@ class ProviderEconomicCut:
             "provider_id",
             "account_id",
             "environment",
+            "provider_environment",
             "book_id",
             "event_id",
             "payload_hash",
@@ -1680,6 +1682,7 @@ def _provider_economic_cut_seal_digest(value: ProviderEconomicCut) -> str:
             "provider_id": value.provider_id,
             "account_id": value.account_id,
             "environment": value.environment,
+            "provider_environment": value.provider_environment,
             "book_id": value.book_id,
             "aggregate_version": value.aggregate_version,
             "journal_sequence": value.journal_sequence,
@@ -1773,6 +1776,7 @@ def reverify_provider_economic_cut(
         cut.provider_id != book.provider_id
         or cut.account_id != book.account_id
         or cut.environment != book.environment
+        or cut.provider_environment != book.provider_environment
         or cut.book_id != book.book_id
     ):
         raise AccountingConflict(

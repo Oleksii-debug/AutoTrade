@@ -43,6 +43,28 @@ def cash_transaction(*, transaction_id: str = "cash-1", amount: str = "10"):
 
 
 class DurableProviderEconomicBookAuthorityTests(unittest.TestCase):
+    def test_sealed_scoped_authority_composes_with_durable_book(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            book = economic_book(JournalStore(path), environment="SIMULATION")
+
+            initial_digest = book.audit_digest()
+            self.assertEqual(book.transactions, ())
+            self.assertEqual(str(book.balance("CASH:USD", "USD")), "0")
+            self.assertEqual(str(book.cash("USD")), "0")
+            self.assertEqual(str(book.position("ASSET")), "0")
+            self.assertEqual(str(book.fee_expense("USD")), "0")
+
+            transaction = cash_transaction()
+            self.assertTrue(book.append(transaction))
+            self.assertEqual(book.transactions, (transaction,))
+            self.assertEqual(str(book.cash("USD")), "10")
+            self.assertNotEqual(book.audit_digest(), initial_digest)
+
+            reopened = economic_book(JournalStore(path), environment="SIMULATION")
+            self.assertEqual(reopened.transactions, (transaction,))
+            self.assertEqual(reopened.audit_digest(), book.audit_digest())
+
     def test_bybit_provider_environment_separates_durable_book_identity(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

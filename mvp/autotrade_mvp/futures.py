@@ -28,6 +28,7 @@ from .exact_decimal import (
     parse_bounded_exact_decimal,
 )
 from .instruments import InstrumentVersion, _detached_instrument_version
+from .provider_domain import ProviderDomainError, normalize_provider_environment
 from .settlement_convention import SettlementConvention
 
 
@@ -425,6 +426,7 @@ class FuturesSettlementScope:
     provider_id: str | None = None
     account_id: str | None = None
     environment: str | None = None
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_id", _text(self.source_id, "source_id"))
@@ -434,16 +436,35 @@ class FuturesSettlementScope:
                 raise FuturesError(
                     "provider settlement scope requires provider_id, account_id and environment together"
                 )
-            object.__setattr__(
-                self, "provider_id", _text(self.provider_id, "provider_id")
-            )
-            object.__setattr__(self, "account_id", _text(self.account_id, "account_id"))
+            provider_id = _text(self.provider_id, "provider_id")
+            account_id = _text(self.account_id, "account_id")
             environment = _text(self.environment, "environment").upper()
             if environment not in _ENVIRONMENTS:
                 raise FuturesError(
                     "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
                 )
+            provider_environment = None
+            if self.provider_environment is not None or provider_id.upper() == "BYBIT":
+                try:
+                    provider_environment = normalize_provider_environment(
+                        provider_id=provider_id,
+                        environment=environment,
+                        provider_environment=self.provider_environment,
+                    )
+                except ProviderDomainError as error:
+                    raise FuturesError(
+                        "provider settlement scope has invalid provider_environment"
+                    ) from error
+            object.__setattr__(self, "provider_id", provider_id)
+            object.__setattr__(self, "account_id", account_id)
             object.__setattr__(self, "environment", environment)
+            object.__setattr__(
+                self, "provider_environment", provider_environment
+            )
+        elif self.provider_environment is not None:
+            raise FuturesError(
+                "provider_environment requires provider settlement scope"
+            )
 
 
 @dataclass(frozen=True)
@@ -669,6 +690,8 @@ def settlement_identity_digest(evidence: FuturesSettlementEvidence) -> str:
         "settlement_currency": evidence.settlement_currency,
         "evidence_ref": evidence.evidence_ref,
     }
+    if evidence.scope.provider_environment is not None:
+        material["provider_environment"] = evidence.scope.provider_environment
     encoded = json.dumps(
         material,
         sort_keys=True,

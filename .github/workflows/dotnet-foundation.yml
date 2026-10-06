@@ -19,10 +19,12 @@ on:
       - "src/**/*.xaml"
       - "tests/Desktop.Client/**"
       - "tests/Provenance/test_dotnet_package_rights.py"
+      - "tests/Provenance/test_dotnet_lock_content.py"
       - "contracts/**"
       - "provenance/dotnet-package-rights.json"
       - "provenance/licenses/**"
       - "tools/dotnet_package_rights.py"
+      - "tools/dotnet_lock.py"
       - ".github/workflows/dotnet-foundation.yml"
   pull_request:
     paths:
@@ -40,10 +42,12 @@ on:
       - "src/**/*.xaml"
       - "tests/Desktop.Client/**"
       - "tests/Provenance/test_dotnet_package_rights.py"
+      - "tests/Provenance/test_dotnet_lock_content.py"
       - "contracts/**"
       - "provenance/dotnet-package-rights.json"
       - "provenance/licenses/**"
       - "tools/dotnet_package_rights.py"
+      - "tools/dotnet_lock.py"
       - ".github/workflows/dotnet-foundation.yml"
 
 concurrency:
@@ -56,6 +60,7 @@ permissions:
 env:
   AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
 
 jobs:
   build:
@@ -78,6 +83,8 @@ jobs:
       - run: python tools/dotnet_package_rights.py --check-policy
       - run: python -m unittest discover -s tests/Provenance -p "test_dotnet_package_rights.py"
       - run: dotnet restore src/AutoTrade.Contracts/AutoTrade.Contracts.csproj --locked-mode
+      - name: Verify restored Contracts NuGet package rights
+        run: python tools/dotnet_package_rights.py --verify-restored --packages-root "${{ env.NUGET_PACKAGES }}" --project src/AutoTrade.Contracts/AutoTrade.Contracts.csproj
       - run: dotnet build src/AutoTrade.Contracts/AutoTrade.Contracts.csproj --configuration Release --no-restore
       - name: Write exact-head .NET foundation evidence
         run: >-
@@ -94,8 +101,6 @@ jobs:
 
   desktop-build:
     runs-on: windows-2025
-    env:
-      NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
     steps:
       - uses: actions/checkout@v4
         with:
@@ -109,11 +114,7 @@ jobs:
       - run: python tools/dotnet_package_rights.py --check-policy
       - run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --locked-mode
       - name: Verify restored Desktop NuGet package rights
-        run: >-
-          python tools/dotnet_package_rights.py
-          --verify-restored
-          --packages-root "${{ env.NUGET_PACKAGES }}"
-          --project src/AutoTrade.Desktop/AutoTrade.Desktop.csproj
+        run: python tools/dotnet_package_rights.py --verify-restored --packages-root "${{ env.NUGET_PACKAGES }}" --project src/AutoTrade.Desktop/AutoTrade.Desktop.csproj
       - run: dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --configuration Release --no-restore
       - run: dotnet restore tests/Desktop.Client/Desktop.Client.csproj --locked-mode
       - run: dotnet run --project tests/Desktop.Client/Desktop.Client.csproj --configuration Release --no-restore

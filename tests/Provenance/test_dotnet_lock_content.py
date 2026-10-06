@@ -541,6 +541,35 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 )
             )
 
+    def test_path_unsafe_nuget_identity_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = write_project(root)
+            write_lock(project, package_name="../Microsoft.Web.WebView2")
+            blockers = dotnet_lock_content_blockers(root, project)
+            self.assertTrue(
+                any(
+                    item.startswith("DOTNET_PROJECT_LOCK_RECORD_INVALID:")
+                    for item in blockers
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "does not match project"):
+                dotnet_locked_dependency_graph(root, [project])
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = write_project(root)
+            write_lock(project, resolved="../1.0.4191.47")
+            blockers = dotnet_lock_content_blockers(root, project)
+            self.assertTrue(
+                any(
+                    item.startswith("DOTNET_PROJECT_LOCK_RESOLVED_INVALID:")
+                    for item in blockers
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "does not match project"):
+                dotnet_locked_dependency_graph(root, [project])
+
     def test_package_name_case_drift_is_visible(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

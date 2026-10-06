@@ -1419,6 +1419,63 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_currency_by_execution_id={},
             )
 
+    def test_web_api_trades_ignore_observation_instance_scope_shadow(self):
+        observation = ibkr_trade_observation([])
+        callbacks: list[str] = []
+
+        def hostile_scope(**_kwargs):
+            callbacks.append("scope")
+            raise AssertionError("observation instance scope callback executed")
+
+        object.__setattr__(observation, "require_scope", hostile_scope)
+        fills = parse_web_api_trades(
+            observation,
+            instrument_versions_by_conid={},
+            fee_currency_by_execution_id={},
+        )
+        self.assertEqual(fills, ())
+        self.assertEqual(callbacks, [])
+
+    def test_web_api_trades_reject_mutated_binding_text_before_callback(self):
+        observation = ibkr_trade_observation([])
+        _HostileText.strip_called = False
+        object.__setattr__(
+            observation.query_binding,
+            "provider_id",
+            _HostileText("IBKR"),
+        )
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "observation.provider_id must be canonical provider text",
+        ):
+            parse_web_api_trades(
+                observation,
+                instrument_versions_by_conid={},
+                fee_currency_by_execution_id={},
+            )
+        self.assertFalse(_HostileText.strip_called)
+
+    def test_web_api_trades_reject_mutated_evidence_ref_before_use(self):
+        observation = ibkr_trade_observation([])
+        _HostileText.strip_called = False
+        object.__setattr__(
+            observation,
+            "evidence_ref",
+            _HostileText("provider-read:sha256:" + "1" * 64),
+        )
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "observation.evidence_ref must be canonical provider text",
+        ):
+            parse_web_api_trades(
+                observation,
+                instrument_versions_by_conid={},
+                fee_currency_by_execution_id={},
+            )
+        self.assertFalse(_HostileText.strip_called)
+
     def test_web_api_trades_use_execution_identity_coid_and_explicit_fee_currency(self):
         rows = [
             {

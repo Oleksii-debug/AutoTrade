@@ -329,8 +329,8 @@ class AblationPair:
     ablated: AblationOutcome
 
     def __post_init__(self) -> None:
-        if not isinstance(self.target_component, str) or not self.target_component.strip():
-            raise ValueError("target_component is required")
+        if type(self.target_component) is not str or not self.target_component.strip():
+            raise ValueError("target_component must be non-empty exact built-in text")
         object.__setattr__(self, "target_component", self.target_component.strip())
         if self.full.variant != "FULL" or self.ablated.variant != "ABLATED":
             raise ValueError("pair must contain FULL and ABLATED outcomes")
@@ -557,8 +557,8 @@ class AblationEvaluation:
             raise ValueError("ablation evaluation status is not canonical")
 
 def _validate_pairs(target_component: str, pairs: Iterable[AblationPair]) -> list[AblationPair]:
-    if not isinstance(target_component, str) or not target_component.strip():
-        raise ValueError("target_component is required")
+    if type(target_component) is not str or not target_component.strip():
+        raise ValueError("target_component must be non-empty exact built-in text")
     target_component = target_component.strip()
     selected = list(pairs)
     if any(pair.target_component != target_component for pair in selected):
@@ -884,8 +884,8 @@ class AblationEvidenceBundle:
         if not isinstance(self.target_component, str) or not self.target_component.strip():
             raise ValueError("target_component is required")
         object.__setattr__(self, "target_component", self.target_component.strip())
-        if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
-            raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
+        if type(self.source_revision) is not str or _GIT_SHA.fullmatch(self.source_revision) is None:
+            raise ValueError("source_revision must be exact built-in text with a 40-character lowercase git SHA")
         object.__setattr__(
             self,
             "protocol_digest",
@@ -1112,8 +1112,8 @@ _ABLATION_OUTCOME_MEDIA_TYPE = "application/vnd.autotrade.ablation-outcome+json"
 
 
 def _parse_utc_text(value: object, field: str) -> datetime:
-    if not isinstance(value, str) or not value.endswith("Z"):
-        raise ValueError(f"{field} must be canonical UTC text")
+    if type(value) is not str or not value.endswith("Z"):
+        raise ValueError(f"{field} must be canonical exact built-in UTC text")
     try:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as error:
@@ -1143,14 +1143,14 @@ class CanonicalAblationOutcomeEvidence:
     def __post_init__(self) -> None:
         for name in ("case_id", "population_unit_id"):
             value = getattr(self, name)
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"{name} is required")
+            if type(value) is not str or not value.strip():
+                raise ValueError(f"{name} must be non-empty exact built-in text")
             canonical = value.strip()
             if canonical != value:
                 raise ValueError(f"{name} must use canonical text")
             object.__setattr__(self, name, canonical)
-        if self.variant not in {"FULL", "ABLATED"}:
-            raise ValueError("variant must be FULL or ABLATED")
+        if type(self.variant) is not str or self.variant not in {"FULL", "ABLATED"}:
+            raise ValueError("variant must be exact built-in text FULL or ABLATED")
         object.__setattr__(self, "utility", _decimal(self.utility, "utility"))
         cost = _decimal(self.cost, "cost")
         if cost < 0:
@@ -1206,12 +1206,12 @@ class RegisteredAblationPopulation:
             raise ValueError("evaluation cutoff cannot precede population registration")
         object.__setattr__(self, "registered_at_utc", registered)
         object.__setattr__(self, "evaluation_cutoff_utc", cutoff)
-        if not isinstance(self.population_unit_ids, tuple) or not self.population_unit_ids:
-            raise ValueError("population_unit_ids must be a non-empty immutable tuple")
+        if type(self.population_unit_ids) is not tuple or not self.population_unit_ids:
+            raise ValueError("population_unit_ids must be a non-empty exact tuple")
         normalized = tuple(
             value.strip()
             for value in self.population_unit_ids
-            if isinstance(value, str) and value.strip()
+            if type(value) is str and value.strip()
         )
         if len(normalized) != len(self.population_unit_ids):
             raise ValueError("population_unit_ids must contain canonical non-empty strings")
@@ -1247,20 +1247,30 @@ class AblationQualificationAuthority:
         task: str | None = None,
         instrument_family: str | None = None,
     ) -> None:
-        if not isinstance(scientific_registry, ScientificRegistry):
-            raise TypeError("scientific_registry must be ScientificRegistry")
-        if not isinstance(experience_memory, ExperienceMemory):
-            raise TypeError("experience_memory must be ExperienceMemory")
-        if not isinstance(artifact_store, ArtifactStore):
-            raise TypeError("artifact_store must be ArtifactStore")
-        if not isinstance(protocol_id, str) or not protocol_id.strip():
-            raise ValueError("protocol_id is required")
-        if not isinstance(protocol_hash, str):
-            raise TypeError("protocol_hash must be text")
-        if not isinstance(source_revision, str) or _GIT_SHA.fullmatch(source_revision) is None:
-            raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
-        if not isinstance(granted_permissions, set) or not granted_permissions:
-            raise ValueError("granted_permissions must be a non-empty set")
+        if type(scientific_registry) is not ScientificRegistry:
+            raise TypeError("scientific_registry must be exact ScientificRegistry")
+        if type(experience_memory) is not ExperienceMemory:
+            raise TypeError("experience_memory must be exact ExperienceMemory")
+        if type(artifact_store) is not ArtifactStore:
+            raise TypeError("artifact_store must be exact ArtifactStore")
+        if type(protocol_id) is not str or not protocol_id.strip():
+            raise ValueError("protocol_id must be non-empty exact built-in text")
+        if type(protocol_hash) is not str:
+            raise TypeError("protocol_hash must be exact built-in text")
+        if type(source_revision) is not str or _GIT_SHA.fullmatch(source_revision) is None:
+            raise ValueError("source_revision must be exact built-in text with a 40-character lowercase git SHA")
+        if type(granted_permissions) is not set or not granted_permissions:
+            raise ValueError("granted_permissions must be a non-empty exact set")
+        if any(type(permission) is not str or not permission.strip() for permission in granted_permissions):
+            raise ValueError("granted_permissions must contain non-empty exact built-in strings")
+        if task is not None and (type(task) is not str or not task.strip()):
+            raise ValueError("task must be None or non-empty exact built-in text")
+        if instrument_family is not None and (
+            type(instrument_family) is not str or not instrument_family.strip()
+        ):
+            raise ValueError(
+                "instrument_family must be None or non-empty exact built-in text"
+            )
         self.scientific_registry = scientific_registry
         self.experience_memory = experience_memory
         self.artifact_store = artifact_store
@@ -1269,8 +1279,10 @@ class AblationQualificationAuthority:
         self.source_revision = source_revision
         self.causal_cutoff = _utc(causal_cutoff, "causal_cutoff")
         self.granted_permissions = set(granted_permissions)
-        self.task = task
-        self.instrument_family = instrument_family
+        self.task = None if task is None else task.strip()
+        self.instrument_family = (
+            None if instrument_family is None else instrument_family.strip()
+        )
 
     def _load_outcome(
         self,
@@ -1278,8 +1290,10 @@ class AblationQualificationAuthority:
         *,
         population_root: str,
     ) -> CanonicalAblationOutcomeEvidence:
-        if not isinstance(reference, AblationOutcomeArtifactRef):
-            raise TypeError("outcome_refs must contain AblationOutcomeArtifactRef")
+        if type(reference) is not AblationOutcomeArtifactRef:
+            raise TypeError(
+                "outcome_refs must contain exact AblationOutcomeArtifactRef values"
+            )
         manifest = self.artifact_store.load_manifest(reference.artifact_id)
         if manifest.get("sha256") != reference.sha256:
             raise ValueError("ablation outcome artifact digest mismatch")
@@ -1537,9 +1551,9 @@ def evaluate_qualified_incremental_value(
 
     evidence_index: dict[tuple[str, str], CanonicalAblationOutcomeEvidence] = {}
     for evidence in canonical_outcomes:
-        if not isinstance(evidence, CanonicalAblationOutcomeEvidence):
+        if type(evidence) is not CanonicalAblationOutcomeEvidence:
             raise TypeError(
-                "canonical_outcomes must contain CanonicalAblationOutcomeEvidence"
+                "canonical_outcomes must contain exact CanonicalAblationOutcomeEvidence"
             )
         key = (evidence.case_id, evidence.variant)
         if key in evidence_index:

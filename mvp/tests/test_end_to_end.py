@@ -54,6 +54,8 @@ class VerticalSliceTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             with self.assertRaises(ValueError):
                 run_vertical_slice([100, float("nan")], directory)
+            self.assertFalse((Path(directory) / "run-configuration.json").exists())
+            self.assertFalse((Path(directory) / "checkpoint.json").exists())
 
     def test_corrupt_checkpoint_is_not_silently_accepted(self):
         with TemporaryDirectory() as directory:

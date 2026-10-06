@@ -25,7 +25,7 @@ from .provider_core import (
     ProviderResponseObservation,
     ProviderSubmissionObservation,
     Surface,
-    submission_observation_projection,
+    provider_submission_observation_projection,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
@@ -672,7 +672,7 @@ def _submission_evidence(
     *,
     prepared_request: BybitPreparedSubmission,
 ) -> dict[str, str]:
-    projection = submission_observation_projection(observation)
+    projection = provider_submission_observation_projection(observation)
     expected_client_order_id = _client_order_id(
         prepared_request.body.get("orderLinkId")
     )
@@ -732,7 +732,7 @@ def parse_submission_response(
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",
         }
-    projection = submission_observation_projection(observation)
+    projection = provider_submission_observation_projection(observation)
     if projection["attempt_id"] != aid:
         raise ProviderCoreError("Bybit submission observation attempt_id mismatch")
     evidence = [

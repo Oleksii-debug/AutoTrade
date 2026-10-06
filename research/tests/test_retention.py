@@ -185,5 +185,119 @@ class RetentionTests(unittest.TestCase):
         self.assertFalse(result.promotable)
 
 
+    def test_executable_text_subclass_is_rejected_before_strip(self):
+        calls = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("hostile strip executed")
+
+        with self.assertRaisesRegex(TypeError, "exact text"):
+            metric(HostileText("new"), "0.10", "0.11")
+        self.assertEqual(calls, [])
+
+    def test_executable_regime_container_is_rejected_before_iteration(self):
+        calls = []
+
+        class HostileList(list):
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("hostile iteration executed")
+
+        with self.assertRaisesRegex(TypeError, "exact list or tuple"):
+            policy(recent_regimes=HostileList(["new"]))
+        self.assertEqual(calls, [])
+
+    def test_executable_metrics_mapping_is_rejected_before_callbacks(self):
+        calls = []
+
+        class HostileDict(dict):
+            def items(self):
+                calls.append("items")
+                raise AssertionError("hostile items executed")
+
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("hostile iteration executed")
+
+        metrics = HostileDict(
+            {
+                "old": metric("old", "0.10", "0.10"),
+                "new": metric("new", "0.05", "0.20"),
+            }
+        )
+        with self.assertRaisesRegex(TypeError, "metrics must be an exact dict"):
+            evaluate_retention(metrics, policy())
+        self.assertEqual(calls, [])
+
+    def test_polymorphic_numeric_inputs_are_rejected_before_conversion(self):
+        calls = []
+
+        class HostileInt(int):
+            def __str__(self):
+                calls.append("str")
+                raise AssertionError("hostile str executed")
+
+            def __lt__(self, other):
+                calls.append("lt")
+                raise AssertionError("hostile comparison executed")
+
+        with self.assertRaisesRegex(TypeError, "exact Decimal, string or integer"):
+            metric("new", HostileInt(1), "0.11")
+        self.assertEqual(calls, [])
+
+    def test_mutated_policy_is_resealed_before_retention_math(self):
+        valid = policy()
+        object.__setattr__(valid, "recent_regimes", ["new"])
+        result = evaluate_retention(
+            {
+                "old": metric("old", "0.10", "0.10"),
+                "new": metric("new", "0.05", "0.20"),
+            },
+            valid,
+        )
+        self.assertEqual(result.status, "PASS")
+        self.assertTrue(result.promotable)
+
+        class HostileList(list):
+            def __iter__(self):
+                raise AssertionError("hostile iteration executed")
+
+        object.__setattr__(valid, "recent_regimes", HostileList(["new"]))
+        with self.assertRaisesRegex(TypeError, "exact list or tuple"):
+            evaluate_retention(
+                {
+                    "old": metric("old", "0.10", "0.10"),
+                    "new": metric("new", "0.05", "0.20"),
+                },
+                valid,
+            )
+
+    def test_mutated_metric_is_resealed_before_retention_math(self):
+        changed = metric("new", "0.05", "0.20")
+        object.__setattr__(changed, "candidate_net_score", Decimal("999"))
+        result = evaluate_retention(
+            {
+                "old": metric("old", "0.10", "0.10"),
+                "new": changed,
+            },
+            policy(),
+        )
+        self.assertEqual(result.recent_improvement, Decimal("998.95"))
+
+        class HostileDecimal(Decimal):
+            pass
+
+        object.__setattr__(changed, "candidate_net_score", HostileDecimal("0.20"))
+        with self.assertRaisesRegex(TypeError, "exact Decimal"):
+            evaluate_retention(
+                {
+                    "old": metric("old", "0.10", "0.10"),
+                    "new": changed,
+                },
+                policy(),
+            )
+
 if __name__ == "__main__":
     unittest.main()

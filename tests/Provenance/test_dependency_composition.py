@@ -484,6 +484,20 @@ project = "not-a-table"
                 ],
             )
 
+
+    def test_dotnet_restore_target_helper_is_imported_in_both_execution_modes(self):
+        root = Path(__file__).resolve().parents[2]
+        for relative in (
+            "tools/check_dependency_composition.py",
+            "tools/build_provenance_manifest.py",
+        ):
+            source = (root / relative).read_text(encoding="utf-8")
+            self.assertEqual(
+                source.count("dotnet_restore_project_target,"),
+                2,
+                relative,
+            )
+
     def test_nuget_lock_changes_must_trigger_dotnet_workflow(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

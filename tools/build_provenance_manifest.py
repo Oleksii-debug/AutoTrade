@@ -29,6 +29,7 @@ else:
         dotnet_locked_dependency_graph,
         dotnet_project_package_references,
         dotnet_restore_command_tokens,
+        dotnet_restore_project_target,
         dotnet_restore_targets_project,
         dotnet_restore_tokens_are_locked,
         dotnet_restore_workflow_commands,

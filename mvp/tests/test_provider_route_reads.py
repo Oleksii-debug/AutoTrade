@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone, tzinfo
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -64,6 +64,18 @@ def _qualification_with_route_semantics(semantics):
     )
 
 
+class _HostileTimezone(tzinfo):
+    calls = 0
+
+    def utcoffset(self, _dt):
+        type(self).calls += 1
+        raise AssertionError("hostile timezone callback executed")
+
+    def dst(self, _dt):
+        type(self).calls += 1
+        raise AssertionError("hostile timezone callback executed")
+
+
 class ProviderRouteReadTests(unittest.TestCase):
     def setup_route(self, directory: str, *, include_read_rule=True):
         journal = JournalStore(Path(directory) / "journal.sqlite3")
@@ -120,6 +132,32 @@ class ProviderRouteReadTests(unittest.TestCase):
             at=at,
             permission_scope="ACCOUNT.READ",
         )
+
+    def test_qualified_read_rejects_executable_timezone_before_callback(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(directory)
+            _HostileTimezone.calls = 0
+            hostile_at = datetime(
+                2026,
+                10,
+                6,
+                9,
+                0,
+                tzinfo=_HostileTimezone(),
+            )
+
+            with self.assertRaisesRegex(
+                ProviderRouteReadError,
+                "exact stdlib timezone datetime",
+            ):
+                self.prepare(
+                    route,
+                    capabilities,
+                    qualifications,
+                    at=hostile_at,
+                )
+
+            self.assertEqual(_HostileTimezone.calls, 0)
 
     def test_prepared_read_binds_exact_current_q_c_and_rule_identity(self):
         with TemporaryDirectory() as directory:

@@ -312,6 +312,93 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 )
             self.assertEqual(calls, [])
 
+    def test_production_firebreak_rejects_polymorphic_environment_without_callbacks(self):
+        source = sealed_dividend()
+        resolver_calls = []
+
+        class HostileText(str):
+            calls = 0
+
+            def strip(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile strip dispatched")
+
+            def upper(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile upper dispatched")
+
+        def resolver(reference):
+            resolver_calls.append(reference)
+            return source
+
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "expected_environment must be canonical exact text",
+        ):
+            resolve_authoritative_corporate_action(
+                source.evidence_ref,
+                evidence_resolver=resolver,
+                instrument_registry=canonical_registry(),
+                expected_provider_id="BINANCE",
+                expected_account_id="acct-1",
+                expected_environment=HostileText("PAPER"),
+                allowed_endpoints=frozenset({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
+        self.assertEqual(HostileText.calls, 0)
+        self.assertEqual(resolver_calls, [])
+
+    def test_authority_selector_text_subclasses_reject_before_callbacks_and_resolution(self):
+        source = sealed_dividend()
+
+        class HostileText(str):
+            calls = 0
+
+            def strip(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile strip dispatched")
+
+            def upper(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile upper dispatched")
+
+        cases = (
+            ("evidence_ref", HostileText(source.evidence_ref)),
+            ("expected_provider_id", HostileText("BINANCE")),
+            ("expected_account_id", HostileText("acct-1")),
+            ("permission_scope", HostileText("ORDER.READ")),
+        )
+        for field, hostile in cases:
+            resolver_calls = []
+
+            def resolver(reference):
+                resolver_calls.append(reference)
+                return source
+
+            kwargs = {
+                "evidence_resolver": resolver,
+                "instrument_registry": canonical_registry(),
+                "expected_provider_id": "BINANCE",
+                "expected_account_id": "acct-1",
+                "expected_environment": "SIMULATION",
+                "allowed_endpoints": frozenset({ENDPOINT}),
+                "permission_scope": "ORDER.READ",
+            }
+            reference = source.evidence_ref
+            if field == "evidence_ref":
+                reference = hostile
+            else:
+                kwargs[field] = hostile
+
+            before = HostileText.calls
+            with self.subTest(field=field), self.assertRaisesRegex(
+                CorporateActionEvidenceError,
+                "canonical exact text",
+            ):
+                resolve_authoritative_corporate_action(reference, **kwargs)
+            self.assertEqual(HostileText.calls, before)
+            self.assertEqual(resolver_calls, [])
+
     def test_arbitrary_normalizer_cannot_become_financial_authority(self):
         source = sealed_dividend()
 

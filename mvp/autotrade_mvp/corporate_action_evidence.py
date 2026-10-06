@@ -413,6 +413,8 @@ def resolve_authoritative_corporate_action(
         raise TypeError("evidence_resolver must be callable")
     if type(instrument_registry) is not InstrumentRegistry:
         raise TypeError("instrument_registry must be exact InstrumentRegistry")
+    if any(name in vars(instrument_registry) for name in ("exact", "at")):
+        raise TypeError("instrument_registry lookup methods must not be shadowed")
     if normalizer is not None:
         raise TypeError(
             "caller-supplied corporate-action normalizer is not financial authority"
@@ -487,8 +489,9 @@ def resolve_authoritative_corporate_action(
         f"{observation.instrument_id}@{observation.instrument_version}"
     )
     try:
-        instrument = instrument_registry.exact(version_ref)
-        effective_instrument = instrument_registry.at(
+        instrument = InstrumentRegistry.exact(instrument_registry, version_ref)
+        effective_instrument = InstrumentRegistry.at(
+            instrument_registry,
             observation.instrument_id,
             observation.effective_at,
         )

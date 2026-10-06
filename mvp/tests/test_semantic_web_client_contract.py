@@ -69,6 +69,20 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn('filter.value = ""', bind)
         self.assertIn("applyTableFilter(tool, {resetPage: true})", bind)
         self.assertNotIn("filter.blur()", bind)
+        html = INDEX.read_text(encoding="utf-8")
+        for filter_id in (
+            "permissions-filter",
+            "strategy-filter",
+            "portfolio-filter",
+            "operations-filter",
+            "risk-filter",
+            "jobs-filter",
+            "event-history-filter",
+        ):
+            self.assertIn(
+                f'id="{filter_id}" type="search" aria-keyshortcuts="Escape"',
+                html,
+            )
 
     def test_projection_rendering_is_text_only_deterministic_and_focusable(self):
         html = INDEX.read_text(encoding="utf-8")

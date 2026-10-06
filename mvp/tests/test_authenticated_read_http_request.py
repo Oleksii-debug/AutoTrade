@@ -101,6 +101,39 @@ class AuthenticatedReadHttpRequestTests(unittest.TestCase):
 
         self.assertEqual(ExecutableReadRequest.callbacks, 0)
 
+    def test_wire_client_rejects_post_construction_read_request_mutation_zero_wire(self):
+        class Opener:
+            def __init__(self):
+                self.calls = 0
+
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                raise AssertionError("wire must not be reached")
+
+        request = AuthenticatedReadHttpRequest(
+            url="https://localhost/iserver/accounts",
+            headers={"Accept": "application/json"},
+            timeout_seconds=5,
+            method="GET",
+            body=b"",
+        )
+        object.__setattr__(
+            request,
+            "url",
+            "https://attacker.invalid/iserver/accounts",
+        )
+        client = UrllibJsonWireClient(max_response_bytes=1024)
+        opener = Opener()
+        client._opener = opener
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "changed after construction",
+        ):
+            client.send(request)
+
+        self.assertEqual(opener.calls, 0)
+
     def test_wire_client_preserves_queryless_get_method(self):
         class Response:
             status = 200

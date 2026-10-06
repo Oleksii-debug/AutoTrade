@@ -1,4 +1,5 @@
 from hashlib import sha256
+from pathlib import Path
 import inspect
 from tempfile import TemporaryDirectory
 from types import MappingProxyType
@@ -1306,6 +1307,47 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                     for scenario in RecoveryScenario
                 },
             )
+
+
+    def test_evidence_root_rejects_executable_subclasses_before_callbacks(self):
+        calls = []
+
+        class HostileStr(str):
+            def __fspath__(self):
+                calls.append("str-fspath")
+                raise AssertionError("caller path callback must not execute")
+
+            def encode(self, *args, **kwargs):
+                calls.append("str-encode")
+                raise AssertionError("caller string callback must not execute")
+
+        ConcretePath = type(Path())
+
+        class HostilePath(ConcretePath):
+            def __fspath__(self):
+                calls.append("path-fspath")
+                raise AssertionError("caller path callback must not execute")
+
+            def __str__(self):
+                calls.append("path-str")
+                raise AssertionError("caller path callback must not execute")
+
+        for hostile_root in (
+            HostileStr("/tmp/autotrade-hostile-root"),
+            HostilePath("/tmp/autotrade-hostile-root"),
+        ):
+            with self.subTest(root_type=type(hostile_root).__name__):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "exact str or concrete pathlib path",
+                ):
+                    qualify_recovery_release(
+                        policy=policy(),
+                        evidence=complete_evidence(),
+                        evidence_root=hostile_root,
+                    )
+
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

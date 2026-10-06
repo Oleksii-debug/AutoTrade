@@ -248,7 +248,7 @@ def _terminal_nvda_status(
         return False
     if exact_source_sha is None or nvda_status.get("source_sha") != exact_source_sha:
         return False
-    for field in ("release_artifact_id", "attestation_id"):
+    for field in ("release_artifact_id", "attestation_id", "evidence_artifact_id"):
         value = nvda_status.get(field)
         if not isinstance(value, str) or _UUID_TEXT.fullmatch(value) is None:
             return False
@@ -271,21 +271,11 @@ def _terminal_nvda_status(
         return False
 
     receipt = evidence_context.nvda_receipt
-    matching_refs = tuple(
-        ref
-        for ref in receipt.attestation.evidence_refs
-        if (
-            ref.sha256 == nvda_status["evidence_sha256"]
-            and ref.evidence_kind == "NVDA_REAL_RUN"
-            and ref.source_sha == exact_source_sha
-        )
-    )
-    if len(matching_refs) != 1:
-        return False
+    evidence_artifact_id = nvda_status["evidence_artifact_id"]
 
     try:
         _manifest, raw_evidence = evidence_context._read_authenticated_snapshot(
-            matching_refs[0].artifact_id
+            evidence_artifact_id
         )
         if (
             "sha256:" + sha256(raw_evidence).hexdigest()
@@ -336,6 +326,7 @@ def _terminal_nvda_status(
         "release_artifact_id",
         "artifact_sha256",
         "evidence_sha256",
+        "evidence_artifact_id",
         "attestation_id",
         "attestation_digest",
         "policy_id",

@@ -51,9 +51,13 @@ from mvp.autotrade_mvp.provider_transport import (
     ProviderEndpointPolicy,
     ProviderTransportError,
     ProviderTransportScopeError,
+    DirectTradingWriteExecutionReceipt,
     TradingWireResponse,
     SignedHttpRequest,
     UrllibJsonWireClient,
+    direct_trading_write_execution_receipt,
+    direct_trading_write_exact_response_receipt,
+    require_direct_trading_write_client,
     _exact_trading_response,
     _bybit_exact_trading_response,
     _binance_exact_trading_response,
@@ -4577,6 +4581,115 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
             body=b"{}",
             timeout_seconds=2,
         )
+
+    def test_direct_trading_write_receipt_constructor_is_sealed(self):
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "minted only by canonical wire execution",
+        ):
+            DirectTradingWriteExecutionReceipt()
+
+    def test_canonical_direct_trading_client_is_registered_without_network_io(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        self.assertIs(require_direct_trading_write_client(client), client)
+
+    def test_replaced_opener_loses_direct_trading_write_authority_before_io(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        client._opener = object()
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "network authority changed",
+        ):
+            require_direct_trading_write_client(client)
+
+    def test_network_method_rebinding_loses_direct_trading_write_authority(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        with patch(
+            "mvp.autotrade_mvp.provider_transport.HTTPSHandler.https_open",
+            new=lambda *_args, **_kwargs: self.fail("patched network method executed"),
+        ):
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "network authority changed",
+            ):
+                require_direct_trading_write_client(client)
+
+    def test_signed_request_verifier_rebinding_fails_without_hostile_dispatch(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        calls = 0
+
+        def hostile_verifier(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("hostile signed-request verifier executed")
+
+        with patch(
+            "mvp.autotrade_mvp.provider_transport._require_signed_http_request",
+            new=hostile_verifier,
+        ):
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "network authority changed",
+            ):
+                require_direct_trading_write_client(client)
+        self.assertEqual(calls, 0)
+
+    def test_forged_write_receipt_on_local_response_has_no_execution_authority(self):
+        response = TradingWireResponse(
+            http_status=200,
+            body=b'{"ok":true}',
+        )
+        forged = object.__new__(DirectTradingWriteExecutionReceipt)
+        object.__setattr__(
+            response,
+            "_direct_trading_write_execution_receipt",
+            forged,
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "construction authority is unavailable",
+        ):
+            direct_trading_write_execution_receipt(response)
+
+    def test_injected_opener_write_response_cannot_mint_direct_receipt(self):
+        class Stream(BytesIO):
+            status = 200
+
+            def __init__(self):
+                super().__init__(b'{"ok":true}')
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class InjectedOpener:
+            def open(self, *_args, **_kwargs):
+                return Stream()
+
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        client._opener = InjectedOpener()
+        response = client.send(self.request())
+        self.assertIs(type(response), TradingWireResponse)
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "canonical direct trading-write execution receipt",
+        ):
+            direct_trading_write_execution_receipt(response)
+
+    def test_caller_assembled_exact_response_has_no_direct_write_authority(self):
+        exact = _bybit_exact_trading_response(
+            TradingWireResponse(
+                http_status=200,
+                body=b'{"retCode":0,"retMsg":"OK","result":{}}',
+            )
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "lacks direct trading-write execution authority",
+        ):
+            direct_trading_write_exact_response_receipt(exact)
 
     def test_production_client_disables_ambient_process_os_proxy_discovery(self):
         with patch("mvp.autotrade_mvp.provider_transport.build_opener") as factory:

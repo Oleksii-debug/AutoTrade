@@ -1,7 +1,7 @@
 import json
 import sqlite3
 from datetime import datetime as real_datetime, timezone
-from decimal import Inexact, Rounded, ROUND_CEILING, localcontext
+from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, localcontext
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1077,6 +1077,33 @@ class VerticalSliceTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs), TemporaryDirectory() as directory:
                 with self.assertRaises(TypeError):
                     run_vertical_slice([100, 101, 102, 103], directory, **kwargs)
+
+    def test_money_quantization_ignores_mutable_module_aliases(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        expected = pipeline_module._money("1.234567895")
+        with (
+            patch.object(pipeline_module, "MONEY_QUANTUM", Decimal("1")),
+            patch.object(
+                pipeline_module,
+                "round_fraction_to_quantum",
+                side_effect=AssertionError("mutable rounder alias executed"),
+            ),
+            patch.object(
+                pipeline_module,
+                "as_fraction",
+                side_effect=AssertionError("mutable fraction alias executed"),
+            ),
+            patch.object(
+                pipeline_module,
+                "parse_bounded_exact_decimal",
+                side_effect=AssertionError("mutable parser alias executed"),
+            ),
+        ):
+            observed = pipeline_module._money("1.234567895")
+
+        self.assertEqual(observed, expected)
+        self.assertEqual(observed, Decimal("1.23456790"))
 
     def test_financial_configuration_rejects_noncanonical_symbol_text(self):
         for symbol in (" SIM", "SIM ", " SIM ", "\tSIM", "SIM\n"):

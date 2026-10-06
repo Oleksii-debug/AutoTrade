@@ -273,14 +273,14 @@ class ResourceAvailabilityEvidence:
             raise ValueError("valid_until must be after query_completed_at")
         if self.provider_as_of is not None:
             _instant(self.provider_as_of, name="provider_as_of")
-        if not isinstance(self.available_resources, Mapping):
-            raise TypeError("available_resources must be a mapping")
+        if type(self.available_resources) is not dict:
+            raise TypeError("available_resources must use an exact dict")
         if not self.available_resources:
             raise ValueError("available_resources must not be empty")
         normalized: dict[str, Decimal] = {}
         for resource, raw in self.available_resources.items():
-            if not isinstance(resource, str):
-                raise TypeError("available_resources keys must be strings")
+            if type(resource) is not str:
+                raise TypeError("available_resources keys must use exact strings")
             key = _text(resource, name="available_resources key")
             if key in normalized:
                 raise ValueError(
@@ -297,8 +297,8 @@ class ResourceAvailabilityEvidence:
         )
 
         raw_details = {} if self.resource_details is None else self.resource_details
-        if not isinstance(raw_details, Mapping):
-            raise TypeError("resource_details must be a mapping")
+        if type(raw_details) is not dict:
+            raise TypeError("resource_details must use an exact dict")
         normalized_details: dict[str, Mapping[str, str]] = {}
         for raw_resource, raw_detail in raw_details.items():
             resource = _text(raw_resource, name="resource_details key")
@@ -306,13 +306,13 @@ class ResourceAvailabilityEvidence:
                 raise ValueError(
                     "resource_details may only describe available_resources"
                 )
-            if not isinstance(raw_detail, Mapping):
-                raise TypeError("resource detail must be a mapping")
+            if type(raw_detail) is not dict:
+                raise TypeError("resource detail must use an exact dict")
             detail: dict[str, str] = {}
             for raw_key, raw_value in raw_detail.items():
                 key = _text(raw_key, name="resource detail key")
-                if not isinstance(raw_value, str):
-                    raise TypeError("resource detail values must be strings")
+                if type(raw_value) is not str:
+                    raise TypeError("resource detail values must use exact strings")
                 if key in detail:
                     raise ValueError(
                         "resource detail keys must be unique after normalization"

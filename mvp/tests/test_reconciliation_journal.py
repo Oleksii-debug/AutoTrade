@@ -129,6 +129,82 @@ def reconciliation(**overrides):
 
 class ReconciliationJournalTests(unittest.TestCase):
 
+    def test_resource_availability_rejects_polymorphic_mappings_before_callbacks(self):
+        class ExplosiveDict(dict):
+            calls = 0
+
+            def _explode(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("provider availability mapping callback executed")
+
+            items = _explode
+            __iter__ = _explode
+            __len__ = _explode
+            __bool__ = _explode
+
+        common = dict(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            snapshot_id="hostile-capacity",
+            query_started_at="2026-09-24T17:00:00Z",
+            query_completed_at="2026-09-24T19:00:00Z",
+            provider_as_of="2026-09-24T18:59:59Z",
+            valid_until="2026-09-24T19:05:00Z",
+            evidence_refs=("provider:hostile-capacity",),
+        )
+
+        ExplosiveDict.calls = 0
+        with self.assertRaisesRegex(TypeError, "available_resources must use an exact dict"):
+            ResourceAvailabilityEvidence(
+                **common,
+                available_resources=ExplosiveDict({"CASH:USD": "850"}),
+            )
+        self.assertEqual(ExplosiveDict.calls, 0)
+
+        ExplosiveDict.calls = 0
+        with self.assertRaisesRegex(TypeError, "resource_details must use an exact dict"):
+            ResourceAvailabilityEvidence(
+                **common,
+                available_resources={"CASH:USD": "850"},
+                resource_details=ExplosiveDict({}),
+            )
+        self.assertEqual(ExplosiveDict.calls, 0)
+
+    def test_resource_availability_rejects_polymorphic_nested_detail_before_callbacks(self):
+        class ExplosiveDetail(dict):
+            calls = 0
+
+            def _explode(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("provider resource detail callback executed")
+
+            items = _explode
+            __iter__ = _explode
+            __len__ = _explode
+            __bool__ = _explode
+
+        ExplosiveDetail.calls = 0
+        with self.assertRaisesRegex(TypeError, "resource detail must use an exact dict"):
+            ResourceAvailabilityEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                snapshot_id="hostile-detail",
+                query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+                provider_as_of="2026-09-24T18:59:59Z",
+                valid_until="2026-09-24T19:05:00Z",
+                available_resources={"MARGIN_CREDIT:USD": "250"},
+                evidence_refs=("provider:hostile-detail",),
+                resource_details={
+                    "MARGIN_CREDIT:USD": ExplosiveDetail(
+                        {"schema_version": "margin-buying-power-resource.v1"}
+                    ),
+                },
+            )
+        self.assertEqual(ExplosiveDetail.calls, 0)
+
     def test_margin_credit_requires_typed_buying_power_evidence(self):
         with self.assertRaisesRegex(
             ValueError,

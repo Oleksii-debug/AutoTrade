@@ -314,5 +314,133 @@ class ExactResponseSnapshotCurrentTests(unittest.TestCase):
             )
 
 
+    def test_post_send_builtin_and_decoder_default_tamper_compose_unknown_restart_safe(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        callbacks = 0
+
+        def hostile_type(*_args, **_kwargs):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("post-send hostile type shadow executed")
+
+        class ForgedDecoder:
+            def __init__(self, **_kwargs):
+                pass
+
+            def decode(self, _text):
+                raise AssertionError("forged decoder executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            json_loads = dispatch_module.json.loads
+            original_kwdefaults = json_loads.__kwdefaults__
+            baseline_kwdefaults = dict(original_kwdefaults)
+            module_globals = vars(dispatch_module)
+            had_type_global = "type" in module_globals
+            original_type_global = module_globals.get("type")
+            outbound = 0
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                dispatch_module.type = hostile_type
+                json_loads.__kwdefaults__["cls"] = ForgedDecoder
+                return response
+
+            try:
+                first = dispatcher.dispatch(
+                    attempt_id="snapshot-builtins-decoder-compose-a1",
+                    intent_id="intent-builtins-decoder-compose",
+                    intent_hash="sha256:" + "4" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T18:25:00Z",
+                    authority_check=self._allow,
+                    transport_send=transport,
+                    submission_scope={"endpoint": "/orders"},
+                )
+                self.assertEqual(callbacks, 0)
+                self.assertEqual(
+                    json_loads.__kwdefaults__,
+                    baseline_kwdefaults,
+                )
+                if had_type_global:
+                    self.assertIs(
+                        dispatch_module.type,
+                        original_type_global,
+                    )
+                else:
+                    self.assertNotIn("type", vars(dispatch_module))
+            finally:
+                json_loads.__kwdefaults__ = original_kwdefaults
+                original_kwdefaults.clear()
+                original_kwdefaults.update(baseline_kwdefaults)
+                if had_type_global:
+                    dispatch_module.type = original_type_global
+                else:
+                    vars(dispatch_module).pop("type", None)
+
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(first.reason, "sent_response_persistence_failed")
+            self.assertEqual(outbound, 1)
+            self.assertEqual(callbacks, 0)
+
+            events = JournalStore.load_events(
+                JournalStore(path),
+                "submission_attempt",
+                dispatcher._aggregate_id(
+                    "snapshot-builtins-decoder-compose-a1"
+                ),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:ValueError",
+            )
+
+            restarted = GuardedDispatcher(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner-b",
+            )
+            replay = restarted.dispatch(
+                attempt_id="snapshot-builtins-decoder-compose-a1",
+                intent_id="intent-builtins-decoder-compose",
+                intent_hash="sha256:" + "4" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T18:25:01Z",
+                authority_check=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("terminal replay must not re-authorize")),
+                transport_send=lambda *_args: (
+                    _ for _ in ()
+                ).throw(AssertionError("terminal replay must not resend")),
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(replay.status, "UNKNOWN")
+            self.assertEqual(
+                replay.reason,
+                "sent_response_persistence_failed:ValueError",
+            )
+            self.assertEqual(outbound, 1)
+            self.assertEqual(callbacks, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

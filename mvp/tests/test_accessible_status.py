@@ -312,38 +312,42 @@ class AccessibleStatusTests(unittest.TestCase):
         class TrapKey:
             def __init__(self, text):
                 self.text = text
+                self.armed = False
 
             def __hash__(self):
                 return hash(self.text)
 
             def __eq__(self, other):
-                raise AssertionError("caller-controlled key equality executed")
+                if self.armed:
+                    raise AssertionError("caller-controlled key equality executed")
+                return False
 
-        text = format_accessible_status(
-            {
-                TrapKey("status"): "running",
-                "status": "running",
-                TrapKey("fills"): {},
-                "fills": {},
-                "symbol": "SIM",
-                "state_format": "canonical_journal",
-                "active_reservations": [
-                    {
-                        TrapKey("remaining"): {},
-                        "remaining": {},
-                        "state": "ACTIVE",
-                    }
-                ],
-            },
-            {
-                TrapKey("reconciled"): True,
-                "reconciled": True,
-            },
-        )
+        fills_key = TrapKey("fills")
+        remaining_key = TrapKey("remaining")
+        reconciled_key = TrapKey("reconciled")
+        status = {
+            "status": "running",
+            fills_key: {},
+            "symbol": "SIM",
+            "state_format": "canonical_journal",
+            "active_reservations": [
+                {
+                    remaining_key: {},
+                    "state": "ACTIVE",
+                }
+            ],
+        }
+        economic_report = {reconciled_key: True}
+        fills_key.armed = True
+        remaining_key.armed = True
+        reconciled_key.armed = True
+
+        text = format_accessible_status(status, economic_report)
         self.assertIn("System state: Running", text)
         self.assertIn("Instrument: SIM", text)
-        self.assertIn("Active reservations: 1", text)
-        self.assertIn("Economic reconciliation: passed", text)
+        self.assertIn("Recorded fills: 0", text)
+        self.assertIn("Reservation 1: unavailable; state: ACTIVE", text)
+        self.assertIn("Economic reconciliation: not confirmed", text)
 
 
 if __name__ == "__main__":

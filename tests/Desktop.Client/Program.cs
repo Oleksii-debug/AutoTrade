@@ -1144,6 +1144,9 @@ internal static class Program
                 }
                 Accept(first);
                 Accept(first with { StateVersion = "8", ObservedAtUtc = origin.AddMinutes(-10), IsCurrent = false });
+                var announcement = (System.Windows.Controls.TextBlock)window.FindName("HostStatusAnnouncement");
+                Check.True(announcement.Text.StartsWith("Host status is stale.", StringComparison.Ordinal),
+                    "automatic freshness transitions must announce stale host evidence");
                 Reject(first with { StateVersion = "9", ObservedAtUtc = origin.AddMinutes(-5) });
                 Accept(first with { StateVersion = "9", ObservedAtUtc = origin.AddMinutes(-20), IsCurrent = false });
                 Reject(first with { StateVersion = "10", ObservedAtUtc = origin.AddMinutes(-1) });
@@ -1152,6 +1155,8 @@ internal static class Program
                 Reject(first with { StateVersion = "8", ObservedAtUtc = origin.AddMinutes(1) });
                 Reject(first with { StateVersion = "10", HostId = "different-host" });
                 Accept(first with { StateVersion = "10" }); // Equality is valid.
+                Check.True(announcement.Text.StartsWith("Host status refreshed.", StringComparison.Ordinal),
+                    "automatic freshness transitions must announce restored current evidence");
                 Accept(first with { StateVersion = "11", ObservedAtUtc = origin.AddMinutes(1) });
                 Check.True(((EmergencyHostStatus)current.GetValue(window)!).ObservedAtUtc == origin.AddMinutes(1),
                     "new CURRENT evidence did not advance the retained floor");
@@ -1159,6 +1164,55 @@ internal static class Program
                 var displayed = (System.Windows.Controls.TextBox)window.FindName("LastEvidenceValue");
                 Check.True(displayed.Text.Contains("stale", StringComparison.Ordinal),
                     "disconnected display did not label retained evidence stale");
+
+                var timer = (System.Windows.Threading.DispatcherTimer)typeof(MainWindow)
+                    .GetField("_hostRefreshTimer", flags)!.GetValue(window)!;
+                typeof(MainWindow).GetMethod("MainWindow_Loaded", flags)!
+                    .Invoke(window, new object[] { window, new System.Windows.RoutedEventArgs() });
+                Check.True(timer.IsEnabled && timer.Interval == TimeSpan.FromSeconds(10),
+                    "native status refresh did not start its bounded periodic cadence");
+                typeof(MainWindow).GetMethod("MainWindow_Closed", flags)!
+                    .Invoke(window, new object?[] { window, EventArgs.Empty });
+                Check.True(!timer.IsEnabled,
+                    "native status refresh continued after the window closed");
+            }
+            catch (Exception error) { failure = error; }
+            finally { window?.Close(); }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
+    static void AutomaticHostRefreshKeepsRefreshButtonEnabledTest()
+    {
+        Exception? failure = null;
+        Thread thread = new(() =>
+        {
+            MainWindow? window = null;
+            try
+            {
+                const System.Reflection.BindingFlags flags =
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                InspectingStatusHostClient client = new();
+                window = (MainWindow)Activator.CreateInstance(
+                    typeof(MainWindow),
+                    flags,
+                    null,
+                    new object[] { client },
+                    null)!;
+                var button = (System.Windows.Controls.Button)window.FindName("RefreshStatusButton");
+                client.OnGetStatus = () => Check.True(
+                    button.IsEnabled,
+                    "automatic host refresh disabled the focusable refresh button");
+                var refresh = typeof(MainWindow).GetMethod("RefreshHostStatusAsync", flags)!;
+                Task task = (Task)refresh.Invoke(window, new object[] { false, false })!;
+                task.GetAwaiter().GetResult();
+                Check.True(
+                    button.IsEnabled,
+                    "automatic host refresh left the focusable refresh button disabled");
             }
             catch (Exception error) { failure = error; }
             finally { window?.Close(); }
@@ -1173,6 +1227,7 @@ internal static class Program
     public static async Task Main()
     {
         WindowRetainsCurrentEvidenceFloorTest();
+        AutomaticHostRefreshKeepsRefreshButtonEnabledTest();
         CanonicalOperationIdentityVectorTest();
         CredentialTargetIsOriginBoundTest();
         await PairedOriginMismatchFailsBeforeTransportTest();
@@ -1193,6 +1248,29 @@ internal static class Program
         await SnapshotBearerEchoFailsClosedTest();
         Console.WriteLine("Desktop authenticated host-client contract tests passed.");
     }
+}
+
+internal sealed class InspectingStatusHostClient : IEmergencyHostClient
+{
+    public Action? OnGetStatus { get; set; }
+
+    public Task<EmergencyHostStatus> GetStatusAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        OnGetStatus?.Invoke();
+        return Task.FromResult(
+            EmergencyHostStatus.Disconnected(
+                "Inspecting status client is intentionally disconnected."));
+    }
+
+    public Task<EmergencyCommandResult> BlockNewExposureAsync(
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+
+    public Task<EmergencyOperationStatus> GetOperationAsync(
+        string operationId,
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
 }
 
 internal static class Check

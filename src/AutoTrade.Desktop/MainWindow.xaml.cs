@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Windows.Automation.Peers;
 using System.Windows.Controls;
+using System.Windows.Threading;
 
 namespace AutoTrade.Desktop;
 
@@ -8,8 +9,21 @@ public partial class MainWindow : Window
 {
     private readonly IEmergencyHostClient _hostClient;
     private readonly CancellationTokenSource _lifetime = new();
+    private readonly DispatcherTimer _hostRefreshTimer = new()
+    {
+        Interval = TimeSpan.FromSeconds(10),
+    };
+    private bool _hostRefreshInProgress;
+    private HostDisplayFreshness? _lastDisplayedFreshness;
     private EmergencyHostStatus? _lastKnownConnectedStatus;
     private EmergencyHostStatus? _lastKnownCurrentStatus;
+
+    private enum HostDisplayFreshness
+    {
+        Current,
+        Stale,
+        Disconnected,
+    }
 
     public MainWindow()
         : this(DesktopHostClientFactory.Create())
@@ -20,6 +34,7 @@ public partial class MainWindow : Window
     {
         _hostClient = hostClient ?? throw new ArgumentNullException(nameof(hostClient));
         InitializeComponent();
+        _hostRefreshTimer.Tick += HostRefreshTimer_Tick;
         ConnectionStatus.Text = "Host unavailable; new exposure cannot be confirmed blocked from this window.";
     }
 
@@ -40,11 +55,21 @@ public partial class MainWindow : Window
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         await RefreshHostStatusAsync(announce: true, returnFocus: false);
+        if (!_lifetime.IsCancellationRequested)
+        {
+            _hostRefreshTimer.Start();
+        }
     }
 
     private void MainWindow_Closed(object? sender, EventArgs e)
     {
+        _hostRefreshTimer.Stop();
         _lifetime.Cancel();
+    }
+
+    private async void HostRefreshTimer_Tick(object? sender, EventArgs e)
+    {
+        await RefreshHostStatusAsync(announce: false, returnFocus: false);
     }
 
     private async void RefreshHostStatus_Click(object sender, RoutedEventArgs e)
@@ -54,7 +79,20 @@ public partial class MainWindow : Window
 
     private async Task RefreshHostStatusAsync(bool announce, bool returnFocus)
     {
-        RefreshStatusButton.IsEnabled = false;
+        if (_hostRefreshInProgress || _lifetime.IsCancellationRequested)
+        {
+            return;
+        }
+
+        _hostRefreshInProgress = true;
+        // Only an explicit keyboard/button invocation owns the button state.
+        // Periodic refresh must not disable a focusable control every ten
+        // seconds, because doing so can evict keyboard/NVDA focus.
+        bool manageRefreshButton = returnFocus;
+        if (manageRefreshButton)
+        {
+            RefreshStatusButton.IsEnabled = false;
+        }
 
         try
         {
@@ -74,7 +112,11 @@ public partial class MainWindow : Window
         }
         finally
         {
-            RefreshStatusButton.IsEnabled = true;
+            if (manageRefreshButton)
+            {
+                RefreshStatusButton.IsEnabled = true;
+            }
+            _hostRefreshInProgress = false;
             if (returnFocus && IsLoaded)
             {
                 RefreshStatusButton.Focus();
@@ -86,6 +128,14 @@ public partial class MainWindow : Window
     {
         status = (status ?? throw new InvalidOperationException(
             "Host status response was null.")).Validated();
+
+        HostDisplayFreshness freshness = !status.Connected
+            ? HostDisplayFreshness.Disconnected
+            : status.IsCurrent
+                ? HostDisplayFreshness.Current
+                : HostDisplayFreshness.Stale;
+        bool announceTransition = _lastDisplayedFreshness is { } previousFreshness
+            && previousFreshness != freshness;
 
         if (status.Connected)
         {
@@ -134,7 +184,9 @@ public partial class MainWindow : Window
                     $"{status.Message} Snapshot values are stale and are not current evidence.";
             }
 
-            if (announce)
+            _lastDisplayedFreshness = freshness;
+
+            if (announce || announceTransition)
             {
                 string prefix = status.IsCurrent
                     ? "Host status refreshed."
@@ -146,6 +198,8 @@ public partial class MainWindow : Window
 
             return;
         }
+
+        _lastDisplayedFreshness = freshness;
 
         if (_lastKnownConnectedStatus is { } lastConnected)
         {
@@ -167,7 +221,7 @@ public partial class MainWindow : Window
             ConnectionStatus.Text = status.Message;
         }
 
-        if (announce)
+        if (announce || announceTransition)
         {
             SetLiveRegionText(
                 HostStatusAnnouncement,

@@ -1054,9 +1054,15 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         string ExpectedStateVersion);
 }
 
+internal sealed record DesktopHostConnection(
+    IEmergencyHostClient Client,
+    IEmergencyHostSessionProvider? SessionProvider);
+
 internal static class DesktopHostClientFactory
 {
-    public static IEmergencyHostClient Create()
+    public static IEmergencyHostClient Create() => CreateConnection().Client;
+
+    public static DesktopHostConnection CreateConnection()
     {
         string? uriText = Environment.GetEnvironmentVariable("AUTOTRADE_HOST_URI");
         string? credentialTarget =
@@ -1065,9 +1071,11 @@ internal static class DesktopHostClientFactory
             || string.IsNullOrWhiteSpace(credentialTarget)
             || !Uri.TryCreate(uriText.Trim(), UriKind.Absolute, out Uri? uri))
         {
-            return new DisconnectedEmergencyHostClient(
-                "Authenticated host connection is not configured. "
-                + "Set the non-secret host URI and Windows Credential Manager target after pairing.");
+            return new DesktopHostConnection(
+                new DisconnectedEmergencyHostClient(
+                    "Authenticated host connection is not configured. "
+                    + "Set the non-secret host URI and Windows Credential Manager target after pairing."),
+                null);
         }
 
         try
@@ -1082,23 +1090,27 @@ internal static class DesktopHostClientFactory
                 Timeout = TimeSpan.FromSeconds(10),
             };
             string canonicalCredentialTarget = credentialTarget.Trim();
-            return new AuthenticatedEmergencyHostClient(
+            WindowsCredentialManagerSessionProvider sessionProvider = new(
+                canonicalCredentialTarget,
+                uri);
+            IEmergencyHostClient client = new AuthenticatedEmergencyHostClient(
                 httpClient,
                 uri,
-                new WindowsCredentialManagerSessionProvider(
-                    canonicalCredentialTarget,
-                    uri),
+                sessionProvider,
                 new WindowsCredentialManagerPendingCommandStore(
                     canonicalCredentialTarget + ":pending-emergency-command-v1"));
+            return new DesktopHostConnection(client, sessionProvider);
         }
         catch (Exception error) when (
             error is ArgumentException
             or InvalidOperationException
             or PlatformNotSupportedException)
         {
-            return new DisconnectedEmergencyHostClient(
-                "Authenticated host configuration is invalid. "
-                + "No durable emergency command can be issued until pairing/configuration is repaired.");
+            return new DesktopHostConnection(
+                new DisconnectedEmergencyHostClient(
+                    "Authenticated host configuration is invalid. "
+                    + "No durable emergency command can be issued until pairing/configuration is repaired."),
+                null);
         }
     }
 }

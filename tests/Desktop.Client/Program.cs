@@ -80,6 +80,206 @@ internal static class Program
             "request actor header is missing or changed");
     }
     
+    static void WebExperienceSecurityPolicyOriginAndNavigationTest()
+    {
+        WebExperienceSecurityPolicy policy = new(HostOrigin);
+
+        Check.True(
+            policy.HostOrigin == HostOrigin,
+            "embedded web policy changed the canonical paired host origin");
+        Check.True(
+            policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/")),
+            "canonical host root was not admitted");
+        Check.True(
+            policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/index.html")),
+            "canonical index document was not admitted");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/app/index.html")),
+            "arbitrary same-origin document entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/api/v1/state")),
+            "Host API JSON was admitted as a trusted top-level document");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/index.html?mode=debug")),
+            "query-selected UI document entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/index.html#debug")),
+            "fragment-selected UI document entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8766/app/")),
+            "cross-port navigation entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("https://127.0.0.1:8765/app/")),
+            "cross-scheme navigation entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("https://example.com/")),
+            "external HTTPS navigation entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("file:///C:/AutoTrade/index.html")),
+            "file navigation entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("data:text/html,untrusted")),
+            "data URI navigation entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://user@127.0.0.1:8765/app/")),
+            "userinfo-bearing URI entered the trusted embedded surface");
+
+        Check.Throws<ArgumentException>(
+            () => _ = new WebExperienceSecurityPolicy(new Uri("http://example.com/")),
+            "non-loopback plaintext host origin was accepted");
+        Check.Throws<ArgumentException>(
+            () => _ = new WebExperienceSecurityPolicy(new Uri("http://127.0.0.1:8765/path")),
+            "host origin with a path was accepted");
+    }
+
+    static void WebExperienceSecurityPolicyCredentialForwardingTest()
+    {
+        WebExperienceSecurityPolicy policy = new(HostOrigin);
+
+        Uri trustedDocument = new(HostOrigin, "/index.html");
+        foreach ((string Method, string Path) request in new[]
+        {
+            ("GET", "/api/v1/state"),
+            ("POST", "/api/v1/commands"),
+            ("GET", "/api/v1/events"),
+            ("GET", "/api/v1/events?after=7"),
+            ("GET", "/api/v1/operations/11111111-1111-1111-1111-111111111111"),
+        })
+        {
+            Check.True(
+                policy.AllowsSessionHeaderForwarding(
+                    request.Method,
+                    new Uri(HostOrigin, request.Path),
+                    trustedDocument),
+                "canonical Host API request lost session-header eligibility: "
+                    + request.Method + " " + request.Path);
+        }
+
+        foreach ((string Method, string Path) request in new[]
+        {
+            ("POST", "/api/v1/state"),
+            ("GET", "/api/v1/commands"),
+            ("POST", "/api/v1/events"),
+            ("POST", "/api/v1/events?after=7"),
+            ("POST", "/api/v1/operations/11111111-1111-1111-1111-111111111111"),
+            ("get", "/api/v1/state"),
+            ("", "/api/v1/state"),
+        })
+        {
+            Check.True(
+                !policy.AllowsSessionHeaderForwarding(
+                    request.Method,
+                    new Uri(HostOrigin, request.Path),
+                    trustedDocument),
+                "noncanonical HTTP method gained session-header forwarding authority: "
+                    + request.Method + " " + request.Path);
+        }
+
+        foreach (Uri target in new[]
+        {
+            new Uri(HostOrigin, "/"),
+            new Uri(HostOrigin, "/index.html"),
+            new Uri(HostOrigin, "/api/v1"),
+            new Uri(HostOrigin, "/api/v1/health"),
+            new Uri(HostOrigin, "/api/v1/future"),
+            new Uri(HostOrigin, "/api/v1/operations/not-a-uuid"),
+            new Uri(HostOrigin, "/api/v1/operations/11111111-1111-1111-1111-111111111111/extra"),
+            new Uri(HostOrigin, "/api/v1/operations/11111111-1111-1111-1111-11111111111A"),
+            new Uri(HostOrigin, "/api/v1/state?unexpected=1"),
+            new Uri(HostOrigin, "/api/v1/commands?unexpected=1"),
+            new Uri(HostOrigin, "/api/v1/operations/11111111-1111-1111-1111-111111111111?unexpected=1"),
+            new Uri(HostOrigin, "/api/v1/events?unexpected=1"),
+            new Uri(HostOrigin, "/api/v1/events?after="),
+            new Uri(HostOrigin, "/api/v1/events?after=01"),
+            new Uri(HostOrigin, "/api/v1/events?after=1&other=2"),
+            new Uri(HostOrigin, "/api/v10/state"),
+            new Uri(HostOrigin, "/api/v1evil/state"),
+            new Uri(HostOrigin, "/api/v1/state#debug"),
+            new Uri("http://127.0.0.1:8766/api/v1/state"),
+            new Uri("https://example.com/api/v1/state"),
+        })
+        {
+            Check.True(
+                !policy.AllowsSessionHeaderForwarding("GET", target, trustedDocument),
+                "credential forwarding escaped canonical Host API origin/path: " + target);
+        }
+
+        foreach (Uri untrustedDocument in new[]
+        {
+            new Uri(HostOrigin, "/app.js"),
+            new Uri(HostOrigin, "/api/v1/state"),
+            new Uri("http://127.0.0.1:8766/index.html"),
+            new Uri(HostOrigin, "/index.html?debug=1"),
+            new Uri(HostOrigin, "/index.html#debug"),
+        })
+        {
+            Check.True(
+                !policy.AllowsSessionHeaderForwarding(
+                    "GET",
+                    new Uri(HostOrigin, "/api/v1/state"),
+                    untrustedDocument),
+                "untrusted top-level document gained bearer forwarding authority: "
+                    + untrustedDocument);
+        }
+    }
+
+    static void WebExperienceSecurityPolicyDisablesPrivilegedBrowserSurfacesTest()
+    {
+        WebExperienceSecurityPolicy policy = new(HostOrigin);
+
+        Check.True(
+            !policy.AllowsWebMessageCommandAuthority,
+            "web messages acquired financial command authority");
+        Check.True(
+            !policy.AllowsDeveloperTools,
+            "release-mode developer tools were admitted by the trust policy");
+        Check.True(
+            !policy.AllowsServiceWorkers,
+            "service workers acquired same-origin interception authority");
+        Check.True(
+            !policy.AllowsDownloads,
+            "embedded downloads were admitted by the trust policy");
+        Check.True(
+            !policy.AllowsNewWindow(new Uri(HostOrigin, "/app/help")),
+            "same-origin popup was silently admitted as trusted content");
+        Check.True(
+            !policy.AllowsNewWindow(new Uri("https://example.com/")),
+            "external popup was silently admitted as trusted content");
+    }
+
+    static void WebViewProcessFailureRecoveryClassificationTest()
+    {
+        const System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.Static
+            | System.Reflection.BindingFlags.NonPublic;
+        var classifier = typeof(MainWindow).GetMethod(
+            "RequiresFreshWebViewAfterFailure",
+            flags)
+            ?? throw new InvalidOperationException(
+                "WebView process-failure classifier is missing");
+
+        bool Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind kind) =>
+            (bool)(classifier.Invoke(null, new object[] { kind })
+                ?? throw new InvalidOperationException(
+                    "WebView process-failure classifier returned null"));
+
+        Check.True(
+            Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind.BrowserProcessExited),
+            "browser-process exit must require a fresh WebView");
+        Check.True(
+            Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind.RenderProcessExited),
+            "render-process exit must require a fresh WebView");
+        Check.True(
+            Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind.RenderProcessUnresponsive),
+            "unresponsive renderer must expose fresh-WebView recovery");
+        Check.True(
+            !Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind.GpuProcessExited),
+            "GPU-process exit must not discard the whole WebView authority surface");
+        Check.True(
+            !Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind.UtilityProcessExited),
+            "utility-process exit must not discard the whole WebView authority surface");
+    }
+
     static void CanonicalOperationIdentityVectorTest()
     {
         Check.True(
@@ -1172,6 +1372,10 @@ internal static class Program
 
     public static async Task Main()
     {
+        WebExperienceSecurityPolicyOriginAndNavigationTest();
+        WebExperienceSecurityPolicyCredentialForwardingTest();
+        WebExperienceSecurityPolicyDisablesPrivilegedBrowserSurfacesTest();
+        WebViewProcessFailureRecoveryClassificationTest();
         WindowRetainsCurrentEvidenceFloorTest();
         CanonicalOperationIdentityVectorTest();
         CredentialTargetIsOriginBoundTest();

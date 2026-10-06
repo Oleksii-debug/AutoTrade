@@ -588,6 +588,123 @@ class AblationTests(unittest.TestCase):
             )
         self.assertEqual(calls, [])
 
+    def test_hostile_integer_subclass_is_rejected_before_comparison_callbacks(self):
+        calls = []
+
+        class HostileInt(int):
+            def __lt__(self, other):
+                calls.append("lt")
+                raise AssertionError("hostile integer comparison executed")
+
+            def __le__(self, other):
+                calls.append("le")
+                raise AssertionError("hostile integer comparison executed")
+
+        with self.assertRaisesRegex(TypeError, "elapsed_ms"):
+            outcome(
+                variant="FULL",
+                utility=1,
+                cost=0,
+                elapsed=HostileInt(10),
+                components=("base",),
+            )
+        with self.assertRaisesRegex(ValueError, "minimum_pairs"):
+            evaluate_incremental_value(
+                "agent",
+                [],
+                minimum_pairs=HostileInt(2),
+                required_lower_bound=Decimal("0"),
+            )
+        self.assertEqual(calls, [])
+
+    def test_locked_bundle_rejects_hostile_text_before_string_callbacks(self):
+        calls = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("hostile strip executed")
+
+            def encode(self, *args, **kwargs):
+                calls.append("encode")
+                raise AssertionError("hostile encode executed")
+
+        cases = [pair("hostile-bundle-a", "2"), pair("hostile-bundle-b", "2")]
+        locked = build_ablation_evidence_bundle(
+            "agent",
+            cases,
+            source_revision="a" * 40,
+            protocol_digest=FINGERPRINT_C,
+            dataset_digest=FINGERPRINT_D,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        with self.assertRaisesRegex(ValueError, "source_revision"):
+            build_ablation_evidence_bundle(
+                "agent",
+                cases,
+                source_revision=HostileText("a" * 40),
+                protocol_digest=FINGERPRINT_C,
+                dataset_digest=FINGERPRINT_D,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+        with self.assertRaisesRegex(ValueError, "payload"):
+            replace(locked, payload=HostileText(locked.payload))
+        self.assertEqual(calls, [])
+
+    def test_population_tuple_subclass_is_rejected_before_iteration(self):
+        calls = []
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("hostile tuple iteration executed")
+
+            def __len__(self):
+                calls.append("len")
+                raise AssertionError("hostile tuple length executed")
+
+        with self.assertRaisesRegex(ValueError, "population_unit_ids"):
+            RegisteredAblationPopulation(
+                protocol_digest=FINGERPRINT_A,
+                population_digest=FINGERPRINT_D,
+                stopping_rule_digest=FINGERPRINT_C,
+                source_revision="9" * 40,
+                registered_at_utc=CUT - timedelta(days=1),
+                evaluation_cutoff_utc=CUT + timedelta(hours=2),
+                population_unit_ids=HostileTuple(("unit-a",)),
+                complete=True,
+            )
+        self.assertEqual(calls, [])
+
+    def test_canonical_outcome_rejects_hostile_variant_before_equality_callbacks(self):
+        calls = []
+
+        class HostileVariant(str):
+            def __hash__(self):
+                calls.append("hash")
+                raise AssertionError("hostile variant hash executed")
+
+            def __eq__(self, other):
+                calls.append("eq")
+                raise AssertionError("hostile variant equality executed")
+
+        with self.assertRaisesRegex(ValueError, "variant"):
+            CanonicalAblationOutcomeEvidence(
+                case_id="case-hostile",
+                variant=HostileVariant("FULL"),
+                population_unit_id="unit-hostile",
+                utility=Decimal("1"),
+                cost=Decimal("0"),
+                outcome_available_utc=CUT + timedelta(hours=1),
+                source_revision="9" * 40,
+                utility_evidence_digest=FINGERPRINT_B,
+                cost_evidence_digest=FINGERPRINT_C,
+                evidence_digest=FINGERPRINT_D,
+            )
+        self.assertEqual(calls, [])
+
     def test_pair_rejects_noncanonical_outcome_type_before_field_access(self):
         calls = []
 

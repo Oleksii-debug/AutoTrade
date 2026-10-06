@@ -258,6 +258,12 @@ def _canonical_base64(
     name: str,
     expected_length: int | None = None,
 ) -> bytes:
+    if expected_length is not None:
+        expected_encoded_length = ((expected_length + 2) // 3) * 4
+        if type(value) is not str or len(value) != expected_encoded_length:
+            raise HostProviderAttestationError(
+                f"{name} has invalid encoded length"
+            )
     text = _exact_text(value, name=name)
     try:
         raw = base64.b64decode(text, validate=True)
@@ -570,6 +576,7 @@ def _parse_session(value: object) -> HostIssuerSession:
     spki = _canonical_base64(
         spki_text,
         name="public_key_spki_base64",
+        expected_length=91,
     )
     _p256_point_from_spki(spki)
     key_digest = _sha256_text(
@@ -1273,17 +1280,20 @@ def verify_host_observed_attestation(
         expected_public_key_sha256=expected_public_key_sha256,
         expected_query=expected_query,
     )
-    response_text = _exact_text(
-        raw["response_base64"],
-        name="response_base64",
-    )
-    # A 16 MiB payload encodes to at most 22,369,624 padded base64 bytes.
-    # Bound text before decoding so hostile input cannot force unbounded
-    # allocation before provider evidence is authenticated.
-    if len(response_text) > ((_MAX_RESPONSE_BYTES + 2) // 3) * 4:
+    raw_response_text = raw["response_base64"]
+    # Bound the exact built-in string before trim/canonical-text processing or
+    # base64 decoding so hostile input cannot force unbounded authority work.
+    if (
+        type(raw_response_text) is not str
+        or len(raw_response_text) > ((_MAX_RESPONSE_BYTES + 2) // 3) * 4
+    ):
         raise HostProviderAttestationError(
             "Host observed response exceeds the maximum evidence size"
         )
+    response_text = _exact_text(
+        raw_response_text,
+        name="response_base64",
+    )
     response_bytes = _canonical_base64(
         response_text,
         name="response_base64",

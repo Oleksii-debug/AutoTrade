@@ -22,6 +22,7 @@ if __package__:
         dotnet_restore_command_tokens,
         dotnet_restore_targets_project,
         dotnet_restore_tokens_are_locked,
+        dotnet_restore_workflow_commands,
     )
 else:
     from dotnet_lock import (
@@ -31,6 +32,7 @@ else:
         dotnet_restore_command_tokens,
         dotnet_restore_targets_project,
         dotnet_restore_tokens_are_locked,
+        dotnet_restore_workflow_commands,
     )
 
 
@@ -223,13 +225,14 @@ def _dotnet_dependency_lock_blockers(
     if '"src/**/packages.lock.json"' not in workflow_text:
         blockers.append("DOTNET_LOCK_WORKFLOW_PATH_MISSING")
 
-    restore_commands: list[str] = []
-    for raw in workflow_text.splitlines():
-        command = raw.strip()
-        if command.startswith("- "):
-            command = command[2:].strip()
-        if command.startswith("run: dotnet restore "):
-            restore_commands.append(command)
+    restore_commands, unscoped_restore_lines = dotnet_restore_workflow_commands(
+        workflow_text
+    )
+    for line_number in unscoped_restore_lines:
+        blockers.append(
+            "DOTNET_RESTORE_COMMAND_UNSCOPED:"
+            f".github/workflows/dotnet-foundation.yml:{line_number}"
+        )
 
     if not restore_commands:
         blockers.append("DOTNET_LOCKED_RESTORE_COMMAND_MISSING")
@@ -274,8 +277,9 @@ def _dotnet_blockers(root: Path) -> tuple[list[str], list[str], str]:
         blockers.append("NON_EXACT_DOTNET_SDK_VERSION")
         version = "" if version is None else str(version)
 
-    if sdk.get("rollForward") not in (None, "disable"):
-        blockers.append(f"DOTNET_ROLL_FORWARD_NOT_DISABLED:{sdk.get('rollForward')}")
+    roll_forward = sdk.get("rollForward")
+    if roll_forward != "disable":
+        blockers.append(f"DOTNET_ROLL_FORWARD_NOT_DISABLED:{roll_forward}")
 
     package_projects: list[Path] = []
     blockers.extend(dotnet_imported_package_reference_blockers(root))
@@ -308,6 +312,9 @@ def _ci_runtime_blockers(root: Path) -> list[str]:
                 continue
             value = stripped.split(":", 1)[1].strip()
             if value.startswith("${{"):
+                blockers.append(
+                    f"UNRESOLVED_CI_PYTHON_VERSION:{path.relative_to(root)}:{value}"
+                )
                 continue
             literals: list[str]
             if value.startswith("[") and value.endswith("]"):

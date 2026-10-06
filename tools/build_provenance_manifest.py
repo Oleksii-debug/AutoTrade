@@ -21,6 +21,7 @@ if __package__:
         dotnet_restore_command_tokens,
         dotnet_restore_targets_project,
         dotnet_restore_tokens_are_locked,
+        dotnet_restore_workflow_commands,
     )
 else:
     from dotnet_lock import (
@@ -29,6 +30,7 @@ else:
         dotnet_restore_command_tokens,
         dotnet_restore_targets_project,
         dotnet_restore_tokens_are_locked,
+        dotnet_restore_workflow_commands,
     )
 
 
@@ -980,13 +982,21 @@ def build_manifest() -> dict[str, object]:
                         ),
                     }
                 )
-            restore_commands: list[str] = []
-            for raw in foundation_text.splitlines():
-                command = raw.strip()
-                if command.startswith("- "):
-                    command = command[2:].strip()
-                if command.startswith("run: dotnet restore "):
-                    restore_commands.append(command)
+            (
+                restore_commands,
+                unscoped_restore_lines,
+            ) = dotnet_restore_workflow_commands(foundation_text)
+            if unscoped_restore_lines:
+                blockers.append(
+                    {
+                        "code": "DOTNET_RESTORE_COMMAND_UNSCOPED",
+                        "lines": unscoped_restore_lines,
+                        "detail": (
+                            "dotnet restore must be an explicit one-line workflow "
+                            "run command so locked-mode and project coverage are inspectable."
+                        ),
+                    }
+                )
             if not restore_commands:
                 blockers.append(
                     {

@@ -480,6 +480,11 @@ class QualifiedProviderResponseObservation:
         return self.query_binding.parser_identity
 
     @property
+    def provider_environment(self) -> str:
+        _require_qualified_provider_response_authority(self)
+        return self.query_binding.provider_environment
+
+    @property
     def provider_id(self) -> str:
         _require_qualified_provider_response_authority(self)
         return self.observation.provider_id

@@ -596,5 +596,53 @@ class DispatchReconciliationAttemptIdentityTests(unittest.TestCase):
                 )
 
 
+    def test_recovery_rejects_executable_container_ingress_before_callbacks(self):
+        class TrapIterable:
+            def __iter__(self):
+                raise AssertionError("caller-controlled iterable executed")
+
+        class TrapMapping(dict):
+            def items(self):
+                raise AssertionError("caller-controlled mapping items executed")
+
+            def __iter__(self):
+                raise AssertionError("caller-controlled mapping iteration executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "attempt_ids must be an exact list or tuple",
+            ):
+                unknown_submissions_from_dispatch(
+                    store,
+                    attempt_ids=TrapIterable(),
+                )
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "attempt_ids must be an exact list or tuple",
+            ):
+                unknown_submissions_from_dispatch(
+                    store,
+                    attempt_ids=TrapIterable(),
+                    aggregate_ids={"not-reached": "not-reached"},
+                )
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "aggregate_ids must be an exact dict",
+            ):
+                unknown_submissions_from_dispatch(
+                    store,
+                    attempt_ids=("attempt-a",),
+                    aggregate_ids=TrapMapping(
+                        {"attempt-a": "submission-attempt:attempt-a"}
+                    ),
+                )
+
+
+
 if __name__ == "__main__":
     unittest.main()

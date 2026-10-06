@@ -598,6 +598,52 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 observation=observation,
             )
 
+    def test_submission_response_rejects_conflicting_or_hidden_client_identity_alias(self):
+        intent_id = "hedge-client-alias-conflict"
+        expected_client = stable_client_order_id(
+            "KRAKEN",
+            intent_id,
+            environment="PAPER",
+            account_id="futures-account",
+            max_length=36,
+            client_id_format="UUID",
+        )
+        cases = (
+            (
+                {
+                    "cliOrdId": expected_client,
+                    "cli_ord_id": "different-client",
+                },
+                "client identity aliases are inconsistent",
+            ),
+            (
+                {
+                    "cliOrdId": "",
+                    "cli_ord_id": " " + expected_client + " ",
+                },
+                "client identity must be canonical exact text",
+            ),
+        )
+        for echoed_fields, message in cases:
+            with self.subTest(echoed_fields=echoed_fields):
+                attempt, prepared, observation = self._durable_submission_observation(
+                    {
+                        "result": "success",
+                        "sendStatus": {
+                            "order_id": "provider-client-alias-conflict",
+                            "status": "placed",
+                            **echoed_fields,
+                        },
+                    },
+                    intent_id=intent_id,
+                )
+                with self.assertRaisesRegex(ProviderCoreError, message):
+                    parse_submission_response(
+                        attempt_id=attempt,
+                        prepared_request=prepared,
+                        observation=observation,
+                    )
+
     def test_decoded_mapping_cannot_mint_submission_authority(self):
         prepared = prepared_futures_request("hedge-forged")
         with self.assertRaisesRegex(

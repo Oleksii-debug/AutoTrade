@@ -3838,6 +3838,7 @@ class GuardedDispatcher:
 
         terminal_requires_reconciliation = False
         terminal_reason = "sent_confirmed"
+        verified_exact_sent_payload = None
         try:
             if snapshot_type(response) is exact_response_type:
                 # Revalidate raw exact state now. Frozen dataclass construction
@@ -3874,6 +3875,13 @@ class GuardedDispatcher:
                     )
                     sent_payload["reason"] = terminal_reason
                     sent_payload["retry_disposition"] = "RECONCILE_FIRST"
+                # From this point forward the exact response has crossed every
+                # response-authority/decoder fence. If only the terminal journal
+                # append fails, preserve these already-verified bytes as
+                # reconciliation evidence instead of degrading to marker-free
+                # UNKNOWN. This variable is deliberately assigned only after
+                # exact snapshot construction succeeds.
+                verified_exact_sent_payload = sent_payload
             elif snapshot_isinstance(response, exact_response_type):
                 # Caller-polymorphic post-SEND response getters are not evidence.
                 # A durable UNKNOWN retains the no-blind-retry property.
@@ -3905,17 +3913,29 @@ class GuardedDispatcher:
             # Never make this state safe to retry merely because the provider
             # response could not be journaled.
             try:
+                fallback_reason = (
+                    "sent_response_persistence_failed:"
+                    + snapshot_type(persistence_error).__name__
+                )
+                if verified_exact_sent_payload is not None:
+                    fallback_payload = snapshot_dict(
+                        verified_exact_sent_payload
+                    )
+                    if not terminal_requires_reconciliation:
+                        fallback_payload["reason"] = fallback_reason
+                        fallback_payload["retry_disposition"] = (
+                            "RECONCILE_FIRST"
+                        )
+                else:
+                    fallback_payload = {
+                        "client_order_id": client_order_id,
+                        "reason": fallback_reason,
+                    }
                 self._append(
                     attempt_id=attempt_id,
                     event_type="SubmissionUnknown",
                     version=3,
-                    payload={
-                        "client_order_id": client_order_id,
-                        "reason": (
-                            "sent_response_persistence_failed:"
-                            + snapshot_type(persistence_error).__name__
-                        ),
-                    },
+                    payload=fallback_payload,
                     now=barrier_now,
                 )
             except snapshot_exception:

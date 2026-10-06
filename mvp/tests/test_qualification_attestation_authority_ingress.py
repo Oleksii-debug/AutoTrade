@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustPolicy,
     SignedQualificationAttestation,
     TrustRoot,
+    verify_qualification_attestation,
 )
 from mvp.tests.test_qualification_attestation import (
     attestation,
@@ -102,7 +103,23 @@ class QualificationAttestationAuthorityIngressTests(unittest.TestCase):
                 TypeError,
                 "policy must be QualificationTrustPolicy",
             ):
-                verify(receipt, store, derived_policy)
+                verify_qualification_attestation(
+                    receipt,
+                    policy=derived_policy,
+                    evidence_store=store,
+                    evidence_root=store.root,
+                    expected_policy_id=exact_policy.policy_id,
+                    expected_policy_version=exact_policy.policy_version,
+                    expected_source_sha=signed.source_sha,
+                    expected_domain=signed.domain,
+                    expected_gate=signed.gate,
+                    expected_package_id=signed.package_id,
+                    expected_protocol_id=signed.protocol_id,
+                    expected_protocol_version=signed.protocol_version,
+                    expected_requirement_id="release-candidate-freeze",
+                    expected_release_artifact_id=signed.release_artifact_id,
+                    expected_release_artifact_sha256=signed.release_artifact_sha256,
+                )
         self.assertEqual(touched, [])
 
     def test_receipt_subclass_is_rejected_before_attestation_dispatch(self):

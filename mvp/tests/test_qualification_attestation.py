@@ -245,8 +245,8 @@ class QualificationAttestationTests(unittest.TestCase):
             ):
                 verify(receipt, store, trust_policy)
 
-        self.assertEqual(callback_calls, 1)
-        self.assertEqual(original.runner_id, mutated.runner_id)
+        self.assertEqual(callback_calls, 0)
+        self.assertNotEqual(original.runner_id, mutated.runner_id)
 
     def test_verified_snapshot_is_prebuilt_before_evidence_callback_rebinds_constructor(self):
         trust_root = root()
@@ -1766,13 +1766,11 @@ class QualificationAttestationTests(unittest.TestCase):
                 "release_artifact_sha256",
             )
         })
-        receipt = SignedQualificationAttestation(forged, signature)
-
-        with TemporaryDirectory() as directory:
-            store = ArtifactStore(directory)
-            publish(store)
-            with self.assertRaisesRegex(TypeError, "exact canonical QualificationAttestation"):
-                verify(receipt, store, policy(trust_root))
+        with self.assertRaisesRegex(
+            TypeError,
+            "attestation must be QualificationAttestation",
+        ):
+            SignedQualificationAttestation(forged, signature)
 
     def test_altered_signed_payload_fails_signature(self):
         trust_root = root()

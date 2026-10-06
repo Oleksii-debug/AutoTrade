@@ -39,16 +39,18 @@ class InstrumentNotFound(InstrumentRegistryError):
 
 
 def _text(value: str, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    # Financial/provider metadata ingress must not virtual-dispatch caller text
+    # subclasses before the value has been reduced to inert built-in authority.
+    if type(value) is not str or not value.strip():
         raise InstrumentRegistryError(f"{field} is required")
     return value.strip()
 
 
 def _decimal(value: Decimal | str | int, field: str, *, positive: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
+    if type(value) not in (Decimal, str, int):
         raise InstrumentRegistryError(f"{field} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, ValueError, TypeError) as error:
         raise InstrumentRegistryError(f"{field} must be a finite decimal") from error
     if not result.is_finite():
@@ -59,9 +61,15 @@ def _decimal(value: Decimal | str | int, field: str, *, positive: bool = False) 
 
 
 def _utc(value: datetime, field: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise InstrumentRegistryError(f"{field} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    # An exact datetime can still carry an arbitrary tzinfo implementation whose
+    # utcoffset()/fromutc() methods execute caller code. Instrument authority is
+    # canonical UTC, so admit only an exact built-in datetime already bound to
+    # the process-owned UTC singleton and avoid conversion callbacks entirely.
+    if type(value) is not datetime or value.tzinfo is not timezone.utc:
+        raise InstrumentRegistryError(
+            f"{field} must be an exact timezone-aware UTC datetime"
+        )
+    return value
 
 
 def _utc_text(value: datetime) -> str:
@@ -118,19 +126,21 @@ def _split_instrument_version_ref(value: str, field: str = "instrument_version")
 
 
 def _freeze_jsonish(value: object, field: str) -> object:
-    if isinstance(value, Mapping):
+    # Never iterate or stringify arbitrary Mapping/container/scalar subclasses
+    # at an authority-bearing metadata boundary.
+    if type(value) is dict:
         frozen: dict[str, object] = {}
         for key, item in value.items():
-            if not isinstance(key, str) or not key:
+            if type(key) is not str or not key:
                 raise InstrumentRegistryError(f"{field} object keys must be non-empty strings")
             frozen[key] = _freeze_jsonish(item, field)
         return MappingProxyType(frozen)
-    if isinstance(value, (list, tuple)):
+    if type(value) in (list, tuple):
         return tuple(_freeze_jsonish(item, field) for item in value)
-    if value is None or isinstance(value, (str, bool, int)):
+    if value is None or type(value) in (str, bool, int):
         return value
     raise InstrumentRegistryError(
-        f"{field} must contain only JSON-safe string, integer, boolean, null, object or array values"
+        f"{field} must contain only exact built-in JSON-safe string, integer, boolean, null, object or array values"
     )
 
 
@@ -147,8 +157,10 @@ _EVIDENCE_ALLOWED = _EVIDENCE_REQUIRED | {"source_uri", "rights_id"}
 
 
 def _evidence_ref(value: Mapping[str, object]) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise InstrumentRegistryError("metadata_evidence entries must be objects")
+    if type(value) is not dict:
+        raise InstrumentRegistryError(
+            "metadata_evidence entries must be exact built-in objects"
+        )
     keys = set(value)
     missing = _EVIDENCE_REQUIRED - keys
     unknown = keys - _EVIDENCE_ALLOWED
@@ -203,7 +215,7 @@ class OffsetTransition:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "effective_from", _utc(self.effective_from, "effective_from"))
-        if isinstance(self.utc_offset_minutes, bool) or not isinstance(self.utc_offset_minutes, int):
+        if type(self.utc_offset_minutes) is not int:
             raise InstrumentRegistryError("utc_offset_minutes must be an integer")
         if not -14 * 60 <= self.utc_offset_minutes <= 14 * 60:
             raise InstrumentRegistryError("utc_offset_minutes is outside supported bounds")
@@ -216,11 +228,11 @@ class WeeklySession:
     close_minute: int
 
     def __post_init__(self) -> None:
-        if isinstance(self.weekday, bool) or self.weekday not in range(7):
+        if type(self.weekday) is not int or self.weekday not in range(7):
             raise InstrumentRegistryError("weekday must be between 0 and 6")
-        if not 0 <= self.open_minute < 24 * 60:
+        if type(self.open_minute) is not int or not 0 <= self.open_minute < 24 * 60:
             raise InstrumentRegistryError("open_minute is outside the day")
-        if not 0 < self.close_minute <= 24 * 60:
+        if type(self.close_minute) is not int or not 0 < self.close_minute <= 24 * 60:
             raise InstrumentRegistryError("close_minute is outside the day")
         if self.open_minute >= self.close_minute:
             raise InstrumentRegistryError("overnight or empty sessions require an explicit split")
@@ -275,6 +287,18 @@ class TradingCalendar:
     def __post_init__(self) -> None:
         object.__setattr__(self, "calendar_id", _text(self.calendar_id, "calendar_id"))
         object.__setattr__(self, "timezone_id", _text(self.timezone_id, "timezone_id"))
+        if type(self.continuous) is not bool:
+            raise InstrumentRegistryError("continuous must be a boolean")
+        if type(self.sessions) not in (tuple, list):
+            raise InstrumentRegistryError("sessions must be an exact built-in array")
+        if type(self.transitions) not in (tuple, list):
+            raise InstrumentRegistryError("transitions must be an exact built-in array")
+        if any(type(item) is not WeeklySession for item in self.sessions):
+            raise InstrumentRegistryError("sessions entries must be exact WeeklySession")
+        if any(type(item) is not OffsetTransition for item in self.transitions):
+            raise InstrumentRegistryError(
+                "transitions entries must be exact OffsetTransition"
+            )
         object.__setattr__(self, "sessions", tuple(self.sessions))
         ordered = tuple(sorted(tuple(self.transitions), key=lambda item: item.effective_from))
         if len({item.effective_from for item in ordered}) != len(ordered):
@@ -389,12 +413,13 @@ class InstrumentVersion:
     settlement_convention: SettlementConvention | None = None
 
     def __post_init__(self) -> None:
+        raw_instrument_id = _text(self.instrument_id, "instrument_id")
         try:
-            canonical_instrument_id = str(UUID(self.instrument_id))
+            canonical_instrument_id = str(UUID(raw_instrument_id))
         except (ValueError, TypeError, AttributeError) as error:
             raise InstrumentRegistryError("instrument_id must be a UUID") from error
         object.__setattr__(self, "instrument_id", canonical_instrument_id)
-        if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version < 1:
+        if type(self.version) is not int or self.version < 1:
             raise InstrumentRegistryError("version must be a positive integer")
 
         for field in (
@@ -410,6 +435,8 @@ class InstrumentVersion:
         ):
             object.__setattr__(self, field, _text(getattr(self, field), field))
 
+        object.__setattr__(self, "asset_class", _text(self.asset_class, "asset_class"))
+        object.__setattr__(self, "status", _text(self.status, "status"))
         if self.asset_class not in {
             "CASH_EQUITY",
             "FUND",
@@ -469,6 +496,15 @@ class InstrumentVersion:
         if self.effective_to is not None and self.effective_to <= start:
             raise InstrumentRegistryError("effective_to must be after effective_from")
 
+        if type(self.deliverable) not in (tuple, list):
+            raise InstrumentRegistryError(
+                "deliverable must be an exact built-in array"
+            )
+        if type(self.metadata_evidence) not in (tuple, list):
+            raise InstrumentRegistryError(
+                "metadata_evidence must be an exact built-in array"
+            )
+
         canonical_deliverable = []
         for leg in self.deliverable:
             if type(leg) is not DeliverableLeg:
@@ -525,6 +561,9 @@ class InstrumentVersion:
 
         derivative = self.asset_class in {"FUTURE", "PERPETUAL", "OPTION"}
         if derivative:
+            if self.payoff is None:
+                raise InstrumentRegistryError("derivative payoff is required")
+            object.__setattr__(self, "payoff", _text(self.payoff, "payoff"))
             if self.payoff not in {"LINEAR", "INVERSE", "OPTION"}:
                 raise InstrumentRegistryError("derivative payoff is required")
             if self.asset_class in {"FUTURE", "PERPETUAL"} and self.payoff not in {
@@ -578,8 +617,10 @@ class InstrumentVersion:
                 raise InstrumentRegistryError("perpetual must not invent an expiry")
             if self.funding_schedule is None:
                 raise InstrumentRegistryError("perpetual funding_schedule is required")
-            if not isinstance(self.funding_schedule, Mapping) or not self.funding_schedule:
-                raise InstrumentRegistryError("funding_schedule must be a non-empty object")
+            if type(self.funding_schedule) is not dict or not self.funding_schedule:
+                raise InstrumentRegistryError(
+                    "funding_schedule must be a non-empty exact built-in object"
+                )
             object.__setattr__(
                 self,
                 "funding_schedule",
@@ -596,6 +637,11 @@ class InstrumentVersion:
             if self.strike is None:
                 raise InstrumentRegistryError("option strike is required")
             object.__setattr__(self, "strike", _decimal(self.strike, "strike", positive=True))
+            if self.option_right is None:
+                raise InstrumentRegistryError("option_right must be CALL or PUT")
+            object.__setattr__(
+                self, "option_right", _text(self.option_right, "option_right")
+            )
             if self.option_right not in {"CALL", "PUT"}:
                 raise InstrumentRegistryError("option_right must be CALL or PUT")
             if self.exercise_style is None:
@@ -1234,7 +1280,7 @@ class InstrumentRegistry:
         known_at: list[datetime] = []
         for evidence in version.metadata_evidence:
             raw = evidence.get("observed_at")
-            if not isinstance(raw, str) or not raw.endswith("Z"):
+            if type(raw) is not str or not raw.endswith("Z"):
                 raise InstrumentRegistryError(
                     "instrument metadata evidence has invalid observed_at"
                 )
@@ -1249,7 +1295,7 @@ class InstrumentRegistry:
 
             artifact_id = evidence.get("artifact_id")
             expected_digest = evidence.get("sha256")
-            if not isinstance(artifact_id, str) or not isinstance(expected_digest, str):
+            if type(artifact_id) is not str or type(expected_digest) is not str:
                 raise InstrumentRegistryError(
                     "instrument metadata evidence identity is invalid"
                 )
@@ -1289,7 +1335,7 @@ class InstrumentRegistry:
             if "rights_id" in evidence and manifest.get("rights", {}).get("rights_id") != evidence["rights_id"]:
                 raise InstrumentRegistryError("instrument metadata evidence rights identity mismatch")
             committed_raw = manifest.get("created_at")
-            if not isinstance(committed_raw, str):
+            if type(committed_raw) is not str:
                 raise InstrumentRegistryError(
                     "instrument metadata evidence lacks trusted commit time"
                 )

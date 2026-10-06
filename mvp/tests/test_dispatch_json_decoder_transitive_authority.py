@@ -390,7 +390,7 @@ class JsonDecoderTransitiveAuthorityTests(unittest.TestCase):
             )
 
 
-    def test_transport_cannot_replace_json_decoder_decode_defaults(self):
+    def test_transport_cannot_replace_json_decoder_decode_defaults_with_matcher(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
             dispatcher = self._dispatcher(path)

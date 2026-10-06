@@ -1058,8 +1058,7 @@ class SignedHttpRequest:
                 )
             normalized_headers[key] = value
         if (
-            isinstance(self.timeout_seconds, bool)
-            or not isinstance(self.timeout_seconds, int)
+            type(self.timeout_seconds) is not int
             or self.timeout_seconds < 1
             or self.timeout_seconds > 120
         ):

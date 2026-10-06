@@ -80,6 +80,52 @@ class AuthenticatedReadHttpRequestTests(unittest.TestCase):
         self.assertEqual(request.method, "POST")
         self.assertEqual(request.body, b"nonce=1")
 
+    def test_wire_client_preserves_queryless_get_method(self):
+        class Response:
+            status = 200
+
+            def __init__(self):
+                self.body = BytesIO(b'{"accounts":["DU123"]}')
+
+            def read(self, size=-1):
+                return self.body.read(size)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class Opener:
+            def __init__(self):
+                self.requests = []
+
+            def open(self, request, *, timeout):
+                self.requests.append((request, timeout))
+                return Response()
+
+        request = AuthenticatedReadHttpRequest(
+            url="https://localhost/iserver/accounts",
+            headers={"Accept": "application/json"},
+            timeout_seconds=5,
+            method="GET",
+            body=b"",
+        )
+        client = UrllibJsonWireClient(max_response_bytes=1024)
+        opener = Opener()
+        client._opener = opener
+
+        response = client.send(request)
+
+        self.assertIs(type(response), AuthenticatedReadWireResponse)
+        self.assertEqual(response.http_status, 200)
+        self.assertEqual(response.body, b'{"accounts":["DU123"]}')
+        self.assertEqual(len(opener.requests), 1)
+        outbound, timeout = opener.requests[0]
+        self.assertEqual(outbound.get_method(), "GET")
+        self.assertIsNone(outbound.data)
+        self.assertEqual(timeout, 5)
+
     def test_wire_client_preserves_explicit_empty_body_post_method(self):
         class Response:
             status = 200
@@ -202,6 +248,25 @@ class AuthenticatedReadHttpRequestTests(unittest.TestCase):
                 url="https://localhost/iserver/accounts",
                 headers={"Accept": " application/json "},
                 timeout_seconds=5,
+                method="GET",
+            )
+
+    def test_timeout_requires_exact_integer_before_comparison(self):
+        class HostileInt(int):
+            def __lt__(self, other):
+                raise AssertionError("hostile less-than executed")
+
+            def __gt__(self, other):
+                raise AssertionError("hostile greater-than executed")
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "invalid request timeout",
+        ):
+            AuthenticatedReadHttpRequest(
+                url="https://localhost/iserver/accounts",
+                headers={"Accept": "application/json"},
+                timeout_seconds=HostileInt(5),
                 method="GET",
             )
 

@@ -115,6 +115,10 @@ async function exercisePortfolioTableTools(page) {
     await page.locator("#portfolio-filter").getAttribute("aria-keyshortcuts"),
     "Escape",
     "table filter exposes the Escape shortcut to assistive technology");
+  assert.equal(
+    await page.locator("#portfolio-region").getAttribute("aria-describedby"),
+    "portfolio-filter-status",
+    "table region exposes current paging/filter context to assistive technology");
   await page.keyboard.type("895.696");
   await page.waitForFunction(() => {
     const status = document.querySelector("#portfolio-filter-status")?.textContent || "";

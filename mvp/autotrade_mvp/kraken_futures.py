@@ -716,6 +716,91 @@ parse_submission_response = _install_submission_response_parser(
 )
 del _install_submission_response_parser
 
+def _install_submission_response_parser_authority(parser):
+    """Fence mutable parser dependencies before financial normalization."""
+
+    parser_code = parser.__code__
+    uuid_text = _uuid_text
+    uuid_text_code = uuid_text.__code__
+    prepared_projection = _prepared_submission_projection
+    prepared_projection_code = prepared_projection.__code__
+    client_order_validator = _client_order_id
+    client_order_validator_code = client_order_validator.__code__
+    submission_projection = _submission_projection
+    submission_projection_code = submission_projection.__code__
+    response_evidence = _response_evidence
+    response_evidence_code = response_evidence.__code__
+    mapping_helper = _mapping
+    mapping_helper_code = mapping_helper.__code__
+    exact_json_decoder = _decode_exact_json
+    exact_json_decoder_code = exact_json_decoder.__code__
+    error_type = ProviderCoreError
+    canonical_type = type
+    canonical_bool = bool
+    canonical_isinstance = isinstance
+    mapping_type = Mapping
+    canonical_str = str
+    unicode_error_type = UnicodeEncodeError
+    canonical_getattr = getattr
+
+    def guarded(
+        *,
+        attempt_id: str,
+        prepared_request: KrakenFuturesPreparedRequest,
+        observation: ProviderSubmissionObservation | None = None,
+        transport_ambiguous: bool = False,
+    ) -> dict[str, Any]:
+        if (
+            canonical_getattr(parser, "__code__", None) is not parser_code
+            or _uuid_text is not uuid_text
+            or canonical_getattr(uuid_text, "__code__", None) is not uuid_text_code
+            or _prepared_submission_projection is not prepared_projection
+            or canonical_getattr(prepared_projection, "__code__", None)
+            is not prepared_projection_code
+            or _client_order_id is not client_order_validator
+            or canonical_getattr(client_order_validator, "__code__", None)
+            is not client_order_validator_code
+            or _submission_projection is not submission_projection
+            or canonical_getattr(submission_projection, "__code__", None)
+            is not submission_projection_code
+            or _response_evidence is not response_evidence
+            or canonical_getattr(response_evidence, "__code__", None)
+            is not response_evidence_code
+            or _mapping is not mapping_helper
+            or canonical_getattr(mapping_helper, "__code__", None)
+            is not mapping_helper_code
+            or _decode_exact_json is not exact_json_decoder
+            or canonical_getattr(exact_json_decoder, "__code__", None)
+            is not exact_json_decoder_code
+            or ProviderCoreError is not error_type
+            or type is not canonical_type
+            or bool is not canonical_bool
+            or isinstance is not canonical_isinstance
+            or Mapping is not mapping_type
+            or str is not canonical_str
+            or UnicodeEncodeError is not unicode_error_type
+            or getattr is not canonical_getattr
+        ):
+            raise error_type(
+                "Kraken Futures prepared response authority is unavailable"
+            )
+        return parser(
+            attempt_id=attempt_id,
+            prepared_request=prepared_request,
+            observation=observation,
+            transport_ambiguous=transport_ambiguous,
+        )
+
+    return guarded
+
+
+_unsealed_parse_submission_response = parse_submission_response
+parse_submission_response = _install_submission_response_parser_authority(
+    _unsealed_parse_submission_response
+)
+del _unsealed_parse_submission_response
+del _install_submission_response_parser_authority
+
 def parse_position_executions(
     observation: ProviderResponseObservation,
     *,

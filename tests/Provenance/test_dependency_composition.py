@@ -254,6 +254,71 @@ class DependencyCompositionGateTests(unittest.TestCase):
         ):
             self.assertNotIn(blocker, self.report.blockers)
 
+    def test_all_ci_requirements_installs_use_hash_only_boundary(self):
+        self.assertFalse(
+            any(
+                blocker.startswith("PYTHON_REQUIREMENTS_INSTALL_NOT_HASH_ONLY:")
+                for blocker in self.report.blockers
+            )
+        )
+
+    def test_weak_ci_requirements_install_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "research").mkdir()
+            workflows = root / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            (root / "requirements-dev.txt").write_text(
+                "setuptools==84.0.0 \\\n"
+                "    --hash=sha256:"
+                "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670\n"
+                "jsonschema==4.26.0 \\\n"
+                "    --hash=sha256:"
+                "d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce\n",
+                encoding="utf-8",
+            )
+            (root / "pyproject.toml").write_text(
+                "[build-system]\n"
+                'requires = ["setuptools==84.0.0"]\n\n'
+                "[project]\n"
+                'name = "autotrade-exact-numeric"\n'
+                'version = "0.0.1"\n',
+                encoding="utf-8",
+            )
+            (root / "research" / "pyproject.toml").write_text(
+                "[build-system]\n"
+                'requires = ["setuptools==84.0.0"]\n\n'
+                "[project]\n"
+                'name = "sample"\n'
+                'version = "0.0.1"\n'
+                'dependencies = ["autotrade-exact-numeric==0.0.1"]\n\n'
+                "[project.optional-dependencies]\n"
+                'test = ["jsonschema==4.26.0"]\n',
+                encoding="utf-8",
+            )
+            strict = (
+                'run: "python -m pip install --disable-pip-version-check '
+                '--force-reinstall --no-deps --only-binary=:all: --require-hashes '
+                '-r requirements-dev.txt"'
+            )
+            (workflows / "research-primitives.yml").write_text(
+                'paths:\n  - "requirements-dev.txt"\nsteps:\n'
+                f"  - {strict}\n"
+                "  - run: python -m pip install --no-deps --no-build-isolation -e research\n",
+                encoding="utf-8",
+            )
+            (workflows / "unsafe.yml").write_text(
+                "steps:\n"
+                "  - run: python -m pip install -r requirements-dev.txt\n",
+                encoding="utf-8",
+            )
+            blockers, _ = _python_blockers(root)
+            self.assertIn(
+                "PYTHON_REQUIREMENTS_INSTALL_NOT_HASH_ONLY:"
+                ".github/workflows/unsafe.yml:2",
+                blockers,
+            )
+
     def test_research_build_boundary_regression_fails_closed(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

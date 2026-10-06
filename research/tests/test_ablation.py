@@ -845,6 +845,14 @@ class AblationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "shadows canonical methods"):
                 authority.resolve([], outcome_refs=[])
 
+            authority, _science, _memory, artifacts = issued()
+            artifacts.root = root / "retargeted-artifacts"
+            with self.assertRaisesRegex(
+                ValueError,
+                "artifact store namespace changed after issuance",
+            ):
+                authority.resolve([], outcome_refs=[])
+
     def test_qualification_authority_rejects_memory_correction_retargeting(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

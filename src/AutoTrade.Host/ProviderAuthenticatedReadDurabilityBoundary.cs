@@ -19,10 +19,10 @@ internal sealed class ProviderAuthenticatedReadPreparedEvidence
             throw new ProviderIssuerAuthorityException(
                 "authenticated-read Prepared query must be an exact inert Dictionary");
         }
-        if (query.Count > 256)
+        if (query.Count is < 1 or > 64)
         {
             throw new ProviderIssuerAuthorityException(
-                "authenticated-read Prepared query exceeds the bounded item count");
+                "authenticated-read Prepared query must contain 1..64 items");
         }
 
         ProviderIssuerVerifier.RequireValidReadAttempt(
@@ -36,13 +36,15 @@ internal sealed class ProviderAuthenticatedReadPreparedEvidence
         {
             if (string.IsNullOrEmpty(key)
                 || !string.Equals(key, key.Trim(), StringComparison.Ordinal)
-                || key.Length > 512
+                || key.Length > 2048
                 || value is null
                 || !string.Equals(value, value.Trim(), StringComparison.Ordinal)
-                || value.Length > 4096)
+                || value.Length > 2048
+                || !IsPrintableAscii(key)
+                || !IsPrintableAscii(value))
             {
                 throw new ProviderIssuerAuthorityException(
-                    "authenticated-read Prepared query contains non-canonical or oversized text");
+                    "authenticated-read Prepared query contains non-canonical, non-ASCII or oversized text");
             }
             if (!copy.TryAdd(key, value))
             {
@@ -54,6 +56,18 @@ internal sealed class ProviderAuthenticatedReadPreparedEvidence
         IssuerSession = issuerSession;
         Attempt = attempt;
         _query = new ReadOnlyDictionary<string, string>(copy);
+    }
+
+    private static bool IsPrintableAscii(string value)
+    {
+        foreach (char character in value)
+        {
+            if (character < 0x20 || character > 0x7e)
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     internal ProviderIssuerSession IssuerSession { get; }

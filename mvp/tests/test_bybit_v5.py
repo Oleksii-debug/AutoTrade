@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -43,7 +44,14 @@ from mvp.tests.capability_test_support import fresh_test_admission
 READ_AT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def read_capability(*, account_id="paper-1", environment="PAPER", instrument_version="BTCUSDT@v1", provider_environment=None):
+def read_capability(
+    *,
+    account_id="paper-1",
+    environment="PAPER",
+    instrument_version="BTCUSDT@v1",
+    provider_environment=None,
+    permission_scopes=("ORDER.READ",),
+):
     observed_at = READ_AT - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
@@ -58,7 +66,7 @@ def read_capability(*, account_id="paper-1", environment="PAPER", instrument_ver
             expires_at=READ_AT + timedelta(hours=1),
             supported_order_types=frozenset({"LIMIT", "MARKET"}),
             time_in_force=frozenset({"GTC", "IOC"}),
-            permission_scopes=frozenset({"ORDER.READ"}),
+            permission_scopes=frozenset(permission_scopes),
             position_mode="NET",
             native_protection=frozenset(),
             rate_limit_policy_id="bybit-read-test",
@@ -182,19 +190,30 @@ def bound_execution_response(
     account_id="paper-1",
     environment="PAPER",
     instrument_version="BTCUSDT@v1",
+    query_category="spot",
+    permission_scope="ORDER.READ",
+    ensure_response_category=True,
 ):
     query = prepare_authenticated_read_query(
         capability=read_capability(
             account_id=account_id,
             environment=environment,
             instrument_version=instrument_version,
+            permission_scopes=(permission_scope,),
         ),
         surface=Surface.AUTHENTICATED_READ,
         endpoint="/v5/execution/list",
-        query={"category": "spot", "limit": "100"},
+        query={"category": query_category, "limit": "100"},
         at=READ_AT,
-        permission_scope="ORDER.READ",
+        permission_scope=permission_scope,
     )
+    if ensure_response_category and type(response) is dict:
+        result = response.get("result")
+        if type(result) is dict and "category" not in result:
+            response = dict.copy(response)
+            result = dict.copy(result)
+            result["category"] = query_category
+            response["result"] = result
     raw = json.dumps(
         response,
         sort_keys=True,
@@ -1811,6 +1830,140 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertIsNone(fill.position_side)
         self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
 
+    def test_execution_consumer_rejects_observation_subclass_before_virtual_callback(self):
+        canonical = bound_execution_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "list": [
+                        {
+                            "execId": "exec-hostile-observation",
+                            "orderLinkId": "",
+                            "symbol": "BTCUSDT",
+                            "side": "Buy",
+                            "execQty": "0.01",
+                            "execPrice": "65000",
+                            "execFee": "0",
+                            "feeCurrency": "USDT",
+                            "execTime": "1790280000000",
+                        }
+                    ]
+                },
+            }
+        )
+        callbacks = []
+
+        class HostileObservation(type(canonical)):
+            def __getattribute__(self, name):
+                callbacks.append(name)
+                raise AssertionError(
+                    "virtual provider-response callback executed before exact-type fence"
+                )
+
+        forged = object.__new__(HostileObservation)
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact ProviderResponseObservation",
+        ):
+            parse_executions(
+                forged,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_execution_read_scope_and_response_category_are_bound(self):
+        row = {
+            "execId": "exec-scope-category",
+            "orderLinkId": "",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.01",
+            "execPrice": "65000",
+            "execFee": "0",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+
+        wrong_permission = bound_execution_response(
+            {"retCode": 0, "result": {"list": [row]}},
+            permission_scope="ACCOUNT.READ",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "ORDER.READ permission scope",
+        ):
+            parse_executions(
+                wrong_permission,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+        wrong_query_category = bound_execution_response(
+            {"retCode": 0, "result": {"list": [row]}},
+            query_category="SPOT",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "exact documented category",
+        ):
+            parse_executions(
+                wrong_query_category,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+        mismatched_response = bound_execution_response(
+            {
+                "retCode": 0,
+                "result": {"category": "linear", "list": [row]},
+            },
+            query_category="spot",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "response category must match exact queried category",
+        ):
+            parse_executions(
+                mismatched_response,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+        missing_response_category = bound_execution_response(
+            {"retCode": 0, "result": {"list": [row]}},
+            ensure_response_category=False,
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "response category must match exact queried category",
+        ):
+            parse_executions(
+                missing_response_category,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+    def test_execution_success_code_requires_exact_json_integer(self):
+        row = {
+            "execId": "exec-ret-code-type",
+            "orderLinkId": "",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.01",
+            "execPrice": "65000",
+            "execFee": "0",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+        for malformed in ("0", False):
+            with self.subTest(retCode=malformed):
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "retCode must be exact integer",
+                ):
+                    parse_executions(
+                        bound_execution_response(
+                            {"retCode": malformed, "result": {"list": [row]}}
+                        ),
+                        instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                    )
+
     def test_execution_direction_is_evidenced_without_inventing_hedge_leg(self):
         base = {
             "execId": "exec-direction",
@@ -1883,6 +2036,215 @@ class BybitV5AdapterTests(unittest.TestCase):
                         qualified_fee_currencies={"BTCUSDT@v1": "USDT"},
                     )
 
+    def test_execution_metadata_inputs_require_exact_dict_snapshots(self):
+        row = {
+            "execId": "exec-metadata-snapshot",
+            "orderLinkId": "",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.01",
+            "execPrice": "65000",
+            "execFee": "0.5",
+            "feeCurrency": "",
+            "execTime": "1790280000000",
+        }
+        observation = bound_execution_response(
+            {"retCode": 0, "result": {"list": [row]}}
+        )
+        callbacks = []
+
+        class HostileDict(dict):
+            def __getitem__(self, key):
+                callbacks.append(("getitem", key))
+                raise AssertionError("mapping callback executed")
+
+            def __iter__(self):
+                callbacks.append(("iter", None))
+                raise AssertionError("mapping callback executed")
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "instrument_versions must be an exact dict snapshot",
+        ):
+            parse_executions(
+                observation,
+                instrument_versions=HostileDict(
+                    {"BTCUSDT": "BTCUSDT@v1"}
+                ),
+                qualified_fee_currencies={"BTCUSDT@v1": "USDT"},
+            )
+        self.assertEqual(callbacks, [])
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "qualified_fee_currencies must be an exact dict snapshot",
+        ):
+            parse_executions(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                qualified_fee_currencies=HostileDict(
+                    {"BTCUSDT@v1": "USDT"}
+                ),
+            )
+        self.assertEqual(callbacks, [])
+
+        immutable_instruments = MappingProxyType(
+            {"BTCUSDT": "BTCUSDT@v1"}
+        )
+        immutable_fee_currencies = MappingProxyType(
+            {"BTCUSDT@v1": "USDT"}
+        )
+        fills = parse_executions(
+            observation,
+            instrument_versions=immutable_instruments,
+            qualified_fee_currencies=immutable_fee_currencies,
+        )
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].instrument, "BTCUSDT@v1")
+        self.assertEqual(fills[0].fee_currency, "USDT")
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "instrument_versions keys and values must be exact text",
+        ):
+            parse_executions(
+                observation,
+                instrument_versions=MappingProxyType(
+                    {1: "BTCUSDT@v1"}
+                ),
+                qualified_fee_currencies=immutable_fee_currencies,
+            )
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "qualified_fee_currencies keys and values must be exact text",
+        ):
+            parse_executions(
+                observation,
+                instrument_versions=immutable_instruments,
+                qualified_fee_currencies=MappingProxyType(
+                    {"BTCUSDT@v1": 1}
+                ),
+            )
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "instrument version must be canonical exact text",
+        ):
+            parse_executions(
+                observation,
+                instrument_versions={"BTCUSDT": " BTCUSDT@v1 "},
+                qualified_fee_currencies={"BTCUSDT@v1": "USDT"},
+            )
+
+    def test_execution_rejects_noncanonical_provider_identity_text(self):
+        base = {
+            "execId": "exec-identity-canonical",
+            "orderLinkId": "client-identity-canonical",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.01",
+            "execPrice": "65000",
+            "execFee": "0.5",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+        cases = (
+            ("execId", " exec-identity-canonical ", "execution id"),
+            ("execId", 123, "execution id"),
+            ("symbol", " BTCUSDT ", "execution symbol"),
+            ("symbol", 123, "execution symbol"),
+            ("orderLinkId", " client-identity-canonical ", "orderLinkId"),
+            ("orderLinkId", 123, "orderLinkId"),
+            ("side", "BUY", "execution side"),
+            ("side", " Buy ", "execution side"),
+            ("side", 123, "execution side"),
+        )
+        for field, malformed, message in cases:
+            with self.subTest(field=field, value=malformed):
+                row = dict(base, **{field: malformed})
+                with self.assertRaisesRegex(ProviderCoreError, message):
+                    parse_executions(
+                        bound_execution_response(
+                            {"retCode": 0, "result": {"list": [row]}}
+                        ),
+                        instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                    )
+
+    def test_execution_rejects_noncanonical_economic_field_types(self):
+        base = {
+            "execId": "exec-economics-canonical",
+            "orderLinkId": "",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.01",
+            "execPrice": "65000.10",
+            "execFee": "0.5",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+        cases = (
+            ("execQty", " 0.01 "),
+            ("execQty", 1),
+            ("execPrice", " 65000.10 "),
+            ("execPrice", 65000),
+            ("execFee", " 0.5 "),
+            ("execFee", 1),
+            ("execTime", " 1790280000000 "),
+            ("execTime", 1790280000000),
+        )
+        for field, malformed in cases:
+            with self.subTest(field=field, value=malformed):
+                row = dict(base, **{field: malformed})
+                with self.assertRaisesRegex(ProviderCoreError, field):
+                    parse_executions(
+                        bound_execution_response(
+                            {"retCode": 0, "result": {"list": [row]}}
+                        ),
+                        instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                    )
+
+    def test_execution_numeric_fields_use_bounded_financial_envelope(self):
+        base = {
+            "execId": "exec-bounded-economics",
+            "orderLinkId": "",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.01",
+            "execPrice": "65000.10",
+            "execFee": "0.5",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+        oversized_decimal = "1" * 260
+        for field in ("execQty", "execPrice", "execFee"):
+            with self.subTest(field=field):
+                row = dict(base, **{field: oversized_decimal})
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "exact numeric envelope",
+                ):
+                    parse_executions(
+                        bound_execution_response(
+                            {"retCode": 0, "result": {"list": [row]}}
+                        ),
+                        instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                    )
+
+        for malformed_time, message in (
+            ("1" * 260, "bounded integer string"),
+            ("999999999999999999999999999999999999", "supported UTC range"),
+        ):
+            with self.subTest(execTime=malformed_time):
+                row = dict(base, execTime=malformed_time)
+                with self.assertRaisesRegex(ProviderCoreError, message):
+                    parse_executions(
+                        bound_execution_response(
+                            {"retCode": 0, "result": {"list": [row]}}
+                        ),
+                        instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                    )
+
     def test_documented_linear_execution_requires_qualified_fee_currency(self):
         response = {"retCode": 0, "result": {"category": "linear", "list": [{
             "execId": "e0cbe81d-0f18-5866-9415-cf319b5dab3b", "orderLinkId": "",
@@ -1890,7 +2252,11 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execFee": "0.071409", "feeCurrency": "", "extraFees": "",
             "execTime": "1672282722429",
         }]}}
-        evidence = bound_execution_response(response, instrument_version="ETHPERP@v1")
+        evidence = bound_execution_response(
+            response,
+            instrument_version="ETHPERP@v1",
+            query_category="linear",
+        )
         with self.assertRaisesRegex(ProviderCoreError, "fee currency is unresolved"):
             parse_executions(evidence, instrument_versions={"ETHPERP": "ETHPERP@v1"})
         for malformed in (" USDT ", "usdt", 123):

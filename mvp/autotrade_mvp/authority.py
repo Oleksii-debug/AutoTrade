@@ -1863,6 +1863,10 @@ def _require_provider_scope_matches_authoritative_risk_snapshot(
     expected_provider, expected_provider_environment = (
         _authoritative_risk_provider_scope(authoritative_snapshot)
     )
+    expected_account = _text(
+        authoritative_snapshot.get("account_id"),
+        name="authoritative risk account_id",
+    )
     expected_runtime = _text(
         authoritative_snapshot.get("environment"),
         name="authoritative risk environment",
@@ -1873,6 +1877,10 @@ def _require_provider_scope_matches_authoritative_risk_snapshot(
         evidence.get("provider_id"),
         name=f"{evidence_name} provider_id",
     ).upper()
+    evidence_account = _text(
+        evidence.get("account_id"),
+        name=f"{evidence_name} account_id",
+    )
     evidence_runtime = _text(
         evidence.get("environment"),
         name=f"{evidence_name} environment",
@@ -1891,11 +1899,12 @@ def _require_provider_scope_matches_authoritative_risk_snapshot(
         ).upper()
     if (
         evidence_provider != expected_provider
+        or evidence_account != expected_account
         or evidence_runtime != expected_runtime
         or evidence_provider_environment != expected_provider_environment
     ):
         raise AuthorityConflict(
-            f"{evidence_name} provider domain differs from authoritative risk snapshot"
+            f"{evidence_name} provider/account scope differs from authoritative risk snapshot"
         )
     return expected_provider, expected_provider_environment
 

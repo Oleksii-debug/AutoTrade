@@ -1163,6 +1163,9 @@ class JournalStore:
                 raise ValueError("journal event envelope is not valid JSON") from error
             if canonical_json(envelope) != raw_envelope:
                 raise ValueError("journal event envelope is not canonical JSON")
+            if type(envelope) is not dict:
+                raise ValueError("journal event envelope must be a JSON object")
+            _validate_canonical_event_envelope_if_claimed(envelope)
             core_envelope = {
                 "event_id": row["event_id"],
                 "event_type": row["event_type"],

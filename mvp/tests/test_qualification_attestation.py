@@ -1759,7 +1759,14 @@ class QualificationAttestationTests(unittest.TestCase):
         object.__setattr__(value, "evidence_refs", ())
         object.__setattr__(value, "completed_at", "2099-01-01T00:00:00Z")
         self.assertEqual(accepted.requirement_ids, ("release-candidate-freeze", "signed-windows-artifacts"))
-        self.assertEqual(accepted.evidence_refs, (evidence_ref(),))
+        self.assertEqual(accepted.evidence_refs[0].artifact_id, EVIDENCE_ID)
+        self.assertEqual(accepted.evidence_refs[0].sha256, EVIDENCE_SHA)
+        self.assertEqual(accepted.evidence_refs[0].media_type, evidence_ref().media_type)
+        self.assertEqual(accepted.evidence_refs[0].evidence_kind, "QUALIFICATION_RUN")
+        self.assertEqual(accepted.evidence_refs[0].source_sha, SOURCE)
+        with self.assertRaises(AttributeError):
+            object.__setattr__(accepted.evidence_refs[0], "sha256", "sha256:" + "f" * 64)
+        self.assertEqual(accepted.evidence_refs[0].sha256, EVIDENCE_SHA)
         self.assertEqual(accepted.completed_at, "2026-09-25T02:10:00Z")
 
     def test_polymorphic_forgery_plus_foreign_publication_root_fails_closed(self):

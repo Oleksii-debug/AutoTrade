@@ -582,6 +582,26 @@ class ExecutionOracleTests(unittest.TestCase):
                 result=replace(waiting, status="NO_FILL"),
             )
 
+    def test_oracle_accepts_pre_arrival_bar_waiting_without_interval_start(self):
+        o = order()
+        q = LiquidityObservation.create(
+            instrument_version="ABC@v1",
+            market_time="2026-09-24T10:00:00.100000Z",
+            available_at="2026-09-24T10:00:00.150000Z",
+            available_volume="100",
+            bar_low="90",
+            bar_high="110",
+        )
+        m = model(data_fidelity="BAR", latency_ms=100)
+        waiting = simulate_execution(o, q, m)
+        self.assertEqual(waiting.status, "WAITING_FOR_LATENCY")
+        assert_conservative_execution(
+            order=o,
+            observation=q,
+            model=m,
+            result=waiting,
+        )
+
     def test_oracle_rejects_waiting_status_after_venue_arrival(self):
         o = order(order_type="LIMIT", limit_price="90")
         q = observation()

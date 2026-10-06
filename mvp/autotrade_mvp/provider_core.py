@@ -1012,6 +1012,7 @@ def _install_provider_submission_observation_authority(binding_projection):
         )
     )
     states: dict[int, tuple[object, tuple[object, ...]]] = {}
+    observation_require_scope_code = None
 
     def authority_changed():
         raise error_type("provider submission observation authority is unavailable")
@@ -1028,6 +1029,8 @@ def _install_provider_submission_observation_authority(binding_projection):
             is not observation_getattribute
             or canonical_type_getattribute(observation_type, "require_scope")
             is not observation_require_scope
+            or observation_require_scope_code is None
+            or observation_require_scope.__code__ is not observation_require_scope_code
             or id is not canonical_id
             or tuple is not canonical_tuple
             or len is not canonical_len
@@ -1162,6 +1165,7 @@ def _install_provider_submission_observation_authority(binding_projection):
                 "environment": binding["environment"],
                 "account_id": binding["account_id"],
                 "sent_at": binding["sent_at"],
+                "observed_at": binding["sent_at"],
                 "response_sha256": binding["response_sha256"],
                 "response_encoding": binding["response_encoding"],
                 "terminal_state": binding["terminal_state"],
@@ -1249,6 +1253,7 @@ def _install_provider_submission_observation_authority(binding_projection):
                 return provider_submission_observation_projection(value)[name]
         return object_getattribute(value, name)
 
+    observation_require_scope_code = observation_require_scope.__code__
     canonical_type_setattr(
         observation_type,
         "require_scope",

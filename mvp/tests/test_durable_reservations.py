@@ -312,6 +312,49 @@ class DurableReservationBookTests(unittest.TestCase):
         ):
             reservation_snapshot_digest(hostile)
 
+    def test_replay_rejects_executable_event_before_mapping_callbacks(self):
+        book = self.book()
+        hostile_event = _HostileMapping()
+        dict.__setitem__(hostile_event, "aggregate_version", 1)
+
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "exact inert JSON values",
+        ):
+            book._replay([hostile_event])
+
+    def test_replay_rejects_executable_nested_json_before_digest_callbacks(self):
+        book = self.book()
+
+        for nested_name in ("payload", "request", "snapshot"):
+            hostile = _HostileMapping()
+            dict.__setitem__(hostile, "hostile", "value")
+            if nested_name == "payload":
+                event = {
+                    "aggregate_version": 1,
+                    "event_type": "ignored",
+                    "payload": hostile,
+                    "payload_hash": "ignored",
+                }
+            else:
+                payload = {
+                    nested_name: hostile,
+                    "safe": "value",
+                }
+                event = {
+                    "aggregate_version": 1,
+                    "event_type": "ignored",
+                    "payload": payload,
+                    "payload_hash": "ignored",
+                }
+
+            with self.subTest(nested_name=nested_name):
+                with self.assertRaisesRegex(
+                    ReservationConflict,
+                    "exact inert JSON values",
+                ):
+                    book._replay([event])
+
     def test_durable_text_subclass_callbacks_do_not_execute(self):
         book = self.book()
         snapshot = book.reserve(

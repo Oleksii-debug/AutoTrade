@@ -295,6 +295,45 @@ class SubmissionResponseBinding:
         return _freeze_json(_decode_exact_json_bytes(self.response_bytes))
 
 
+def _detach_submission_json(
+    value: Any,
+    *,
+    _active_containers: set[int] | None = None,
+) -> Any:
+    """Detach caller JSON into an exact-builtin, callback-free value graph."""
+
+    if value is None or type(value) in (str, int, float, bool):
+        return value
+    if type(value) not in (list, tuple, dict):
+        raise TypeError(
+            "submission JSON values must use exact built-in JSON containers and scalars"
+        )
+
+    active = set() if _active_containers is None else _active_containers
+    identity = id(value)
+    if identity in active:
+        raise ValueError("submission JSON value contains a circular reference")
+    active.add(identity)
+    try:
+        if type(value) in (list, tuple):
+            return [
+                _detach_submission_json(item, _active_containers=active)
+                for item in value
+            ]
+
+        detached: dict[str, Any] = {}
+        for key, item in dict.items(value):
+            if type(key) is not str:
+                raise TypeError("submission JSON object keys must be exact strings")
+            detached[key] = _detach_submission_json(
+                item,
+                _active_containers=active,
+            )
+        return detached
+    finally:
+        active.remove(identity)
+
+
 def _freeze_json(value: Any) -> Any:
     """Recursively freeze a canonical JSON value before it reaches transport."""
     if isinstance(value, dict):
@@ -1278,20 +1317,19 @@ class GuardedDispatcher:
         ):
             if type(value) is not str or not value.strip():
                 raise ValueError(f"{name} is required")
-        if not isinstance(request, Mapping):
-            raise TypeError("request must be a mapping")
+        if type(request) is not dict:
+            raise TypeError("request must be an exact dict")
         _instant(now)
-        request_canonical = canonical_json(dict(request))
-        request_dict = json.loads(request_canonical)
+        request_dict = _detach_submission_json(request)
+        request_canonical = canonical_json(request_dict)
         request_frozen = _freeze_json(request_dict)
         request_hash = "sha256:" + sha256(request_canonical.encode("utf-8")).hexdigest()
         if submission_scope is None:
             scope_dict: dict[str, Any] = {}
         else:
-            if not isinstance(submission_scope, Mapping):
-                raise TypeError("submission_scope must be a mapping")
-            scope_canonical = canonical_json(dict(submission_scope))
-            scope_dict = json.loads(scope_canonical)
+            if type(submission_scope) is not dict:
+                raise TypeError("submission_scope must be an exact dict")
+            scope_dict = _detach_submission_json(submission_scope)
         scope_canonical = canonical_json(scope_dict)
         submission_scope_hash = (
             "sha256:" + sha256(scope_canonical.encode("utf-8")).hexdigest()

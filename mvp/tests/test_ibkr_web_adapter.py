@@ -980,6 +980,47 @@ class IbkrWebAdapterTests(unittest.TestCase):
 
 
 
+    def test_execution_evidence_accepts_zero_perm_id_for_external_activity(self):
+        execution = IbkrExecutionEvidence.create(
+            execution_id="external.1.01",
+            permanent_order_id=0,
+            account_id="U1234567",
+            quantity="1",
+            price="100",
+        )
+        self.assertEqual(execution.permanent_order_id, "0")
+        fill = execution_to_reconciliation_fill(
+            execution,
+            client_order_id=None,
+            expected_account_id="U1234567",
+            instrument="AAPL-CONID-265598:v1",
+            fee_amount="0",
+            fee_currency="USD",
+            trade_time="2026-09-24T20:00:01Z",
+        )
+        self.assertEqual(fill.provider_execution_id, "external.1.01")
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError, "non-negative exact integer"
+        ):
+            IbkrExecutionEvidence.create(
+                execution_id="external.bad.01",
+                permanent_order_id=-1,
+                account_id="U1234567",
+                quantity="1",
+                price="100",
+            )
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError, "canonical non-negative integer text"
+        ):
+            IbkrExecutionEvidence(
+                execution_id="external.bad.02",
+                permanent_order_id="00",
+                account_id="U1234567",
+                quantity=Decimal("1"),
+                price=Decimal("100"),
+            )
+
     def test_web_api_trades_use_execution_identity_coid_and_explicit_fee_currency(self):
         rows = [
             {
@@ -991,11 +1032,13 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 "size": Decimal("0.5"),
                 "price": "220.10",
                 "commission": "-0.35",
-                "trade_time": "2026-09-24T20:00:01Z",
+                "trade_time": "20260924-20:00:01",
+            "trade_time_r": 1790280001000,
             }
         ]
+        observation = ibkr_trade_observation([rows[0], dict(rows[0])])
         fills = parse_web_api_trades(
-            ibkr_trade_observation([rows[0], dict(rows[0])]),
+            observation,
             instrument_versions_by_conid={265598: "AAPL-CONID-265598:v1"},
             fee_currency_by_execution_id={"0001.123.01": "USD"},
         )
@@ -1008,6 +1051,59 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(fills[0].side, "BUY")
         self.assertEqual(fills[0].quantity, Decimal("0.5"))
         self.assertEqual(fills[0].fee_amount, Decimal("-0.35"))
+        self.assertEqual(fills[0].trade_time, "2026-09-24T20:00:01Z")
+        self.assertEqual(fills[0].evidence_refs, (observation.evidence_ref,))
+
+    def test_web_api_trade_time_and_conidex_are_cross_bound(self):
+        base = {
+            "execution_id": "exec-time-1",
+            "order_ref": "at-ibkr-time",
+            "account": "U1234567",
+            "accountCode": "U1234567",
+            "side": "B",
+            "conid": 265598,
+            "conidEx": "265598@SMART",
+            "size": "1",
+            "price": "100",
+            "commission": "0.25",
+            "trade_time": "20260924-20:00:01",
+            "trade_time_r": 1790280001000,
+        }
+        fills = parse_web_api_trades(
+            ibkr_trade_observation([base]),
+            instrument_versions_by_conid={265598: "AAPL:v1"},
+            fee_currency_by_execution_id={"exec-time-1": "USD"},
+        )
+        self.assertEqual(fills[0].trade_time, "2026-09-24T20:00:01Z")
+
+        with self.assertRaisesRegex(IbkrWebAdapterError, "trade_time_r conflict"):
+            parse_web_api_trades(
+                ibkr_trade_observation([dict(base, trade_time_r=1790280002000)]),
+                instrument_versions_by_conid={265598: "AAPL:v1"},
+                fee_currency_by_execution_id={"exec-time-1": "USD"},
+            )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "documented IBKR UTC format"):
+            parse_web_api_trades(
+                ibkr_trade_observation(
+                    [dict(base, trade_time="2026-09-24T20:00:01Z")]
+                ),
+                instrument_versions_by_conid={265598: "AAPL:v1"},
+                fee_currency_by_execution_id={"exec-time-1": "USD"},
+            )
+        missing_epoch = dict(base)
+        missing_epoch.pop("trade_time_r")
+        with self.assertRaisesRegex(IbkrWebAdapterError, "trade_time_r"):
+            parse_web_api_trades(
+                ibkr_trade_observation([missing_epoch]),
+                instrument_versions_by_conid={265598: "AAPL:v1"},
+                fee_currency_by_execution_id={"exec-time-1": "USD"},
+            )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "conidEx"):
+            parse_web_api_trades(
+                ibkr_trade_observation([dict(base, conidEx="999999")]),
+                instrument_versions_by_conid={265598: "AAPL:v1"},
+                fee_currency_by_execution_id={"exec-time-1": "USD"},
+            )
 
     def test_web_api_trade_rejects_cross_account_unknown_conid_and_missing_fee_currency(self):
         row = {
@@ -1426,7 +1522,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertFalse(_HostileText.strip_called)
 
         with self.assertRaisesRegex(
-            IbkrWebAdapterError, "canonical positive integer text"
+            IbkrWebAdapterError, "canonical non-negative integer text"
         ):
             IbkrExecutionEvidence(
                 execution_id="exec-direct",

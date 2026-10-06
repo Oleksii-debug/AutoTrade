@@ -50,6 +50,9 @@ _ORDER_TYPES = {
 }
 _TIFS = frozenset({"DAY", "GTC", "IOC"})
 _SIDES = frozenset({"BUY", "SELL"})
+_PERMANENT_ORDER_ID = re.compile(r"^(?:0|[1-9][0-9]*)$")
+_IBKR_WEB_TRADE_TIME = re.compile(r"^[0-9]{8}-[0-9]{2}:[0-9]{2}:[0-9]{2}$")
+_TRADE_CONIDEX = re.compile(r"^(?P<conid>[1-9][0-9]*)(?:@[A-Za-z0-9._-]+)?$")
 
 
 def _text(value: str, *, name: str) -> str:
@@ -100,6 +103,36 @@ def _instant(value: datetime, *, name: str) -> datetime:
 
 def _decimal_text(value: Decimal) -> str:
     return format(value, "f")
+
+
+def _canonical_web_trade_time(
+    value: object,
+    *,
+    epoch_milliseconds: object,
+) -> str:
+    """Cross-bind documented IBKR trade time text to its epoch evidence."""
+
+    text = _provider_text(value, name="trade_time")
+    if _IBKR_WEB_TRADE_TIME.fullmatch(text) is None:
+        raise IbkrWebAdapterError(
+            "trade_time must use documented IBKR UTC format YYYYMMDD-HH:mm:ss"
+        )
+    try:
+        parsed = datetime.strptime(text, "%Y%m%d-%H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as error:
+        raise IbkrWebAdapterError(
+            "trade_time must use documented IBKR UTC format YYYYMMDD-HH:mm:ss"
+        ) from error
+    if type(epoch_milliseconds) is not int or epoch_milliseconds < 0:
+        raise IbkrWebAdapterError(
+            "trade_time_r must be a non-negative exact integer"
+        )
+    expected_epoch_milliseconds = int(parsed.timestamp()) * 1000
+    if epoch_milliseconds != expected_epoch_milliseconds:
+        raise IbkrWebAdapterError("trade_time and trade_time_r conflict")
+    return parsed.isoformat().replace("+00:00", "Z")
 
 
 def validate_coid(value: str) -> str:
@@ -561,9 +594,9 @@ class IbkrExecutionEvidence:
         permanent_order_id = _text(
             self.permanent_order_id, name="permanent_order_id"
         )
-        if re.fullmatch(r"[1-9][0-9]*", permanent_order_id) is None:
+        if _PERMANENT_ORDER_ID.fullmatch(permanent_order_id) is None:
             raise IbkrWebAdapterError(
-                "permanent_order_id must be canonical positive integer text"
+                "permanent_order_id must be canonical non-negative integer text"
             )
         object.__setattr__(self, "execution_id", execution_id)
         object.__setattr__(self, "permanent_order_id", permanent_order_id)
@@ -593,9 +626,9 @@ class IbkrExecutionEvidence:
         quantity,
         price,
     ) -> "IbkrExecutionEvidence":
-        if type(permanent_order_id) is not int or permanent_order_id <= 0:
+        if type(permanent_order_id) is not int or permanent_order_id < 0:
             raise IbkrWebAdapterError(
-                "permanent_order_id must be a positive exact integer"
+                "permanent_order_id must be a non-negative exact integer"
             )
         return cls(
             execution_id=execution_id,
@@ -1215,6 +1248,14 @@ def parse_web_api_trades(
         conid = raw.get("conid")
         if type(conid) is not int or conid <= 0:
             raise IbkrWebAdapterError("trade conid must be a positive exact integer")
+        raw_conidex = raw.get("conidEx")
+        if raw_conidex is not None:
+            conidex = _provider_text(raw_conidex, name="trade.conidEx")
+            conidex_match = _TRADE_CONIDEX.fullmatch(conidex)
+            if conidex_match is None or conidex_match.group("conid") != str(conid):
+                raise IbkrWebAdapterError(
+                    "trade conidEx does not match trade conid"
+                )
         if conid not in instrument_versions_by_conid:
             raise IbkrWebAdapterError(f"unmapped IBKR conid: {conid}")
         instrument = _text(
@@ -1222,9 +1263,12 @@ def parse_web_api_trades(
         )
 
         raw_client_id = raw.get("order_ref")
-        client_id = None
-        if raw_client_id not in {None, ""}:
-            client_id = validate_coid(_text(raw_client_id, name="order_ref"))
+        if raw_client_id is None or raw_client_id == "":
+            client_id = None
+        else:
+            client_id = validate_coid(
+                _provider_text(raw_client_id, name="order_ref")
+            )
 
         if execution_id not in fee_currency_by_execution_id:
             raise IbkrWebAdapterError(
@@ -1243,7 +1287,10 @@ def parse_web_api_trades(
                 "trade side must be provider-evidenced B or S"
             )
         side = side_by_provider_value[raw_side]
-        trade_time = _text(raw.get("trade_time"), name="trade_time")
+        trade_time = _canonical_web_trade_time(
+            raw.get("trade_time"),
+            epoch_milliseconds=raw.get("trade_time_r"),
+        )
         fill = ProviderFillEvidence.create(
             provider_id="IBKR",
             account_id=account,
@@ -1257,6 +1304,7 @@ def parse_web_api_trades(
             fee_amount=_decimal(raw.get("commission"), name="trade.commission"),
             fee_currency=fee_currency,
             trade_time=trade_time,
+            evidence_refs=(observation.evidence_ref,),
         )
         prior = by_execution.get(execution_id)
         if prior is not None and prior != fill:
@@ -1295,9 +1343,9 @@ def execution_to_reconciliation_fill(
         execution.permanent_order_id,
         name="execution.permanent_order_id",
     )
-    if re.fullmatch(r"[1-9][0-9]*", permanent_order_id) is None:
+    if _PERMANENT_ORDER_ID.fullmatch(permanent_order_id) is None:
         raise IbkrWebAdapterError(
-            "execution permanent_order_id must be canonical positive integer text"
+            "execution permanent_order_id must be canonical non-negative integer text"
         )
     execution_account = _text(
         execution.account_id,

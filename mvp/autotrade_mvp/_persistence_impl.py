@@ -2565,8 +2565,8 @@ class JournalStore:
             if supplied_hash != expected_payload_hash:
                 raise ValueError("payload_hash does not match payload")
             committed_at = _require_canonical_json_text(
-            envelope.get("committed_at"), name="committed_at"
-        )
+                envelope.get("committed_at"), name="committed_at"
+            )
             if outbox_topic is not None:
                 self._require_text(outbox_topic, "outbox_topic")
             envelope_json = canonical_json(envelope)

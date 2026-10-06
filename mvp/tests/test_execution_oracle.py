@@ -518,6 +518,16 @@ class ExecutionOracleTests(unittest.TestCase):
         self.assertTrue(result.triggered)
         self.assertEqual(result.filled_quantity, Decimal("0"))
         assert_conservative_execution(order=o, observation=q, model=m, result=result)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "observed stop trigger cannot be omitted",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=replace(result, triggered=False),
+            )
 
     def test_oracle_rejects_status_quantity_contradictions(self):
         o, q, m = order(), observation(), model()

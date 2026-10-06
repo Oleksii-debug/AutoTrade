@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from threading import RLock
+from types import MappingProxyType
 from typing import Mapping
 from uuid import UUID, NAMESPACE_URL, uuid5
 import weakref
@@ -55,9 +56,14 @@ _RESOLUTION_SCHEMA_VERSION = 2
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str):
         raise ValueError(f"{name} is required")
-    return value.strip()
+    # Preserve historical trimming semantics without dispatching caller-owned
+    # str-subclass overrides inside durable reservation authority.
+    normalized = str.strip(value)
+    if not normalized:
+        raise ValueError(f"{name} is required")
+    return normalized
 
 
 
@@ -104,10 +110,23 @@ def _decimal_text(value: Decimal) -> str:
 
 
 def _amount_map(values: Mapping[str, object], *, allow_zero: bool) -> dict[str, str]:
-    if not isinstance(values, Mapping) or not values:
+    # Financial reservation identity must never enumerate an executable Mapping
+    # implementation. Exact dict and MappingProxyType are the inert mapping
+    # surfaces used by the product; snapshot their entries once before any
+    # amount parsing or durable hashing.
+    if type(values) is dict:
+        items = tuple(dict.items(values))
+    elif type(values) is MappingProxyType:
+        items = tuple(values.items())
+    else:
+        raise TypeError(
+            "resource amounts must use exact dict or MappingProxyType"
+        )
+    if not items:
         raise ValueError("resource amounts are required")
+
     result: dict[str, str] = {}
-    for resource, raw in values.items():
+    for resource, raw in items:
         key = _text(resource, name="resource")
         if key in result:
             raise ValueError("resource names must be unique after normalization")
@@ -142,8 +161,8 @@ def _snapshot_payload(snapshot: ReservationSnapshot) -> dict[str, object]:
 def reservation_snapshot_digest(snapshot: ReservationSnapshot) -> str:
     """Return the reservation authority's canonical identity for one state cut."""
 
-    if not isinstance(snapshot, ReservationSnapshot):
-        raise TypeError("snapshot must be ReservationSnapshot")
+    if type(snapshot) is not ReservationSnapshot:
+        raise TypeError("snapshot must be exact ReservationSnapshot")
     return payload_digest(_snapshot_payload(snapshot))
 
 
@@ -152,7 +171,12 @@ def _now() -> str:
 
 
 def _environment(value: str) -> str:
-    normalized = value.strip().upper() if isinstance(value, str) else ""
+    if not isinstance(value, str):
+        normalized = ""
+    else:
+        # Use base str operations so a caller-owned subclass cannot execute
+        # code while financial environment scope is being selected.
+        normalized = str.upper(str.strip(value))
     if normalized not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
         raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
     return normalized

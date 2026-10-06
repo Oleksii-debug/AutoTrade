@@ -347,6 +347,80 @@ def release_evidence_snapshot(
     return True, None, value
 
 
+def _canonical_evidence_ref(
+    item: object,
+) -> tuple[str, str, str] | None:
+    """Return the exact canonical identity of one release evidence reference."""
+
+    if not isinstance(item, dict):
+        return None
+    artifact_id = item.get("artifact_id")
+    digest = item.get("sha256")
+    observed_at = item.get("observed_at")
+    if (
+        not isinstance(artifact_id, str)
+        or not artifact_id.strip()
+        or artifact_id != artifact_id.strip()
+        or not isinstance(digest, str)
+        or SHA256_ID.fullmatch(digest) is None
+        or not isinstance(observed_at, str)
+        or UTC_EVIDENCE_TIME.fullmatch(observed_at) is None
+    ):
+        return None
+    try:
+        instant = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if (
+        instant.tzinfo is None
+        or instant.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        != observed_at
+    ):
+        return None
+    return artifact_id, digest, observed_at
+
+
+def _canonical_evidence_ref_artifact_id(item: object) -> str | None:
+    identity = _canonical_evidence_ref(item)
+    return None if identity is None else identity[0]
+
+
+def _dependency_graph_component_identities(
+    graph: object,
+) -> tuple[str, ...] | None:
+    """Return deterministic identities requiring advisory disposition."""
+
+    if not isinstance(graph, dict):
+        return None
+    identities: list[str] = []
+    sections = (
+        ("python_development_dependencies", "python", "==", ("name", "version")),
+        ("dotnet_package_dependencies", "nuget", "@", ("name", "version")),
+        ("inspected_components", "source", "@", ("repository", "revision")),
+    )
+    for section, prefix, separator, keys in sections:
+        records = graph.get(section)
+        if not isinstance(records, list):
+            return None
+        for record in records:
+            if not isinstance(record, dict):
+                return None
+            left = record.get(keys[0])
+            right = record.get(keys[1])
+            if (
+                not isinstance(left, str)
+                or not left
+                or left != left.strip()
+                or not isinstance(right, str)
+                or not right
+                or right != right.strip()
+            ):
+                return None
+            identities.append(f"{prefix}:{left}{separator}{right}")
+    if len(identities) != len(set(identities)):
+        return None
+    return tuple(sorted(identities))
+
 def release_evidence_document(
     path: Path,
     *,
@@ -546,7 +620,15 @@ def dependency_advisory_evidence_document(
     expected_dependency_graph: dict[str, object],
     expected_source_sha: str | None = None,
 ) -> tuple[bool, str | None]:
-    """Require advisory evidence for the exact dependency graph under review."""
+    """Validate complete advisory structure without minting terminal trust.
+
+    The repository document is candidate-authored input. It must bind the exact
+    dependency graph to explicit review-policy and advisory-source snapshots and
+    complete reviewed-component coverage. Even a structurally complete document
+    remains non-terminal until the canonical WP-64 signed trust boundary accepts
+    the same evidence.
+    """
+
     qualified, reason, value = release_evidence_snapshot(
         path,
         label="dependency advisory qualification",
@@ -556,8 +638,82 @@ def dependency_advisory_evidence_document(
         return False, reason
     if value.get("dependency_graph") != expected_dependency_graph:
         return False, "dependency_graph_mismatch"
-    return True, None
 
+    expected_components = _dependency_graph_component_identities(
+        expected_dependency_graph
+    )
+    if expected_components is None:
+        return False, "invalid_expected_dependency_graph"
+
+    top_level_refs = value.get("evidence_refs")
+    if not isinstance(top_level_refs, list):
+        return False, "invalid_evidence_refs"
+    top_level_evidence = {
+        identity
+        for item in top_level_refs
+        if (identity := _canonical_evidence_ref(item)) is not None
+    }
+
+    policy_evidence = _canonical_evidence_ref(
+        value.get("review_policy_evidence")
+    )
+    if policy_evidence is None:
+        return False, "missing_review_policy_evidence"
+    if policy_evidence not in top_level_evidence:
+        return False, "unbound_review_policy_evidence"
+
+    source_refs = value.get("advisory_source_evidence")
+    if not isinstance(source_refs, list) or not source_refs:
+        return False, "missing_advisory_source_evidence"
+    source_artifact_ids: set[str] = set()
+    for item in source_refs:
+        identity = _canonical_evidence_ref(item)
+        if identity is None:
+            return False, "invalid_advisory_source_evidence"
+        artifact_id = identity[0]
+        if artifact_id in source_artifact_ids:
+            return False, "duplicate_advisory_source_evidence"
+        if identity not in top_level_evidence:
+            return False, "unbound_advisory_source_evidence"
+        if artifact_id == policy_evidence[0]:
+            return False, "advisory_source_must_be_distinct_from_policy"
+        source_artifact_ids.add(artifact_id)
+
+    reviewed = value.get("reviewed_components")
+    if (
+        not isinstance(reviewed, list)
+        or any(
+            not isinstance(item, str)
+            or not item
+            or item != item.strip()
+            for item in reviewed
+        )
+        or len(reviewed) != len(set(reviewed))
+    ):
+        return False, "invalid_reviewed_components"
+    if tuple(reviewed) != expected_components:
+        return False, "reviewed_component_coverage_mismatch"
+
+    blocking = value.get("blocking_findings")
+    if not isinstance(blocking, list):
+        return False, "missing_blocking_findings"
+    if blocking:
+        return False, "blocking_findings_present"
+
+    residual = value.get("residual_risks")
+    if (
+        not isinstance(residual, list)
+        or any(
+            not isinstance(item, str)
+            or not item.strip()
+            or item != item.strip()
+            for item in residual
+        )
+        or len(residual) != len(set(residual))
+    ):
+        return False, "invalid_residual_risks"
+
+    return False, "authenticated_trust_required"
 
 def normalize_inspected_components(
     document: object,

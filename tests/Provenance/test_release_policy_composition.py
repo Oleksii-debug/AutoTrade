@@ -103,8 +103,8 @@ class ReleaseEvidenceSnapshotTests(unittest.TestCase):
                 expected_source_sha="a" * 40,
             )
 
-        self.assertTrue(qualified)
-        self.assertIsNone(reason)
+        self.assertFalse(qualified)
+        self.assertEqual(reason, "missing_review_policy_evidence")
         self.assertEqual(read_bytes.call_count, 1)
 
 

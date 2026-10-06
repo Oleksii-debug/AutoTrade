@@ -1250,6 +1250,27 @@ class VerticalSliceTests(unittest.TestCase):
                             **kwargs,
                         )
 
+    def test_checkpoint_configuration_identity_ignores_mutable_module_aliases(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        with TemporaryDirectory() as directory:
+            prices = [100, 101, 102, 103]
+            first = run_vertical_slice(prices, directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint_before = checkpoint_path.read_bytes()
+
+            with (
+                patch.object(pipeline_module, "MONEY_QUANTUM", Decimal("1")),
+                patch.object(pipeline_module, "CHECKPOINT_SCHEMA_VERSION", 99),
+                patch.object(pipeline_module, "_CHECKPOINT_FIELDS", frozenset()),
+            ):
+                restarted = run_vertical_slice(prices, directory)
+
+            self.assertTrue(restarted.resumed)
+            self.assertEqual(restarted.fill_id, first.fill_id)
+            self.assertEqual(restarted.cash, first.cash)
+            self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+
     def test_financial_outputs_ignore_ambient_decimal_context(self):
         prices = ["100.12345678", "101.23456789", "102.34567891", "103.45678912"]
         kwargs = {

@@ -1019,5 +1019,57 @@ class InstrumentIngressAuthorityTests(unittest.TestCase):
         self.assertEqual(candidate.metadata_evidence[0]["artifact_id"], B)
 
 
+    def test_asset_class_subclass_is_rejected_before_hash_or_equality(self):
+        with self.assertRaisesRegex(InstrumentRegistryError, "asset_class is required"):
+            InstrumentVersion(
+                **{
+                    **spot().__dict__,
+                    "asset_class": _TrapText("CASH_EQUITY"),
+                }
+            )
+
+    def test_metadata_container_subclass_is_rejected_before_iteration(self):
+        class TrapList(list):
+            def __iter__(self):
+                raise AssertionError("caller list iteration executed")
+
+        with self.assertRaisesRegex(
+            InstrumentRegistryError,
+            "metadata_evidence must be an exact built-in array",
+        ):
+            spot(metadata_evidence=TrapList())
+
+    def test_funding_mapping_subclass_is_rejected_before_mapping_callbacks(self):
+        hostile = _TrapMapping({"interval": "8h", "source": "provider"})
+        with self.assertRaisesRegex(
+            InstrumentRegistryError,
+            "funding_schedule must be a non-empty exact built-in object",
+        ):
+            InstrumentVersion(
+                instrument_id=A,
+                version=1,
+                provider_id="simulated",
+                venue_id="perpetuals",
+                provider_symbol="ABC-PERP",
+                asset_class="PERPETUAL",
+                base_currency="ABC",
+                quote_currency="USD",
+                settlement_currency="USD",
+                quantity_unit="contract",
+                contract_multiplier="1",
+                price_tick="0.01",
+                quantity_step="1",
+                minimum_quantity="1",
+                calendar_id="CONTINUOUS_24_7",
+                timezone_id="UTC",
+                effective_from=when(1),
+                payoff="LINEAR",
+                underlying_id=f"{B}@1",
+                settlement_method="CASH",
+                funding_schedule=hostile,
+                margin_model_id="perp-margin-v1",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

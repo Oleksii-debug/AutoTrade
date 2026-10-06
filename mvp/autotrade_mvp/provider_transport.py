@@ -6514,6 +6514,7 @@ def _install_bybit_direct_authenticated_read_executor(
     receipt_snapshot,
     signer,
     observer,
+    bind_observation,
     require_current_capability,
     validate_query_rule,
     canonical_sha256,
@@ -6678,6 +6679,11 @@ def _install_bybit_direct_authenticated_read_executor(
                 raise transport_error(
                     "Bybit direct authenticated-read observation differs from wire receipt"
                 )
+            observation = bind_observation(
+                wire_client,
+                wire_response,
+                observation,
+            )
             return observation, receipt
 
     return execute_direct
@@ -6696,6 +6702,7 @@ BybitV5AuthenticatedReadTransport.execute_direct = (
         direct_authenticated_read_execution_receipt_snapshot,
         BybitV5AuthenticatedReadSigner.sign,
         observe_authenticated_json_response,
+        _bind_direct_authenticated_read_observation,
         BybitV5AuthenticatedReadTransport._require_current_capability,
         _canonical_bybit_authenticated_read_query,
         sha256,

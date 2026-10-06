@@ -123,7 +123,13 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             economic_book=self.book,
         )
 
-    def _authority(self, *, registry, economic_book):
+    def _authority(
+        self,
+        *,
+        registry,
+        economic_book,
+        provider_environment=None,
+    ):
         def resolve(reference):
             return self._evidence[reference]
 
@@ -134,6 +140,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             evidence_resolver=resolve,
             lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
             permission_scope=LIFECYCLE_SCOPE,
+            provider_environment=provider_environment,
         )
 
     @staticmethod
@@ -606,6 +613,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                     evidence_resolver=mutate_financial_state_if_called,
                     lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
                     permission_scope=LIFECYCLE_SCOPE,
+                    provider_environment="TESTNET",
                 )
                 before_economic = tuple(book.transactions)
                 before_lifecycle = tuple(
@@ -634,6 +642,62 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                     ),
                     before_lifecycle,
                 )
+
+    def test_provider_environment_is_canonical_and_changes_aggregate_identity(self):
+        testnet = self._authority(
+            registry=self.registry,
+            economic_book=self.book,
+            provider_environment="testnet",
+        )
+        demo = self._authority(
+            registry=self.registry,
+            economic_book=self.book,
+            provider_environment="DEMO",
+        )
+        self.assertEqual(testnet.provider_environment, "TESTNET")
+        self.assertEqual(demo.provider_environment, "DEMO")
+        self.assertNotEqual(testnet.aggregate_id, demo.aggregate_id)
+
+    def test_provider_environment_mutation_fails_before_lifecycle_read(self):
+        authority = self._authority(
+            registry=self.registry,
+            economic_book=self.book,
+            provider_environment="TESTNET",
+        )
+        authority.provider_environment = "DEMO"
+        with self.assertRaisesRegex(
+            OptionLifecycleConflict,
+            "provider_environment authority changed",
+        ):
+            authority._events()
+
+    def test_neutral_simulation_evidence_cannot_satisfy_provider_environment_authority(self):
+        self.seed_option_position("1")
+        reference = self.evidence(
+            external_event_id="neutral-provider-domain",
+            provider_revision="neutral-provider-domain-r1",
+        )
+        authority = self._authority(
+            registry=self.registry,
+            economic_book=self.book,
+            provider_environment="TESTNET",
+        )
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", authority.aggregate_id)
+        )
+
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "provider_environment scope does not match lifecycle authority",
+        ):
+            authority.apply(reference)
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            before_lifecycle,
+        )
 
     def test_qualified_provider_read_wrapper_is_not_lifecycle_authority(self):
         reference = "qualified-provider-read-wrapper"

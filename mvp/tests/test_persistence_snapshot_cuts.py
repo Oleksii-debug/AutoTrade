@@ -171,6 +171,79 @@ class PersistenceSnapshotCutTests(unittest.TestCase):
             self.assertTrue(raced)
             self.assertEqual(JournalStore(path).current_journal_sequence(), 2)
 
+    def test_projection_checkpoint_rejects_non_text_durable_authority(self):
+        for column in ("state_json", "state_hash", "updated_at"):
+            with self.subTest(column=column), TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                store = JournalStore(path)
+                store.append_event(event())
+                self.assertTrue(
+                    store.save_projection_checkpoint(
+                        projection_name="position",
+                        aggregate_type="account",
+                        aggregate_id="paper-1",
+                        aggregate_version=1,
+                        state={"net_quantity": "1"},
+                    )
+                )
+
+                connection = sqlite3.connect(path)
+                try:
+                    connection.execute(
+                        f"UPDATE projection_checkpoints "
+                        f"SET {column} = CAST({column} AS BLOB) "
+                        "WHERE projection_name = ? AND aggregate_type = ? "
+                        "AND aggregate_id = ?",
+                        ("position", "account", "paper-1"),
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"projection checkpoint {column} must be canonical non-empty text",
+                ):
+                    JournalStore(path).load_projection_checkpoint(
+                        projection_name="position",
+                        aggregate_type="account",
+                        aggregate_id="paper-1",
+                    )
+
+    def test_global_checkpoint_rejects_non_text_durable_authority(self):
+        for column in ("state_json", "state_hash", "updated_at"):
+            with self.subTest(column=column), TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                store = JournalStore(path)
+                store.append_event(event())
+                self.assertTrue(
+                    store.save_global_projection_checkpoint(
+                        projection_name="portfolio",
+                        journal_sequence=1,
+                        state={"paper-1": "1"},
+                    )
+                )
+
+                connection = sqlite3.connect(path)
+                try:
+                    connection.execute(
+                        f"UPDATE global_projection_checkpoints "
+                        f"SET {column} = CAST({column} AS BLOB) "
+                        "WHERE projection_name = ?",
+                        ("portfolio",),
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"global projection checkpoint {column} must be canonical non-empty text",
+                ):
+                    JournalStore(path).load_global_projection_checkpoint(
+                        projection_name="portfolio"
+                    )
+
     def test_projection_rebuild_from_zero_equals_checkpoint_plus_tail_after_restart(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

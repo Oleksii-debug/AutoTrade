@@ -1,4 +1,5 @@
 using AutoTrade.Desktop;
+using System.Text;
 using System.Text.Json;
 
 // Compile the exact Desktop preflight into a portable test host. No second
@@ -33,12 +34,36 @@ try
 
         ExpectRejection(() => File.WriteAllText(extra, "probe"),
             () => File.Delete(extra), "undeclared installed file");
+
+        ExpectManifestRejection(text =>
+        {
+            const string marker = "\"product\": \"AutoTrade\",";
+            int index = text.IndexOf(marker, StringComparison.Ordinal);
+            if (index < 0) throw new InvalidOperationException("Probe could not locate product identity.");
+            return text.Insert(index, "\"product\": \"forged-first-value\",\n  ");
+        }, "duplicate root manifest property");
+
+        ExpectManifestRejection(text =>
+        {
+            int files = text.IndexOf("\"files\": [", StringComparison.Ordinal);
+            int path = files < 0 ? -1 : text.IndexOf("\"path\": ", files, StringComparison.Ordinal);
+            if (path < 0) throw new InvalidOperationException("Probe could not locate file inventory path.");
+            return text.Insert(path, "\"path\": \"forged-first-path\",\n      ");
+        }, "duplicate file inventory property");
+
+        ExpectManifestRejection(text =>
+        {
+            int firstLine = text.IndexOf('\n');
+            if (firstLine < 0) throw new InvalidOperationException("Probe manifest is not multiline JSON.");
+            return text.Insert(firstLine + 1, "  \"unexpected_inventory_authority\": true,\n");
+        }, "unknown root manifest property");
     }
     InstalledCandidateInventory.Verify(payload);
     Console.WriteLine(JsonSerializer.Serialize(new
     {
         inventory = "PASS",
         exercised_missing_changed_extra = exercised,
+        exercised_manifest_schema = exercised,
         windows_executed = OperatingSystem.IsWindows(),
         nvda_verified = false
     }));
@@ -62,4 +87,17 @@ void ExpectRejection(Action mutate, Action restore, string scenario)
     }
     finally { restore(); }
     InstalledCandidateInventory.Verify(payload);
+}
+
+void ExpectManifestRejection(Func<string, string> mutate, string scenario)
+{
+    string manifest = Path.Combine(Path.GetDirectoryName(payload)!, "bundle-manifest.json");
+    byte[] original = File.ReadAllBytes(manifest);
+    string originalText = Encoding.UTF8.GetString(original);
+    string changedText = mutate(originalText);
+    byte[] changed = Encoding.UTF8.GetBytes(changedText);
+    ExpectRejection(
+        () => File.WriteAllBytes(manifest, changed),
+        () => File.WriteAllBytes(manifest, original),
+        scenario);
 }

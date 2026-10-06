@@ -563,6 +563,9 @@ def _install_submission_response_binding_authority(loader):
     canonical_bytes = bytes
     canonical_object = object
     object_getattribute = canonical_object.__getattribute__
+    canonical_dict = dict
+    dict_getitem = canonical_dict.__getitem__
+    canonical_frozenset = frozenset
     mapping_proxy_type = MappingProxyType
     canonical_weakref_ref = weakref_ref
     canonical_loader = loader
@@ -622,6 +625,8 @@ def _install_submission_response_binding_authority(loader):
             or int is not canonical_int
             or bytes is not canonical_bytes
             or object is not canonical_object
+            or dict is not canonical_dict
+            or frozenset is not canonical_frozenset
             or MappingProxyType is not mapping_proxy_type
             or weakref_ref is not canonical_weakref_ref
             or JournalStore is not canonical_journal_type
@@ -644,8 +649,13 @@ def _install_submission_response_binding_authority(loader):
             authority_changed()
 
     def raw_snapshot(value):
+        instance_state = object_getattribute(value, "__dict__")
+        if canonical_type(instance_state) is not canonical_dict:
+            authority_changed()
+        if canonical_frozenset(instance_state) != canonical_frozenset(field_names):
+            authority_changed()
         return canonical_tuple(
-            object_getattribute(value, name)
+            dict_getitem(instance_state, name)
             for name in field_names
         )
 

@@ -339,10 +339,12 @@ def prepare_authenticated_read_query(
     from the VERIFIED capability snapshot before any provider response exists.
     """
 
-    if not isinstance(capability, CapabilitySnapshot):
-        raise TypeError("capability must be CapabilitySnapshot")
+    if type(capability) is not CapabilitySnapshot:
+        raise TypeError("capability must be exact CapabilitySnapshot")
     if not isinstance(surface, Surface):
         raise ProviderCoreError("surface must be a provider Surface")
+    if type(at) is not datetime or type(at.tzinfo) is not timezone:
+        raise ProviderCoreError("at must be an exact timezone-aware datetime")
     point = _utc(at, "at")
     if (
         type(permission_scope) is not str

@@ -198,9 +198,9 @@ def capture_current_scientific_financial_cut(
 
     protocol_id = _text(scientific_protocol_id, name="scientific_protocol_id")
     profile_digest = _sha256(gate_profile_digest, name="gate_profile_digest")
-    provider = _text(provider_id, name="provider_id")
+    provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")
-    env = _text(environment, name="environment")
+    env = _text(environment, name="environment").upper()
     checkpoint_id = _text(
         reconciliation_event_id,
         name="reconciliation_event_id",
@@ -226,22 +226,19 @@ def capture_current_scientific_financial_cut(
             account_id=account,
             environment=env,
         )
-        if latest is None:
-            raise FinancialCutUnavailable(
-                "current reconciliation checkpoint is unavailable"
-            )
-        try:
-            checkpoint = require_current_reconciliation_checkpoint(
-                store,
-                checkpoint_event_id=checkpoint_id,
-                provider_id=provider,
-                account_id=account,
-                environment=env,
-            )
-        except (TypeError, ValueError) as error:
-            raise FinancialCutConflict(
-                "reconciliation checkpoint is not authoritative for the requested scope"
-            ) from error
+        checkpoint = None
+        checkpoint_error: Exception | None = None
+        if latest is not None:
+            try:
+                checkpoint = require_current_reconciliation_checkpoint(
+                    store,
+                    checkpoint_event_id=checkpoint_id,
+                    provider_id=provider,
+                    account_id=account,
+                    environment=env,
+                )
+            except (TypeError, ValueError) as error:
+                checkpoint_error = error
         after = _exact_dict(
             store.whole_store_state_cut(),
             name="journal_state_after",
@@ -251,6 +248,14 @@ def capture_current_scientific_financial_cut(
         raise FinancialCutConflict(
             "financial journal changed while the scientific financial cut was captured"
         )
+    if latest is None:
+        raise FinancialCutUnavailable(
+            "current reconciliation checkpoint is unavailable"
+        )
+    if checkpoint_error is not None:
+        raise FinancialCutConflict(
+            "reconciliation checkpoint is not authoritative for the requested scope"
+        ) from checkpoint_error
     checkpoint = _exact_dict(checkpoint, name="reconciliation_checkpoint")
     reconciliation_sequence = checkpoint.get("journal_sequence")
     if type(reconciliation_sequence) is not int or reconciliation_sequence <= 0:

@@ -39,6 +39,10 @@ from .provider_response_limits import (
     HARD_MAX_PROVIDER_RESPONSE_BYTES,
     require_provider_response_bytes,
 )
+from .provider_origin_journal_identity import (
+    ProviderOriginJournalIdentityError,
+    canonical_provider_origin_journal_identity,
+)
 
 _CANONICAL_PROVIDER_ORIGIN_REQUIRE_RESPONSE_BYTES = require_provider_response_bytes
 _CANONICAL_PROVIDER_ORIGIN_REQUIRE_RESPONSE_BYTES_CODE = (
@@ -978,7 +982,6 @@ def observe_test_injected_json_response(
 # provider transport is cryptographically/compositionally bound to this issuer.
 _HOST_ATTESTED_PENDING_KIND = "HOST_ATTESTED_PENDING"
 _HOST_ATTESTED_OBSERVED_KIND = "HOST_ATTESTED_OBSERVED"
-_HOST_JOURNAL_IDENTITY_SCHEMA = "autotrade-provider-origin-journal-identity:v1"
 _HOST_PREPARED_DURABILITY_SCHEMA = "autotrade-provider-read-durable-prepared:v1"
 _HOST_OBSERVED_DURABILITY_SCHEMA = "autotrade-provider-read-durable-observed:v1"
 _HOST_SESSION_SCHEMA = "autotrade-provider-issuer-session:v1"
@@ -1099,39 +1102,6 @@ def _host_canonical_utc(value: object, *, name: str) -> str:
         f"T{point.hour:02d}:{point.minute:02d}:{point.second:02d}."
         f"{point.microsecond:06d}0Z"
     )
-
-
-def _host_journal_identity(
-    identity: object,
-) -> str:
-    from .provider_host_attestation import canonical_host_material
-    from .store_identity import require_exact_journal_store_identity
-
-    exact = require_exact_journal_store_identity(
-        identity,
-        subject="Host bridge journal identity",
-    )
-
-    def number(value: int | None) -> str:
-        if value is None:
-            return ""
-        if type(value) is not int:
-            raise ProviderOriginError(
-                "Host bridge journal identity contains non-integer identity material"
-            )
-        return str(value)
-
-    material = canonical_host_material(
-        _HOST_JOURNAL_IDENTITY_SCHEMA,
-        exact.identity_source,
-        exact.canonical_path,
-        number(exact.filesystem_device),
-        number(exact.filesystem_inode),
-        number(exact.windows_volume_serial),
-        number(exact.windows_file_index_high),
-        number(exact.windows_file_index_low),
-    )
-    return "sha256:" + sha256(material).hexdigest()
 
 
 def _host_event(
@@ -1345,12 +1315,24 @@ class HostAuthenticatedReadJournalBridge:
     def __init__(self, store: JournalStore) -> None:
         self._store = store
         self._store_identity = _require_origin_journal_authority(store)
-        self._journal_identity = _host_journal_identity(self._store_identity)
+        try:
+            self._journal_identity = canonical_provider_origin_journal_identity(
+                store
+            )
+        except ProviderOriginJournalIdentityError as error:
+            raise ProviderOriginError(
+                "Host bridge canonical journal identity is unavailable"
+            ) from error
 
     @property
     def journal_identity(self) -> str:
-        store, identity = self._require_store()
-        current = _host_journal_identity(identity)
+        store, _identity = self._require_store()
+        try:
+            current = canonical_provider_origin_journal_identity(store)
+        except ProviderOriginJournalIdentityError as error:
+            raise ProviderOriginError(
+                "Host bridge canonical journal identity is unavailable"
+            ) from error
         if current != self._journal_identity:
             raise ProviderOriginError(
                 "Host bridge canonical journal identity changed"

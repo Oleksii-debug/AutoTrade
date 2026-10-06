@@ -229,6 +229,77 @@ class ReconciliationJournalTests(unittest.TestCase):
 
             self.assertEqual(calls, [])
 
+    def test_checkpoint_writer_rejects_rebound_journal_class_operation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            calls = []
+
+            def explode(*_args, **_kwargs):
+                calls.append("load_events")
+                raise AssertionError("reconciliation invoked rebound class operation")
+
+            original = JournalStore.load_events
+            JournalStore.load_events = explode
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "reconciliation journal operation changed: load_events",
+                ):
+                    record_reconciliation_checkpoint(
+                        store,
+                        reconciliation_id="class-rebind",
+                        result=reconciliation(),
+                        observed_at="2026-09-24T19:00:00Z",
+                        host_id="test-host",
+                        owner_epoch="epoch-1",
+                    )
+            finally:
+                JournalStore.load_events = original
+
+            self.assertEqual(calls, [])
+            self.assertEqual(
+                JournalStore.load_events_by_aggregate_type(
+                    store,
+                    "account_reconciliation",
+                ),
+                [],
+            )
+
+    def test_checkpoint_writer_rejects_rebound_authority_guard(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            original = (
+                reconciliation_journal_module.require_exact_journal_store_authority
+            )
+            reconciliation_journal_module.require_exact_journal_store_authority = (
+                lambda *_args, **_kwargs: store.store_identity
+            )
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "reconciliation journal authority changed",
+                ):
+                    record_reconciliation_checkpoint(
+                        store,
+                        reconciliation_id="guard-rebind",
+                        result=reconciliation(),
+                        observed_at="2026-09-24T19:00:00Z",
+                        host_id="test-host",
+                        owner_epoch="epoch-1",
+                    )
+            finally:
+                reconciliation_journal_module.require_exact_journal_store_authority = (
+                    original
+                )
+
+            self.assertEqual(
+                JournalStore.load_events_by_aggregate_type(
+                    store,
+                    "account_reconciliation",
+                ),
+                [],
+            )
+
     def test_checkpoint_writer_rejects_polymorphic_text_before_callback(self):
         class ExplosiveText(str):
             calls = 0

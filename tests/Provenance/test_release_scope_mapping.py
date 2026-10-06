@@ -56,12 +56,25 @@ def _sbom(*, extra=False, wrong_hash=False):
         "spdxVersion": "SPDX-2.3",
         "SPDXID": "SPDXRef-DOCUMENT",
         "packages": packages,
-        "relationships": [{
-            "spdxElementId": "SPDXRef-DOCUMENT",
-            "relationshipType": "DESCRIBES",
-            "relatedSpdxElement": "SPDXRef-Package-AutoTrade",
-        }],
+        "relationships": [
+            {
+                "spdxElementId": "SPDXRef-DOCUMENT",
+                "relationshipType": "DESCRIBES",
+                "relatedSpdxElement": "SPDXRef-Package-AutoTrade",
+            },
+            {
+                "spdxElementId": "SPDXRef-Package-AutoTrade",
+                "relationshipType": "DEPENDS_ON",
+                "relatedSpdxElement": "SPDXRef-WebView2",
+            },
+        ],
     }
+    if extra:
+        document["relationships"].append({
+            "spdxElementId": "SPDXRef-Package-AutoTrade",
+            "relationshipType": "DEPENDS_ON",
+            "relatedSpdxElement": "SPDXRef-Unknown",
+        })
     raw = (
         json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
     ).encode("utf-8")
@@ -287,6 +300,41 @@ class ReleaseScopeMappingTests(unittest.TestCase):
         ):
             self._build(sbom_override=(document, raw))
 
+
+    def test_sbom_external_package_must_be_reachable_from_application(self):
+        document, _ = _sbom()
+        document["relationships"] = [
+            relation
+            for relation in document["relationships"]
+            if relation.get("relationshipType") != "DEPENDS_ON"
+        ]
+        raw = (
+            json.dumps(document, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError,
+            "not reachable from AutoTrade dependency graph",
+        ):
+            self._build(sbom_override=(document, raw))
+
+    def test_sbom_dependency_cannot_reference_unknown_package(self):
+        document, _ = _sbom()
+        document["relationships"].append({
+            "spdxElementId": "SPDXRef-WebView2",
+            "relationshipType": "DEPENDS_ON",
+            "relatedSpdxElement": "SPDXRef-Missing",
+        })
+        raw = (
+            json.dumps(document, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError,
+            "references unknown package",
+        ):
+            self._build(sbom_override=(document, raw))
+
     def test_locked_package_license_mismatch_fails(self):
         document, raw = _sbom()
         webview = next(
@@ -379,6 +427,11 @@ class ReleaseScopeMappingTests(unittest.TestCase):
             }],
         }
         document["packages"].append(python_package)
+        document["relationships"].append({
+            "spdxElementId": "SPDXRef-Package-AutoTrade",
+            "relationshipType": "DEPENDS_ON",
+            "relatedSpdxElement": "SPDXRef-Python",
+        })
         raw = (
             json.dumps(document, sort_keys=True, separators=(",", ":"))
             + "\n"
@@ -414,6 +467,11 @@ class ReleaseScopeMappingTests(unittest.TestCase):
                 "checksumValue": "2" * 64,
             }],
         })
+        document["relationships"].append({
+            "spdxElementId": "SPDXRef-Package-AutoTrade",
+            "relationshipType": "DEPENDS_ON",
+            "relatedSpdxElement": "SPDXRef-Python",
+        })
         raw = (
             json.dumps(document, sort_keys=True, separators=(",", ":"))
             + "\n"
@@ -442,6 +500,11 @@ class ReleaseScopeMappingTests(unittest.TestCase):
                 "algorithm": "SHA256",
                 "checksumValue": "2" * 64,
             }],
+        })
+        document["relationships"].append({
+            "spdxElementId": "SPDXRef-Package-AutoTrade",
+            "relationshipType": "DEPENDS_ON",
+            "relatedSpdxElement": "SPDXRef-Python",
         })
         raw = (
             json.dumps(document, sort_keys=True, separators=(",", ":"))

@@ -194,7 +194,11 @@ def _nuget_purl(name: str, version: str) -> str:
     return f"pkg:nuget/{name}@{version}"
 
 
-def _validate_autotrade_sbom_subject(sbom, *, source_sha: str) -> None:
+def _validate_autotrade_sbom_subject(
+    sbom,
+    *,
+    source_sha: str,
+) -> set[str]:
     """Bind the SPDX application subject to the exact source composition."""
 
     if type(sbom) is not dict:
@@ -249,6 +253,37 @@ def _validate_autotrade_sbom_subject(sbom, *, source_sha: str) -> None:
         raise ReleaseScopeMappingError(
             "SBOM must describe the exact AutoTrade application package"
         )
+
+    package_ids = {
+        item.get("SPDXID")
+        for item in packages
+        if type(item) is dict and type(item.get("SPDXID")) is str
+    }
+    edges: dict[str, set[str]] = {}
+    for relation in relationships:
+        if type(relation) is not dict:
+            raise ReleaseScopeMappingError(
+                "SBOM relationship must be object"
+            )
+        if relation.get("relationshipType") != "DEPENDS_ON":
+            continue
+        source = relation.get("spdxElementId")
+        target = relation.get("relatedSpdxElement")
+        if source not in package_ids or target not in package_ids:
+            raise ReleaseScopeMappingError(
+                "SBOM dependency relationship references unknown package"
+            )
+        edges.setdefault(source, set()).add(target)
+
+    reachable = {"SPDXRef-Package-AutoTrade"}
+    pending = ["SPDXRef-Package-AutoTrade"]
+    while pending:
+        source = pending.pop()
+        for target in sorted(edges.get(source, ())):
+            if target not in reachable:
+                reachable.add(target)
+                pending.append(target)
+    return reachable
 
 
 def normalize_spdx_packages(sbom) -> dict[str, dict[str, object]]:
@@ -356,11 +391,21 @@ def build_mapping(
     composition = normalize_composition(composition)
     if "sha256:" + sha256(sbom_raw).hexdigest() != composition["sbom_sha256"]:
         raise ReleaseScopeMappingError("SBOM bytes do not match composition")
-    _validate_autotrade_sbom_subject(
+    reachable_package_ids = _validate_autotrade_sbom_subject(
         sbom,
         source_sha=composition["source_sha"],
     )
     sbom_packages = normalize_spdx_packages(sbom)
+    unreachable = sorted(
+        purl
+        for purl, package in sbom_packages.items()
+        if package["spdx_id"] not in reachable_package_ids
+    )
+    if unreachable:
+        raise ReleaseScopeMappingError(
+            "SBOM package is not reachable from AutoTrade dependency graph: "
+            + ",".join(unreachable)
+        )
 
     rights = {}
     rights_by_name_version = {}

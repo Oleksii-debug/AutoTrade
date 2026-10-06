@@ -695,7 +695,7 @@ def _submission_evidence(
         "artifact_id": str(
             uuid5(
                 NAMESPACE_URL,
-                f"{source_uri}#{projection["evidence_ref"]}",
+                f"{source_uri}#{projection['evidence_ref']}",
             )
         ),
         "sha256": projection["response_sha256"],

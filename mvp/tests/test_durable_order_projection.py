@@ -1,8 +1,10 @@
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 from uuid import uuid4
+import gc
 import sqlite3
 import unittest
+import weakref
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
@@ -1037,6 +1039,36 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 evidence_refs=[ref],
             )
             self.assertTrue(confirmed.snapshot.cancel_confirmed)
+
+
+    def test_binding_registry_releases_selected_authorities_when_oms_is_collected(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+
+            book_ref = weakref.ref(book)
+            store_ref = weakref.ref(store)
+            artifacts_ref = weakref.ref(artifacts)
+
+            del book
+            del store
+            del artifacts
+            gc.collect()
+
+            self.assertIsNone(book_ref())
+            self.assertIsNone(
+                store_ref(),
+                "OMS binding registry retained JournalStore after OMS collection",
+            )
+            self.assertIsNone(
+                artifacts_ref(),
+                "OMS binding registry retained ArtifactStore after OMS collection",
+            )
 
 
 if __name__ == "__main__":

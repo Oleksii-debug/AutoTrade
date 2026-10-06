@@ -1,5 +1,6 @@
 from datetime import date, datetime, timezone, tzinfo
 from decimal import Decimal, ROUND_DOWN, localcontext
+from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.accounting import (
@@ -11,6 +12,8 @@ from mvp.autotrade_mvp.accounting import (
     book_fx_exchange,
     reverse_transaction,
 )
+from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.reservations import InsufficientAvailable, ReservationBook
 from mvp.autotrade_mvp.settlement import (
     BuyingPowerEvidence,
@@ -1077,6 +1080,57 @@ class EconomicSettlementCapitalTests(unittest.TestCase):
             obligations=(),
         )
         self.assertEqual(rebuilt.available_to_spend("USD"), Decimal("1000"))
+
+    def test_durable_economic_book_obligations_require_exact_provider_domain(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            economic = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            rebuilt = SettlementBook.from_economic_book(
+                economic_book=economic,
+                obligations=(),
+            )
+            self.assertEqual(rebuilt.available_to_spend("USD"), Decimal("0"))
+
+            demo_scope = SettlementAccountScope(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="DEMO",
+            )
+            demo_rule = SettlementRuleBinding(
+                rule_id="demo-rule",
+                rule_version="1",
+                scope=demo_scope,
+                instrument_version="ABC",
+                settlement_currency="USD",
+                effective_from=date(2026, 9, 1),
+                effective_to=None,
+                evidence_refs=("provider:demo-rule",),
+            )
+            foreign_domain = SettlementObligation(
+                obligation_id="demo-obligation",
+                cause_event_id="demo-fill",
+                currency="USD",
+                amount=Decimal("-10"),
+                trade_date=date(2026, 9, 24),
+                settlement_date=date(2026, 9, 25),
+                source_transaction_id="demo-transaction",
+                rule_binding=demo_rule,
+            )
+            with self.assertRaisesRegex(
+                SettlementConflict,
+                "differs from settlement scope",
+            ):
+                SettlementBook.from_economic_book(
+                    economic_book=economic,
+                    obligations=(foreign_domain,),
+                )
 
     def test_sell_is_economic_cash_but_not_available_before_settlement(self):
         book = self.funded_book()

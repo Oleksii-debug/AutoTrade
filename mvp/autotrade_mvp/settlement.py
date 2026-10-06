@@ -954,7 +954,7 @@ class SettlementBook:
                 environment, account_id, canonical_book = _require_scoped_economic_book_owner(economic_book)
             except AccountingConflict as error:
                 raise SettlementConflict(str(error)) from error
-            owner_scope = (None, account_id, environment)
+            owner_scope = (None, account_id, environment, None)
         else:
             # The durable financial book has its own original provider/account/
             # store generation seal. Validate it before obtaining the projection.
@@ -964,7 +964,12 @@ class SettlementBook:
             if type(economic_book) is not DurableProviderEconomicBook:
                 raise TypeError("economic_book must be an exact canonical economic authority")
             authority = _require_durable_provider_economic_book_authority(economic_book)
-            owner_scope = (authority.provider_id, authority.account_id, authority.environment)
+            owner_scope = (
+                authority.provider_id,
+                authority.account_id,
+                authority.environment,
+                authority.provider_environment,
+            )
             canonical_book = object.__getattribute__(economic_book, "_book")
             if type(canonical_book) is not EconomicBook:
                 raise TypeError("durable economic authority must own an exact EconomicBook")
@@ -990,14 +995,21 @@ class SettlementBook:
             )
         items = tuple(obligations)
         if owner_scope is not None:
-            provider, account, environment = owner_scope
+            provider, account, environment, provider_environment = owner_scope
             for item in items:
                 scope = None if item.rule_binding is None else item.rule_binding.scope
                 if scope is None or (
-                    scope.account_id != account or scope.environment != environment
+                    scope.account_id != account
+                    or scope.environment != environment
                     or (provider is not None and scope.provider_id != provider)
+                    or (
+                        provider_environment is not None
+                        and scope.provider_environment != provider_environment
+                    )
                 ):
-                    raise SettlementConflict("scoped economic book differs from settlement scope")
+                    raise SettlementConflict(
+                        "scoped economic book differs from settlement scope"
+                    )
         by_transaction = {
             transaction.transaction_id: transaction
             for transaction in transactions

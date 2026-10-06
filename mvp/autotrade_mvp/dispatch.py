@@ -1030,7 +1030,7 @@ class GuardedDispatcher:
                         events=current,
                         attempt_id=attempt_id,
                         client_order_id=client_order_id,
-                    expected_prepared=expected_prepared,
+                        expected_prepared=expected_prepared,
                     )
                 raise
             current = self._events(attempt_id)
@@ -1086,13 +1086,14 @@ class GuardedDispatcher:
                     events=current,
                     attempt_id=attempt_id,
                     client_order_id=client_order_id,
-                expected_prepared=expected_prepared,
+                    expected_prepared=expected_prepared,
                 )
             if current_last["event_type"] == "SubmissionSending":
                 return self._recover_existing(
                     attempt_id=attempt_id,
                     client_order_id=client_order_id,
                     now=now,
+                    expected_prepared=expected_prepared,
                 )
             raise
         current = self._events(attempt_id)
@@ -1444,7 +1445,7 @@ class GuardedDispatcher:
                         events=events,
                         attempt_id=attempt_id,
                         client_order_id=client_order_id,
-                    expected_prepared=expected_prepared,
+                        expected_prepared=expected_prepared,
                     )
             return DispatchOutcome("BLOCKED", client_order_id, None, str(error))
         except Exception as error:

@@ -20,7 +20,12 @@ import re
 import zlib
 
 from .capabilities import CapabilitySnapshot
-from .provider_core import ProviderResponseObservation, ProviderSubmissionObservation, Surface
+from .provider_core import (
+    ProviderResponseObservation,
+    ProviderSubmissionObservation,
+    Surface,
+    provider_submission_observation_projection,
+)
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -651,43 +656,74 @@ def _validate_submission_scope(
     return source
 
 
-def _submission_evidence(
+def _submission_projection(
     observation: ProviderSubmissionObservation,
+    *,
+    prepared_request: KrakenSpotPreparedRequest,
+    _projection=provider_submission_observation_projection,
+    _projection_code=provider_submission_observation_projection.__code__,
+    _observation_type=ProviderSubmissionObservation,
+) -> Mapping[str, object]:
+    """Authenticate one durable write observation before virtual access."""
+
+    if _projection.__code__ is not _projection_code:
+        raise KrakenSpotAdapterError(
+            "provider submission observation consumer authority is unavailable"
+        )
+    if type(observation) is not _observation_type:
+        raise TypeError(
+            "observation must be durable ProviderSubmissionObservation"
+        )
+    projected = _projection(observation)
+    cid = validate_spot_client_order_id(
+        prepared_request.body.get("cl_ord_id")
+    )
+    expected = (
+        ("provider_id", "KRAKEN", "provider"),
+        ("endpoint", prepared_request.endpoint, "endpoint"),
+        ("request_sha256", prepared_request.body_sha256, "request digest"),
+        (
+            "capability_snapshot_ids",
+            (prepared_request.capability_snapshot_id,),
+            "capability",
+        ),
+        (
+            "instrument_versions",
+            (prepared_request.instrument_version,),
+            "instrument",
+        ),
+        ("account_id", prepared_request.account_id, "account"),
+        ("environment", prepared_request.environment, "environment"),
+        ("client_order_id", cid, "client-order"),
+    )
+    for key, expected_value, label in expected:
+        if projected[key] != expected_value:
+            raise KrakenSpotAdapterError(
+                f"provider-write provenance {label} mismatch"
+            )
+    return projected
+
+
+def _submission_evidence(
+    projection: Mapping[str, object],
     *,
     prepared_request: KrakenSpotPreparedRequest,
     source_uri: str,
 ) -> dict[str, str]:
-    if not isinstance(observation, ProviderSubmissionObservation):
-        raise TypeError(
-            "observation must be durable ProviderSubmissionObservation"
-        )
     source = _validate_submission_scope(
         prepared_request,
         source_uri=source_uri,
-    )
-    cid = validate_spot_client_order_id(
-        prepared_request.body.get("cl_ord_id")
-    )
-    observation.require_scope(
-        provider_id="KRAKEN",
-        endpoint=prepared_request.endpoint,
-        prepared_request_sha256=prepared_request.body_sha256,
-        capability_snapshot_ids=(prepared_request.capability_snapshot_id,),
-        instrument_versions=(prepared_request.instrument_version,),
-        account_id=prepared_request.account_id,
-        environment=prepared_request.environment,
-        client_order_id=cid,
     )
     return {
         "artifact_id": str(
             uuid5(
                 NAMESPACE_URL,
-                f"{source}#{observation.evidence_ref}",
+                f"{source}#{projection['evidence_ref']}",
             )
         ),
-        "sha256": observation.response_sha256,
+        "sha256": projection["response_sha256"],
         "source_uri": source,
-        "observed_at": observation.observed_at,
+        "observed_at": projection["sent_at"],
         "rights_id": "provider-observation-kraken-spot",
     }
 
@@ -746,20 +782,20 @@ def parse_spot_submission_response(
             "retry_disposition": "RECONCILE_FIRST",
         }
 
-    if not isinstance(observation, ProviderSubmissionObservation):
-        raise TypeError(
-            "observation must be durable ProviderSubmissionObservation"
-        )
-    if observation.response_binding.attempt_id != aid:
+    projection = _submission_projection(
+        observation,
+        prepared_request=prepared_request,
+    )
+    if projection["attempt_id"] != aid:
         raise KrakenSpotAdapterError("submission observation attempt_id mismatch")
     evidence = [
         _submission_evidence(
-            observation,
+            projection,
             prepared_request=prepared_request,
             source_uri=source,
         )
     ]
-    payload = observation.payload
+    payload = projection["payload"]
     if not isinstance(payload, Mapping):
         raise KrakenSpotAdapterError("provider response payload must be an object")
     errors = payload.get("error", ())

@@ -941,6 +941,8 @@ def _install_provider_submission_observation_authority(binding_projection):
     binding_type = SubmissionResponseBinding
     error_type = ProviderCoreError
     canonical_type = type
+    canonical_type_setattr = canonical_type.__setattr__
+    canonical_type_getattribute = canonical_type.__getattribute__
     canonical_id = id
     canonical_tuple = tuple
     canonical_len = len
@@ -984,6 +986,16 @@ def _install_provider_submission_observation_authority(binding_projection):
     canonical_weakref_module = weakref
     canonical_weakref_ref = weakref.ref
     provider_ids = frozenset(PROVIDERS)
+    sensitive_observation_fields = canonical_frozenset(
+        (
+            "response_binding",
+            "endpoint",
+            "capability_snapshot_ids",
+            "instrument_versions",
+            "evidence_ref",
+            "payload",
+        )
+    )
     states: dict[int, tuple[object, tuple[object, ...]]] = {}
 
     def authority_changed():
@@ -995,6 +1007,10 @@ def _install_provider_submission_observation_authority(binding_projection):
             or SubmissionResponseBinding is not binding_type
             or ProviderCoreError is not error_type
             or type is not canonical_type
+            or canonical_type.__setattr__ is not canonical_type_setattr
+            or canonical_type.__getattribute__ is not canonical_type_getattribute
+            or canonical_type_getattribute(observation_type, "__getattribute__")
+            is not observation_getattribute
             or id is not canonical_id
             or tuple is not canonical_tuple
             or len is not canonical_len
@@ -1144,6 +1160,24 @@ def _install_provider_submission_observation_authority(binding_projection):
                 "payload": current[5],
             }
         )
+
+    def observation_getattribute(value, name):
+        # Frozen dataclass syntax is not an authority boundary: object.__setattr__
+        # can still retarget stored fields. Route every normal read of the
+        # authority-bearing observation payload/scope through the external
+        # issuance registry so post-mint relabelling fails before consumption.
+        if (
+            canonical_type(name) is canonical_str
+            and name in sensitive_observation_fields
+        ):
+            return provider_submission_observation_projection(value)[name]
+        return object_getattribute(value, name)
+
+    canonical_type_setattr(
+        observation_type,
+        "__getattribute__",
+        observation_getattribute,
+    )
 
     def observe_submission_json_response(
         *,

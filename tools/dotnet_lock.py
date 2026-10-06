@@ -3,9 +3,13 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 import shlex
 from pathlib import Path
 import xml.etree.ElementTree as ET
+
+
+_DOTNET_RESTORE_TEXT = re.compile(r"\bdotnet[ \t]+restore\b", re.IGNORECASE)
 
 
 def _strict_json(text: str):
@@ -58,7 +62,11 @@ def dotnet_restore_workflow_commands(
         command = raw.strip()
         if command.startswith("- "):
             command = command[2:].strip()
-        if not command or command.startswith("#") or "dotnet restore" not in command:
+        if (
+            not command
+            or command.startswith("#")
+            or _DOTNET_RESTORE_TEXT.search(command) is None
+        ):
             continue
         if command.startswith("run: dotnet restore "):
             commands.append(command)

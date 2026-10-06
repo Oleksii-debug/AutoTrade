@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, localcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -118,6 +119,144 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertEqual(replay.evidence_count, 1)
             self.assertEqual(len(evidence.read_text(encoding="utf-8").splitlines()), 1)
 
+    def test_restart_rejects_duplicate_evidence_ids_before_checkpoint_write(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint["evidence_ids"].append(checkpoint["evidence_ids"][0])
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with patch(
+                "mvp.autotrade_mvp.pipeline._atomic_json",
+                side_effect=AssertionError("checkpoint write attempted"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "checkpoint evidence IDs: duplicates",
+                ):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_rejects_foreign_jsonl_row_before_checkpoint_write(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            evidence_path = Path(directory) / "learning-evidence.jsonl"
+            original = json.loads(evidence_path.read_text(encoding="utf-8"))
+            forged = dict(original)
+            forged["evidence_id"] = "evidence-forged"
+            evidence_path.write_text(
+                json.dumps(original, sort_keys=True)
+                + "\n"
+                + json.dumps(forged, sort_keys=True)
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch(
+                "mvp.autotrade_mvp.pipeline._atomic_json",
+                side_effect=AssertionError("checkpoint write attempted"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Learning evidence conflicts with checkpoint",
+                ):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_rejects_blank_jsonl_row_before_checkpoint_write(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            evidence_path = Path(directory) / "learning-evidence.jsonl"
+            evidence_path.write_text(
+                evidence_path.read_text(encoding="utf-8") + "\n",
+                encoding="utf-8",
+            )
+
+            with patch(
+                "mvp.autotrade_mvp.pipeline._atomic_json",
+                side_effect=AssertionError("checkpoint write attempted"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Corrupt learning evidence",
+                ):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_rejects_checkpoint_jsonl_disagreement_before_write(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            evidence_path = Path(directory) / "learning-evidence.jsonl"
+            row = json.loads(evidence_path.read_text(encoding="utf-8"))
+            row["cash"] = "999999.99"
+            evidence_path.write_text(
+                json.dumps(row, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with patch(
+                "mvp.autotrade_mvp.pipeline._atomic_json",
+                side_effect=AssertionError("checkpoint write attempted"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Learning evidence conflicts with checkpoint",
+                ):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_replay_rejects_jointly_tampered_checkpoint_and_jsonl_economics(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            evidence_path = Path(directory) / "learning-evidence.jsonl"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            evidence_id = checkpoint["evidence_ids"][0]
+            checkpoint["evidence_records"][evidence_id]["cash"] = "999999.99"
+            checkpoint["evidence_records"][evidence_id]["equity"] = "999999.99"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            row = json.loads(evidence_path.read_text(encoding="utf-8"))
+            row["cash"] = "999999.99"
+            row["equity"] = "999999.99"
+            evidence_path.write_text(
+                json.dumps(row, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Checkpoint evidence conflicts with this episode",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_replay_rejects_jointly_tampered_risk_outcome_before_checkpoint_write(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            evidence_path = Path(directory) / "learning-evidence.jsonl"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            evidence_id = checkpoint["evidence_ids"][0]
+            checkpoint["evidence_records"][evidence_id]["risk_outcome"] = "forged"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            row = json.loads(evidence_path.read_text(encoding="utf-8"))
+            row["risk_outcome"] = "forged"
+            evidence_path.write_text(
+                json.dumps(row, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            import mvp.autotrade_mvp.pipeline as pipeline_module
+
+            with patch.object(
+                pipeline_module,
+                "_atomic_json",
+                side_effect=AssertionError("checkpoint rewrite before evidence rejection"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Checkpoint evidence conflicts with this episode",
+                ):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
     def test_checkpoint_ledger_mismatch_is_rejected(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)
@@ -127,6 +266,209 @@ class VerticalSliceTests(unittest.TestCase):
             checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "reconcile"):
                 run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_corrupt_financial_checkpoint_rejects_unbounded_decimal_text(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint["postings"][0]["cash_delta"] = "1e999999"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "checkpoint cash_delta"):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_corrupt_financial_checkpoint_rejects_non_text_fill_scalar(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            fill = next(iter(checkpoint["fills"].values()))
+            fill["quantity"] = 1
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "checkpoint fill quantity"):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_rejects_self_consistent_negative_fill_fee(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            fill = next(iter(checkpoint["fills"].values()))
+            posting = checkpoint["postings"][0]
+            quantity = Decimal(fill["quantity"])
+            price = Decimal(fill["price"])
+            forged_fee = Decimal("-1")
+            fill["fee"] = str(forged_fee)
+            posting["fee"] = str(forged_fee)
+            posting["cash_delta"] = str(-(quantity * price) - forged_fee)
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "fill fee.*non-negative"):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_rejects_noncanonical_fill_side_before_sell_semantics(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            fill = next(iter(checkpoint["fills"].values()))
+            posting = checkpoint["postings"][0]
+            quantity = Decimal(fill["quantity"])
+            price = Decimal(fill["price"])
+            fee = Decimal(fill["fee"])
+            fill["side"] = "FORGED"
+            posting["position_delta"] = str(-quantity)
+            posting["cash_delta"] = str(quantity * price - fee)
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "side must be BUY or SELL"):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_rejects_self_consistent_fill_that_differs_from_durable_intent(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            fill = next(iter(checkpoint["fills"].values()))
+            posting = checkpoint["postings"][0]
+            forged_quantity = Decimal(fill["quantity"]) + Decimal("1")
+            price = Decimal(fill["price"])
+            fee = Decimal(fill["fee"])
+            fill["quantity"] = str(forged_quantity)
+            posting["position_delta"] = str(forged_quantity)
+            posting["cash_delta"] = str(-(forged_quantity * price) - fee)
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "durable order intent does not match fill",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_requires_durable_intent_for_each_restored_fill(self):
+        with TemporaryDirectory() as directory:
+            result = run_vertical_slice([100, 101, 102, 103], directory)
+            intent_path = (
+                Path(directory) / "order-intents" / f"{result.order_id}.json"
+            )
+            intent_path.unlink()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "durable order intent is unavailable",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_rejects_fill_symbol_outside_run_scope(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            fill = next(iter(checkpoint["fills"].values()))
+            fill["symbol"] = "OTHER"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "symbol does not match run scope"):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_cross_binds_posting_fee_to_fill(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint["postings"][0]["fee"] = "0"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "reconcile"):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_restart_cross_binds_fill_map_and_deterministic_fill_identity(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            key, fill = next(iter(checkpoint["fills"].items()))
+            checkpoint["fills"] = {"different-intent": fill}
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "map key does not match client_order_id",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+            checkpoint["fills"] = {key: fill}
+            fill["fill_id"] = "fill-" + "0" * 20
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError,
+                "fill_id does not match simulated identity",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_simulated_symbol_requires_exact_canonical_text(self):
+        class HostileSymbol(str):
+            def strip(self):
+                raise AssertionError("hostile symbol strip executed")
+
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "canonical simulated symbol"):
+                run_vertical_slice(
+                    [100, 101, 102, 103],
+                    directory,
+                    symbol=HostileSymbol("SIM"),
+                )
+            with self.assertRaisesRegex(ValueError, "canonical simulated symbol"):
+                run_vertical_slice(
+                    [100, 101, 102, 103],
+                    directory,
+                    symbol=" SIM ",
+                )
+
+    def test_market_data_rejects_oversized_text_before_decimal_construction(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        with patch.object(
+            pipeline_module,
+            "Decimal",
+            side_effect=AssertionError("unbounded Decimal construction"),
+        ):
+            with self.assertRaisesRegex(ValueError, "finite and positive"):
+                pipeline_module.handle_market_data(["1e999999"])
+
+    def test_market_data_rejects_hostile_scalar_subclasses_without_virtual_conversion(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        class HostileStr(str):
+            def __str__(self):
+                raise AssertionError("hostile str conversion")
+
+        class HostileFloat(float):
+            def __str__(self):
+                raise AssertionError("hostile float conversion")
+
+        class HostileInt(int):
+            def __str__(self):
+                raise AssertionError("hostile int conversion")
+
+        class HostileDecimal(Decimal):
+            def __str__(self):
+                raise AssertionError("hostile Decimal conversion")
+
+        for value in (
+            HostileStr("100"),
+            HostileFloat(100.0),
+            HostileInt(100),
+            HostileDecimal("100"),
+        ):
+            with self.subTest(value=type(value).__name__):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "exact float, str, int or Decimal",
+                ):
+                    pipeline_module.handle_market_data([value])
 
     def test_cash_limit_and_invalid_configuration(self):
         with TemporaryDirectory() as directory:
@@ -151,6 +493,84 @@ class VerticalSliceTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs), TemporaryDirectory() as directory:
                 with self.assertRaises(TypeError):
                     run_vertical_slice([100, 101, 102, 103], directory, **kwargs)
+
+    def test_money_quantization_ignores_mutable_module_aliases(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        expected = pipeline_module._money("1.234567895")
+        with (
+            patch.object(pipeline_module, "MONEY_QUANTUM", Decimal("1")),
+            patch.object(
+                pipeline_module,
+                "round_fraction_to_quantum",
+                side_effect=AssertionError("mutable rounder alias executed"),
+            ),
+            patch.object(
+                pipeline_module,
+                "as_fraction",
+                side_effect=AssertionError("mutable fraction alias executed"),
+            ),
+            patch.object(
+                pipeline_module,
+                "parse_bounded_exact_decimal",
+                side_effect=AssertionError("mutable parser alias executed"),
+            ),
+        ):
+            observed = pipeline_module._money("1.234567895")
+
+        self.assertEqual(observed, expected)
+        self.assertEqual(observed, Decimal("1.23456790"))
+
+    def test_financial_outputs_ignore_ambient_decimal_context(self):
+        prices = ["100.12345678", "101.23456789", "102.34567891", "103.45678912"]
+        kwargs = {
+            "order_quantity": "3.14159265",
+            "max_abs_position": "10",
+            "max_notional": "1000",
+            "fee_rate": "0.00123456",
+        }
+        with TemporaryDirectory() as reference_dir, TemporaryDirectory() as hostile_dir:
+            reference = run_vertical_slice(prices, reference_dir, **kwargs)
+            with localcontext() as context:
+                context.prec = 2
+                context.rounding = ROUND_CEILING
+                context.traps[Inexact] = True
+                context.traps[Rounded] = True
+                hostile = run_vertical_slice(prices, hostile_dir, **kwargs)
+
+        self.assertEqual(hostile.status, reference.status)
+        self.assertEqual(hostile.decision, reference.decision)
+        self.assertEqual(hostile.cash, reference.cash)
+        self.assertEqual(hostile.position, reference.position)
+        self.assertEqual(hostile.equity, reference.equity)
+        self.assertEqual(hostile.reconciled, reference.reconciled)
+
+    def test_buy_sell_cycle_ignores_ambient_decimal_context(self):
+        episodes = [
+            ["100.12345678", "101.23456789", "102.34567891", "103.45678912"],
+            ["103.45678912", "102.34567891", "101.23456789", "100.12345678"],
+        ]
+        kwargs = {
+            "order_quantity": "3.14159265",
+            "max_abs_position": "10",
+            "max_notional": "1000",
+            "fee_rate": "0.00123456",
+        }
+        with TemporaryDirectory() as reference_dir, TemporaryDirectory() as hostile_dir:
+            reference = run_multi_episode(episodes, reference_dir, **kwargs)
+            with localcontext() as context:
+                context.prec = 2
+                context.rounding = ROUND_CEILING
+                context.traps[Inexact] = True
+                context.traps[Rounded] = True
+                hostile = run_multi_episode(episodes, hostile_dir, **kwargs)
+
+        self.assertEqual([item.decision for item in hostile], ["BUY", "SELL"])
+        self.assertEqual(
+            [(item.cash, item.position, item.equity, item.reconciled) for item in hostile],
+            [(item.cash, item.position, item.equity, item.reconciled) for item in reference],
+        )
+        self.assertEqual(hostile[-1].position, reference[-1].position)
 
     def test_replay_verification_detects_tampered_evidence(self):
         with TemporaryDirectory() as directory:

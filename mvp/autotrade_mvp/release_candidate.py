@@ -632,7 +632,6 @@ class ReleaseCandidateDecision:
 def _canonical_manifest(
     candidate: ReleaseCandidateInput,
     accepted: AcceptedQualificationAttestation,
-    receipt: SignedQualificationAttestation,
 ) -> str:
     body = {
         "release_id": candidate.release_id,
@@ -645,8 +644,8 @@ def _canonical_manifest(
             "policy_id": accepted.policy_id,
             "trust_root_id": accepted.trust_root_id,
             "receipt": {
-                "attestation": receipt.attestation.canonical_payload(),
-                "signature_b64": receipt.signature_b64,
+                "attestation": json.loads(accepted.signed_attestation_payload_json),
+                "signature_b64": accepted.signature_b64,
             },
         },
         "artifacts": [
@@ -928,7 +927,6 @@ def freeze_release_candidate(
     manifest = _canonical_manifest(
         candidate,
         accepted,
-        qualification_receipt,
     )
     digest = "sha256:" + sha256(manifest.encode("utf-8")).hexdigest()
     return ReleaseCandidateDecision(

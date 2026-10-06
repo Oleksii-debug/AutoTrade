@@ -8,6 +8,7 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.provider_core import (
+    AuthenticatedReadQueryBinding,
     Surface,
     prepare_authenticated_read_query,
 )
@@ -99,6 +100,36 @@ def sign(query, *, surface=Surface.ACTIVITIES, permission_scope="ACCOUNT.READ"):
 
 
 class BybitOptionDeliveryReadPolicyTests(unittest.TestCase):
+    def test_unissued_exact_binding_clone_is_rejected_before_signing(self):
+        prepared = delivery_binding({"category": "option"})
+        forged = object.__new__(AuthenticatedReadQueryBinding)
+        for field in (
+            "provider_id",
+            "account_id",
+            "entity_id",
+            "environment",
+            "capability_snapshot_id",
+            "instrument_version",
+            "surface",
+            "endpoint",
+            "query",
+            "prepared_at",
+            "permission_scope",
+            "query_digest",
+        ):
+            object.__setattr__(forged, field, getattr(prepared, field))
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "construction authority is unavailable",
+        ):
+            BybitV5AuthenticatedReadSigner.sign(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+                query_binding=forged,
+                credential_plaintext='{"api_key":"test-key","api_secret":"test-secret"}',
+                timestamp_ms=1791244800000,
+            )
+
     def test_minimal_option_delivery_query_is_admitted_on_activity_surface(self):
         signed = sign({"category": "option"})
         parsed = urlsplit(signed.url)

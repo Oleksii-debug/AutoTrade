@@ -418,14 +418,29 @@ def load_submission_response_binding(
         raise ValueError("durable submission timestamps are unavailable")
     if sending.get("aggregate_id") != aggregate_id or sent.get("aggregate_id") != aggregate_id:
         raise ValueError("durable submission aggregate identity mismatch")
+    durable_text: dict[str, str] = {}
+    for field_name in (
+        "provider",
+        "request_hash",
+        "client_order_id",
+        "environment",
+        "account_id",
+    ):
+        field_value = payload.get(field_name)
+        if type(field_value) is not str or not field_value:
+            raise ValueError(
+                f"durable SubmissionPrepared {field_name} must be exact non-empty text"
+            )
+        durable_text[field_name] = field_value
+
     return SubmissionResponseBinding(
         attempt_id=attempt_id,
         aggregate_id=aggregate_id,
-        provider=str(payload.get("provider", "")),
-        request_hash=str(payload.get("request_hash", "")),
-        client_order_id=str(payload.get("client_order_id", "")),
-        environment=str(payload.get("environment", "")),
-        account_id=str(payload.get("account_id", "")),
+        provider=durable_text["provider"],
+        request_hash=durable_text["request_hash"],
+        client_order_id=durable_text["client_order_id"],
+        environment=durable_text["environment"],
+        account_id=durable_text["account_id"],
         prepared_at=prepared_at,
         sent_at=sent_at,
         submission_scope=scope,

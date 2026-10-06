@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, tzinfo
 from decimal import Decimal, ROUND_DOWN, localcontext
 import unittest
 
@@ -1039,6 +1039,54 @@ class EconomicSettlementCapitalTests(unittest.TestCase):
                 with self.assertRaisesRegex(TypeError, expected):
                     BuyingPowerEvidence(**values)
                 self.assertEqual(counter.calls, before)
+
+    def test_margin_buying_power_rejects_hostile_timezone_without_callbacks(self):
+        class HostileTimezone(tzinfo):
+            calls = 0
+
+            def utcoffset(self, _dt):
+                type(self).calls += 1
+                raise AssertionError("hostile timezone utcoffset executed")
+
+            def dst(self, _dt):
+                type(self).calls += 1
+                raise AssertionError("hostile timezone dst executed")
+
+            def tzname(self, _dt):
+                type(self).calls += 1
+                raise AssertionError("hostile timezone tzname executed")
+
+        hostile_timezone = HostileTimezone()
+        hostile_observed = datetime(
+            2026, 9, 24, 15, tzinfo=hostile_timezone
+        )
+        hostile_as_of = datetime(
+            2026, 9, 24, 16, tzinfo=hostile_timezone
+        )
+        common = {
+            "evidence_id": "bp-hostile-timezone",
+            "scope": self.scope,
+            "currency": "USD",
+            "additional_credit": "250",
+            "observed_at": hostile_observed,
+            "valid_until": datetime(
+                2026, 9, 24, 17, tzinfo=timezone.utc
+            ),
+            "evidence_refs": ("provider:buying-power:hostile-timezone",),
+        }
+
+        with self.assertRaisesRegex(TypeError, "exact built-in timezone"):
+            BuyingPowerEvidence(**common)
+        self.assertEqual(HostileTimezone.calls, 0)
+
+        settlement = SettlementBook(settled_cash={"USD": "1000"})
+        with self.assertRaisesRegex(TypeError, "exact built-in timezone"):
+            settlement.available_capital(
+                scope=self.scope,
+                currency="USD",
+                as_of=hostile_as_of,
+            )
+        self.assertEqual(HostileTimezone.calls, 0)
 
     def test_margin_buying_power_consumer_rejects_authority_subclasses(self):
         settlement = SettlementBook(settled_cash={"USD": "1000"})

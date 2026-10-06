@@ -1380,44 +1380,38 @@ def verify_qualification_attestation(
     # The RSA signature is verified over this detached graph, never over a
     # caller-overridable canonical_bytes() method.
     attestation = QualificationAttestation(
-        attestation_id=str(attestation_input.attestation_id),
-        source_sha=str(attestation_input.source_sha),
-        domain=str(attestation_input.domain),
-        gate=str(attestation_input.gate),
-        package_id=str(attestation_input.package_id),
-        protocol_id=str(attestation_input.protocol_id),
-        protocol_version=str(attestation_input.protocol_version),
-        requirement_ids=tuple(str(item) for item in attestation_input.requirement_ids),
+        attestation_id=attestation_input.attestation_id,
+        source_sha=attestation_input.source_sha,
+        domain=attestation_input.domain,
+        gate=attestation_input.gate,
+        package_id=attestation_input.package_id,
+        protocol_id=attestation_input.protocol_id,
+        protocol_version=attestation_input.protocol_version,
+        requirement_ids=tuple(attestation_input.requirement_ids),
         evidence_refs=tuple(
             EvidenceArtifactRef(
-                artifact_id=str(item.artifact_id),
-                sha256=str(item.sha256),
-                media_type=str(item.media_type),
-                evidence_kind=str(item.evidence_kind),
-                source_sha=str(item.source_sha),
+                artifact_id=item.artifact_id,
+                sha256=item.sha256,
+                media_type=item.media_type,
+                evidence_kind=item.evidence_kind,
+                source_sha=item.source_sha,
             )
             for item in attestation_input.evidence_refs
         ),
-        producer_id=str(attestation_input.producer_id),
-        verifier_id=str(attestation_input.verifier_id),
-        trust_root_id=str(attestation_input.trust_root_id),
-        runner_id=str(attestation_input.runner_id),
-        harness_version=str(attestation_input.harness_version),
-        started_at=str(attestation_input.started_at),
-        completed_at=str(attestation_input.completed_at),
-        signed_at=str(attestation_input.signed_at),
-        result=str(attestation_input.result),
-        unresolved_limits=tuple(str(item) for item in attestation_input.unresolved_limits),
-        release_artifact_id=(
-            None if attestation_input.release_artifact_id is None
-            else str(attestation_input.release_artifact_id)
-        ),
-        release_artifact_sha256=(
-            None if attestation_input.release_artifact_sha256 is None
-            else str(attestation_input.release_artifact_sha256)
-        ),
-        schema_version=str(attestation_input.schema_version),
-        verification_method=str(attestation_input.verification_method),
+        producer_id=attestation_input.producer_id,
+        verifier_id=attestation_input.verifier_id,
+        trust_root_id=attestation_input.trust_root_id,
+        runner_id=attestation_input.runner_id,
+        harness_version=attestation_input.harness_version,
+        started_at=attestation_input.started_at,
+        completed_at=attestation_input.completed_at,
+        signed_at=attestation_input.signed_at,
+        result=attestation_input.result,
+        unresolved_limits=tuple(attestation_input.unresolved_limits),
+        release_artifact_id=attestation_input.release_artifact_id,
+        release_artifact_sha256=attestation_input.release_artifact_sha256,
+        schema_version=attestation_input.schema_version,
+        verification_method=attestation_input.verification_method,
     )
     verified_attestation_bytes = _qualification_attestation_bytes_exact(attestation)
     verified_attestation_digest = (

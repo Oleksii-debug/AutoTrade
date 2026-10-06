@@ -842,6 +842,8 @@ def _store_artifact_matches(
             return False
         if manifest.get("sha256") != artifact_hash:
             return False
+        if "sha256:" + sha256(raw).hexdigest() != artifact_hash:
+            return False
         if manifest.get("media_type") != media_type:
             return False
         if manifest.get("source_refs") != [f"git:{release_sha}"]:

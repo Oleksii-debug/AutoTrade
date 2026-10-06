@@ -73,6 +73,7 @@ _REGISTRY_FUNCTION_AUTHORITIES = tuple(
         "_store_identity_digest",
         "_material_from_payload",
         "_binding_payload",
+        "_production_request_origin_receipt",
         "_risk_intent_axis",
         "_reservation_scope_digest",
         "_reservation_cut_digest",

@@ -24,12 +24,18 @@ from hashlib import sha256
 from typing import Mapping
 
 from .authority import AdmissionRecord, AuthorityConflict, AuthorityService
+from .bybit_v5 import (
+    BybitPreparedSubmission,
+    guarded_order_projection,
+    require_canonical_bybit_prepared_submission,
+)
 from .durable_reservations import DurableReservationBook
 from .financial_request_binding import (
     FinancialRequestBindingError,
     FinancialRequestBindingMaterial,
 )
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_core import ProviderCoreError
 from .provider_domain import ProviderDomainError, ProviderFinancialScope
 from .risk_policy_authority import journal_store_identity_digest
 
@@ -50,6 +56,40 @@ _CANONICAL_PAYLOAD_DIGEST = payload_digest
 _AUTHORITY_TYPE = AuthorityService
 _ADMISSION_TYPE = AdmissionRecord
 _MATERIAL_TYPE = FinancialRequestBindingMaterial
+_BYBIT_PREPARED_TYPE = BybitPreparedSubmission
+_CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION = guarded_order_projection
+_CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION_CODE = guarded_order_projection.__code__
+_CANONICAL_BYBIT_REQUIRE_PREPARED = require_canonical_bybit_prepared_submission
+_CANONICAL_BYBIT_REQUIRE_PREPARED_CODE = require_canonical_bybit_prepared_submission.__code__
+_BYBIT_PREPARED_ORIGIN_SCHEMA = "bybit-prepared-origin.v1"
+_BINDING_PAYLOAD_BASE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "admission_id",
+        "binding_id",
+        "journal_store_identity_digest",
+        "material",
+    }
+)
+_BINDING_PAYLOAD_PRODUCTION_FIELDS = (
+    _BINDING_PAYLOAD_BASE_FIELDS | {"provider_request_origin"}
+)
+_BYBIT_TRIGGER_PROTECTION_KEYS = (
+    "triggerDirection",
+    "triggerPrice",
+    "triggerBy",
+    "orderFilter",
+    "takeProfit",
+    "stopLoss",
+    "tpTriggerBy",
+    "slTriggerBy",
+    "tpslMode",
+    "tpLimitPrice",
+    "slLimitPrice",
+    "tpOrderType",
+    "slOrderType",
+    "closeOnTrigger",
+)
 
 
 def _text(value: object, *, name: str) -> str:
@@ -117,19 +157,234 @@ def _material_from_payload(value: object) -> FinancialRequestBindingMaterial:
     return material
 
 
+def _production_request_origin_receipt(
+    material: FinancialRequestBindingMaterial,
+) -> dict[str, object] | None:
+    """Return the durable proof schema required for production request origin.
+
+    The receipt is deliberately deterministic from the already-bound material.
+    Its authority comes from the writer gate below: legacy PAPER/LIVE rows that
+    predate canonical provider preparation do not contain this receipt and
+    therefore fail canonical replay rather than being silently upgraded.
+    """
+
+    if type(material) is not _MATERIAL_TYPE:
+        raise TypeError("material must be exact FinancialRequestBindingMaterial")
+    if material.runtime_environment not in {"PAPER", "LIVE"}:
+        return None
+    if material.provider_id != "BYBIT":
+        raise DurableFinancialRequestBindingError(
+            "PAPER/LIVE financial request binding has no canonical prepared-request origin verifier"
+        )
+    return {
+        "schema_version": _BYBIT_PREPARED_ORIGIN_SCHEMA,
+        "provider_id": "BYBIT",
+        "request_sha256": material.request_sha256,
+        "body_sha256": material.body_sha256,
+        "query_sha256": material.query_sha256,
+        "trigger_protection_digest": material.trigger_protection_digest,
+    }
+
+
+def _require_bybit_prepared_request_origin(
+    material: FinancialRequestBindingMaterial,
+    prepared_request: object,
+) -> dict[str, object]:
+    """Prove production Bybit binding content came from canonical adapter prep."""
+
+    if type(material) is not _MATERIAL_TYPE:
+        raise TypeError("material must be exact FinancialRequestBindingMaterial")
+    if type(prepared_request) is not _BYBIT_PREPARED_TYPE:
+        raise DurableFinancialRequestBindingError(
+            "BYBIT PAPER/LIVE binding requires exact canonical BybitPreparedSubmission"
+        )
+    if BybitPreparedSubmission is not _BYBIT_PREPARED_TYPE:
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared-request type authority changed"
+        )
+    if (
+        require_canonical_bybit_prepared_submission
+        is not _CANONICAL_BYBIT_REQUIRE_PREPARED
+        or getattr(
+            _CANONICAL_BYBIT_REQUIRE_PREPARED,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_BYBIT_REQUIRE_PREPARED_CODE
+    ):
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared-request provenance authority changed"
+        )
+    try:
+        _CANONICAL_BYBIT_REQUIRE_PREPARED(prepared_request)
+    except (ProviderCoreError, TypeError, ValueError) as error:
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared request lacks canonical issuance provenance"
+        ) from error
+    if (
+        guarded_order_projection is not _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION
+        or getattr(
+            _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION_CODE
+    ):
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared-request projection authority changed"
+        )
+
+    projected = _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION(prepared_request)
+    request = dict(projected)
+    body = request.get("body")
+    if type(body) is not dict:
+        raise DurableFinancialRequestBindingError(
+            "canonical Bybit prepared request body is unavailable"
+        )
+
+    actual_body_digest = _CANONICAL_PAYLOAD_DIGEST(body)
+    if request.get("body_sha256") != actual_body_digest:
+        raise DurableFinancialRequestBindingError(
+            "canonical Bybit prepared request body digest is inconsistent"
+        )
+    if actual_body_digest != material.body_sha256:
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared body differs from financial binding"
+        )
+    if _CANONICAL_PAYLOAD_DIGEST(request) != material.request_sha256:
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared request differs from financial binding"
+        )
+    if material.query_sha256 != _CANONICAL_PAYLOAD_DIGEST({}):
+        raise DurableFinancialRequestBindingError(
+            "Bybit place-order financial binding must carry canonical empty query"
+        )
+
+    protection = {
+        key: body[key]
+        for key in _BYBIT_TRIGGER_PROTECTION_KEYS
+        if key in body
+    }
+    if (
+        material.trigger_protection_digest
+        != _CANONICAL_PAYLOAD_DIGEST(protection)
+    ):
+        raise DurableFinancialRequestBindingError(
+            "Bybit trigger/protection/close semantics differ from financial binding"
+        )
+
+    projection_checks = (
+        ("endpoint", request.get("endpoint"), material.endpoint),
+        ("account_id", request.get("account_id"), material.account_id),
+        (
+            "runtime_environment",
+            request.get("environment"),
+            material.runtime_environment,
+        ),
+        (
+            "provider_environment",
+            request.get("provider_environment"),
+            material.provider_environment,
+        ),
+        (
+            "capability_snapshot_id",
+            request.get("capability_snapshot_id"),
+            material.capability_snapshot_id,
+        ),
+    )
+    for name, actual, expected in projection_checks:
+        if actual != expected:
+            raise DurableFinancialRequestBindingError(
+                f"Bybit prepared {name} differs from financial binding"
+            )
+
+    side = {"Buy": "BUY", "Sell": "SELL"}.get(body.get("side"))
+    order_type = {"Market": "MARKET", "Limit": "LIMIT"}.get(
+        body.get("orderType")
+    )
+    time_in_force = {
+        "GTC": "GTC",
+        "IOC": "IOC",
+        "FOK": "FOK",
+        "PostOnly": "POST_ONLY",
+    }.get(body.get("timeInForce"))
+    if side is None or order_type is None or time_in_force is None:
+        raise DurableFinancialRequestBindingError(
+            "canonical Bybit prepared order semantics are unsupported"
+        )
+    reduce_only = body.get("reduceOnly", False)
+    if type(reduce_only) is not bool:
+        raise DurableFinancialRequestBindingError(
+            "canonical Bybit prepared reduce-only semantics are invalid"
+        )
+    price = body.get("price")
+    if price is not None and type(price) is not str:
+        raise DurableFinancialRequestBindingError(
+            "canonical Bybit prepared price semantics are invalid"
+        )
+    semantic_checks = (
+        ("client_order_id", body.get("orderLinkId"), material.client_order_id),
+        ("side", side, material.side),
+        ("quantity", body.get("qty"), material.quantity),
+        ("price", price, material.price),
+        ("order_type", order_type, material.order_type),
+        ("time_in_force", time_in_force, material.time_in_force),
+        ("reduce_only", reduce_only, material.reduce_only),
+    )
+    for name, actual, expected in semantic_checks:
+        if actual != expected:
+            raise DurableFinancialRequestBindingError(
+                f"Bybit prepared {name} differs from financial binding"
+            )
+
+    receipt = _production_request_origin_receipt(material)
+    if receipt is None:
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared request origin receipt is unavailable"
+        )
+    return receipt
+
+
+def _require_prepared_request_origin(
+    material: FinancialRequestBindingMaterial,
+    prepared_request: object | None,
+) -> dict[str, object] | None:
+    if material.runtime_environment not in {"PAPER", "LIVE"}:
+        if prepared_request is not None:
+            raise DurableFinancialRequestBindingError(
+                "prepared_request is only accepted for PAPER/LIVE financial binding"
+            )
+        return None
+    if material.provider_id != "BYBIT":
+        raise DurableFinancialRequestBindingError(
+            "PAPER/LIVE financial request binding has no canonical prepared-request origin verifier"
+        )
+    return _require_bybit_prepared_request_origin(material, prepared_request)
+
+
+_CANONICAL_REQUIRE_PREPARED_REQUEST_ORIGIN = _require_prepared_request_origin
+_CANONICAL_REQUIRE_PREPARED_REQUEST_ORIGIN_CODE = (
+    _require_prepared_request_origin.__code__
+)
+
+
 def _binding_payload(
     *,
     admission_id: str,
     material: FinancialRequestBindingMaterial,
     store_identity_digest: str,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "schema_version": _SCHEMA_VERSION,
         "admission_id": admission_id,
         "binding_id": material.binding_id,
         "journal_store_identity_digest": store_identity_digest,
         "material": material.payload(),
     }
+    origin = _production_request_origin_receipt(material)
+    if origin is not None:
+        payload["provider_request_origin"] = origin
+    return payload
 
 
 def _risk_intent_axis(
@@ -624,15 +879,13 @@ class DurableFinancialRequestBindingRegistry:
             raise DurableFinancialRequestBindingError(
                 "admitted financial request binding payload hash mismatch"
             )
-        expected_fields = {
-            "schema_version",
-            "admission_id",
-            "binding_id",
-            "journal_store_identity_digest",
-            "material",
-        }
+        payload_fields = frozenset(payload)
         if (
-            set(payload) != expected_fields
+            payload_fields
+            not in (
+                _BINDING_PAYLOAD_BASE_FIELDS,
+                _BINDING_PAYLOAD_PRODUCTION_FIELDS,
+            )
             or payload.get("schema_version") != _SCHEMA_VERSION
             or payload.get("admission_id") != aid
             or payload.get("journal_store_identity_digest")
@@ -674,11 +927,29 @@ class DurableFinancialRequestBindingRegistry:
         admission_id: str,
         material: FinancialRequestBindingMaterial,
         bound_at: str,
+        prepared_request: object | None = None,
     ) -> FinancialRequestBindingMaterial:
         aid = _text(admission_id, name="admission_id")
         if type(material) is not _MATERIAL_TYPE:
             raise TypeError("material must be exact FinancialRequestBindingMaterial")
         committed_at = _utc_text(bound_at, name="bound_at")
+        current_origin_gate = _require_prepared_request_origin
+        if (
+            current_origin_gate is not _CANONICAL_REQUIRE_PREPARED_REQUEST_ORIGIN
+            or getattr(
+                _CANONICAL_REQUIRE_PREPARED_REQUEST_ORIGIN,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_REQUIRE_PREPARED_REQUEST_ORIGIN_CODE
+        ):
+            raise DurableFinancialRequestBindingError(
+                "prepared-request origin executable authority changed"
+            )
+        _CANONICAL_REQUIRE_PREPARED_REQUEST_ORIGIN(
+            material,
+            prepared_request,
+        )
         store = self._require_store()
         record = _validate_material_against_admission(
             store,

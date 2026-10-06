@@ -495,6 +495,58 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
             )
             self.assertNotIn("response_text", events[-1]["payload"])
 
+    def test_transport_decoder_method_restore_does_not_execute_descriptor(self):
+        class TrapDescriptor:
+            calls = 0
+
+            def __get__(self, _instance, _owner):
+                type(self).calls += 1
+                raise AssertionError("transport-controlled descriptor executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            decoder = dispatch_module.json.JSONDecoder
+            original_decode = decoder.__dict__["decode"]
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                decoder.decode = TrapDescriptor()
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "snapshot-json-decoder-descriptor-retarget",
+                    transport,
+                )
+                self.assertEqual(TrapDescriptor.calls, 0)
+                self.assertIs(decoder.__dict__["decode"], original_decode)
+            finally:
+                decoder.decode = original_decode
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            self.assertEqual(TrapDescriptor.calls, 0)
+            events = self._events(
+                path,
+                dispatcher,
+                "snapshot-json-decoder-descriptor-retarget",
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertNotIn("response_text", events[-1]["payload"])
+
     def test_transport_cannot_replace_json_decoder_decode_code_after_send(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

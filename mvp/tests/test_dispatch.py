@@ -807,6 +807,66 @@ class DispatchTests(unittest.TestCase):
             ):
                 require_canonical_submission_response_binding(after_restart)
 
+            callbacks = []
+
+            def forged_journal_authority(*_args, **_kwargs):
+                callbacks.append(True)
+                return []
+
+            for method_name in (
+                "load_events",
+                "_decode_event_row",
+                "_connect",
+                "_require_text",
+            ):
+                with self.subTest(journal_authority=method_name):
+                    with patch.object(
+                        JournalStore,
+                        method_name,
+                        forged_journal_authority,
+                    ):
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "submission response binding authority is unavailable",
+                        ):
+                            load_submission_response_binding(
+                                store,
+                                environment="SIMULATION",
+                                account_id="acct",
+                                attempt_id="exact-response-a1",
+                            )
+                    self.assertEqual(callbacks, [])
+
+            with patch.object(
+                JournalStore,
+                "store_identity",
+                property(forged_journal_authority),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "submission response binding authority is unavailable",
+                ):
+                    load_submission_response_binding(
+                        store,
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id="exact-response-a1",
+                    )
+            self.assertEqual(callbacks, [])
+
+            with patch.object(JournalStore, "SCHEMA_VERSION", 4):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "submission response binding authority is unavailable",
+                ):
+                    load_submission_response_binding(
+                        store,
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id="exact-response-a1",
+                    )
+            self.assertEqual(callbacks, [])
+
     def test_unknown_json_binding_cannot_mint_provider_observation(self):
         request = {"symbol": "BTCUSDT", "side": "BUY", "quantity": "1"}
         request_hash = (

@@ -21,6 +21,7 @@ from mvp.autotrade_mvp.ibkr_web import (
     IbkrBrokerageSessionStatus,
     IbkrContractIdentity,
     IbkrExecutionEvidence,
+    IbkrNormalizedOrder,
     IbkrReplyRequest,
     IbkrWebAdapterError,
     IbkrWebOrderIntent,
@@ -1286,6 +1287,131 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(prepared.fields["extOperator"], "autotrade")
 
 
+
+    def test_normalized_order_cannot_self_assert_provider_serialization_qualification(self):
+        prepared = prepare_normalized_order(
+            IbkrWebOrderIntent.create(
+                instrument_version="AAPL-CONID-265598:v1",
+                account_id="U1234567",
+                contract=IbkrContractIdentity(conid=265598),
+                side="BUY",
+                order_type="MARKET",
+                time_in_force="DAY",
+                quantity="1",
+            ),
+            client_order_id="at-normalized-authority",
+            capability=capability(),
+            session=ready_session(),
+            at=NOW,
+            maximum_session_age_seconds=30,
+        )
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError, "cannot self-assert provider serialization qualification"
+        ):
+            IbkrNormalizedOrder(
+                endpoint=prepared.endpoint,
+                fields=dict(prepared.fields),
+                exact_quantity_text=prepared.exact_quantity_text,
+                exact_limit_price_text=prepared.exact_limit_price_text,
+                exact_stop_price_text=prepared.exact_stop_price_text,
+                capability_snapshot_id=prepared.capability_snapshot_id,
+                documentation_refs=prepared.documentation_refs,
+                provider_serialization_qualified=True,
+            )
+
+    def test_normalized_order_rejects_executable_mapping_before_callbacks(self):
+        class ExecutableFields(dict):
+            iter_called = False
+
+            def __iter__(self):
+                type(self).iter_called = True
+                raise AssertionError("normalized field mapping callback executed")
+
+            def keys(self):
+                type(self).iter_called = True
+                raise AssertionError("normalized field mapping callback executed")
+
+            def __getitem__(self, key):
+                type(self).iter_called = True
+                raise AssertionError("normalized field mapping callback executed")
+
+        fields = ExecutableFields(
+            {
+                "acctId": "U1234567",
+                "orderType": "MKT",
+                "side": "BUY",
+                "tif": "DAY",
+                "cOID": "at-hostile-fields",
+                "conid": 265598,
+            }
+        )
+        with self.assertRaisesRegex(TypeError, "fields must be an exact dict"):
+            IbkrNormalizedOrder(
+                endpoint="/iserver/account/U1234567/orders",
+                fields=fields,
+                exact_quantity_text="1",
+                exact_limit_price_text=None,
+                exact_stop_price_text=None,
+                capability_snapshot_id="capability-1",
+                documentation_refs=tuple(
+                    (
+                        "https://www.interactivebrokers.com/docs/web-api/trading/trading-sessions-in-the-web-api",
+                        "https://www.interactivebrokers.com/docs/web-api/v1/endpoints/orders/place-order",
+                        "https://www.interactivebrokers.com/docs/web-api/api-reference/trading/trading-orders/modify-open-order",
+                        "https://www.interactivebrokers.com/docs/tws-api/ref/execution",
+                    )
+                ),
+            )
+        self.assertFalse(ExecutableFields.iter_called)
+
+    def test_normalized_order_rejects_shape_that_implies_unqualified_serialization(self):
+        base = {
+            "acctId": "U1234567",
+            "orderType": "MKT",
+            "side": "BUY",
+            "tif": "DAY",
+            "cOID": "at-unqualified-numeric",
+            "conid": 265598,
+        }
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError, "supported IBKR shape"
+        ):
+            IbkrNormalizedOrder(
+                endpoint="/iserver/account/U1234567/orders",
+                fields={**base, "quantity": "1"},
+                exact_quantity_text="1",
+                exact_limit_price_text=None,
+                exact_stop_price_text=None,
+                capability_snapshot_id="capability-1",
+                documentation_refs=tuple(
+                    (
+                        "https://www.interactivebrokers.com/docs/web-api/trading/trading-sessions-in-the-web-api",
+                        "https://www.interactivebrokers.com/docs/web-api/v1/endpoints/orders/place-order",
+                        "https://www.interactivebrokers.com/docs/web-api/api-reference/trading/trading-orders/modify-open-order",
+                        "https://www.interactivebrokers.com/docs/tws-api/ref/execution",
+                    )
+                ),
+            )
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError, "price evidence does not match orderType"
+        ):
+            IbkrNormalizedOrder(
+                endpoint="/iserver/account/U1234567/orders",
+                fields=base,
+                exact_quantity_text="1",
+                exact_limit_price_text="100",
+                exact_stop_price_text=None,
+                capability_snapshot_id="capability-1",
+                documentation_refs=tuple(
+                    (
+                        "https://www.interactivebrokers.com/docs/web-api/trading/trading-sessions-in-the-web-api",
+                        "https://www.interactivebrokers.com/docs/web-api/v1/endpoints/orders/place-order",
+                        "https://www.interactivebrokers.com/docs/web-api/api-reference/trading/trading-orders/modify-open-order",
+                        "https://www.interactivebrokers.com/docs/tws-api/ref/execution",
+                    )
+                ),
+            )
 
     def test_execution_evidence_direct_constructor_enforces_canonical_invariants(self):
         _HostileText.strip_called = False

@@ -310,7 +310,161 @@ class IbkrNormalizedOrder:
     provider_serialization_qualified: bool = False
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
+        if type(self.fields) is not dict:
+            raise TypeError("normalized order fields must be an exact dict")
+        if type(self.provider_serialization_qualified) is not bool:
+            raise TypeError("provider_serialization_qualified must be boolean")
+        if self.provider_serialization_qualified:
+            raise IbkrWebAdapterError(
+                "IBKR Web foundation cannot self-assert provider serialization qualification"
+            )
+
+        raw_fields = self.fields
+        for key in raw_fields:
+            if type(key) is not str:
+                raise IbkrWebAdapterError(
+                    "normalized order field names must be exact text"
+                )
+        required = {"acctId", "orderType", "side", "tif", "cOID"}
+        optional = {"conid", "conidex", "manualIndicator", "extOperator"}
+        keys = set(raw_fields)
+        if not required.issubset(keys) or not keys.issubset(required | optional):
+            raise IbkrWebAdapterError(
+                "normalized order fields do not match the supported IBKR shape"
+            )
+        if ("conid" in raw_fields) == ("conidex" in raw_fields):
+            raise IbkrWebAdapterError(
+                "normalized order requires exactly one of conid or conidex"
+            )
+
+        account_id = _text(raw_fields["acctId"], name="fields.acctId")
+        endpoint = _text(self.endpoint, name="endpoint")
+        if endpoint != f"/iserver/account/{account_id}/orders":
+            raise IbkrWebAdapterError(
+                "normalized order endpoint does not match account"
+            )
+        order_type = _text(raw_fields["orderType"], name="fields.orderType")
+        if order_type not in set(_ORDER_TYPES.values()):
+            raise IbkrWebAdapterError("unsupported provider orderType")
+        side = _text(raw_fields["side"], name="fields.side")
+        if side not in _SIDES:
+            raise IbkrWebAdapterError("normalized provider side must be BUY or SELL")
+        tif = _text(raw_fields["tif"], name="fields.tif")
+        if tif not in _TIFS:
+            raise IbkrWebAdapterError("unsupported normalized provider tif")
+        coid = validate_coid(raw_fields["cOID"])
+
+        normalized_fields: dict[str, object] = {
+            "acctId": account_id,
+            "orderType": order_type,
+            "side": side,
+            "tif": tif,
+            "cOID": coid,
+        }
+        if "conid" in raw_fields:
+            conid = raw_fields["conid"]
+            if type(conid) is not int or conid <= 0:
+                raise IbkrWebAdapterError(
+                    "normalized conid must be a positive exact integer"
+                )
+            normalized_fields["conid"] = conid
+        else:
+            conidex = _text(raw_fields["conidex"], name="fields.conidex")
+            if _CONIDEX.fullmatch(conidex) is None:
+                raise IbkrWebAdapterError(
+                    "normalized conidex must have positive-conid@EXCHANGE form"
+                )
+            normalized_fields["conidex"] = conidex
+        if "manualIndicator" in raw_fields:
+            manual = raw_fields["manualIndicator"]
+            if type(manual) is not bool:
+                raise IbkrWebAdapterError(
+                    "normalized manualIndicator must be boolean"
+                )
+            normalized_fields["manualIndicator"] = manual
+        if "extOperator" in raw_fields:
+            normalized_fields["extOperator"] = _text(
+                raw_fields["extOperator"],
+                name="fields.extOperator",
+            )
+
+        if type(self.exact_quantity_text) is not str:
+            raise TypeError("exact_quantity_text must be exact text")
+        if (
+            self.exact_limit_price_text is not None
+            and type(self.exact_limit_price_text) is not str
+        ):
+            raise TypeError("exact_limit_price_text must be exact text when present")
+        if (
+            self.exact_stop_price_text is not None
+            and type(self.exact_stop_price_text) is not str
+        ):
+            raise TypeError("exact_stop_price_text must be exact text when present")
+        quantity = _decimal(
+            self.exact_quantity_text,
+            name="exact_quantity_text",
+            positive=True,
+        )
+        limit = (
+            None
+            if self.exact_limit_price_text is None
+            else _decimal(
+                self.exact_limit_price_text,
+                name="exact_limit_price_text",
+                positive=True,
+            )
+        )
+        stop = (
+            None
+            if self.exact_stop_price_text is None
+            else _decimal(
+                self.exact_stop_price_text,
+                name="exact_stop_price_text",
+                positive=True,
+            )
+        )
+        price_shape = {
+            "MKT": (False, False),
+            "LMT": (True, False),
+            "STP": (False, True),
+            "STP LMT": (True, True),
+        }[order_type]
+        if (limit is not None, stop is not None) != price_shape:
+            raise IbkrWebAdapterError(
+                "normalized exact price evidence does not match orderType"
+            )
+
+        if type(self.documentation_refs) is not tuple or any(
+            type(value) is not str for value in self.documentation_refs
+        ):
+            raise TypeError("documentation_refs must be an exact tuple of exact text")
+        if self.documentation_refs != tuple(IBKR_WEB_DOCS.values()):
+            raise IbkrWebAdapterError(
+                "normalized order documentation refs must match canonical IBKR refs"
+            )
+
+        object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(self, "fields", MappingProxyType(normalized_fields))
+        object.__setattr__(
+            self,
+            "exact_quantity_text",
+            _decimal_text(quantity),
+        )
+        object.__setattr__(
+            self,
+            "exact_limit_price_text",
+            None if limit is None else _decimal_text(limit),
+        )
+        object.__setattr__(
+            self,
+            "exact_stop_price_text",
+            None if stop is None else _decimal_text(stop),
+        )
+        object.__setattr__(
+            self,
+            "capability_snapshot_id",
+            _text(self.capability_snapshot_id, name="capability_snapshot_id"),
+        )
 
 
 def prepare_normalized_order(
@@ -402,6 +556,33 @@ class IbkrExecutionEvidence:
     quantity: Decimal
     price: Decimal
 
+    def __post_init__(self) -> None:
+        execution_id = _text(self.execution_id, name="execution_id")
+        permanent_order_id = _text(
+            self.permanent_order_id, name="permanent_order_id"
+        )
+        if re.fullmatch(r"[1-9][0-9]*", permanent_order_id) is None:
+            raise IbkrWebAdapterError(
+                "permanent_order_id must be canonical positive integer text"
+            )
+        object.__setattr__(self, "execution_id", execution_id)
+        object.__setattr__(self, "permanent_order_id", permanent_order_id)
+        object.__setattr__(
+            self,
+            "account_id",
+            _text(self.account_id, name="account_id"),
+        )
+        object.__setattr__(
+            self,
+            "quantity",
+            _decimal(self.quantity, name="quantity", positive=True),
+        )
+        object.__setattr__(
+            self,
+            "price",
+            _decimal(self.price, name="price", positive=True),
+        )
+
     @classmethod
     def create(
         cls,
@@ -417,9 +598,9 @@ class IbkrExecutionEvidence:
                 "permanent_order_id must be a positive exact integer"
             )
         return cls(
-            execution_id=_text(execution_id, name="execution_id"),
+            execution_id=execution_id,
             permanent_order_id=str(permanent_order_id),
-            account_id=_text(account_id, name="account_id"),
+            account_id=account_id,
             quantity=_decimal(quantity, name="quantity", positive=True),
             price=_decimal(price, name="price", positive=True),
         )
@@ -1106,19 +1287,45 @@ def execution_to_reconciliation_fill(
 
     if type(execution) is not IbkrExecutionEvidence:
         raise TypeError("execution must be exact IbkrExecutionEvidence")
+    execution_id = _text(
+        execution.execution_id,
+        name="execution.execution_id",
+    )
+    permanent_order_id = _text(
+        execution.permanent_order_id,
+        name="execution.permanent_order_id",
+    )
+    if re.fullmatch(r"[1-9][0-9]*", permanent_order_id) is None:
+        raise IbkrWebAdapterError(
+            "execution permanent_order_id must be canonical positive integer text"
+        )
+    execution_account = _text(
+        execution.account_id,
+        name="execution.account_id",
+    )
+    execution_quantity = _decimal(
+        execution.quantity,
+        name="execution.quantity",
+        positive=True,
+    )
+    execution_price = _decimal(
+        execution.price,
+        name="execution.price",
+        positive=True,
+    )
     account = _text(expected_account_id, name="expected_account_id")
-    if execution.account_id != account:
+    if execution_account != account:
         raise IbkrWebAdapterError("execution account does not match reconciliation account")
     client_id = None if client_order_id is None else validate_coid(client_order_id)
     return ProviderFillEvidence.create(
         provider_id="IBKR",
         account_id=account,
         environment=environment,
-        provider_execution_id=execution.execution_id,
+        provider_execution_id=execution_id,
         client_order_id=client_id,
         instrument=_text(instrument, name="instrument"),
-        quantity=execution.quantity,
-        price=execution.price,
+        quantity=execution_quantity,
+        price=execution_price,
         fee_amount=_decimal(fee_amount, name="fee_amount"),
         fee_currency=_text(fee_currency, name="fee_currency"),
         trade_time=_text(trade_time, name="trade_time"),

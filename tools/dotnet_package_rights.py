@@ -224,6 +224,53 @@ def package_rights_records(root: Path = ROOT) -> list[dict[str, str]]:
     return sorted(records, key=_artifact_key)
 
 
+def _workflow_step_has_bypass(lines: list[str], command_index: int) -> bool:
+    """Reject verifier steps that can be skipped or can suppress exit semantics."""
+
+    raw = lines[command_index]
+    command_indent = len(raw) - len(raw.lstrip(" "))
+    stripped = raw.strip()
+    step_start = command_index
+    step_indent: int | None = None
+    if stripped.startswith("- "):
+        step_indent = command_indent
+    else:
+        for index in range(command_index - 1, -1, -1):
+            candidate = lines[index]
+            if not candidate.strip():
+                continue
+            indent = len(candidate) - len(candidate.lstrip(" "))
+            if indent >= command_indent:
+                continue
+            if candidate.lstrip(" ").startswith("- "):
+                step_start = index
+                step_indent = indent
+                break
+            if indent < command_indent - 2:
+                break
+    if step_indent is None:
+        return True
+
+    step_end = len(lines)
+    for index in range(step_start + 1, len(lines)):
+        candidate = lines[index]
+        if not candidate.strip():
+            continue
+        indent = len(candidate) - len(candidate.lstrip(" "))
+        if indent < step_indent:
+            step_end = index
+            break
+        if indent == step_indent and candidate.lstrip(" ").startswith("- "):
+            step_end = index
+            break
+
+    forbidden = ("if:", "continue-on-error:", "shell:")
+    return any(
+        lines[index].strip().startswith(forbidden)
+        for index in range(step_start, step_end)
+    )
+
+
 def workflow_restored_rights_projects(
     workflow_text: str,
 ) -> tuple[list[str], list[int]]:
@@ -232,9 +279,11 @@ def workflow_restored_rights_projects(
     if type(workflow_text) is not str:
         raise TypeError("workflow text must be exact str")
 
+    lines = workflow_text.splitlines()
     projects: list[str] = []
     invalid_lines: list[int] = []
-    for line_number, raw in enumerate(workflow_text.splitlines(), start=1):
+    for command_index, raw in enumerate(lines):
+        line_number = command_index + 1
         command = raw.strip()
         if command.startswith("- "):
             command = command[2:].strip()
@@ -244,6 +293,9 @@ def workflow_restored_rights_projects(
         ):
             continue
         if not command.startswith(_VERIFY_RESTORED_PREFIX):
+            invalid_lines.append(line_number)
+            continue
+        if _workflow_step_has_bypass(lines, command_index):
             invalid_lines.append(line_number)
             continue
         payload = command.removeprefix("run: ")

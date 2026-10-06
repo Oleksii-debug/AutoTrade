@@ -53,6 +53,27 @@ def _write_project(root: Path) -> Path:
     return project
 
 
+def _write_rights_workflow(root: Path, projects: list[Path]) -> None:
+    workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
+    workflow.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "env:",
+        "  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages",
+        "jobs:",
+        "  verify:",
+        "    steps:",
+    ]
+    for project in projects:
+        relative = project.relative_to(root).as_posix()
+        lines.append(
+            "      - run: python tools/dotnet_package_rights.py "
+            "--verify-restored "
+            '--packages-root "${{ env.NUGET_PACKAGES }}" '
+            f"--project {relative}"
+        )
+    workflow.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _write_policy(root: Path) -> None:
     licenses = root / "provenance" / "licenses"
     licenses.mkdir(parents=True)
@@ -106,7 +127,8 @@ class DotnetPackageRightsTests(unittest.TestCase):
     def test_missing_rights_record_blocks_locked_package(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            _write_project(root)
+            project = _write_project(root)
+            _write_rights_workflow(root, [project])
             (root / "provenance").mkdir()
             (root / "provenance" / "dotnet-package-rights.json").write_text(
                 '{"schema_version":"1.0.0","packages":[]}\n',
@@ -115,6 +137,58 @@ class DotnetPackageRightsTests(unittest.TestCase):
             self.assertEqual(
                 package_rights_blockers(root),
                 ["DOTNET_PACKAGE_RIGHTS_MISSING:Example.Package@1.2.3"],
+            )
+
+    def test_package_project_without_post_restore_rights_verification_is_blocked(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "env:\n"
+                "  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages\n",
+                encoding="utf-8",
+            )
+            self.assertIn(
+                "DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_MISSING:"
+                "src/App/App.csproj",
+                package_rights_blockers(root),
+            )
+
+    def test_post_restore_rights_verifier_rejects_shell_bypass(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "env:\n"
+                "  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages\n"
+                "jobs:\n"
+                "  verify:\n"
+                "    steps:\n"
+                "      - run: python tools/dotnet_package_rights.py "
+                "--verify-restored "
+                '--packages-root "${{ env.NUGET_PACKAGES }}" '
+                "--project src/App/App.csproj || true\n",
+                encoding="utf-8",
+            )
+            blockers = package_rights_blockers(root)
+            self.assertTrue(
+                any(
+                    blocker.startswith(
+                        "DOTNET_PACKAGE_RIGHTS_VERIFY_COMMAND_INVALID:"
+                    )
+                    for blocker in blockers
+                )
+            )
+            self.assertIn(
+                "DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_MISSING:"
+                "src/App/App.csproj",
+                blockers,
             )
 
     def test_zero_package_project_does_not_require_nuget_cache(self):
@@ -160,6 +234,7 @@ class DotnetPackageRightsTests(unittest.TestCase):
             root = Path(directory)
             project = _write_project(root)
             _write_policy(root)
+            _write_rights_workflow(root, [project])
             packages = _write_restored_package(root)
             self.assertEqual(package_rights_blockers(root), [])
             verify_restored_package_rights(

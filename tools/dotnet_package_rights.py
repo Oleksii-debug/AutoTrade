@@ -5,6 +5,8 @@ import base64
 import binascii
 import json
 from pathlib import Path, PurePosixPath
+import re
+import shlex
 import xml.etree.ElementTree as ET
 
 if __package__:
@@ -22,6 +24,15 @@ else:
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = ROOT / "provenance" / "dotnet-package-rights.json"
 _SCHEMA_VERSION = "1.0.0"
+_VERIFY_RESTORED_PREFIX = (
+    "run: python tools/dotnet_package_rights.py --verify-restored "
+)
+_VERIFY_SHELL_CONTROL = re.compile(r"(?:&&|\\|\\||[;&|<>\\x60]|\\$\\()")
+_CANONICAL_NUGET_PACKAGES_AUTHORITY = (
+    "NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages"
+)
+_CANONICAL_VERIFY_PACKAGES_ROOT = "${{ env.NUGET_PACKAGES }}"
+
 _REQUIRED_PACKAGE_FIELDS = frozenset(
     {
         "name",
@@ -212,6 +223,120 @@ def package_rights_records(root: Path = ROOT) -> list[dict[str, str]]:
     return sorted(records, key=_artifact_key)
 
 
+def workflow_restored_rights_projects(
+    workflow_text: str,
+) -> tuple[list[str], list[int]]:
+    """Return exact projects whose restored package bytes are rights-verified."""
+
+    if type(workflow_text) is not str:
+        raise TypeError("workflow text must be exact str")
+
+    projects: list[str] = []
+    invalid_lines: list[int] = []
+    for line_number, raw in enumerate(workflow_text.splitlines(), start=1):
+        command = raw.strip()
+        if command.startswith("- "):
+            command = command[2:].strip()
+        if (
+            "tools/dotnet_package_rights.py" not in command
+            or "--verify-restored" not in command
+        ):
+            continue
+        if not command.startswith(_VERIFY_RESTORED_PREFIX):
+            invalid_lines.append(line_number)
+            continue
+        payload = command.removeprefix("run: ")
+        if _VERIFY_SHELL_CONTROL.search(payload) is not None:
+            invalid_lines.append(line_number)
+            continue
+        try:
+            tokens = tuple(shlex.split(payload, comments=True))
+        except ValueError:
+            invalid_lines.append(line_number)
+            continue
+        if (
+            len(tokens) != 7
+            or tokens[:4]
+            != (
+                "python",
+                "tools/dotnet_package_rights.py",
+                "--verify-restored",
+                "--packages-root",
+            )
+            or tokens[4] != _CANONICAL_VERIFY_PACKAGES_ROOT
+            or tokens[5] != "--project"
+        ):
+            invalid_lines.append(line_number)
+            continue
+        project = tokens[6]
+        path = PurePosixPath(project)
+        if (
+            not project
+            or "\\" in project
+            or path.is_absolute()
+            or path.suffix != ".csproj"
+            or any(part in {"", ".", ".."} for part in path.parts)
+            or path.as_posix() != project
+        ):
+            invalid_lines.append(line_number)
+            continue
+        projects.append(project)
+    return projects, invalid_lines
+
+
+def _workflow_rights_blockers(
+    root: Path,
+    package_projects: list[Path],
+) -> list[str]:
+    if not package_projects:
+        return []
+
+    workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
+    try:
+        workflow_text = workflow.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ["DOTNET_PACKAGE_RIGHTS_WORKFLOW_MISSING"]
+
+    authority_lines = [
+        line_number
+        for line_number, raw in enumerate(workflow_text.splitlines(), start=1)
+        if raw.strip().startswith("NUGET_PACKAGES:")
+    ]
+    canonical_authority_lines = [
+        line_number
+        for line_number, raw in enumerate(workflow_text.splitlines(), start=1)
+        if raw.strip() == _CANONICAL_NUGET_PACKAGES_AUTHORITY
+    ]
+    blockers: list[str] = []
+    if len(authority_lines) != 1 or authority_lines != canonical_authority_lines:
+        blockers.append("DOTNET_PACKAGE_RIGHTS_NUGET_PACKAGES_AUTHORITY_INVALID")
+
+    verified, invalid_lines = workflow_restored_rights_projects(workflow_text)
+    for line_number in invalid_lines:
+        blockers.append(
+            f"DOTNET_PACKAGE_RIGHTS_VERIFY_COMMAND_INVALID:{line_number}"
+        )
+    seen: set[str] = set()
+    for project in verified:
+        if project in seen:
+            blockers.append(
+                f"DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_DUPLICATE:{project}"
+            )
+        seen.add(project)
+        if not (root / project).is_file():
+            blockers.append(
+                f"DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_NOT_FOUND:{project}"
+            )
+
+    for project in sorted(set(package_projects)):
+        relative = project.relative_to(root).as_posix()
+        if relative not in seen:
+            blockers.append(
+                f"DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_MISSING:{relative}"
+            )
+    return sorted(blockers)
+
+
 def package_rights_blockers(root: Path = ROOT) -> list[str]:
     try:
         artifacts = locked_package_artifacts(root)
@@ -237,6 +362,7 @@ def package_rights_blockers(root: Path = ROOT) -> list[str]:
                 "DOTNET_PACKAGE_RIGHTS_ORPHANED:"
                 f"{record['name']}@{record['version']}"
             )
+    blockers.extend(_workflow_rights_blockers(root, _package_projects(root)))
     return sorted(blockers)
 
 

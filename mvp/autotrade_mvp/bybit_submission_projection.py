@@ -67,6 +67,7 @@ def _bind_authenticated_bybit_submission_projection():
     _dict_type = dict
     _list_type = list
     _tuple_type = tuple
+    _str_type = str
     _object_getattribute = object.__getattribute__
     _getattr = getattr
 
@@ -139,14 +140,14 @@ def _bind_authenticated_bybit_submission_projection():
             )
     
         body = prepared["body"]
-        if _type(body) is not dict:
+        if _type(body) is not _dict_type:
             # guarded_order_projection currently returns one exact detached dict;
             # fail closed if that canonical surface changes.
             raise _error_type(
                 "Bybit prepared request body projection is non-canonical"
             )
         client_order_id = body.get("orderLinkId")
-        if _type(client_order_id) is not str or not client_order_id:
+        if _type(client_order_id) is not _str_type or not client_order_id:
             raise _error_type(
                 "Bybit prepared request lacks canonical client order identity"
             )
@@ -207,7 +208,7 @@ def _bind_authenticated_bybit_submission_projection():
     
         observed = _provider_submission_observation_projection(observation)
         evidence = normalized.get("evidence")
-        if _type(evidence) is not list or _len(evidence) != 1 or _type(evidence[0]) is not dict:
+        if _type(evidence) is not _list_type or _len(evidence) != 1 or _type(evidence[0]) is not _dict_type:
             raise _error_type(
                 "Bybit normalized lifecycle result lacks one canonical evidence reference"
             )
@@ -229,22 +230,22 @@ def _bind_authenticated_bybit_submission_projection():
             "attempt_id": attempt_id,
         }
     
-        if environment in {"PAPER", "LIVE"} and __type(artifact_store) is not _artifact_store_type:
+        if environment in {"PAPER", "LIVE"} and _type(artifact_store) is not _artifact_store_type:
             raise _error_type(
                 "authenticated Bybit lifecycle projection requires trusted ArtifactStore"
             )
         if artifact_store is not None:
-            if __type(artifact_store) is not _artifact_store_type:
+            if _type(artifact_store) is not _artifact_store_type:
                 raise _error_type(
                     "provider evidence ArtifactStore authority is non-canonical"
                 )
             source_uri = evidence_ref.get("source_uri")
             rights_id = evidence_ref.get("rights_id")
-            if _type(source_uri) is not str or not source_uri:
+            if _type(source_uri) is not _str_type or not source_uri:
                 raise _error_type(
                     "Bybit normalized evidence source is non-canonical"
                 )
-            if _type(rights_id) is not str or not rights_id:
+            if _type(rights_id) is not _str_type or not rights_id:
                 raise _error_type(
                     "Bybit normalized evidence rights id is non-canonical"
                 )
@@ -273,7 +274,8 @@ def _bind_authenticated_bybit_submission_projection():
                     "published Bybit response evidence differs from normalized evidence"
                 )
     
-        return _book_acknowledge(book, 
+        return _book_acknowledge(
+            book,
             event_key="bybit-submission:" + observed["evidence_ref"],
             client_order_id=client_order_id,
             provider_order_id=provider_order_id,

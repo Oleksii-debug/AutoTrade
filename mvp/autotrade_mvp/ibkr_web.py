@@ -10,15 +10,24 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Mapping
 import hashlib
 import json
 import re
 
+from autotrade_numeric.exact_decimal import (
+    ExactDecimalError,
+    parse_bounded_exact_decimal,
+)
+
 from .capabilities import CapabilitySnapshot
-from .provider_core import ProviderResponseObservation, Surface
+from .provider_core import (
+    AuthenticatedReadQueryBinding,
+    ProviderResponseObservation,
+    Surface,
+)
 from .reconciliation import ProviderFillEvidence
 
 
@@ -37,44 +46,142 @@ IBKR_WEB_DOCS = MappingProxyType(
 
 _COID = re.compile(r"^[\x21-\x7e]{1,64}$")
 _CONIDEX = re.compile(r"^(?P<conid>[1-9][0-9]*)@(?P<exchange>[A-Za-z0-9._-]+)$")
-_ORDER_TYPES = {
+_ORDER_TYPES = MappingProxyType({
     "MARKET": "MKT",
     "LIMIT": "LMT",
     "STOP": "STP",
     "STOP_LIMIT": "STP LMT",
-}
+})
+_PROVIDER_ORDER_TYPES = frozenset(_ORDER_TYPES.values())
 _TIFS = frozenset({"DAY", "GTC", "IOC"})
 _SIDES = frozenset({"BUY", "SELL"})
+_PERMANENT_ORDER_ID = re.compile(r"^(?:0|[1-9][0-9]*)$")
+_IBKR_WEB_TRADE_TIME = re.compile(r"^[0-9]{8}-[0-9]{2}:[0-9]{2}:[0-9]{2}$")
+_TRADE_CONIDEX = re.compile(r"^(?P<conid>[1-9][0-9]*)(?:@[A-Za-z0-9._-]+)?$")
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise IbkrWebAdapterError(f"{name} is required")
     return value.strip()
 
 
+def _provider_text(value: object, *, name: str) -> str:
+    """Admit canonical inert JSON strings without changing provider identity."""
+
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+    ):
+        raise IbkrWebAdapterError(f"{name} must be canonical provider text")
+    return value
+
+
+def _optional_provider_text(value: object, *, name: str) -> str | None:
+    """Classify optional provider text without changing provider identity."""
+
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise IbkrWebAdapterError(f"{name} must be provider text")
+    if value == "":
+        return None
+    if value != value.strip():
+        raise IbkrWebAdapterError(f"{name} must be canonical provider text")
+    return value
+
+
 def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise IbkrWebAdapterError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise IbkrWebAdapterError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise IbkrWebAdapterError(f"{name} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except (ExactDecimalError, TypeError) as error:
+        raise IbkrWebAdapterError(
+            f"{name} must use bounded exact decimal input"
+        ) from error
     if positive and result <= 0:
         raise IbkrWebAdapterError(f"{name} must be positive")
     return result
 
 
 def _instant(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
-        raise IbkrWebAdapterError(f"{name} must be timezone-aware")
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise IbkrWebAdapterError(
+            f"{name} must be an exact timezone-aware datetime"
+        )
     return value.astimezone(timezone.utc)
 
 
 def _decimal_text(value: Decimal) -> str:
     return format(value, "f")
+
+
+def _canonical_web_trade_time(
+    value: object,
+    *,
+    epoch_milliseconds: object,
+) -> str:
+    """Cross-bind documented IBKR trade time text to its epoch evidence."""
+
+    text = _provider_text(value, name="trade_time")
+    if _IBKR_WEB_TRADE_TIME.fullmatch(text) is None:
+        raise IbkrWebAdapterError(
+            "trade_time must use documented IBKR UTC format YYYYMMDD-HH:mm:ss"
+        )
+    try:
+        parsed = datetime.strptime(text, "%Y%m%d-%H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as error:
+        raise IbkrWebAdapterError(
+            "trade_time must use documented IBKR UTC format YYYYMMDD-HH:mm:ss"
+        ) from error
+    if type(epoch_milliseconds) is not int or epoch_milliseconds < 0:
+        raise IbkrWebAdapterError(
+            "trade_time_r must be a non-negative exact integer"
+        )
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    elapsed = parsed - epoch
+    expected_epoch_milliseconds = (
+        (elapsed.days * 86_400 + elapsed.seconds) * 1000
+        + elapsed.microseconds // 1000
+    )
+    if epoch_milliseconds != expected_epoch_milliseconds:
+        raise IbkrWebAdapterError("trade_time and trade_time_r conflict")
+    return parsed.isoformat().replace("+00:00", "Z")
+
+
+def _execution_correction_identity(
+    execution_id: str,
+) -> tuple[str, tuple[int, str]] | None:
+    """Return IBKR execution correction family/revision without integer coercion."""
+
+    family, separator, revision = execution_id.rpartition(".")
+    if not separator or not family or re.fullmatch(r"[0-9]+", revision) is None:
+        return None
+    normalized_revision = revision.lstrip("0") or "0"
+    if normalized_revision == "0":
+        raise IbkrWebAdapterError(
+            "IBKR execution correction revision must be a positive integer"
+        )
+    return family, (len(normalized_revision), normalized_revision)
+
+
+def _stable_execution_id(execution_id: str) -> str:
+    """Map IBKR correction revisions onto one durable execution identity.
+
+    IBKR documents corrections by changing only the digits after the final
+    period (for example .02 correcting .01). AutoTrade's durable correction
+    authority requires one provider_execution_id across revisions, so numeric
+    IBKR revisions normalize to the .01 root. The exact raw ExecId remains in
+    the immutable provider-response evidence referenced by the fill.
+    """
+
+    correction = _execution_correction_identity(execution_id)
+    if correction is None:
+        return execution_id
+    family, _revision_key = correction
+    return family + ".01"
 
 
 def validate_coid(value: str) -> str:
@@ -122,8 +229,8 @@ class IbkrContractIdentity:
         if (self.conid is None) == (self.conidex is None):
             raise IbkrWebAdapterError("exactly one of conid or conidex is required")
         if self.conid is not None:
-            if not isinstance(self.conid, int) or isinstance(self.conid, bool) or self.conid <= 0:
-                raise IbkrWebAdapterError("conid must be a positive integer")
+            if type(self.conid) is not int or self.conid <= 0:
+                raise IbkrWebAdapterError("conid must be a positive exact integer")
         if self.conidex is not None:
             value = _text(self.conidex, name="conidex")
             match = _CONIDEX.fullmatch(value)
@@ -152,8 +259,8 @@ class IbkrWebOrderIntent:
     ext_operator: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.contract, IbkrContractIdentity):
-            raise TypeError("contract must be IbkrContractIdentity")
+        if type(self.contract) is not IbkrContractIdentity:
+            raise TypeError("contract must be exact IbkrContractIdentity")
         side = _text(self.side, name="side").upper()
         order = _text(self.order_type, name="order_type").upper()
         tif = _text(self.time_in_force, name="time_in_force").upper()
@@ -220,8 +327,8 @@ class IbkrWebOrderIntent:
         manual_indicator: bool | None = None,
         ext_operator: str | None = None,
     ) -> "IbkrWebOrderIntent":
-        if not isinstance(contract, IbkrContractIdentity):
-            raise TypeError("contract must be IbkrContractIdentity")
+        if type(contract) is not IbkrContractIdentity:
+            raise TypeError("contract must be exact IbkrContractIdentity")
         side_value = _text(side, name="side").upper()
         order = _text(order_type, name="order_type").upper()
         tif = _text(time_in_force, name="time_in_force").upper()
@@ -285,7 +392,161 @@ class IbkrNormalizedOrder:
     provider_serialization_qualified: bool = False
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
+        if type(self.fields) is not dict:
+            raise TypeError("normalized order fields must be an exact dict")
+        if type(self.provider_serialization_qualified) is not bool:
+            raise TypeError("provider_serialization_qualified must be boolean")
+        if self.provider_serialization_qualified:
+            raise IbkrWebAdapterError(
+                "IBKR Web foundation cannot self-assert provider serialization qualification"
+            )
+
+        raw_fields = self.fields
+        for key in raw_fields:
+            if type(key) is not str:
+                raise IbkrWebAdapterError(
+                    "normalized order field names must be exact text"
+                )
+        required = {"acctId", "orderType", "side", "tif", "cOID"}
+        optional = {"conid", "conidex", "manualIndicator", "extOperator"}
+        keys = set(raw_fields)
+        if not required.issubset(keys) or not keys.issubset(required | optional):
+            raise IbkrWebAdapterError(
+                "normalized order fields do not match the supported IBKR shape"
+            )
+        if ("conid" in raw_fields) == ("conidex" in raw_fields):
+            raise IbkrWebAdapterError(
+                "normalized order requires exactly one of conid or conidex"
+            )
+
+        account_id = _text(raw_fields["acctId"], name="fields.acctId")
+        endpoint = _text(self.endpoint, name="endpoint")
+        if endpoint != f"/iserver/account/{account_id}/orders":
+            raise IbkrWebAdapterError(
+                "normalized order endpoint does not match account"
+            )
+        order_type = _text(raw_fields["orderType"], name="fields.orderType")
+        if order_type not in _PROVIDER_ORDER_TYPES:
+            raise IbkrWebAdapterError("unsupported provider orderType")
+        side = _text(raw_fields["side"], name="fields.side")
+        if side not in _SIDES:
+            raise IbkrWebAdapterError("normalized provider side must be BUY or SELL")
+        tif = _text(raw_fields["tif"], name="fields.tif")
+        if tif not in _TIFS:
+            raise IbkrWebAdapterError("unsupported normalized provider tif")
+        coid = validate_coid(raw_fields["cOID"])
+
+        normalized_fields: dict[str, object] = {
+            "acctId": account_id,
+            "orderType": order_type,
+            "side": side,
+            "tif": tif,
+            "cOID": coid,
+        }
+        if "conid" in raw_fields:
+            conid = raw_fields["conid"]
+            if type(conid) is not int or conid <= 0:
+                raise IbkrWebAdapterError(
+                    "normalized conid must be a positive exact integer"
+                )
+            normalized_fields["conid"] = conid
+        else:
+            conidex = _text(raw_fields["conidex"], name="fields.conidex")
+            if _CONIDEX.fullmatch(conidex) is None:
+                raise IbkrWebAdapterError(
+                    "normalized conidex must have positive-conid@EXCHANGE form"
+                )
+            normalized_fields["conidex"] = conidex
+        if "manualIndicator" in raw_fields:
+            manual = raw_fields["manualIndicator"]
+            if type(manual) is not bool:
+                raise IbkrWebAdapterError(
+                    "normalized manualIndicator must be boolean"
+                )
+            normalized_fields["manualIndicator"] = manual
+        if "extOperator" in raw_fields:
+            normalized_fields["extOperator"] = _text(
+                raw_fields["extOperator"],
+                name="fields.extOperator",
+            )
+
+        if type(self.exact_quantity_text) is not str:
+            raise TypeError("exact_quantity_text must be exact text")
+        if (
+            self.exact_limit_price_text is not None
+            and type(self.exact_limit_price_text) is not str
+        ):
+            raise TypeError("exact_limit_price_text must be exact text when present")
+        if (
+            self.exact_stop_price_text is not None
+            and type(self.exact_stop_price_text) is not str
+        ):
+            raise TypeError("exact_stop_price_text must be exact text when present")
+        quantity = _decimal(
+            self.exact_quantity_text,
+            name="exact_quantity_text",
+            positive=True,
+        )
+        limit = (
+            None
+            if self.exact_limit_price_text is None
+            else _decimal(
+                self.exact_limit_price_text,
+                name="exact_limit_price_text",
+                positive=True,
+            )
+        )
+        stop = (
+            None
+            if self.exact_stop_price_text is None
+            else _decimal(
+                self.exact_stop_price_text,
+                name="exact_stop_price_text",
+                positive=True,
+            )
+        )
+        price_shape = {
+            "MKT": (False, False),
+            "LMT": (True, False),
+            "STP": (False, True),
+            "STP LMT": (True, True),
+        }[order_type]
+        if (limit is not None, stop is not None) != price_shape:
+            raise IbkrWebAdapterError(
+                "normalized exact price evidence does not match orderType"
+            )
+
+        if type(self.documentation_refs) is not tuple or any(
+            type(value) is not str for value in self.documentation_refs
+        ):
+            raise TypeError("documentation_refs must be an exact tuple of exact text")
+        if self.documentation_refs != tuple(IBKR_WEB_DOCS.values()):
+            raise IbkrWebAdapterError(
+                "normalized order documentation refs must match canonical IBKR refs"
+            )
+
+        object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(self, "fields", MappingProxyType(normalized_fields))
+        object.__setattr__(
+            self,
+            "exact_quantity_text",
+            _decimal_text(quantity),
+        )
+        object.__setattr__(
+            self,
+            "exact_limit_price_text",
+            None if limit is None else _decimal_text(limit),
+        )
+        object.__setattr__(
+            self,
+            "exact_stop_price_text",
+            None if stop is None else _decimal_text(stop),
+        )
+        object.__setattr__(
+            self,
+            "capability_snapshot_id",
+            _text(self.capability_snapshot_id, name="capability_snapshot_id"),
+        )
 
 
 def prepare_normalized_order(
@@ -304,66 +565,118 @@ def prepare_normalized_order(
     until exact-version adapter tests establish a lossless provider boundary.
     """
 
-    if not isinstance(intent, IbkrWebOrderIntent):
-        raise TypeError("intent must be IbkrWebOrderIntent")
-    if not isinstance(capability, CapabilitySnapshot):
-        raise TypeError("capability must be CapabilitySnapshot")
-    if not isinstance(session, IbkrBrokerageSessionStatus):
-        raise TypeError("session must be IbkrBrokerageSessionStatus")
+    if type(intent) is not IbkrWebOrderIntent:
+        raise TypeError("intent must be exact IbkrWebOrderIntent")
+    if type(capability) is not CapabilitySnapshot:
+        raise TypeError("capability must be exact CapabilitySnapshot")
+    if type(session) is not IbkrBrokerageSessionStatus:
+        raise TypeError("session must be exact IbkrBrokerageSessionStatus")
+
+    raw_contract = intent.contract
+    if type(raw_contract) is not IbkrContractIdentity:
+        raise TypeError("intent contract must remain exact IbkrContractIdentity")
+    sealed_contract = IbkrContractIdentity(
+        conid=raw_contract.conid,
+        conidex=raw_contract.conidex,
+    )
+    sealed_intent = IbkrWebOrderIntent.create(
+        instrument_version=intent.instrument_version,
+        account_id=intent.account_id,
+        contract=sealed_contract,
+        side=intent.side,
+        order_type=intent.order_type,
+        time_in_force=intent.time_in_force,
+        quantity=intent.quantity,
+        limit_price=intent.limit_price,
+        stop_price=intent.stop_price,
+        regulatory_manual_indicator_required=(
+            intent.regulatory_manual_indicator_required
+        ),
+        manual_indicator=intent.manual_indicator,
+        ext_operator=intent.ext_operator,
+    )
+    coid = validate_coid(client_order_id)
     point = _instant(at, name="at")
     if (
-        isinstance(maximum_session_age_seconds, bool)
-        or not isinstance(maximum_session_age_seconds, int)
+        type(maximum_session_age_seconds) is not int
         or maximum_session_age_seconds < 0
     ):
         raise IbkrWebAdapterError(
             "maximum_session_age_seconds must be a non-negative integer"
         )
-    if session.observed_at > point:
+    for field in ("connected", "authenticated", "established", "competing"):
+        if type(getattr(session, field)) is not bool:
+            raise TypeError(f"session {field} must remain exact boolean")
+    session_observed_at = _instant(
+        session.observed_at,
+        name="session.observed_at",
+    )
+    if session_observed_at > point:
         raise IbkrWebAdapterError("session evidence is from the future")
-    if point - session.observed_at > timedelta(seconds=maximum_session_age_seconds):
+    if point - session_observed_at > timedelta(
+        seconds=maximum_session_age_seconds
+    ):
         raise IbkrWebAdapterError("brokerage session evidence is stale")
-    session.require_trade_ready()
-    coid = validate_coid(client_order_id)
-    if capability.provider_id.upper() != "IBKR":
+    IbkrBrokerageSessionStatus.require_trade_ready(session)
+
+    capability_provider_id = _text(
+        capability.provider_id,
+        name="capability.provider_id",
+    ).upper()
+    capability_account_id = _text(
+        capability.account_id,
+        name="capability.account_id",
+    )
+    capability_instrument_version = _text(
+        capability.instrument_version,
+        name="capability.instrument_version",
+    )
+    for field in ("supported_order_types", "time_in_force", "permission_scopes"):
+        values = getattr(capability, field)
+        if type(values) is not frozenset or any(
+            type(value) is not str for value in values
+        ):
+            raise TypeError(f"capability {field} must remain an exact text frozenset")
+    if capability_provider_id != "IBKR":
         raise IbkrWebAdapterError("capability belongs to another provider")
-    if capability.account_id != intent.account_id:
+    if capability_account_id != sealed_intent.account_id:
         raise IbkrWebAdapterError("capability account does not match intent account")
-    if capability.instrument_version != intent.instrument_version:
+    if capability_instrument_version != sealed_intent.instrument_version:
         raise IbkrWebAdapterError("capability instrument version does not match intent")
-    if not capability.admits(
+    if not CapabilitySnapshot.admits(
+        capability,
         at=point,
-        order_type=intent.order_type,
-        time_in_force=intent.time_in_force,
+        order_type=sealed_intent.order_type,
+        time_in_force=sealed_intent.time_in_force,
         permission_scope="ORDER_WRITE",
     ):
         raise IbkrWebAdapterError("exact capability evidence does not admit this order")
 
     fields: dict[str, object] = {
-        "acctId": intent.account_id,
-        "orderType": _ORDER_TYPES[intent.order_type],
-        "side": intent.side,
-        "tif": intent.time_in_force,
+        "acctId": sealed_intent.account_id,
+        "orderType": _ORDER_TYPES[sealed_intent.order_type],
+        "side": sealed_intent.side,
+        "tif": sealed_intent.time_in_force,
         "cOID": coid,
     }
-    if intent.contract.conid is not None:
-        fields["conid"] = intent.contract.conid
+    if sealed_intent.contract.conid is not None:
+        fields["conid"] = sealed_intent.contract.conid
     else:
-        fields["conidex"] = intent.contract.conidex
-    if intent.manual_indicator is not None:
-        fields["manualIndicator"] = intent.manual_indicator
-    if intent.ext_operator is not None:
-        fields["extOperator"] = intent.ext_operator
+        fields["conidex"] = sealed_intent.contract.conidex
+    if sealed_intent.manual_indicator is not None:
+        fields["manualIndicator"] = sealed_intent.manual_indicator
+    if sealed_intent.ext_operator is not None:
+        fields["extOperator"] = sealed_intent.ext_operator
 
     return IbkrNormalizedOrder(
-        endpoint=f"/iserver/account/{intent.account_id}/orders",
+        endpoint=f"/iserver/account/{sealed_intent.account_id}/orders",
         fields=fields,
-        exact_quantity_text=_decimal_text(intent.quantity),
+        exact_quantity_text=_decimal_text(sealed_intent.quantity),
         exact_limit_price_text=(
-            None if intent.limit_price is None else _decimal_text(intent.limit_price)
+            None if sealed_intent.limit_price is None else _decimal_text(sealed_intent.limit_price)
         ),
         exact_stop_price_text=(
-            None if intent.stop_price is None else _decimal_text(intent.stop_price)
+            None if sealed_intent.stop_price is None else _decimal_text(sealed_intent.stop_price)
         ),
         capability_snapshot_id=capability.snapshot_id,
         documentation_refs=tuple(IBKR_WEB_DOCS.values()),
@@ -378,6 +691,33 @@ class IbkrExecutionEvidence:
     quantity: Decimal
     price: Decimal
 
+    def __post_init__(self) -> None:
+        execution_id = _text(self.execution_id, name="execution_id")
+        permanent_order_id = _text(
+            self.permanent_order_id, name="permanent_order_id"
+        )
+        if _PERMANENT_ORDER_ID.fullmatch(permanent_order_id) is None:
+            raise IbkrWebAdapterError(
+                "permanent_order_id must be canonical non-negative integer text"
+            )
+        object.__setattr__(self, "execution_id", execution_id)
+        object.__setattr__(self, "permanent_order_id", permanent_order_id)
+        object.__setattr__(
+            self,
+            "account_id",
+            _text(self.account_id, name="account_id"),
+        )
+        object.__setattr__(
+            self,
+            "quantity",
+            _decimal(self.quantity, name="quantity", positive=True),
+        )
+        object.__setattr__(
+            self,
+            "price",
+            _decimal(self.price, name="price", positive=True),
+        )
+
     @classmethod
     def create(
         cls,
@@ -388,16 +728,14 @@ class IbkrExecutionEvidence:
         quantity,
         price,
     ) -> "IbkrExecutionEvidence":
-        if (
-            not isinstance(permanent_order_id, int)
-            or isinstance(permanent_order_id, bool)
-            or permanent_order_id <= 0
-        ):
-            raise IbkrWebAdapterError("permanent_order_id must be a positive integer")
+        if type(permanent_order_id) is not int or permanent_order_id < 0:
+            raise IbkrWebAdapterError(
+                "permanent_order_id must be a non-negative exact integer"
+            )
         return cls(
-            execution_id=_text(execution_id, name="execution_id"),
+            execution_id=execution_id,
             permanent_order_id=str(permanent_order_id),
-            account_id=_text(account_id, name="account_id"),
+            account_id=account_id,
             quantity=_decimal(quantity, name="quantity", positive=True),
             price=_decimal(price, name="price", positive=True),
         )
@@ -460,6 +798,142 @@ class IbkrAbsenceEvidence:
 
 
 @dataclass(frozen=True)
+class IbkrCancelRequest:
+    """One provider-relative cancel request; this object grants no send authority."""
+
+    endpoint: str
+    query: Mapping[str, str]
+    account_id: str
+    provider_order_id: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.account_id) is not str
+            or not self.account_id
+            or self.account_id != self.account_id.strip()
+            or re.fullmatch(r"[A-Za-z0-9._~-]+", self.account_id) is None
+            or self.account_id in {".", ".."}
+        ):
+            raise IbkrWebAdapterError(
+                "cancel account_id must be a canonical URI path segment"
+            )
+        account = self.account_id
+        if (
+            type(self.provider_order_id) is not str
+            or re.fullmatch(r"[1-9][0-9]*", self.provider_order_id) is None
+        ):
+            raise IbkrWebAdapterError(
+                "cancel provider_order_id must be canonical positive integer text"
+            )
+        order_id = self.provider_order_id
+        if type(self.endpoint) is not str:
+            raise TypeError("cancel endpoint must be exact text")
+        expected_endpoint = f"/iserver/account/{account}/order/{order_id}"
+        if self.endpoint != expected_endpoint:
+            raise IbkrWebAdapterError(
+                "cancel endpoint does not match account/order identity"
+            )
+        if type(self.query) is not dict:
+            raise TypeError("cancel query must be an exact dict")
+        # Snapshot exact-dict entries without hashing or virtual dispatching
+        # caller-controlled key objects. Key type is proven before allowlist
+        # membership, so a str subclass cannot execute __hash__ in this
+        # financial cancel boundary.
+        items = tuple(dict.items(self.query))
+        allowed = frozenset({"manualIndicator", "extOperator"})
+        normalized: dict[str, str] = {}
+        for key, value in items:
+            if type(key) is not str or type(value) is not str:
+                raise IbkrWebAdapterError("cancel query must use exact text")
+            if key not in allowed:
+                raise IbkrWebAdapterError("cancel query contains unsupported fields")
+            if not value or value != value.strip():
+                raise IbkrWebAdapterError("cancel query must use canonical text")
+            normalized[key] = value
+        if "manualIndicator" in normalized and normalized["manualIndicator"] not in {
+            "true",
+            "false",
+        }:
+            raise IbkrWebAdapterError(
+                "cancel manualIndicator must be true or false"
+            )
+        if ("manualIndicator" in normalized) != ("extOperator" in normalized):
+            raise IbkrWebAdapterError(
+                "regulated cancel metadata must contain "
+                "manualIndicator and extOperator together"
+            )
+        object.__setattr__(self, "query", MappingProxyType(normalized))
+
+
+def prepare_cancel_request(
+    *,
+    account_id: str,
+    provider_order_id: str,
+    regulatory_manual_indicator_required: bool,
+    manual_indicator: bool | None = None,
+    ext_operator: str | None = None,
+) -> IbkrCancelRequest:
+    """Prepare an exact single-order cancel without granting outbound authority.
+
+    IBKR's special order id -1 means cancel all open orders and is deliberately
+    outside this adapter. FUT/FOP cancellation metadata is only admitted when
+    the caller explicitly supplies the regulatory requirement. The returned
+    request must still cross the canonical guarded dispatcher.
+    """
+
+    if type(regulatory_manual_indicator_required) is not bool:
+        raise TypeError(
+            "regulatory_manual_indicator_required must be boolean"
+        )
+    if (
+        type(account_id) is not str
+        or not account_id
+        or account_id != account_id.strip()
+        or re.fullmatch(r"[A-Za-z0-9._~-]+", account_id) is None
+        or account_id in {".", ".."}
+    ):
+        raise IbkrWebAdapterError(
+            "cancel account_id must be a canonical URI path segment"
+        )
+    if (
+        type(provider_order_id) is not str
+        or re.fullmatch(r"[1-9][0-9]*", provider_order_id) is None
+    ):
+        raise IbkrWebAdapterError(
+            "single-order cancel requires canonical positive provider order id"
+        )
+
+    query: dict[str, str] = {}
+    if regulatory_manual_indicator_required:
+        if type(manual_indicator) is not bool:
+            raise IbkrWebAdapterError(
+                "regulated IBKR cancel requires exact manual_indicator evidence"
+            )
+        if (
+            type(ext_operator) is not str
+            or not ext_operator
+            or ext_operator != ext_operator.strip()
+        ):
+            raise IbkrWebAdapterError(
+                "regulated IBKR cancel requires canonical ext_operator evidence"
+            )
+        query["manualIndicator"] = "true" if manual_indicator else "false"
+        query["extOperator"] = ext_operator
+    elif manual_indicator is not None or ext_operator is not None:
+        raise IbkrWebAdapterError(
+            "unqualified cancel metadata is not accepted "
+            "for non-regulated request"
+        )
+
+    return IbkrCancelRequest(
+        endpoint=f"/iserver/account/{account_id}/order/{provider_order_id}",
+        query=query,
+        account_id=account_id,
+        provider_order_id=provider_order_id,
+    )
+
+
+@dataclass(frozen=True)
 class IbkrCancelOutcome:
     """Cancel endpoint acknowledgement; never proof of terminal cancellation."""
 
@@ -491,30 +965,54 @@ def parse_cancel_response(
     """Classify an observed cancel response without inventing terminal state.
 
     A successful request means only that IBKR acknowledged the cancel request.
-    Order truth still comes from subsequent order/execution/reconciliation
-    evidence because cancellation can race with fills.
+    The acknowledgement is accepted only when the documented integer order_id
+    names the exact ticket requested. Order truth still comes from subsequent
+    order/execution/reconciliation evidence because cancellation can race with
+    fills.
     """
 
-    order_id = _text(provider_order_id, name="provider_order_id")
-    if not isinstance(payload, Mapping):
-        raise TypeError("cancel response must be an object")
-    error = payload.get("error")
-    if error not in {None, ""}:
+    if (
+        type(provider_order_id) is not str
+        or not provider_order_id
+        or provider_order_id != provider_order_id.strip()
+    ):
+        raise IbkrWebAdapterError(
+            "provider_order_id must be canonical exact text"
+        )
+    order_id = provider_order_id
+    if type(payload) is not dict:
+        raise TypeError("cancel response must be an exact object")
+
+    error = _optional_provider_text(payload.get("error"), name="error")
+    if error is not None:
+        if any(key in payload for key in ("order_id", "msg", "conid", "account")):
+            raise IbkrWebAdapterError("cancel response shape is ambiguous")
         return IbkrCancelOutcome(
             provider_order_id=order_id,
             acknowledged=False,
-            message=_text(str(error), name="error"),
+            message=error,
         )
-    message = payload.get("msg", payload.get("message"))
+
+    raw_order_id = payload.get("order_id")
+    if (
+        type(raw_order_id) is not int
+        or raw_order_id <= 0
+        or re.fullmatch(r"[1-9][0-9]*", order_id) is None
+        or order_id != str(raw_order_id)
+    ):
+        raise IbkrWebAdapterError(
+            "cancel acknowledgement order_id does not match requested order"
+        )
+    message = _provider_text(payload.get("msg"), name="msg")
     return IbkrCancelOutcome(
         provider_order_id=order_id,
         acknowledged=True,
-        message=None if message in {None, ""} else _text(str(message), name="message"),
+        message=message,
     )
 
 
 def _reply_id(value: object) -> str:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise IbkrWebAdapterError("reply id must be a string")
     reply_id = _text(value, name="reply id")
     if (
@@ -568,15 +1066,17 @@ class IbkrSubmissionOutcome:
 
 
 def _single_submission_item(payload: object) -> Mapping[str, object]:
-    if isinstance(payload, Mapping):
+    if type(payload) is dict:
         return payload
-    if isinstance(payload, (list, tuple)):
-        if len(payload) != 1 or not isinstance(payload[0], Mapping):
+    if type(payload) in {list, tuple}:
+        if len(payload) != 1 or type(payload[0]) is not dict:
             raise IbkrWebAdapterError(
                 "single-order adapter requires exactly one provider response object"
             )
         return payload[0]
-    raise TypeError("submission response must be an object or one-item sequence")
+    raise TypeError(
+        "submission response must be an exact object or one-item sequence"
+    )
 
 
 def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
@@ -587,15 +1087,14 @@ def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
     """
 
     item = _single_submission_item(payload)
-    order_value = item.get("order_id")
+    order_text = _optional_provider_text(item.get("order_id"), name="order_id")
+    error_text = _optional_provider_text(item.get("error"), name="error")
     reply_value = item.get("id")
     message_value = item.get("message")
-    error_value = item.get("error")
-    has_order = order_value is not None and order_value != ""
-    has_reply_shape = "id" in item and message_value is not None and message_value != ""
-    validated_reply_id = _reply_id(reply_value) if has_reply_shape else None
-    has_reply = has_reply_shape
-    has_error = error_value is not None and error_value != ""
+    has_order = order_text is not None
+    has_reply = "id" in item and message_value is not None
+    validated_reply_id = _reply_id(reply_value) if has_reply else None
+    has_error = error_text is not None
 
     if sum(bool(value) for value in (has_order, has_reply, has_error)) != 1:
         raise IbkrWebAdapterError("submission response shape is ambiguous or unsupported")
@@ -603,22 +1102,30 @@ def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
     if has_order:
         return IbkrSubmissionOutcome(
             status="ACKNOWLEDGED",
-            provider_order_id=_text(str(item["order_id"]), name="order_id"),
-            provider_order_status=_text(
-                str(item.get("order_status", "")),
+            provider_order_id=order_text,
+            provider_order_status=_provider_text(
+                item.get("order_status", ""),
                 name="order_status",
             ),
         )
 
     if has_reply:
         raw_messages = item["message"]
-        if isinstance(raw_messages, (str, bytes)) or not isinstance(raw_messages, (list, tuple)):
-            raise IbkrWebAdapterError("reply message must be a sequence of strings")
-        messages = tuple(_text(str(value), name="reply message") for value in raw_messages)
+        if type(raw_messages) not in {list, tuple}:
+            raise IbkrWebAdapterError(
+                "reply message must be an exact sequence of strings"
+            )
+        messages = tuple(
+            _provider_text(value, name="reply message") for value in raw_messages
+        )
         raw_ids = item.get("messageIds", ())
-        if isinstance(raw_ids, (str, bytes)) or not isinstance(raw_ids, (list, tuple)):
-            raise IbkrWebAdapterError("messageIds must be a sequence when present")
-        message_ids = tuple(_text(str(value), name="messageId") for value in raw_ids)
+        if type(raw_ids) not in {list, tuple}:
+            raise IbkrWebAdapterError(
+                "messageIds must be an exact sequence when present"
+            )
+        message_ids = tuple(
+            _provider_text(value, name="messageId") for value in raw_ids
+        )
         suppressed = item.get("isSuppressed")
         if suppressed is not None and type(suppressed) is not bool:
             raise IbkrWebAdapterError("isSuppressed must be boolean when present")
@@ -631,7 +1138,7 @@ def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
 
     return IbkrSubmissionOutcome(
         status="REJECTED",
-        rejection_reason=_text(str(item["error"]), name="error"),
+        rejection_reason=error_text,
     )
 
 
@@ -735,18 +1242,22 @@ def record_order_submission_result(
     until reconciliation establishes whether the cOID appeared at the provider.
     """
 
-    if not isinstance(normalized, IbkrNormalizedOrder):
-        raise TypeError("normalized must be IbkrNormalizedOrder")
+    if type(normalized) is not IbkrNormalizedOrder:
+        raise TypeError("normalized must be exact IbkrNormalizedOrder")
     attempt = _text(attempt_id, name="attempt_id")
     account = _text(account_id, name="account_id")
     environment_value = _text(environment, name="environment").upper()
     point = _instant(observed_at, name="observed_at")
-    request_account = _text(str(normalized.fields.get("acctId", "")), name="acctId")
+    request_account = _provider_text(
+        normalized.fields.get("acctId", ""), name="acctId"
+    )
     if request_account != account:
         raise IbkrWebAdapterError(
             "recorded account does not match normalized guarded order"
         )
-    coid = validate_coid(str(normalized.fields.get("cOID", "")))
+    coid = validate_coid(
+        _provider_text(normalized.fields.get("cOID", ""), name="cOID")
+    )
 
     if transport_ambiguous:
         if response_body is not None:
@@ -768,13 +1279,13 @@ def record_order_submission_result(
         raise IbkrWebAdapterError(
             "non-ambiguous submission requires authoritative provider response bytes"
         )
-    if isinstance(response_body, bytes):
+    if type(response_body) is bytes:
         try:
             text_body = response_body.decode("utf-8")
         except UnicodeDecodeError as error:
             raise IbkrWebAdapterError("provider response must be UTF-8") from error
         raw = response_body
-    elif isinstance(response_body, str) and response_body:
+    elif type(response_body) is str and response_body:
         text_body = response_body
         raw = response_body.encode("utf-8")
     else:
@@ -823,7 +1334,7 @@ class IbkrReplyRequest:
         if not endpoint.startswith(prefix):
             raise IbkrWebAdapterError("reply endpoint must use /iserver/reply/<reply-id>")
         _reply_id(endpoint[len(prefix):])
-        if not isinstance(self.body, Mapping) or dict(self.body) != {"confirmed": True}:
+        if type(self.body) is not dict or self.body != {"confirmed": True}:
             raise IbkrWebAdapterError("reply request body must be exactly confirmed=true")
         object.__setattr__(self, "endpoint", endpoint)
         object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
@@ -854,8 +1365,8 @@ def prepare_reply_confirmation(
     that produced the reply id and must still cross GuardedDispatcher.
     """
 
-    if not isinstance(recorded, IbkrRecordedSubmission):
-        raise TypeError("recorded must be IbkrRecordedSubmission")
+    if type(recorded) is not IbkrRecordedSubmission:
+        raise TypeError("recorded must be exact IbkrRecordedSubmission")
     if type(explicit_authorization) is not bool:
         raise TypeError("explicit_authorization must be boolean")
     if recorded.outcome != "REPLY_REQUIRED":
@@ -896,36 +1407,139 @@ def parse_web_api_trades(
     explicit evidence because the trades row does not canonically carry it.
     """
 
-    if not isinstance(observation, ProviderResponseObservation):
-        raise TypeError("observation must be ProviderResponseObservation")
-    observation.require_scope(
+    if type(observation) is not ProviderResponseObservation:
+        raise TypeError("observation must be exact ProviderResponseObservation")
+    binding = observation.query_binding
+    if type(binding) is not AuthenticatedReadQueryBinding:
+        raise TypeError(
+            "observation query_binding must be exact AuthenticatedReadQueryBinding"
+        )
+    binding_provider = _provider_text(
+        binding.provider_id,
+        name="observation.provider_id",
+    )
+    binding_account = _provider_text(
+        binding.account_id,
+        name="observation.account_id",
+    )
+    binding_environment = _provider_text(
+        binding.environment,
+        name="observation.environment",
+    )
+    binding_endpoint = _provider_text(
+        binding.endpoint,
+        name="observation.endpoint",
+    )
+    if type(binding.surface) is not Surface:
+        raise TypeError("observation surface must be exact Surface")
+    evidence_ref = _provider_text(
+        observation.evidence_ref,
+        name="observation.evidence_ref",
+    )
+    if re.fullmatch(r"provider-read:sha256:[0-9a-f]{64}", evidence_ref) is None:
+        raise IbkrWebAdapterError(
+            "observation evidence_ref must be canonical provider-read evidence"
+        )
+    AuthenticatedReadQueryBinding.require_scope(
+        binding,
         provider_id="IBKR",
-        surface=Surface.AUTHENTICATED_READ,
+        surface=Surface.ACTIVITIES,
         endpoint="/iserver/account/trades",
     )
+    if binding_provider != "IBKR":
+        raise IbkrWebAdapterError("trade observation belongs to another provider")
+    if binding_endpoint != "/iserver/account/trades":
+        raise IbkrWebAdapterError("trade observation endpoint is not canonical")
     payload = observation.payload
-    if not isinstance(payload, (list, tuple)):
-        raise IbkrWebAdapterError("trades response must be an array")
-    if not isinstance(instrument_versions_by_conid, Mapping):
-        raise TypeError("instrument_versions_by_conid must be a mapping")
-    if not isinstance(fee_currency_by_execution_id, Mapping):
-        raise TypeError("fee_currency_by_execution_id must be a mapping")
-    account = observation.account_id
-    environment = observation.environment
+    if type(payload) is not tuple:
+        raise IbkrWebAdapterError(
+            "trades response must be the canonical frozen JSON array"
+        )
+    if type(instrument_versions_by_conid) is not dict:
+        raise TypeError("instrument_versions_by_conid must be an exact dict")
+    if type(fee_currency_by_execution_id) is not dict:
+        raise TypeError("fee_currency_by_execution_id must be an exact dict")
+    for conid_key, instrument_value in instrument_versions_by_conid.items():
+        if type(conid_key) is not int or conid_key <= 0:
+            raise IbkrWebAdapterError(
+                "instrument_versions_by_conid keys must be positive exact integers"
+            )
+        if (
+            type(instrument_value) is not str
+            or not instrument_value
+            or instrument_value != instrument_value.strip()
+        ):
+            raise IbkrWebAdapterError(
+                "instrument_versions_by_conid values must be exact text"
+            )
+    for execution_key, currency_value in fee_currency_by_execution_id.items():
+        if (
+            type(execution_key) is not str
+            or not execution_key
+            or execution_key != execution_key.strip()
+        ):
+            raise IbkrWebAdapterError(
+                "fee_currency_by_execution_id keys must be exact text"
+            )
+        if (
+            type(currency_value) is not str
+            or not currency_value
+            or currency_value != currency_value.strip()
+        ):
+            raise IbkrWebAdapterError(
+                "fee_currency_by_execution_id values must be exact text"
+            )
+    account = binding_account
+    environment = binding_environment
     by_execution: dict[str, ProviderFillEvidence] = {}
+    selected_by_execution_family: dict[
+        tuple[str, str],
+        tuple[tuple[int, str] | None, str, ProviderFillEvidence],
+    ] = {}
 
     for index, raw in enumerate(payload):
-        if not isinstance(raw, Mapping):
-            raise IbkrWebAdapterError(f"trades[{index}] must be an object")
-        execution_id = _text(raw.get("execution_id"), name="execution_id")
-        raw_account = raw.get("account", raw.get("accountCode"))
-        observed_account = _text(raw_account, name="trade.account")
+        if type(raw) is not MappingProxyType:
+            raise IbkrWebAdapterError(
+                f"trades[{index}] must be a canonical frozen JSON object"
+            )
+        execution_id = _provider_text(
+            raw.get("execution_id"), name="execution_id"
+        )
+        account_values: list[str] = []
+        for field_name in ("account", "accountCode"):
+            if field_name in raw and raw[field_name] is not None:
+                account_values.append(
+                    _provider_text(raw[field_name], name=f"trade.{field_name}")
+                )
+        if not account_values:
+            raise IbkrWebAdapterError(
+                "trade response must identify the reconciliation account"
+            )
+        if any(value != account_values[0] for value in account_values[1:]):
+            raise IbkrWebAdapterError(
+                "trade account and accountCode identifiers conflict"
+            )
+        observed_account = account_values[0]
         if observed_account != account:
-            raise IbkrWebAdapterError("trade account does not match reconciliation account")
+            raise IbkrWebAdapterError(
+                "trade account does not match reconciliation account"
+            )
 
         conid = raw.get("conid")
-        if not isinstance(conid, int) or isinstance(conid, bool) or conid <= 0:
-            raise IbkrWebAdapterError("trade conid must be a positive integer")
+        if type(conid) is not int or conid <= 0:
+            raise IbkrWebAdapterError("trade conid must be a positive exact integer")
+        raw_conidex = raw.get("conidEx")
+        if raw_conidex is not None:
+            conidex = _provider_text(raw_conidex, name="trade.conidEx")
+            if ";;;" in conidex:
+                raise IbkrWebAdapterError(
+                    "IBKR combo/spread trade reconciliation is not qualified"
+                )
+            conidex_match = _TRADE_CONIDEX.fullmatch(conidex)
+            if conidex_match is None or conidex_match.group("conid") != str(conid):
+                raise IbkrWebAdapterError(
+                    "trade conidEx does not match trade conid"
+                )
         if conid not in instrument_versions_by_conid:
             raise IbkrWebAdapterError(f"unmapped IBKR conid: {conid}")
         instrument = _text(
@@ -933,9 +1547,12 @@ def parse_web_api_trades(
         )
 
         raw_client_id = raw.get("order_ref")
-        client_id = None
-        if raw_client_id not in {None, ""}:
-            client_id = validate_coid(_text(raw_client_id, name="order_ref"))
+        if raw_client_id is None or raw_client_id == "":
+            client_id = None
+        else:
+            client_id = validate_coid(
+                _provider_text(raw_client_id, name="order_ref")
+            )
 
         if execution_id not in fee_currency_by_execution_id:
             raise IbkrWebAdapterError(
@@ -954,12 +1571,15 @@ def parse_web_api_trades(
                 "trade side must be provider-evidenced B or S"
             )
         side = side_by_provider_value[raw_side]
-        trade_time = _text(raw.get("trade_time"), name="trade_time")
+        trade_time = _canonical_web_trade_time(
+            raw.get("trade_time"),
+            epoch_milliseconds=raw.get("trade_time_r"),
+        )
         fill = ProviderFillEvidence.create(
             provider_id="IBKR",
             account_id=account,
             environment=environment,
-            provider_execution_id=execution_id,
+            provider_execution_id=_stable_execution_id(execution_id),
             client_order_id=client_id,
             instrument=instrument,
             side=side,
@@ -968,15 +1588,55 @@ def parse_web_api_trades(
             fee_amount=_decimal(raw.get("commission"), name="trade.commission"),
             fee_currency=fee_currency,
             trade_time=trade_time,
+            evidence_refs=(evidence_ref,),
         )
         prior = by_execution.get(execution_id)
-        if prior is not None and prior != fill:
-            raise IbkrWebAdapterError(
-                "IBKR execution id appears with conflicting economic content"
-            )
+        if prior is not None:
+            if prior != fill:
+                raise IbkrWebAdapterError(
+                    "IBKR execution id appears with conflicting economic content"
+                )
+            continue
         by_execution[execution_id] = fill
 
-    return tuple(by_execution.values())
+        correction = _execution_correction_identity(execution_id)
+        if correction is None:
+            family_key = ("exact", execution_id)
+            selected_by_execution_family[family_key] = (None, execution_id, fill)
+            continue
+
+        family, revision_key = correction
+        family_key = ("correction", family)
+        selected = selected_by_execution_family.get(family_key)
+        if selected is None:
+            selected_by_execution_family[family_key] = (
+                revision_key,
+                execution_id,
+                fill,
+            )
+            continue
+        selected_revision, selected_execution_id, _selected_fill = selected
+        if selected_revision == revision_key and selected_execution_id != execution_id:
+            raise IbkrWebAdapterError(
+                "IBKR execution correction revision is ambiguous"
+            )
+        if selected_revision is None or revision_key > selected_revision:
+            selected_by_execution_family[family_key] = (
+                revision_key,
+                execution_id,
+                fill,
+            )
+
+    return tuple(
+        sorted(
+            (
+                selected_fill
+                for _revision, _execution_id, selected_fill
+                in selected_by_execution_family.values()
+            ),
+            key=lambda fill: (fill.trade_time, fill.provider_execution_id),
+        )
+    )
 
 
 def execution_to_reconciliation_fill(
@@ -989,6 +1649,7 @@ def execution_to_reconciliation_fill(
     fee_amount,
     fee_currency: str,
     trade_time: str,
+    evidence_refs: tuple[str, ...],
 ) -> ProviderFillEvidence:
     """Bind unique IBKR execution identity into canonical account truth.
 
@@ -996,22 +1657,63 @@ def execution_to_reconciliation_fill(
     must not invent commission or timestamp evidence that was not observed.
     """
 
-    if not isinstance(execution, IbkrExecutionEvidence):
-        raise TypeError("execution must be IbkrExecutionEvidence")
+    if type(execution) is not IbkrExecutionEvidence:
+        raise TypeError("execution must be exact IbkrExecutionEvidence")
+    execution_id = _text(
+        execution.execution_id,
+        name="execution.execution_id",
+    )
+    permanent_order_id = _text(
+        execution.permanent_order_id,
+        name="execution.permanent_order_id",
+    )
+    if _PERMANENT_ORDER_ID.fullmatch(permanent_order_id) is None:
+        raise IbkrWebAdapterError(
+            "execution permanent_order_id must be canonical non-negative integer text"
+        )
+    execution_account = _text(
+        execution.account_id,
+        name="execution.account_id",
+    )
+    execution_quantity = _decimal(
+        execution.quantity,
+        name="execution.quantity",
+        positive=True,
+    )
+    execution_price = _decimal(
+        execution.price,
+        name="execution.price",
+        positive=True,
+    )
     account = _text(expected_account_id, name="expected_account_id")
-    if execution.account_id != account:
+    if execution_account != account:
         raise IbkrWebAdapterError("execution account does not match reconciliation account")
     client_id = None if client_order_id is None else validate_coid(client_order_id)
+    if (
+        type(evidence_refs) is not tuple
+        or not evidence_refs
+        or any(
+            type(reference) is not str
+            or not reference
+            or reference != reference.strip()
+            for reference in evidence_refs
+        )
+        or len(set(evidence_refs)) != len(evidence_refs)
+    ):
+        raise IbkrWebAdapterError(
+            "execution reconciliation requires exact unique evidence_refs"
+        )
     return ProviderFillEvidence.create(
         provider_id="IBKR",
         account_id=account,
         environment=environment,
-        provider_execution_id=execution.execution_id,
+        provider_execution_id=_stable_execution_id(execution_id),
         client_order_id=client_id,
         instrument=_text(instrument, name="instrument"),
-        quantity=execution.quantity,
-        price=execution.price,
+        quantity=execution_quantity,
+        price=execution_price,
         fee_amount=_decimal(fee_amount, name="fee_amount"),
         fee_currency=_text(fee_currency, name="fee_currency"),
         trade_time=_text(trade_time, name="trade_time"),
+        evidence_refs=evidence_refs,
     )

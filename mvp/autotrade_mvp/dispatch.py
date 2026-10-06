@@ -2351,44 +2351,6 @@ class GuardedDispatcher:
         )
         dispatch_authority_changed_error = _DispatchAuthorityChanged
         dispatch_blocked_error = DispatchBlocked
-        # These module-level helpers are part of the irreversible send-state
-        # authority even though GuardedDispatcher methods are class-sealed.
-        # Python function bodies resolve them dynamically from module globals,
-        # so an external callback could otherwise rebind them after
-        # SubmissionSending and redirect terminal journal reads/writes.
-        dispatch_module_globals = globals()
-        dispatch_module_get = dispatch_module_globals.get
-        dispatch_module_set = dispatch_module_globals.__setitem__
-        dispatch_module_authority = (
-            (
-                "_canonical_journal_authority_snapshot",
-                _canonical_journal_authority_snapshot,
-            ),
-            ("_journal_store_call", _journal_store_call),
-            ("_envelope", _envelope),
-            ("_detach_submission_json", _detach_submission_json),
-            ("submission_attempt_aggregate_id", submission_attempt_aggregate_id),
-            ("_event_id", _event_id),
-            ("_identity_digest", _identity_digest),
-            ("_instant", _instant),
-            ("payload_digest", payload_digest),
-            ("canonical_json", canonical_json),
-            (
-                "_canonical_submission_event_instant",
-                _canonical_submission_event_instant,
-            ),
-            (
-                "_exact_response_terminal_semantics_are_canonical",
-                _exact_response_terminal_semantics_are_canonical,
-            ),
-            ("_has_exact_response_markers", _has_exact_response_markers),
-            ("uuid5", uuid5),
-            ("NAMESPACE_URL", NAMESPACE_URL),
-            ("sha256", sha256),
-            ("_DispatchAuthorityChanged", dispatch_authority_changed_error),
-            ("DispatchBlocked", dispatch_blocked_error),
-            ("DispatchOutcome", DispatchOutcome),
-        )
         # External callbacks run inside dispatch.  Capture the exact module,
         # builtin, class and helper execution surface before the first callback;
         # later validation must not itself dispatch through caller-rebound

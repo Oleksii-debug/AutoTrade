@@ -247,10 +247,13 @@ class SubmissionResponseBinding:
             != self.response_sha256
         ):
             raise ValueError("durable provider response digest mismatch")
+        if (
+            type(self.response_encoding) is not str
+            or self.response_encoding not in {"utf-8-json", "hex"}
+        ):
+            raise ValueError("durable provider response encoding is invalid")
         if self.response_encoding == "utf-8-json":
             _decode_exact_json_bytes(self.response_bytes)
-        elif self.response_encoding != "hex":
-            raise ValueError("unsupported durable provider response encoding")
         if type(self.terminal_state) is not str:
             raise TypeError("terminal_state must be a string")
         terminal_state = self.terminal_state.strip().upper()
@@ -315,6 +318,8 @@ class SubmissionResponseBinding:
 
     @property
     def payload(self) -> Any:
+        if self.response_encoding != "utf-8-json":
+            raise ValueError("opaque provider response has no JSON payload")
         return _freeze_json(_decode_exact_json_bytes(self.response_bytes))
 
 
@@ -856,6 +861,10 @@ def _install_submission_response_binding_authority(loader):
         if canonical_type(current[9]) is not mapping_proxy_type:
             authority_changed()
         if canonical_type(current[11]) is not canonical_bytes:
+            authority_changed()
+        if canonical_type(current[13]) is not canonical_str:
+            authority_changed()
+        if canonical_type(current[14]) is not canonical_str:
             authority_changed()
         prune()
         object_id = canonical_id(value)

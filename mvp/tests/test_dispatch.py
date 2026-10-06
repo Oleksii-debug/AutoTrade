@@ -742,6 +742,7 @@ class DispatchTests(unittest.TestCase):
             )
             self.assertIsInstance(binding, SubmissionResponseBinding)
             self.assertEqual(binding.response_bytes, raw)
+            self.assertEqual(binding.response_encoding, "utf-8-json")
             self.assertEqual(
                 binding.response_sha256,
                 "sha256:" + __import__("hashlib").sha256(raw).hexdigest(),
@@ -762,6 +763,7 @@ class DispatchTests(unittest.TestCase):
                 attempt_id="exact-response-a1",
             )
             self.assertEqual(after_restart.response_bytes, binding.response_bytes)
+            self.assertEqual(after_restart.response_encoding, "utf-8-json")
             self.assertEqual(after_restart.response_sha256, binding.response_sha256)
             self.assertEqual(
                 after_restart.submission_scope_hash,
@@ -788,6 +790,7 @@ class DispatchTests(unittest.TestCase):
                 "submission_scope_hash",
                 "response_bytes",
                 "response_sha256",
+                "response_encoding",
                 "http_status",
                 "_factory_token",
             ):

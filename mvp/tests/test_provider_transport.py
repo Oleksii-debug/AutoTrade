@@ -5054,8 +5054,9 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
                 attempt_id="attempt-bybit-http-503",
             )
             self.assertEqual(binding.response_bytes, raw)
+            self.assertEqual(binding.response_encoding, "hex")
             self.assertEqual(binding.http_status, 503)
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, "no JSON payload"):
                 binding.payload
 
 

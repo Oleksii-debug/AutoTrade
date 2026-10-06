@@ -3,7 +3,9 @@ import json
 import unittest
 
 from mvp.autotrade_mvp.bybit_v5 import (
+    BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
     BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
+    BYBIT_OPTION_DELIVERY_PARSER_VERSION,
     BybitOptionDeliveryPage,
     parse_option_delivery_page,
 )
@@ -131,6 +133,11 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
             BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
             "BYBIT_OPTION_DELIVERY_V5_JSON_V1",
         )
+        self.assertEqual(BYBIT_OPTION_DELIVERY_PARSER_VERSION, "1.0.0")
+        self.assertRegex(
+            BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
+            r"^sha256:[0-9a-f]{64}$",
+        )
         parsed = parse_option_delivery_page(observation(response()))
         self.assertIsInstance(parsed, BybitOptionDeliveryPage)
         self.assertEqual(len(parsed.records), 1)
@@ -170,6 +177,22 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
         self.assertEqual(parsed.endpoint, ENDPOINT)
         self.assertEqual(parsed.permission_scope, "ACCOUNT.READ")
         self.assertEqual(parsed.query_digest, source.query_binding.query_digest)
+        self.assertEqual(
+            parsed.parser_identity,
+            BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
+        )
+        self.assertEqual(
+            parsed.parser_version,
+            BYBIT_OPTION_DELIVERY_PARSER_VERSION,
+        )
+        self.assertEqual(
+            parsed.parser_contract_digest,
+            BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
+        )
+        self.assertRegex(
+            parsed.parser_contract_digest,
+            r"^sha256:[0-9a-f]{64}$",
+        )
         self.assertEqual(parsed.evidence_ref, source.evidence_ref)
         self.assertEqual(parsed.response_sha256, source.response_sha256)
         self.assertEqual(parsed.observed_at, source.observed_at)
@@ -574,6 +597,23 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
                     "deliveryTime must be an exact non-negative integer",
                 ):
                     parse_option_delivery_page(observation(payload))
+
+    def test_parser_rejects_oversized_requested_symbol(self):
+        payload = response()
+        oversized = "A" * 161
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "query symbol is non-canonical",
+        ):
+            parse_option_delivery_page(
+                observation(
+                    payload,
+                    query={
+                        "category": "option",
+                        "symbol": oversized,
+                    },
+                )
+            )
 
     def test_parser_rejects_symbol_that_needs_normalization(self):
         for symbol in (

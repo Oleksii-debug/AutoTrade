@@ -213,6 +213,11 @@ class ExecutionPriceGrid:
     ) -> "ExecutionPriceGrid":
         return _issue_execution_price_grid(registry, instrument_version)
 
+    def validate(self) -> None:
+        """Fail closed unless this object is the exact sealed registry issuance."""
+
+        _detach_execution_price_grid(self)
+
     @property
     def fingerprint(self) -> str:
         return _execution_price_grid_fingerprint(self)

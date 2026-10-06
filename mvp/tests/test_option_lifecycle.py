@@ -685,6 +685,10 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                 )
 
     def test_provider_environment_is_canonical_and_changes_aggregate_identity(self):
+        legacy = self._authority(
+            registry=self.registry,
+            economic_book=self.book,
+        )
         testnet = self._authority(
             registry=self.registry,
             economic_book=self.book,
@@ -695,9 +699,29 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             economic_book=self.book,
             provider_environment="DEMO",
         )
+        self.assertEqual(
+            legacy.aggregate_id,
+            option_lifecycle_module._identity(
+                "option-lifecycle-book",
+                "TEST_PROVIDER",
+                "paper-1",
+                "SIMULATION",
+            ),
+        )
         self.assertEqual(testnet.provider_environment, "TESTNET")
         self.assertEqual(demo.provider_environment, "DEMO")
+        self.assertNotEqual(testnet.aggregate_id, legacy.aggregate_id)
         self.assertNotEqual(testnet.aggregate_id, demo.aggregate_id)
+        self.assertNotIn(
+            "provider_environment",
+            canonical_option_lifecycle_observation(self.forged_observation()),
+        )
+        self.assertEqual(
+            canonical_option_lifecycle_observation(
+                self.forged_observation(provider_environment="TESTNET")
+            )["provider_environment"],
+            "TESTNET",
+        )
 
     def test_provider_environment_mutation_fails_before_lifecycle_read(self):
         authority = self._authority(
@@ -967,7 +991,11 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             before_lifecycle,
         )
 
-    def forged_observation(self) -> OptionLifecycleObservation:
+    def forged_observation(
+        self,
+        *,
+        provider_environment=None,
+    ) -> OptionLifecycleObservation:
         return OptionLifecycleObservation(
             provider_id="TEST_PROVIDER",
             account_id="paper-1",
@@ -981,6 +1009,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             observed_at=utc(12, 18, 19, 1),
             raw_evidence_digest="sha256:" + "f" * 64,
             provider_revision="forged-r1",
+            provider_environment=provider_environment,
         )
 
     def test_direct_fabricated_lifecycle_fact_cannot_mutate_financial_state(self):

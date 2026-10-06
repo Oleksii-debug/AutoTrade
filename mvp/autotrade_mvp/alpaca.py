@@ -853,6 +853,7 @@ def _install_submission_response_parser_authority(parser):
     value_error_type = ValueError
     client_id_pattern = _CLIENT_ID
     canonical_uuid5 = uuid5
+    canonical_uuid5_code = canonical_uuid5.__code__
     canonical_namespace = NAMESPACE_URL
     error_type = AlpacaAdapterError
     type_error = TypeError
@@ -894,7 +895,7 @@ def _install_submission_response_parser_authority(parser):
             or _CLIENT_ID is not client_id_pattern
             or uuid5 is not canonical_uuid5
             or canonical_getattr(canonical_uuid5, "__code__", None)
-            is not canonical_getattr(uuid5, "__code__", None)
+            is not canonical_uuid5_code
             or NAMESPACE_URL is not canonical_namespace
             or AlpacaAdapterError is not error_type
             or TypeError is not type_error

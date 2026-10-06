@@ -110,6 +110,18 @@ def _instant(value: str, *, name: str) -> datetime:
         raise ValueError(f"{name} must include a timezone")
     return parsed.astimezone(timezone.utc)
 
+def _authority_datetime_utc(value: object, *, name: str) -> datetime:
+    """Normalize exact built-in datetime authority without hostile tzinfo callbacks."""
+
+    if type(value) is not datetime:
+        raise TypeError(f"{name} must be an exact datetime")
+    selected_timezone = value.tzinfo
+    if type(selected_timezone) is not type(timezone.utc):
+        raise TypeError(f"{name} must use an exact built-in timezone")
+    if value.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware")
+    return value.astimezone(timezone.utc)
+
 
 @dataclass(frozen=True, order=True)
 class InstrumentVersionIdentity:
@@ -878,15 +890,10 @@ def _authority_service_capital_operations():
                 name="snapshot_query_completed_at",
             )
         else:
-            if (
-                type(as_of) is not datetime
-                or as_of.tzinfo is None
-                or as_of.utcoffset() is None
-            ):
-                raise TypeError(
-                    "settlement capital as_of must be an exact timezone-aware datetime"
-                )
-            projection_at = as_of.astimezone(timezone.utc)
+            projection_at = _authority_datetime_utc(
+                as_of,
+                name="settlement capital as_of",
+            )
         adjustments: dict[str, dict[str, str]] = {}
         for resource in capital_resources:
             raw_provider = provider_available.get(resource)

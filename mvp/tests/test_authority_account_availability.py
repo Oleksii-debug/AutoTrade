@@ -1,6 +1,6 @@
 from copy import deepcopy
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -345,6 +345,37 @@ def _admit(authority, reservations, checkpoint, **overrides):
 
 
 class AuthorityAccountAvailabilityTests(unittest.TestCase):
+    def test_settlement_capital_datetime_guard_rejects_hostile_tzinfo_without_callbacks(self):
+        class HostileTimezone(tzinfo):
+            calls = 0
+
+            def utcoffset(self, _dt):
+                type(self).calls += 1
+                raise AssertionError("hostile authority timezone utcoffset executed")
+
+            def dst(self, _dt):
+                type(self).calls += 1
+                raise AssertionError("hostile authority timezone dst executed")
+
+            def tzname(self, _dt):
+                type(self).calls += 1
+                raise AssertionError("hostile authority timezone tzname executed")
+
+        hostile = datetime(
+            2026,
+            9,
+            24,
+            18,
+            1,
+            tzinfo=HostileTimezone(),
+        )
+        with self.assertRaisesRegex(TypeError, "exact built-in timezone"):
+            authority_module._authority_datetime_utc(
+                hostile,
+                name="settlement capital as_of",
+            )
+        self.assertEqual(HostileTimezone.calls, 0)
+
     def test_financial_admission_rejects_polymorphic_scope_text_before_callbacks(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

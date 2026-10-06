@@ -4162,5 +4162,825 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             self.assertNotIn("re", vars(dispatch_module))
 
 
+    def test_authority_callback_cannot_rebind_envelope_helper_before_send(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            original_envelope = dispatch_module._envelope
+            forged_calls = 0
+            wire_calls = 0
+
+            def forged_envelope(*_args, **_kwargs):
+                nonlocal forged_calls
+                forged_calls += 1
+                raise AssertionError("rebound envelope helper executed")
+
+            def authority(_intent_hash, _now):
+                dispatch_module._envelope = forged_envelope
+                return True, "allowed"
+
+            def transport(*_args):
+                nonlocal wire_calls
+                wire_calls += 1
+                raise AssertionError("wire must not execute")
+
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "dispatcher authority changed during dispatch",
+                ):
+                    dispatcher.dispatch(
+                        attempt_id="module-envelope-rebind-a1",
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=authority,
+                        transport_send=transport,
+                        submission_scope={"endpoint": "/orders"},
+                    )
+            finally:
+                dispatch_module._envelope = original_envelope
+
+            self.assertEqual(forged_calls, 0)
+            self.assertEqual(wire_calls, 0)
+            self.assertIs(dispatch_module._envelope, original_envelope)
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("module-envelope-rebind-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared"],
+            )
+
+    def test_final_authority_callback_cannot_rebind_journal_helper_before_send(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            original_journal_call = dispatch_module._journal_store_call
+            authority_calls = 0
+            forged_calls = 0
+            wire_calls = 0
+
+            def forged_journal_call(*_args, **_kwargs):
+                nonlocal forged_calls
+                forged_calls += 1
+                raise AssertionError("rebound journal helper executed")
+
+            def authority(_intent_hash, _now):
+                nonlocal authority_calls
+                authority_calls += 1
+                if authority_calls == 2:
+                    dispatch_module._journal_store_call = forged_journal_call
+                return True, "allowed"
+
+            def transport(_client_order_id, _request, guard):
+                nonlocal wire_calls
+                guard()
+                wire_calls += 1
+                return ExactJsonTransportResponse(b'{"accepted":true}')
+
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "dispatcher authority changed during dispatch",
+                ):
+                    dispatcher.dispatch(
+                        attempt_id="module-journal-rebind-a1",
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=authority,
+                        transport_send=transport,
+                        submission_scope={"endpoint": "/orders"},
+                    )
+            finally:
+                dispatch_module._journal_store_call = original_journal_call
+
+            self.assertEqual(authority_calls, 2)
+            self.assertEqual(forged_calls, 0)
+            self.assertEqual(wire_calls, 0)
+            self.assertIs(
+                dispatch_module._journal_store_call,
+                original_journal_call,
+            )
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("module-journal-rebind-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared"],
+            )
+
+    def test_sender_callback_cannot_mutate_append_code_before_send(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            append_method = GuardedDispatcher._append
+            original_code = append_method.__code__
+            wire_calls = 0
+
+            def forged_append(self, **_kwargs):
+                raise AssertionError("mutated _append code executed")
+
+            def sender_check(_owner_token, _owner_epoch):
+                append_method.__code__ = forged_append.__code__
+
+            def transport(_client_order_id, _request, guard):
+                nonlocal wire_calls
+                guard()
+                wire_calls += 1
+                return ExactJsonTransportResponse(b'{"accepted":true}')
+
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "dispatcher authority changed during dispatch",
+                ):
+                    dispatcher.dispatch(
+                        attempt_id="append-code-retarget-a1",
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=lambda *_args: (True, "allowed"),
+                        transport_send=transport,
+                        sender_check=sender_check,
+                        submission_scope={"endpoint": "/orders"},
+                    )
+            finally:
+                append_method.__code__ = original_code
+
+            self.assertEqual(wire_calls, 0)
+            self.assertIs(append_method.__code__, original_code)
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("append-code-retarget-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared"],
+            )
+
+    def test_post_send_module_helper_rebinding_is_restored_without_execution(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        surfaces = (
+            "_canonical_journal_authority_snapshot",
+            "_journal_store_call",
+            "_envelope",
+            "_detach_submission_json",
+            "_validated_authority_result",
+            "submission_attempt_aggregate_id",
+            "_event_id",
+            "_identity_digest",
+            "_instant",
+            "payload_digest",
+            "canonical_json",
+            "_canonical_submission_event_instant",
+            "_exact_response_terminal_semantics_are_canonical",
+            "_has_exact_response_markers",
+            "uuid5",
+            "NAMESPACE_URL",
+            "sha256",
+            "_DispatchAuthorityChanged",
+            "DispatchBlocked",
+            "DispatchOutcome",
+        )
+        for surface in surfaces:
+            with self.subTest(surface=surface), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+                original = getattr(dispatch_module, surface)
+                hostile_calls = 0
+                wire_calls = 0
+
+                def forged(*_args, **_kwargs):
+                    nonlocal hostile_calls
+                    hostile_calls += 1
+                    raise AssertionError(f"rebound {surface} executed")
+
+                def transport(_client_order_id, _request, guard):
+                    nonlocal wire_calls
+                    guard()
+                    response = ExactJsonTransportResponse(b'{"accepted":true}')
+                    wire_calls += 1
+                    setattr(dispatch_module, surface, forged)
+                    return response
+
+                attempt_id = f"post-send-module-helper-{surface}"
+                try:
+                    result = dispatcher.dispatch(
+                        attempt_id=attempt_id,
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=lambda *_args: (True, "allowed"),
+                        transport_send=transport,
+                        submission_scope={"endpoint": "/orders"},
+                    )
+                    self.assertIs(getattr(dispatch_module, surface), original)
+                finally:
+                    setattr(dispatch_module, surface, original)
+
+                self.assertEqual(wire_calls, 1)
+                self.assertEqual(hostile_calls, 0)
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertEqual(
+                    result.reason,
+                    "dispatcher_authority_changed_after_send_barrier",
+                )
+                events = JournalStore.load_events(
+                    store,
+                    "submission_attempt",
+                    dispatcher._aggregate_id(attempt_id),
+                )
+                self.assertEqual(
+                    [event["event_type"] for event in events],
+                    ["SubmissionPrepared", "SubmissionSending"],
+                )
+
+                resend_calls = 0
+
+                def must_not_resend(*_args):
+                    nonlocal resend_calls
+                    resend_calls += 1
+                    raise AssertionError("recovered possible-send state must not resend")
+
+                recovered = dispatcher.dispatch(
+                    attempt_id=attempt_id,
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T14:00:01Z",
+                    authority_check=lambda *_args: (
+                        (_ for _ in ()).throw(
+                            AssertionError(
+                                "Sending recovery must not rerun authority"
+                            )
+                        )
+                    ),
+                    transport_send=must_not_resend,
+                    submission_scope={"endpoint": "/orders"},
+                )
+                self.assertEqual(resend_calls, 0)
+                self.assertEqual(recovered.status, "UNKNOWN")
+                self.assertEqual(
+                    recovered.reason,
+                    "recovered_after_send_barrier_without_terminal_result",
+                )
+                self.assertEqual(
+                    [
+                        event["event_type"]
+                        for event in JournalStore.load_events(
+                            store,
+                            "submission_attempt",
+                            dispatcher._aggregate_id(attempt_id),
+                        )
+                    ],
+                    [
+                        "SubmissionPrepared",
+                        "SubmissionSending",
+                        "SubmissionUnknown",
+                    ],
+                )
+
+    def test_authority_callback_cannot_retarget_json_module_class_before_send(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            json_module = dispatch_module.json
+            module_type = type(json_module)
+            hostile_gets = 0
+            wire_calls = 0
+
+            class HostileJsonModule(module_type):
+                def __getattribute__(self, name):
+                    nonlocal hostile_gets
+                    hostile_gets += 1
+                    raise AssertionError(
+                        f"hostile json module lookup executed: {name}"
+                    )
+
+            def authority(_intent_hash, _now):
+                module_type.__setattr__(
+                    json_module,
+                    "__class__",
+                    HostileJsonModule,
+                )
+                return True, "allowed"
+
+            def transport(*_args):
+                nonlocal wire_calls
+                wire_calls += 1
+                raise AssertionError("wire must remain zero")
+
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "dispatcher authority changed during dispatch",
+                ):
+                    dispatcher.dispatch(
+                        attempt_id="json-module-class-before-send-a1",
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=authority,
+                        transport_send=transport,
+                        submission_scope={"endpoint": "/orders"},
+                    )
+            finally:
+                if type(json_module) is not module_type:
+                    module_type.__setattr__(
+                        json_module,
+                        "__class__",
+                        module_type,
+                    )
+
+            self.assertEqual(hostile_gets, 0)
+            self.assertEqual(wire_calls, 0)
+            self.assertIs(type(json_module), module_type)
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id(
+                    "json-module-class-before-send-a1"
+                ),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared"],
+            )
+
+    def test_authority_callback_cannot_shadow_validator_builtins_before_send(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        for surface in ("type", "getattr", "vars", "dict"):
+            with self.subTest(surface=surface), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+                hostile_calls = 0
+                wire_calls = 0
+
+                def forged(*_args, **_kwargs):
+                    nonlocal hostile_calls
+                    hostile_calls += 1
+                    raise AssertionError(
+                        f"shadowed builtin executed: {surface}"
+                    )
+
+                def authority(_intent_hash, _now):
+                    setattr(dispatch_module, surface, forged)
+                    return True, "allowed"
+
+                def transport(*_args):
+                    nonlocal wire_calls
+                    wire_calls += 1
+                    raise AssertionError("wire must remain zero")
+
+                try:
+                    with self.assertRaisesRegex(
+                        PermissionError,
+                        "dispatcher authority changed during dispatch",
+                    ):
+                        dispatcher.dispatch(
+                            attempt_id=f"builtin-shadow-{surface}-a1",
+                            intent_id="intent-1",
+                            intent_hash="sha256:" + "1" * 64,
+                            provider="provider",
+                            request={"side": "BUY"},
+                            now="2026-10-06T14:00:00Z",
+                            authority_check=authority,
+                            transport_send=transport,
+                            submission_scope={"endpoint": "/orders"},
+                        )
+                finally:
+                    vars(dispatch_module).pop(surface, None)
+
+                self.assertEqual(hostile_calls, 0)
+                self.assertEqual(wire_calls, 0)
+                self.assertNotIn(surface, vars(dispatch_module))
+                events = JournalStore.load_events(
+                    store,
+                    "submission_attempt",
+                    dispatcher._aggregate_id(
+                        f"builtin-shadow-{surface}-a1"
+                    ),
+                )
+                self.assertEqual(
+                    [event["event_type"] for event in events],
+                    ["SubmissionPrepared"],
+                )
+
+    def test_authority_callback_cannot_rebind_result_validator_before_send(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            original = dispatch_module._validated_authority_result
+            hostile_calls = 0
+            wire_calls = 0
+
+            def forged(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("rebound authority-result validator executed")
+
+            def authority(_intent_hash, _now):
+                dispatch_module._validated_authority_result = forged
+                return True, "allowed"
+
+            def transport(*_args):
+                nonlocal wire_calls
+                wire_calls += 1
+                raise AssertionError("wire must remain zero")
+
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "dispatcher authority changed during dispatch",
+                ):
+                    dispatcher.dispatch(
+                        attempt_id="authority-result-helper-rebind-a1",
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=authority,
+                        transport_send=transport,
+                        submission_scope={"endpoint": "/orders"},
+                    )
+                self.assertIs(
+                    dispatch_module._validated_authority_result,
+                    original,
+                )
+            finally:
+                dispatch_module._validated_authority_result = original
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(wire_calls, 0)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        store,
+                        "submission_attempt",
+                        dispatcher._aggregate_id(
+                            "authority-result-helper-rebind-a1"
+                        ),
+                    )
+                ],
+                ["SubmissionPrepared"],
+            )
+
+    def test_post_send_exception_class_rebinding_cannot_escape_unknown(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        for surface in ("_DispatchAuthorityChanged", "DispatchBlocked"):
+            with self.subTest(surface=surface), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+                original = getattr(dispatch_module, surface)
+                hostile_checks = 0
+                wire_calls = 0
+
+                class HostileMeta(type):
+                    def __instancecheck__(cls, _instance):
+                        nonlocal hostile_checks
+                        hostile_checks += 1
+                        raise AssertionError(
+                            f"rebound {surface} instance check executed"
+                        )
+
+                    def __subclasscheck__(cls, _subclass):
+                        nonlocal hostile_checks
+                        hostile_checks += 1
+                        raise AssertionError(
+                            f"rebound {surface} subclass check executed"
+                        )
+
+                class HostileException(Exception, metaclass=HostileMeta):
+                    pass
+
+                def transport(_client_order_id, _request, guard):
+                    nonlocal wire_calls
+                    guard()
+                    wire_calls += 1
+                    setattr(dispatch_module, surface, HostileException)
+                    raise RuntimeError("transport failed after helper retarget")
+
+                attempt_id = f"post-send-exception-class-{surface}"
+                try:
+                    result = dispatcher.dispatch(
+                        attempt_id=attempt_id,
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=lambda *_args: (True, "allowed"),
+                        transport_send=transport,
+                        submission_scope={"endpoint": "/orders"},
+                    )
+                    self.assertIs(getattr(dispatch_module, surface), original)
+                finally:
+                    setattr(dispatch_module, surface, original)
+
+                self.assertEqual(wire_calls, 1)
+                self.assertEqual(hostile_checks, 0)
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertEqual(
+                    result.reason,
+                    "dispatcher_authority_changed_after_send_barrier",
+                )
+                self.assertEqual(
+                    [
+                        event["event_type"]
+                        for event in JournalStore.load_events(
+                            store,
+                            "submission_attempt",
+                            dispatcher._aggregate_id(attempt_id),
+                        )
+                    ],
+                    ["SubmissionPrepared", "SubmissionSending"],
+                )
+
+    def test_post_send_builtin_exception_shadow_cannot_escape_unknown(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            hostile_checks = 0
+            wire_calls = 0
+
+            class HostileMeta(type):
+                def __instancecheck__(cls, _instance):
+                    nonlocal hostile_checks
+                    hostile_checks += 1
+                    raise AssertionError("module Exception shadow executed")
+
+                def __subclasscheck__(cls, _subclass):
+                    nonlocal hostile_checks
+                    hostile_checks += 1
+                    raise AssertionError("module Exception shadow executed")
+
+            class HostileException(Exception, metaclass=HostileMeta):
+                pass
+
+            def transport(_client_order_id, _request, guard):
+                nonlocal wire_calls
+                guard()
+                wire_calls += 1
+                dispatch_module.Exception = HostileException
+                raise RuntimeError("transport failed after Exception shadow")
+
+            try:
+                result = dispatcher.dispatch(
+                    attempt_id="post-send-exception-shadow-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T14:00:00Z",
+                    authority_check=lambda *_args: (True, "allowed"),
+                    transport_send=transport,
+                    submission_scope={"endpoint": "/orders"},
+                )
+            finally:
+                vars(dispatch_module).pop("Exception", None)
+
+            self.assertEqual(wire_calls, 1)
+            self.assertEqual(hostile_checks, 0)
+            self.assertNotIn("Exception", vars(dispatch_module))
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(
+                result.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        store,
+                        "submission_attempt",
+                        dispatcher._aggregate_id(
+                            "post-send-exception-shadow-a1"
+                        ),
+                    )
+                ],
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
+    def test_post_send_dispatch_outcome_rebinding_restores_canonical_unknown(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            original_outcome = dispatch_module.DispatchOutcome
+            hostile_calls = 0
+            wire_calls = 0
+
+            class HostileOutcome:
+                def __init__(self, *_args, **_kwargs):
+                    nonlocal hostile_calls
+                    hostile_calls += 1
+                    raise AssertionError("rebound DispatchOutcome executed")
+
+            def transport(_client_order_id, _request, guard):
+                nonlocal wire_calls
+                guard()
+                wire_calls += 1
+                dispatch_module.DispatchOutcome = HostileOutcome
+                return ExactJsonTransportResponse(b'{"accepted":true}')
+
+            try:
+                result = dispatcher.dispatch(
+                    attempt_id="post-send-outcome-rebind-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T14:00:00Z",
+                    authority_check=lambda *_args: (True, "allowed"),
+                    transport_send=transport,
+                    submission_scope={"endpoint": "/orders"},
+                )
+                self.assertIs(dispatch_module.DispatchOutcome, original_outcome)
+            finally:
+                dispatch_module.DispatchOutcome = original_outcome
+
+            self.assertEqual(wire_calls, 1)
+            self.assertEqual(hostile_calls, 0)
+            self.assertIs(type(result), original_outcome)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(
+                result.reason,
+                "dispatcher_authority_changed_after_send_barrier",
+            )
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        store,
+                        "submission_attempt",
+                        dispatcher._aggregate_id(
+                            "post-send-outcome-rebind-a1"
+                        ),
+                    )
+                ],
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
+    def test_dispatch_canonicalizes_identity_text_before_durable_send_and_replay(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            wire_calls = 0
+
+            def transport(_client_order_id, _request, guard):
+                nonlocal wire_calls
+                guard()
+                wire_calls += 1
+                return ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+
+            first = dispatcher.dispatch(
+                attempt_id="  canonical-attempt  ",
+                intent_id="  canonical-intent  ",
+                intent_hash="sha256:" + "1" * 64,
+                provider="  provider  ",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda *_args: (True, "allowed"),
+                transport_send=transport,
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(first.status, "SENT")
+            self.assertEqual(wire_calls, 1)
+
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("canonical-attempt"),
+            )
+            prepared = events[0]["payload"]
+            self.assertEqual(prepared["attempt_id"], "canonical-attempt")
+            self.assertEqual(prepared["intent_id"], "canonical-intent")
+            self.assertEqual(prepared["provider"], "provider")
+
+            binding = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="canonical-attempt",
+            )
+            self.assertEqual(binding.attempt_id, "canonical-attempt")
+            self.assertEqual(binding.provider, "provider")
+
+            def must_not_resend(*_args):
+                raise AssertionError("canonical replay must not resend")
+
+            replay = dispatcher.dispatch(
+                attempt_id="canonical-attempt",
+                intent_id="canonical-intent",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:01Z",
+                authority_check=lambda *_args: (
+                    (_ for _ in ()).throw(
+                        AssertionError("canonical replay must not rerun authority")
+                    )
+                ),
+                transport_send=must_not_resend,
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(replay.status, "SENT")
+            self.assertEqual(replay.client_order_id, first.client_order_id)
+            self.assertEqual(wire_calls, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

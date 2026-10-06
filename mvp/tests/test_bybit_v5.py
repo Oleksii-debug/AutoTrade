@@ -680,7 +680,11 @@ class BybitV5AdapterTests(unittest.TestCase):
                     "provider_route_provider_environment": (
                         submission_scope_route_provider_environment
                         if submission_scope_route_provider_environment is not None
-                        else provider_environment
+                        else (
+                            submission_scope_provider_environment
+                            if submission_scope_provider_environment is not None
+                            else provider_environment
+                        )
                     ),
                     "provider_route_adapter_code_sha": "adapter-code-sha",
                     "provider_route_packaged_artifact_digest": (

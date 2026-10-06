@@ -58,6 +58,7 @@ def verification_commands(*, platform: str | None = None) -> tuple[tuple[str, ..
             "Release",
             "--",
             "contracts/fixtures/common-scalars.corpus.json",
+            "contracts/fixtures/dataset-manifest.semantic.corpus.json",
         ),
     )
     if platform == "win32":

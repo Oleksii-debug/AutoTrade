@@ -564,8 +564,8 @@
         "Exclusive mutation key: REPLAY / causal-feeder",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Section-5-required replay/common-cut authority is complete on main via #2155: a detached CompositeReplayCheckpoint is verified by the product-selected RuntimeStateVerifier before research fit/transform, and the authoritative frozen fold receives only the verified checkpoint fingerprint. Broader WP-12 whole-runtime checkpoint/resume equivalence, recovery portability and hostile-process isolation remain open under #699 and are outside Section-5 data-authority closure."
+      "proposed_status": "DONE",
+      "status_note": "DONE for Section 7 causal replay / deterministic whole-runtime checkpoint-resume semantics on main. Canonical CompositeReplayCheckpoint binds replay cursor/clock plus all required runtime component classes (pending queue, RNG, strategy, portfolio/accounting, execution, accrual/settlement, policy, instrument, provider, experiment), exact JournalStore identity, build SHA and protocol identity. Main-resident regressions cover uninterrupted-vs-resume equivalence, tamper/missing/stale rejection, authority-key replacement, crash after durable completion, UNKNOWN no-resend, and hostile authority ingress. Portable backup/restore reconstitution remains WP-49 and does not reopen Section 7."
     },
     {
       "id": "WP-13",
@@ -661,8 +661,8 @@
         "Exclusive mutation key: FINANCE / economic-ledger",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Provider-neutral exact double-entry accounting foundation implemented in mvp/autotrade_mvp/accounting.py with per-asset/currency conservation, cash and position projections, external flows, third-currency fees/rebates, explicit FX clearing, exact reversals and duplicate/double-reversal protection. Independent economic reference vectors cover cash round trip, linear/inverse futures, funding, split, deposit neutrality and bust/correction. Remaining WP-14 work: production journal persistence integration, lot/basis and realized/unrealized projection policy, settled/unsettled cash, full FX valuation freshness, derivative lifecycle postings, corrections from provider events and exact-head cross-platform qualification."
+      "proposed_status": "DONE",
+      "status_note": "DONE for Section 8 core economic-ledger / exact financial conservation on main. Exact accounting, FIFO basis/P&L, reversals/corrections, context-independent arithmetic, trade-date obligations vs settled spendable CASH, typed MARGIN_CREDIT separation, versioned settlement rules, provider settlement exactly-once across restart, FX settlement availability and bust/correction conservation are integrated. Current-main settlement-capital successor #2275 merged as 11da6a62888bb832546a0063ebcbbada0fed7042 with candidate/post-merge tree equality. WP-15 reservations, asset-specific lifecycle economics, hard-risk and provider qualification remain separately owned and do not reopen Section 8."
     },
     {
       "id": "WP-15",

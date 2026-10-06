@@ -1195,6 +1195,11 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
         self.assertRegex(decision.evidence_set_sha256, r"^sha256:[0-9a-f]{64}$")
         self.assertTrue(decision.matches_policy(current_policy))
 
+        stricter_policy = policy(
+            limits={RecoveryScenario.POWER_LOSS: 30_000},
+        )
+        self.assertFalse(decision.matches_policy(stricter_policy))
+
         other_release = policy(
             artifact_id=str(
                 uuid5(NAMESPACE_URL, "different-recovery-release-artifact")

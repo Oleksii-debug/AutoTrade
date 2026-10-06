@@ -111,12 +111,18 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
                 )
             self.assertEqual(store.whole_store_state_counts()["projection_checkpoints"], 0)
 
-    def test_scalar_subclasses_are_not_durable_json_authority(self):
-        with self.assertRaisesRegex(
-            TypeError,
-            "persistent JSON values must use exact built-in JSON containers and scalars",
-        ):
-            canonical_json({"value": _HostileText("authority")})
+    def test_scalar_subclass_is_rejected_at_durable_event_ingress(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            candidate = _event("evt-hostile-scalar")
+            candidate["payload"] = {"value": _HostileText("authority")}
+            candidate["payload_hash"] = "sha256:" + "0" * 64
+            with self.assertRaisesRegex(
+                TypeError,
+                "persistent JSON values must use exact built-in JSON containers and scalars",
+            ):
+                store.append_event(candidate)
+            self.assertEqual(store.current_journal_sequence(), 0)
 
     def test_exact_tuple_keeps_legacy_json_array_semantics(self):
         self.assertEqual(

@@ -13,10 +13,11 @@ class VerifyOrchestrationContractTests(unittest.TestCase):
         ]
         self.assertEqual(len(contract_commands), 1)
         self.assertEqual(
-            contract_commands[0][-2:],
+            contract_commands[0][-3:],
             (
                 "contracts/fixtures/common-scalars.corpus.json",
                 "contracts/fixtures/dataset-manifest.semantic.corpus.json",
+                "contracts/fixtures/contract-shapes.corpus.json",
             ),
         )
 

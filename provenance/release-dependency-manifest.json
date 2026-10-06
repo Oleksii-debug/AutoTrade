@@ -43,7 +43,7 @@
           "path": ".github/workflows/baseline.yml"
         },
         {
-          "blob_sha": "1ea07fd79e85a65622f887e084563a10c1275f1d",
+          "blob_sha": "b50eb151966311eb88fc09366bcc3beaf876cf27",
           "path": ".github/workflows/contracts.yml"
         },
         {
@@ -63,7 +63,7 @@
           "path": ".github/workflows/reconvergence-integrity.yml"
         },
         {
-          "blob_sha": "78796cbc8efc8302e2355cc2702d718f979dbdf2",
+          "blob_sha": "de842329069f9aec8c7894d19f8f11928cca8416",
           "path": ".github/workflows/research-primitives.yml"
         },
         {
@@ -95,7 +95,7 @@
       "revision": "26b0ec14cb23fa6904739307f278c14f94c95bf1",
       "workflow_blob_shas": [
         {
-          "blob_sha": "1ea07fd79e85a65622f887e084563a10c1275f1d",
+          "blob_sha": "b50eb151966311eb88fc09366bcc3beaf876cf27",
           "path": ".github/workflows/contracts.yml"
         },
         {
@@ -117,7 +117,7 @@
       "revision": "49933ea5288caeca8642d1e84afbd3f7d6820020",
       "workflow_blob_shas": [
         {
-          "blob_sha": "1ea07fd79e85a65622f887e084563a10c1275f1d",
+          "blob_sha": "b50eb151966311eb88fc09366bcc3beaf876cf27",
           "path": ".github/workflows/contracts.yml"
         }
       ]
@@ -141,7 +141,7 @@
           "path": ".github/workflows/baseline.yml"
         },
         {
-          "blob_sha": "1ea07fd79e85a65622f887e084563a10c1275f1d",
+          "blob_sha": "b50eb151966311eb88fc09366bcc3beaf876cf27",
           "path": ".github/workflows/contracts.yml"
         },
         {
@@ -157,7 +157,7 @@
           "path": ".github/workflows/futures-qualification.yml"
         },
         {
-          "blob_sha": "78796cbc8efc8302e2355cc2702d718f979dbdf2",
+          "blob_sha": "de842329069f9aec8c7894d19f8f11928cca8416",
           "path": ".github/workflows/research-primitives.yml"
         },
         {
@@ -179,7 +179,7 @@
           "path": ".github/workflows/baseline.yml"
         },
         {
-          "blob_sha": "1ea07fd79e85a65622f887e084563a10c1275f1d",
+          "blob_sha": "b50eb151966311eb88fc09366bcc3beaf876cf27",
           "path": ".github/workflows/contracts.yml"
         },
         {
@@ -199,7 +199,7 @@
           "path": ".github/workflows/lean-adoption.yml"
         },
         {
-          "blob_sha": "78796cbc8efc8302e2355cc2702d718f979dbdf2",
+          "blob_sha": "de842329069f9aec8c7894d19f8f11928cca8416",
           "path": ".github/workflows/research-primitives.yml"
         },
         {

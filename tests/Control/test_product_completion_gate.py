@@ -227,6 +227,7 @@ def verified_nvda_fixture(store, trust_root, trust_policy, release_artifact):
         "release_artifact_id": evidence["release_artifact_id"],
         "artifact_sha256": evidence["artifact_sha256"],
         "evidence_sha256": manifest["sha256"],
+        "evidence_artifact_id": artifact_id,
         "attestation_id": attestation.attestation_id,
         "attestation_digest": attestation.content_digest,
         "policy_id": trust_policy.policy_id,
@@ -288,6 +289,7 @@ def nvda(*, qualified=True, source_sha=SHA):
         "release_artifact_id": "11111111-1111-4111-8111-111111111111",
         "artifact_sha256": "sha256:" + "1" * 64,
         "evidence_sha256": "sha256:" + "2" * 64,
+        "evidence_artifact_id": "33333333-3333-4333-8333-333333333333",
         "attestation_id": "22222222-2222-4222-8222-222222222222",
         "attestation_digest": "sha256:" + "3" * 64,
         "policy_id": "sha256:" + "4" * 64,
@@ -362,6 +364,42 @@ class ProductCompletionGateTests(unittest.TestCase):
         self.assertEqual(report["nonpassing_evidence"], [])
         self.assertTrue(report["nvda_source_matches"])
         self.assertTrue(report["qualification_source_matches"])
+
+    def test_nvda_terminal_gate_does_not_iterate_unverified_receipt_refs(self):
+        with TemporaryDirectory() as directory:
+            (
+                qualification,
+                evidence_context,
+                nvda_status,
+            ) = verified_completion_fixture(directory)
+            receipt = evidence_context.nvda_receipt
+            self.assertIsNotNone(receipt)
+
+            class ExecutableRefs(tuple):
+                def __new__(cls, values):
+                    instance = super().__new__(cls, values)
+                    instance.iterated = False
+                    return instance
+
+                def __iter__(self):
+                    self.iterated = True
+                    return super().__iter__()
+
+            executable_refs = ExecutableRefs(receipt.attestation.evidence_refs)
+            object.__setattr__(
+                receipt.attestation,
+                "evidence_refs",
+                executable_refs,
+            )
+
+            report = evaluate(
+                qualification=qualification,
+                nvda_status=nvda_status,
+                evidence_context=evidence_context,
+            )
+
+        self.assertFalse(report["nvda_qualified"])
+        self.assertFalse(executable_refs.iterated)
 
     def test_completion_ignores_post_capture_publication_store_poisoning(self):
         with TemporaryDirectory() as directory:

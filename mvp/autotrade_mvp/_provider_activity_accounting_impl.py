@@ -228,6 +228,44 @@ def _book_id(
     return _scoped_identity("economic-book", *parts)
 
 
+def _require_unambiguous_provider_economic_history(
+    store: JournalStore,
+    store_identity: object,
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    scoped_book_id: str,
+) -> None:
+    """Fence legacy runtime-only BYBIT economics before scoped authority is used."""
+
+    provider = _text(provider_id, name="provider_id").upper()
+    if provider != "BYBIT":
+        return
+    account = _text(account_id, name="account_id")
+    runtime = _environment(environment)
+    legacy_book_id = _scoped_identity(
+        "economic-book",
+        provider,
+        account,
+        runtime,
+    )
+    if legacy_book_id == scoped_book_id:
+        return
+    with journal_store_authority_scope(store, store_identity):
+        legacy_events = JournalStore.load_events(
+            store,
+            "economic_book",
+            legacy_book_id,
+        )
+    if legacy_events:
+        raise AccountingConflict(
+            "BYBIT durable economic-book legacy runtime scope contains "
+            "ambiguous financial history; explicit provider-environment "
+            "migration/reconciliation is required"
+        )
+
+
 def _transaction_payload(transaction: JournalTransaction) -> dict[str, Any]:
     """Serialize one economic fact using the canonical immutable transaction shape."""
     return canonical_transaction(transaction)
@@ -2004,26 +2042,14 @@ def _install_durable_provider_economic_book_authority():
                 provider_environment=provider_environment_value,
             ),
         )
-        if object.__getattribute__(value, "provider_id") == "BYBIT":
-            legacy_book_id = _scoped_identity(
-                "economic-book",
-                object.__getattribute__(value, "provider_id"),
-                object.__getattribute__(value, "account_id"),
-                object.__getattribute__(value, "environment"),
-            )
-            if legacy_book_id != object.__getattribute__(value, "book_id"):
-                with journal_store_authority_scope(store, identity):
-                    legacy_events = JournalStore.load_events(
-                        store,
-                        "economic_book",
-                        legacy_book_id,
-                    )
-                if legacy_events:
-                    raise AccountingConflict(
-                        "BYBIT durable economic-book legacy runtime scope contains "
-                        "ambiguous financial history; explicit provider-environment "
-                        "migration/reconciliation is required"
-                    )
+        _require_unambiguous_provider_economic_history(
+            store,
+            identity,
+            provider_id=object.__getattribute__(value, "provider_id"),
+            account_id=object.__getattribute__(value, "account_id"),
+            environment=object.__getattribute__(value, "environment"),
+            scoped_book_id=object.__getattribute__(value, "book_id"),
+        )
         state = object.__getattribute__(value, "__dict__")
         object_id = id(value)
         authorities[object_id] = (
@@ -5082,6 +5108,14 @@ def book_external_provider_cash_activity(
         account_id=account,
         environment=scope,
         provider_environment=provider_scope,
+    )
+    _require_unambiguous_provider_economic_history(
+        store,
+        store_identity,
+        provider_id=provider,
+        account_id=account,
+        environment=scope,
+        scoped_book_id=book_id,
     )
     cause_event_id = f"provider-activity:{identity}"
     transaction_id = str(

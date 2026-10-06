@@ -10,6 +10,7 @@ from mvp.autotrade_mvp.provider_activity_accounting import (
     AccountingConflict,
     _activity_identity,
     _book_id,
+    _scoped_identity,
     book_external_provider_cash_activity,
     load_provider_account_economic_book,
 )
@@ -105,6 +106,56 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 environment="LIVE",
             ),
         )
+
+    def test_bybit_external_cash_fails_closed_on_legacy_runtime_history(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            legacy_book_id = _scoped_identity(
+                "economic-book",
+                "BYBIT",
+                "bybit-account",
+                "PAPER",
+            )
+            payload = {"legacy": "ambiguous-provider-domain"}
+            store.append_event(
+                {
+                    "event_id": "legacy-bybit-direct-cash",
+                    "event_type": "EconomicTransactionBooked",
+                    "aggregate_type": "economic_book",
+                    "aggregate_id": legacy_book_id,
+                    "aggregate_version": "1",
+                    "committed_at": "2026-09-24T18:00:00Z",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                }
+            )
+            evidence = activity(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                provider_environment="TESTNET",
+                activity_id="new-domain-cash",
+                signed_amount="10",
+            )
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "ambiguous financial history",
+            ):
+                book_paper_activity(
+                    store,
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    activity=evidence,
+                    observed_at="2026-09-24T18:01:00Z",
+                )
+            scoped_book_id = paper_book_id(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                provider_environment="TESTNET",
+            )
+            self.assertEqual(
+                store.load_events("economic_book", scoped_book_id),
+                [],
+            )
 
     def test_bybit_external_cash_isolated_by_provider_environment_and_restart(self):
         with TemporaryDirectory() as directory:

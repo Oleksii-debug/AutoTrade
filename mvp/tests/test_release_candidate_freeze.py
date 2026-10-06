@@ -282,7 +282,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
 
     def test_freeze_manifest_uses_accepted_snapshot_after_receipt_mutation(self):
         candidate = self.candidate()
-        original_verify = release_candidate_module.verify_qualification_attestation
+        original_verify = release_candidate_module.verify_canonical_qualification_attestation
 
         def verify_then_mutate(*args, **kwargs):
             accepted = original_verify(*args, **kwargs)
@@ -293,7 +293,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
 
         with patch.object(
             release_candidate_module,
-            "verify_qualification_attestation",
+            "verify_canonical_qualification_attestation",
             side_effect=verify_then_mutate,
         ):
             decision = freeze_with_integrity_store(candidate, with_attestation=True)

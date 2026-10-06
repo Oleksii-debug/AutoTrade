@@ -28,6 +28,7 @@ _JOURNAL_IDENTITY_SCHEMA = "autotrade-provider-origin-journal-identity:v1"
 def _journal_identity_material(
     identity: JournalStoreIdentity,
     _require_identity=require_exact_journal_store_identity,
+    _schema=_JOURNAL_IDENTITY_SCHEMA,
 ) -> dict[str, object]:
     exact = _require_identity(
         identity,
@@ -39,7 +40,7 @@ def _journal_identity_material(
         # Windows path spelling is not backing-object authority. The retained
         # HANDLE identity is the same authority used by same_journal_backing_object.
         return {
-            "schema": _JOURNAL_IDENTITY_SCHEMA,
+            "schema": _schema,
             "identity_source": source,
             "windows_volume_serial": state["windows_volume_serial"],
             "windows_file_index_high": state["windows_file_index_high"],
@@ -47,7 +48,7 @@ def _journal_identity_material(
         }
     if source == "posix_stat":
         return {
-            "schema": _JOURNAL_IDENTITY_SCHEMA,
+            "schema": _schema,
             "identity_source": source,
             "canonical_path": state["canonical_path"],
             "filesystem_device": state["filesystem_device"],

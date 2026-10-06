@@ -496,6 +496,25 @@ def _instant(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _prepared_lease_state(
+    *,
+    prepared_at: str,
+    now: str,
+    lease_seconds: int,
+) -> str:
+    """Return BEFORE, ACTIVE or EXPIRED using exact microsecond chronology."""
+
+    elapsed = _instant(now) - _instant(prepared_at)
+    if elapsed < timedelta(0):
+        return "BEFORE"
+    elapsed_microseconds = (
+        (elapsed.days * 86400 + elapsed.seconds) * 1_000_000
+        + elapsed.microseconds
+    )
+    lease_microseconds = lease_seconds * 1_000_000
+    return "ACTIVE" if elapsed_microseconds < lease_microseconds else "EXPIRED"
+
+
 def _event_id(scope_key: str, attempt_id: str, event_type: str, version: int) -> str:
     return str(
         uuid5(
@@ -747,16 +766,14 @@ class GuardedDispatcher:
         if last["event_type"] != "SubmissionPrepared":
             raise RuntimeError(f"unsupported submission attempt state: {last['event_type']}")
 
-        prepared_at = _instant(last["payload"]["prepared_at"])
-        elapsed = _instant(now) - prepared_at
-        if elapsed < timedelta(0):
-            return DispatchOutcome("IN_PROGRESS", client_order_id, None, "clock_before_prepared_timestamp")
-        elapsed_microseconds = (
-            (elapsed.days * 86400 + elapsed.seconds) * 1_000_000
-            + elapsed.microseconds
+        lease_state = _prepared_lease_state(
+            prepared_at=last["payload"]["prepared_at"],
+            now=now,
+            lease_seconds=self.prepared_lease_seconds,
         )
-        lease_microseconds = self.prepared_lease_seconds * 1_000_000
-        if elapsed_microseconds < lease_microseconds:
+        if lease_state == "BEFORE":
+            return DispatchOutcome("IN_PROGRESS", client_order_id, None, "clock_before_prepared_timestamp")
+        if lease_state == "ACTIVE":
             return DispatchOutcome("IN_PROGRESS", client_order_id, None, "prepared_owner_lease_active")
         # SubmissionPrepared is durably before the irreversible boundary. If its
         # lease expires while no SubmissionSending exists, the journal proves
@@ -975,6 +992,43 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked("final_barrier_clock_moved_backwards")
+            durable_before_send = self._events(attempt_id)
+            if not durable_before_send or durable_before_send[-1]["event_type"] != "SubmissionPrepared":
+                raise DispatchBlocked(
+                    "submission_changed_during_final_send_validation"
+                )
+            prepared_payload = durable_before_send[0].get("payload")
+            if type(prepared_payload) is not dict or type(prepared_payload.get("prepared_at")) is not str:
+                raise DispatchBlocked("submission_prepared_chronology_invalid")
+            lease_state = _prepared_lease_state(
+                prepared_at=prepared_payload["prepared_at"],
+                now=barrier_now,
+                lease_seconds=self.prepared_lease_seconds,
+            )
+            if lease_state != "ACTIVE":
+                barrier_reason = (
+                    "prepared_owner_lease_expired_before_send"
+                    if lease_state == "EXPIRED"
+                    else "final_barrier_clock_moved_before_prepared"
+                )
+                try:
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionBlocked",
+                        version=2,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": barrier_reason,
+                            "owner_token": self.owner_token,
+                            "owner_epoch": self.owner_epoch,
+                        },
+                        now=barrier_now if lease_state == "EXPIRED" else now,
+                    )
+                except ValueError:
+                    # Another owner may have won the same version-2 race. The
+                    # outer DispatchBlocked handler re-reads that durable truth.
+                    pass
+                raise DispatchBlocked(barrier_reason)
             if self.environment in {"PAPER", "LIVE"} and sender_check is None:
                 barrier_reason = "sender_fence_required"
                 self._append(

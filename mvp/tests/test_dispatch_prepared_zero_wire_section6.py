@@ -476,6 +476,75 @@ class PreparedZeroWireSection6Tests(unittest.TestCase):
                 ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
             )
 
+    def test_original_final_guard_cannot_send_after_prepared_lease_expiry(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = self._dispatcher(store, owner="original-owner")
+            wire_sends = []
+
+            def transport(client_order_id, _request, final_guard):
+                final_guard()
+                wire_sends.append(client_order_id)
+                return {"provider_order_id": "must-not-exist"}
+
+            result = dispatcher.dispatch(
+                attempt_id="section6-stale-owner",
+                intent_id="section6-stale-owner-intent",
+                intent_hash="section6-stale-owner-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T10:00:00Z",
+                final_barrier_clock=lambda: "2026-10-06T10:00:01Z",
+                authority_check=self.authority,
+                transport_send=transport,
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(
+                result.reason,
+                "prepared_owner_lease_expired_before_send",
+            )
+            self.assertEqual(wire_sends, [])
+            events = dispatcher._events("section6-stale-owner")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+            self.assertEqual(
+                events[-1]["committed_at"],
+                "2026-10-06T10:00:01Z",
+            )
+
+    def test_original_final_guard_remains_sendable_immediately_before_lease_expiry(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = self._dispatcher(store, owner="original-owner")
+            wire_sends = []
+
+            def transport(client_order_id, _request, final_guard):
+                final_guard()
+                wire_sends.append(client_order_id)
+                return {"provider_order_id": "simulated-1"}
+
+            result = dispatcher.dispatch(
+                attempt_id="section6-live-owner",
+                intent_id="section6-live-owner-intent",
+                intent_hash="section6-live-owner-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T10:00:00Z",
+                final_barrier_clock=lambda: "2026-10-06T10:00:00.999999Z",
+                authority_check=self.authority,
+                transport_send=transport,
+            )
+
+            self.assertEqual(result.status, "SENT")
+            self.assertEqual(len(wire_sends), 1)
+            self.assertEqual(
+                [event["event_type"] for event in dispatcher._events("section6-live-owner")],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
+            )
+
     def test_recovery_fence_blocks_late_original_final_guard_before_wire(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

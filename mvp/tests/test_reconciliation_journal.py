@@ -2,6 +2,9 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
+
+import mvp.autotrade_mvp.reconciliation_journal as reconciliation_journal_module
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
@@ -119,6 +122,142 @@ def reconciliation(**overrides):
 
 
 class ReconciliationJournalTests(unittest.TestCase):
+    def test_checkpoint_writer_rejects_journal_store_subclass_before_callbacks(self):
+        class ExplosiveJournalStore(JournalStore):
+            calls = 0
+
+            def __getattribute__(self, name):
+                if name in {
+                    "load_events",
+                    "next_aggregate_version",
+                    "append_event",
+                    "get_event",
+                }:
+                    type(self).calls += 1
+                    raise AssertionError("reconciliation writer dispatched through subclass")
+                return super().__getattribute__(name)
+
+        hostile_store = object.__new__(ExplosiveJournalStore)
+        ExplosiveJournalStore.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact JournalStore"):
+            record_reconciliation_checkpoint(
+                hostile_store,
+                reconciliation_id="subclass-store",
+                result=reconciliation(),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+        self.assertEqual(ExplosiveJournalStore.calls, 0)
+
+    def test_checkpoint_writer_rechecks_late_instance_shadow_before_dispatch(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            calls = []
+
+            def explode(*_args, **_kwargs):
+                calls.append("load_events")
+                raise AssertionError("reconciliation writer invoked instance shadow")
+
+            original_payload = reconciliation_journal_module.reconciliation_payload
+
+            def inject_shadow(result, *, observed_at):
+                payload = original_payload(result, observed_at=observed_at)
+                store.load_events = explode
+                return payload
+
+            try:
+                with patch.object(
+                    reconciliation_journal_module,
+                    "reconciliation_payload",
+                    new=inject_shadow,
+                ):
+                    with self.assertRaisesRegex(TypeError, "shadowed"):
+                        record_reconciliation_checkpoint(
+                            store,
+                            reconciliation_id="late-shadow",
+                            result=reconciliation(),
+                            observed_at="2026-09-24T19:00:00Z",
+                            host_id="test-host",
+                            owner_epoch="epoch-1",
+                        )
+            finally:
+                if "load_events" in vars(store):
+                    del store.load_events
+
+            self.assertEqual(calls, [])
+            self.assertEqual(
+                JournalStore.load_events_by_aggregate_type(
+                    store,
+                    "account_reconciliation",
+                ),
+                [],
+            )
+
+    def test_scope_reader_rechecks_late_instance_shadow_before_dispatch(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            calls = []
+
+            def explode(*_args, **_kwargs):
+                calls.append("load_events_by_aggregate_type")
+                raise AssertionError("scope reader invoked instance shadow")
+
+            original_scope = reconciliation_journal_module._scope
+
+            def inject_shadow(**kwargs):
+                scope = original_scope(**kwargs)
+                store.load_events_by_aggregate_type = explode
+                return scope
+
+            try:
+                with patch.object(
+                    reconciliation_journal_module,
+                    "_scope",
+                    new=inject_shadow,
+                ):
+                    with self.assertRaisesRegex(TypeError, "shadowed"):
+                        load_latest_reconciliation_checkpoint_for_scope(
+                            store,
+                            provider_id="TEST_PROVIDER",
+                            account_id="test-account",
+                            environment="PAPER",
+                        )
+            finally:
+                if "load_events_by_aggregate_type" in vars(store):
+                    del store.load_events_by_aggregate_type
+
+            self.assertEqual(calls, [])
+
+    def test_checkpoint_writer_rejects_polymorphic_text_before_callback(self):
+        class ExplosiveText(str):
+            calls = 0
+
+            def strip(self):
+                type(self).calls += 1
+                raise AssertionError("reconciliation ingress invoked polymorphic text")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            ExplosiveText.calls = 0
+            with self.assertRaisesRegex(ValueError, "reconciliation_id is required"):
+                record_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id=ExplosiveText("hostile-reconciliation"),
+                    result=reconciliation(),
+                    observed_at="2026-09-24T19:00:00Z",
+                    host_id="test-host",
+                    owner_epoch="epoch-1",
+                )
+            self.assertEqual(ExplosiveText.calls, 0)
+            self.assertEqual(
+                JournalStore.load_events_by_aggregate_type(
+                    store,
+                    "account_reconciliation",
+                ),
+                [],
+            )
+
     def test_scoped_checkpoint_identity_cannot_collide_on_separator_characters(self):
         left = _reconciliation_aggregate_id(
             reconciliation_id="rid",

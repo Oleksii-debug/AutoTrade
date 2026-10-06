@@ -171,7 +171,13 @@ def assess_reconvergence(
         normalized_scopes = _normalized_scopes(allowed_scopes)
 
     deleted = tuple(
-        sorted(path for kind, path, _previous in validated_changes if kind == "D")
+        sorted(
+            {
+                path
+                for kind, path, _previous in validated_changes
+                if kind == "D"
+            }
+        )
     )
     protected = tuple(sorted(set(deleted).intersection(protected_sentinels)))
     fraction = len(deleted) / base_count

@@ -353,6 +353,7 @@ class ReleaseScopeMappingTests(unittest.TestCase):
             locked_packages=LOCK,
             package_rights=RIGHTS,
             provenance_components=PROVENANCE,
+            reuse_documents=REUSE,
         )
         self.assertNotEqual(
             first["mapping_digest"], second["mapping_digest"]

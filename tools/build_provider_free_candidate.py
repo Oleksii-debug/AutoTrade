@@ -5,6 +5,7 @@ bytes come from one exact Git object; developer caches and state cannot enter it
 """
 import argparse
 import base64
+import binascii
 from contextlib import ExitStack
 import io
 from hashlib import sha256, sha512
@@ -310,7 +311,7 @@ def _build_candidate_sbom(source_sha, inventory, inputs, webview_content_hash):
             webview_content_hash,
             validate=True,
         ).hex()
-    except (ValueError, base64.binascii.Error) as error:
+    except (ValueError, binascii.Error) as error:
         raise ValueError('WebView2 content hash is invalid') from error
     python_sha256 = inputs['python']['sha256']
     python_version = inputs['python']['version']

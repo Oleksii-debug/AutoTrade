@@ -1239,11 +1239,32 @@ class RegisteredAblationPopulation:
             raise TypeError("complete must be a boolean")
 
 
+def _canonical_path_value_binding(
+    path: object,
+    label: str,
+    *,
+    _path_type: type = type(Path()),
+) -> tuple[str, str | None]:
+    """Freeze one exact local pathname together with relative-path context."""
+
+    if type(path) is not _path_type:
+        raise ProtocolViolation(
+            f"ablation qualification {label} is not canonical"
+        )
+    path_text = os.fspath(path)
+    if type(path_text) is not str or not path_text:
+        raise ProtocolViolation(
+            f"ablation qualification {label} is not canonical"
+        )
+    cwd = None if os.path.isabs(path_text) else os.getcwd()
+    return path_text, cwd
+
+
 def _canonical_database_path_binding(
     value: object,
     label: str,
     *,
-    _path_type: type = type(Path()),
+    path_value_binding=_canonical_path_value_binding,
 ) -> tuple[str, str | None]:
     """Bind one exact SQLite pathname without claiming physical-file identity."""
 
@@ -1252,22 +1273,37 @@ def _canonical_database_path_binding(
         raise ProtocolViolation(
             f"ablation qualification {label} database path is unavailable"
         )
-    path = state["path"]
-    if type(path) is not _path_type:
+    return path_value_binding(state["path"], f"{label} database path")
+
+
+def _canonical_artifact_store_path_binding(
+    value: object,
+    *,
+    path_value_binding=_canonical_path_value_binding,
+) -> tuple[tuple[str, tuple[str, str | None]], ...]:
+    """Freeze every pathname that selects the canonical artifact namespace."""
+
+    state = object.__getattribute__(value, "__dict__")
+    required = ("root", "objects", "manifests", "staging", "lock_path")
+    if type(state) is not dict or any(name not in state for name in required):
         raise ProtocolViolation(
-            f"ablation qualification {label} database path is not canonical"
+            "ablation qualification artifact store namespace is unavailable"
         )
-    path_text = os.fspath(path)
-    if type(path_text) is not str or not path_text:
-        raise ProtocolViolation(
-            f"ablation qualification {label} database path is not canonical"
+    return tuple(
+        (
+            name,
+            path_value_binding(
+                state[name],
+                "artifact store " + name,
+            ),
         )
-    cwd = None if os.path.isabs(path_text) else os.getcwd()
-    return path_text, cwd
+        for name in required
+    )
 
 
 def _make_ablation_authority_binding(
     path_binding=_canonical_database_path_binding,
+    artifact_path_binding=_canonical_artifact_store_path_binding,
 ):
     """Create one process-local issuance ledger hidden behind closure-owned state."""
 
@@ -1275,7 +1311,11 @@ def _make_ablation_authority_binding(
     bindings: dict[int, tuple[object, ...]] = {}
     backing_paths: dict[
         int,
-        tuple[tuple[str, str | None], tuple[str, str | None]],
+        tuple[
+            tuple[str, str | None],
+            tuple[str, str | None],
+            tuple[tuple[str, tuple[str, str | None]], ...],
+        ],
     ] = {}
     memory_correction_authorities: dict[int, object | None] = {}
 
@@ -1298,6 +1338,7 @@ def _make_ablation_authority_binding(
         authority_id = id(authority)
         registry_path_binding = path_binding(scientific_registry, "registry")
         memory_path_binding = path_binding(experience_memory, "memory")
+        artifact_store_path_binding = artifact_path_binding(artifact_store)
         memory_state = object.__getattribute__(experience_memory, "__dict__")
         if (
             type(memory_state) is not dict
@@ -1344,6 +1385,7 @@ def _make_ablation_authority_binding(
             backing_paths[authority_id] = (
                 registry_path_binding,
                 memory_path_binding,
+                artifact_store_path_binding,
             )
             memory_correction_authorities[authority_id] = memory_correction_authority
 
@@ -1397,6 +1439,10 @@ def _make_ablation_authority_binding(
             if path_binding(experience_memory, "memory") != bound_paths[1]:
                 raise ProtocolViolation(
                     "ablation qualification memory database path changed after issuance"
+                )
+            if artifact_path_binding(artifact_store) != bound_paths[2]:
+                raise ProtocolViolation(
+                    "ablation qualification artifact store namespace changed after issuance"
                 )
 
             memory_state = object.__getattribute__(experience_memory, "__dict__")
@@ -1647,12 +1693,14 @@ class AblationQualificationAuthority:
         ) = AblationQualificationAuthority._bound_context(self)
         if type(reference) is not AblationOutcomeArtifactRef:
             raise TypeError("outcome_refs must contain AblationOutcomeArtifactRef")
-        manifest = ArtifactStore.load_manifest(artifact_store, reference.artifact_id)
+        manifest, data = ArtifactStore.read_authenticated_snapshot(
+            artifact_store,
+            reference.artifact_id,
+        )
         if manifest.get("sha256") != reference.sha256:
             raise ValueError("ablation outcome artifact digest mismatch")
         if manifest.get("media_type") != _ABLATION_OUTCOME_MEDIA_TYPE:
             raise ValueError("ablation outcome artifact media type is not qualified")
-        data = ArtifactStore.read_bytes(artifact_store, reference.artifact_id)
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError as error:
@@ -1808,7 +1856,9 @@ del _register_ablation_authority_binding
 del _resolve_ablation_authority_binding
 del _make_ablation_qualification_authority_init
 del _make_ablation_authority_binding
+del _canonical_artifact_store_path_binding
 del _canonical_database_path_binding
+del _canonical_path_value_binding
 
 
 def _qualified_inconclusive(

@@ -432,6 +432,7 @@ class BybitExecutionFeeCurrencyProjection:
     entity_policy_id: str
     capability_snapshot_id: str
     qualification_id: str
+    qualification_valid_until: datetime
     adapter_source_git_sha: str
     packaged_artifact_digest: str
     product_family: str
@@ -497,6 +498,10 @@ class BybitExecutionFeeCurrencyProjection:
                 "fee-currency authority provider symbol mismatch"
             )
         point = _point(trade_time, name="trade_time")
+        if point >= self.qualification_valid_until:
+            raise BybitFeeCurrencyAuthorityError(
+                "provider qualification is not valid at execution time"
+            )
         if not self.rule_valid_from <= point < self.rule_valid_until:
             raise BybitFeeCurrencyAuthorityError(
                 "fee-currency authority is not valid at execution time"
@@ -513,6 +518,7 @@ class BybitExecutionFeeCurrencyAuthority:
     entity_policy_id: str
     capability_snapshot_id: str
     qualification_id: str
+    qualification_valid_until: datetime
     adapter_source_git_sha: str
     packaged_artifact_digest: str
     product_family: str
@@ -760,6 +766,7 @@ def _issue_bybit_execution_fee_currency_authority_impl(
         "entity_policy_id": provider_scope.entity_policy_id,
         "capability_snapshot_id": capability.snapshot_id,
         "qualification_id": qualification.qualification_id,
+        "qualification_valid_until": q_valid_until,
         "adapter_source_git_sha": scope.adapter_source_git_sha,
         "packaged_artifact_digest": scope.packaged_artifact_digest,
         "product_family": product_family,

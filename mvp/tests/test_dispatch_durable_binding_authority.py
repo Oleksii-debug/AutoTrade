@@ -393,6 +393,21 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                     ["SubmissionPrepared", "SubmissionSending"],
                 )
 
+    def test_restart_rejects_invalid_exact_response_http_status(self):
+        for bad_status in ("200", True, 99, 600):
+            with self.subTest(bad_status=bad_status), TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                self._make_exact_response_attempt(path)
+                self._tamper_event_field(
+                    path,
+                    "SubmissionSent",
+                    "http_status",
+                    bad_status,
+                )
+                result = self._redispatch_exact_response_attempt(path)
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertEqual(result.reason, "exact_response_invalid")
+
     def test_restart_rejects_prepared_sending_owner_discontinuity(self):
         for event_type, field, value, envelope_field in (
             ("SubmissionPrepared", "owner_token", "", False),

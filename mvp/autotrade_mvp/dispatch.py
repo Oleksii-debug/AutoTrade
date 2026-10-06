@@ -840,6 +840,15 @@ class GuardedDispatcher:
                     return DispatchOutcome(
                         "UNKNOWN", client_order_id, None, "exact_response_invalid"
                     )
+                http_status = payload.get("http_status")
+                if http_status is not None and (
+                    type(http_status) is not int
+                    or http_status < 100
+                    or http_status > 599
+                ):
+                    return DispatchOutcome(
+                        "UNKNOWN", client_order_id, None, "exact_response_invalid"
+                    )
                 response_text = payload.get("response_text")
                 response_hash = payload.get("response_sha256")
                 if (

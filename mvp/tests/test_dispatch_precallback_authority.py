@@ -182,6 +182,56 @@ class PreCallbackAuthorityTests(unittest.TestCase):
                 ["SubmissionPrepared"],
             )
 
+    def test_sender_check_cannot_poison_lease_helper_before_final_authority(self):
+        original = dispatch_module._prepared_lease_state
+        forged_calls = 0
+        outbound = 0
+        sender_calls = 0
+
+        def forged(*_args, **_kwargs):
+            nonlocal forged_calls
+            forged_calls += 1
+            raise AssertionError("forged lease helper executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+
+            def sender_check(_owner_token, _owner_epoch):
+                nonlocal sender_calls
+                sender_calls += 1
+                dispatch_module._prepared_lease_state = forged
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+
+            try:
+                with self.assertRaises(dispatch_module._DispatchAuthorityChanged):
+                    self._dispatch(
+                        dispatcher,
+                        "precallback-sender-a1",
+                        lambda *_args: (True, "allowed"),
+                        transport,
+                        sender_check=sender_check,
+                    )
+            finally:
+                dispatch_module._prepared_lease_state = original
+
+            self.assertEqual(sender_calls, 1)
+            self.assertIs(dispatch_module._prepared_lease_state, original)
+            self.assertEqual(forged_calls, 0)
+            self.assertEqual(outbound, 0)
+            self.assertEqual(
+                self._event_types(path, dispatcher, "precallback-sender-a1"),
+                ["SubmissionPrepared"],
+            )
+
     def test_final_authority_callback_cannot_poison_result_validator(self):
         original = dispatch_module._validated_authority_result
         forged_calls = 0

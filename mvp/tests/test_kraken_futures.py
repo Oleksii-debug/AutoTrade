@@ -567,6 +567,37 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 observation=observation,
             )
 
+    def test_submission_response_rejects_noncanonical_echoed_client_identity(self):
+        intent_id = "hedge-noncanonical-client-echo"
+        expected_client = stable_client_order_id(
+            "KRAKEN",
+            intent_id,
+            environment="PAPER",
+            account_id="futures-account",
+            max_length=36,
+            client_id_format="UUID",
+        )
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "provider-noncanonical-client",
+                    "status": "placed",
+                    "cliOrdId": " " + expected_client + " ",
+                },
+            },
+            intent_id=intent_id,
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "client identity must be canonical exact text",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+
     def test_decoded_mapping_cannot_mint_submission_authority(self):
         prepared = prepared_futures_request("hedge-forged")
         with self.assertRaisesRegex(

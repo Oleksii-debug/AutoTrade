@@ -918,10 +918,15 @@ def parse_submission_response(
     echoed = status.get("cliOrdId")
     if echoed is None:
         echoed = status.get("cli_ord_id")
-    if echoed not in (None, "") and _client_order_id(echoed) != cid:
-        raise ProviderCoreError(
-            "Kraken Futures client identity does not match guarded request"
-        )
+    if echoed not in (None, ""):
+        if type(echoed) is not str or echoed != echoed.strip():
+            raise ProviderCoreError(
+                "Kraken Futures client identity must be canonical exact text"
+            )
+        if _client_order_id(echoed) != cid:
+            raise ProviderCoreError(
+                "Kraken Futures client identity does not match guarded request"
+            )
 
     raw_operation_status = status.get("status")
     if not isinstance(raw_operation_status, str) or not raw_operation_status.strip():

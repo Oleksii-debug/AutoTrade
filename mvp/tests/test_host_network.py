@@ -410,6 +410,23 @@ class HostNetworkTests(unittest.TestCase):
                 self.assertEqual(response.status, 400)
                 self.assertEqual(self.app.store.state_version, 0)
 
+    def test_ui_command_distinct_schema_valid_idempotency_keys_do_not_alias(self):
+        first = self.command(idempotency_key="host-network-key-distinct")
+        first_response = self.post(first)
+        self.assertEqual(first_response.status, 200)
+        self.assertEqual(self.body(first_response)["status"], "ACCEPTED")
+        self.assertEqual(self.app.store.state_version, 1)
+
+        second = self.command(
+            command_id="22222222-2222-4222-8222-222222222222",
+            expected_state_version="1",
+            idempotency_key=" host-network-key-distinct ",
+        )
+        second_response = self.post(second)
+        self.assertEqual(second_response.status, 200)
+        self.assertEqual(self.body(second_response)["status"], "ACCEPTED")
+        self.assertEqual(self.app.store.state_version, 2)
+
     def test_ui_command_contract_accepts_exact_v5_shape(self):
         command = self.command()
         response = self.post(command)

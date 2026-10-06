@@ -249,6 +249,7 @@ project = "not-a-table"
             for blocker in self.report.blockers
             if blocker.startswith("DOTNET_PROJECT_LOCK_MISSING:")
             or blocker.startswith("DOTNET_RESTORE_NOT_LOCKED:")
+            or blocker.startswith("DOTNET_LOCKED_RESTORE_PROJECT_MISSING:")
             or blocker in {
                 "DOTNET_LOCKED_RESTORE_WORKFLOW_MISSING",
                 "DOTNET_LOCKED_RESTORE_COMMAND_MISSING",
@@ -284,12 +285,49 @@ project = "not-a-table"
             )
 
             (project.parent / "packages.lock.json").write_text(
-                "{}\n",
+                json.dumps(
+                    {
+                        "version": 1,
+                        "dependencies": {
+                            "net10.0": {
+                                "ReleaseApp": {"type": "Project"}
+                            }
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
                 encoding="utf-8",
             )
             self.assertEqual(
                 _dotnet_dependency_lock_blockers(root, [project]),
                 [],
+            )
+
+            unrestored = root / "src" / "Unrestored" / "Unrestored.csproj"
+            unrestored.parent.mkdir(parents=True)
+            unrestored.write_text("<Project />\n", encoding="utf-8")
+            (unrestored.parent / "packages.lock.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "dependencies": {
+                            "net10.0": {
+                                "ReleaseApp": {"type": "Project"}
+                            }
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project, unrestored]),
+                [
+                    "DOTNET_LOCKED_RESTORE_PROJECT_MISSING:"
+                    "src/Unrestored/Unrestored.csproj"
+                ],
             )
 
             workflow.write_text(
@@ -307,6 +345,35 @@ project = "not-a-table"
                 ],
             )
 
+            workflow.write_text(
+                'paths:\n'
+                '  - "src/**/packages.lock.json"\n'
+                "steps:\n"
+                "  - run: dotnet restore src/ReleaseApp/ReleaseApp.csproj "
+                "-p:Fake=RestoreLockedMode=true\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project]),
+                [
+                    "DOTNET_RESTORE_NOT_LOCKED:"
+                    ".github/workflows/dotnet-foundation.yml:1"
+                ],
+            )
+
+            workflow.write_text(
+                'paths:\n'
+                '  - "src/**/packages.lock.json"\n'
+                "steps:\n"
+                "  - run: dotnet restore src/ReleaseApp/ReleaseApp.csproj "
+                "-p:RestoreLockedMode=true\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project]),
+                [],
+            )
+
     def test_nuget_lock_changes_must_trigger_dotnet_workflow(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -314,7 +381,18 @@ project = "not-a-table"
             project.parent.mkdir(parents=True)
             project.write_text("<Project />\n", encoding="utf-8")
             (project.parent / "packages.lock.json").write_text(
-                "{}\n",
+                json.dumps(
+                    {
+                        "version": 1,
+                        "dependencies": {
+                            "net10.0": {
+                                "ReleaseApp": {"type": "Project"}
+                            }
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
                 encoding="utf-8",
             )
             workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"

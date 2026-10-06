@@ -14,6 +14,25 @@ import re
 import tomllib
 import xml.etree.ElementTree as ET
 
+if __package__:
+    from .dotnet_lock import (
+        dotnet_imported_package_reference_blockers,
+        dotnet_lock_content_blockers,
+        dotnet_project_package_references,
+        dotnet_restore_command_tokens,
+        dotnet_restore_targets_project,
+        dotnet_restore_tokens_are_locked,
+    )
+else:
+    from dotnet_lock import (
+        dotnet_imported_package_reference_blockers,
+        dotnet_lock_content_blockers,
+        dotnet_project_package_references,
+        dotnet_restore_command_tokens,
+        dotnet_restore_targets_project,
+        dotnet_restore_tokens_are_locked,
+    )
+
 
 ROOT = Path(__file__).resolve().parents[1]
 EXACT_PYTHON = re.compile(r"^[A-Za-z0-9_.-]+==[^=<>!~\s]+$")
@@ -193,11 +212,7 @@ def _dotnet_dependency_lock_blockers(
 
     blockers: list[str] = []
     for project in projects:
-        if not (project.parent / "packages.lock.json").is_file():
-            blockers.append(
-                "DOTNET_PROJECT_LOCK_MISSING:"
-                f"{project.relative_to(root).as_posix()}"
-            )
+        blockers.extend(dotnet_lock_content_blockers(root, project))
 
     workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
     if not workflow.is_file():
@@ -220,14 +235,31 @@ def _dotnet_dependency_lock_blockers(
         blockers.append("DOTNET_LOCKED_RESTORE_COMMAND_MISSING")
         return blockers
 
+    restore_tokens: list[tuple[str, ...]] = []
     for index, command in enumerate(restore_commands, start=1):
-        if (
-            "--locked-mode" not in command
-            and "RestoreLockedMode=true" not in command
-        ):
+        try:
+            tokens = dotnet_restore_command_tokens(command)
+        except ValueError:
+            blockers.append(
+                "DOTNET_RESTORE_COMMAND_INVALID:"
+                f".github/workflows/dotnet-foundation.yml:{index}"
+            )
+            continue
+        restore_tokens.append(tokens)
+        if not dotnet_restore_tokens_are_locked(tokens):
             blockers.append(
                 "DOTNET_RESTORE_NOT_LOCKED:"
                 f".github/workflows/dotnet-foundation.yml:{index}"
+            )
+
+    for project in projects:
+        relative = project.relative_to(root).as_posix()
+        if not any(
+            dotnet_restore_targets_project(tokens, relative)
+            for tokens in restore_tokens
+        ):
+            blockers.append(
+                f"DOTNET_LOCKED_RESTORE_PROJECT_MISSING:{relative}"
             )
     return blockers
 
@@ -246,17 +278,13 @@ def _dotnet_blockers(root: Path) -> tuple[list[str], list[str], str]:
         blockers.append(f"DOTNET_ROLL_FORWARD_NOT_DISABLED:{sdk.get('rollForward')}")
 
     package_projects: list[Path] = []
+    blockers.extend(dotnet_imported_package_reference_blockers(root))
     for project in sorted((root / "src").rglob("*.csproj")):
-        tree = ET.parse(project)
-        package_nodes = tree.findall(".//PackageReference")
-        if package_nodes:
+        package_references = dotnet_project_package_references(project)
+        if package_references:
             package_projects.append(project)
-        for node in package_nodes:
-            name = node.attrib.get("Include") or node.attrib.get("Update") or ""
-            value = node.attrib.get("Version")
-            if value is None:
-                version_node = node.find("Version")
-                value = version_node.text.strip() if version_node is not None and version_node.text else None
+        for raw_name, value in package_references:
+            name = raw_name or ""
             identity = f"{name}@{value}"
             if not name or not value or not EXACT_NUGET.fullmatch(value):
                 blockers.append(f"NON_EXACT_NUGET_REFERENCE:{project.relative_to(root)}:{identity}")

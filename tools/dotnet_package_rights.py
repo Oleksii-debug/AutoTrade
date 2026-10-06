@@ -342,20 +342,22 @@ def _workflow_job_name(lines: list[str], line_number: int) -> str | None:
 
     if type(line_number) is not int or not 1 <= line_number <= len(lines):
         raise ValueError("workflow line_number is outside the document")
+    candidate: str | None = None
     for index in range(line_number - 1, -1, -1):
         raw = lines[index]
         if not raw.strip():
             continue
         indent = len(raw) - len(raw.lstrip(" "))
         stripped = raw.strip()
-        if indent == 0 and stripped == "jobs:":
-            return None
+        if indent == 0:
+            return candidate if stripped == "jobs:" else None
         if (
-            indent == 2
+            candidate is None
+            and indent == 2
             and stripped.endswith(":")
             and not stripped.startswith("- ")
         ):
-            return stripped[:-1]
+            candidate = stripped[:-1]
     return None
 
 

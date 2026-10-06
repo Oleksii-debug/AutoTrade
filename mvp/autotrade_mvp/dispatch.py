@@ -2518,6 +2518,13 @@ class GuardedDispatcher:
         snapshot_setattr = setattr
         snapshot_type = type
         snapshot_isinstance = isinstance
+        snapshot_str = str
+        snapshot_int = int
+        snapshot_exception = Exception
+        snapshot_value_error = ValueError
+        snapshot_type_error = TypeError
+        snapshot_dispatch_blocked = DispatchBlocked
+        snapshot_dispatch_authority_changed = _DispatchAuthorityChanged
         snapshot_tuple = tuple
         snapshot_dict = dict
         snapshot_len = len
@@ -2526,13 +2533,26 @@ class GuardedDispatcher:
         snapshot_module_globals_set = snapshot_module_globals.__setitem__
         snapshot_module_globals_pop = snapshot_module_globals.pop
         snapshot_builtin_missing = object()
-        snapshot_type_global = snapshot_module_globals_get(
+        snapshot_postsend_global_names = (
             "type",
-            snapshot_builtin_missing,
-        )
-        snapshot_isinstance_global = snapshot_module_globals_get(
             "isinstance",
-            snapshot_builtin_missing,
+            "str",
+            "int",
+            "Exception",
+            "ValueError",
+            "TypeError",
+            "DispatchBlocked",
+            "_DispatchAuthorityChanged",
+        )
+        snapshot_postsend_global_state = snapshot_tuple(
+            (
+                name,
+                snapshot_module_globals_get(
+                    name,
+                    snapshot_builtin_missing,
+                ),
+            )
+            for name in snapshot_postsend_global_names
         )
         snapshot_code = snapshot_getattr(
             exact_response_snapshot,
@@ -2999,10 +3019,7 @@ class GuardedDispatcher:
             return changed
 
         def restore_postsend_builtin_globals() -> None:
-            for name, expected in (
-                ("type", snapshot_type_global),
-                ("isinstance", snapshot_isinstance_global),
-            ):
+            for name, expected in snapshot_postsend_global_state:
                 current = snapshot_module_globals_get(
                     name,
                     snapshot_builtin_missing,
@@ -3029,11 +3046,11 @@ class GuardedDispatcher:
                 restore_postsend_builtin_globals()
             try:
                 require_dispatch_call_authority()
-            except _DispatchAuthorityChanged:
+            except snapshot_dispatch_authority_changed:
                 if barrier_passed:
                     return authority_change_after_send_outcome()
                 raise
-        except _DispatchAuthorityChanged:
+        except snapshot_dispatch_authority_changed:
             # The authority helper restores the invocation-selected cut before
             # raising. Once Sending is durable, preserve worst-case exposure as
             # UNKNOWN on that original journal rather than leaking a retryable
@@ -3041,10 +3058,10 @@ class GuardedDispatcher:
             if barrier_passed:
                 return authority_change_after_send_outcome()
             raise
-        except DispatchBlocked as error:
+        except snapshot_dispatch_blocked as error:
             try:
                 require_dispatch_call_authority()
-            except _DispatchAuthorityChanged:
+            except snapshot_dispatch_authority_changed:
                 if barrier_passed:
                     return authority_change_after_send_outcome()
                 raise
@@ -3069,11 +3086,11 @@ class GuardedDispatcher:
                         client_order_id=client_order_id,
                         expected_prepared=expected_prepared,
                     )
-            return DispatchOutcome("BLOCKED", client_order_id, None, str(error))
-        except Exception as error:
+            return DispatchOutcome("BLOCKED", client_order_id, None, snapshot_str(error))
+        except snapshot_exception as error:
             try:
                 require_dispatch_call_authority()
-            except _DispatchAuthorityChanged:
+            except snapshot_dispatch_authority_changed:
                 if barrier_passed:
                     return authority_change_after_send_outcome()
                 raise
@@ -3110,7 +3127,7 @@ class GuardedDispatcher:
                         },
                         now=barrier_now,
                     )
-                except ValueError:
+                except snapshot_value_error:
                     current = self._events(attempt_id)
                     return self._terminal_outcome_from_existing_history(
                         events=current,
@@ -3158,7 +3175,7 @@ class GuardedDispatcher:
                 # and raises something else, we can no longer prove that it
                 # refrained from an outbound side effect after the guard.
                 # Preserve worst-case exposure and force reconciliation.
-                next_version = int(last["aggregate_version"]) + 1
+                next_version = snapshot_int(last["aggregate_version"]) + 1
                 self._append(
                     attempt_id=attempt_id,
                     event_type="SubmissionUnknown",
@@ -3201,7 +3218,7 @@ class GuardedDispatcher:
             # reconciliation instead of fabricating SENT or safe-to-retry.
             events = self._events(attempt_id)
             last = events[-1]
-            next_version = int(last["aggregate_version"]) + 1
+            next_version = snapshot_int(last["aggregate_version"]) + 1
             self._append(
                 attempt_id=attempt_id,
                 event_type="SubmissionUnknown",
@@ -3263,7 +3280,7 @@ class GuardedDispatcher:
                     exact_response_authority_changed
                     or restore_exact_response_authority()
                 ):
-                    raise ValueError(
+                    raise snapshot_value_error(
                         "exact transport response authority changed after send"
                     )
                 (
@@ -3293,7 +3310,7 @@ class GuardedDispatcher:
             elif snapshot_isinstance(response, exact_response_type):
                 # Caller-polymorphic post-SEND response getters are not evidence.
                 # A durable UNKNOWN retains the no-blind-retry property.
-                raise TypeError("exact provider response subtype is forbidden")
+                raise snapshot_type_error("exact provider response subtype is forbidden")
             else:
                 # Legacy provider wrappers may still return decoded JSON rather
                 # than ExactJsonTransportResponse. Detach that graph before
@@ -3316,7 +3333,7 @@ class GuardedDispatcher:
                 payload=sent_payload,
                 now=barrier_now,
             )
-        except Exception as persistence_error:
+        except snapshot_exception as persistence_error:
             # The outbound request has already crossed the final barrier.
             # Never make this state safe to retry merely because the provider
             # response could not be journaled.
@@ -3334,7 +3351,7 @@ class GuardedDispatcher:
                     },
                     now=barrier_now,
                 )
-            except Exception:
+            except snapshot_exception:
                 current = self._events(attempt_id)
                 if current and current[-1]["event_type"] in {
                     "SubmissionSent",

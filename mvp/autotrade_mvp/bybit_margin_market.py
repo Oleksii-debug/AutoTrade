@@ -118,12 +118,18 @@ def _decimal_text(
     return result
 
 
-def _decimal_number(
+def _decimal_number_or_text(
     value: object,
     *,
     name: str,
     positive: bool = False,
 ) -> Decimal:
+    """Accept the two representations used by the documented Bybit contract."""
+
+    if type(value) is str:
+        result = _decimal_text(value, name=name, positive=positive)
+        assert result is not None
+        return result
     if type(value) is int:
         raw = str(value)
     elif type(value) is Decimal:
@@ -132,7 +138,7 @@ def _decimal_number(
         raw = str(value)
     else:
         raise BybitMarginMarketError(
-            f"{name} must be an exact provider JSON number"
+            f"{name} must be exact provider decimal text or JSON number"
         )
     try:
         result = parse_bounded_exact_decimal(raw)
@@ -384,12 +390,12 @@ def parse_bybit_margin_risk_limits(
                 risk_id=risk_id,
                 symbol=row_symbol,
                 risk_limit_value=risk_limit,
-                maintenance_margin=_decimal_number(
+                maintenance_margin=_decimal_number_or_text(
                     row.get("maintenanceMargin"),
                     name=f"risk-limit row[{index}].maintenanceMargin",
                     positive=True,
                 ),
-                initial_margin=_decimal_number(
+                initial_margin=_decimal_number_or_text(
                     row.get("initialMargin"),
                     name=f"risk-limit row[{index}].initialMargin",
                     positive=True,

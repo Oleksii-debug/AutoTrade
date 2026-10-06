@@ -6,7 +6,7 @@ gate is satisfied.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from decimal import Decimal, InvalidOperation
 from typing import Mapping
 
@@ -74,6 +74,32 @@ def _non_negative(value, *, name: str) -> Decimal:
     if result < 0:
         raise ValueError(f"{name} must be non-negative")
     return result
+
+
+def _inert_manifest_value(value: object, *, name: str):
+    if value is None or type(value) in (str, int, bool):
+        return value
+    if type(value) is tuple:
+        return tuple(
+            _inert_manifest_value(item, name=name)
+            for item in value
+        )
+    raise TypeError(f"{name} must contain only exact inert manifest values")
+
+
+def _population_snapshot(
+    population: object,
+) -> PopulationCoverageManifest:
+    if type(population) is not PopulationCoverageManifest:
+        raise TypeError("population must be exact PopulationCoverageManifest")
+    payload = {
+        field.name: _inert_manifest_value(
+            getattr(population, field.name),
+            name=f"population.{field.name}",
+        )
+        for field in fields(PopulationCoverageManifest)
+    }
+    return PopulationCoverageManifest(**payload)
 
 
 @dataclass(frozen=True)
@@ -369,8 +395,7 @@ def evaluate_population_bound_retention(
     the same causal population that scientific qualification will attest.
     """
 
-    if type(population) is not PopulationCoverageManifest:
-        raise TypeError("population must be exact PopulationCoverageManifest")
+    canonical_population = _population_snapshot(population)
     if type(policy) is not RetentionPolicy:
         raise TypeError("policy must be exact RetentionPolicy")
     canonical_policy = RetentionPolicy(
@@ -387,12 +412,12 @@ def evaluate_population_bound_retention(
     metric_snapshot = _metrics_snapshot(metrics)
     base = evaluate_retention(metric_snapshot, canonical_policy)
     reasons = list(base.reasons)
-    evidence_incomplete = not population.complete
+    evidence_incomplete = not canonical_population.complete
     if evidence_incomplete:
         reasons.append("population coverage manifest is incomplete")
 
-    counts = dict(population.included_regime_counts)
-    labels = dict(population.included_labels_complete_by_regime)
+    counts = dict(canonical_population.included_regime_counts)
+    labels = dict(canonical_population.included_labels_complete_by_regime)
     required = set(canonical_policy.protected_regimes) | set(canonical_policy.recent_regimes)
 
     for regime in sorted(required):
@@ -433,5 +458,5 @@ def evaluate_population_bound_retention(
         recent_improvement=base.recent_improvement,
         regimes=base.regimes,
         reasons=tuple(dict.fromkeys(reasons)),
-        population_coverage_digest=population.digest,
+        population_coverage_digest=canonical_population.digest,
     )

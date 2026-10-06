@@ -1727,7 +1727,6 @@ def _direct_trading_write_request_digest(request: SignedHttpRequest) -> str:
     ).hexdigest()
 
 
-
 class _NoRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -2586,14 +2585,14 @@ def _direct_authenticated_read_request_digest(
     _json_dumps=json.dumps,
     _dict=dict,
     _sorted=sorted,
-    _exception=Exception,
+    _type_error=TypeError,
+    _scope_error=ProviderTransportScopeError,
     _transport_error=ProviderTransportError,
-    _policy_absolute_url=ProviderEndpointPolicy.absolute_url,
 ) -> str:
     try:
         method, url, headers, body, timeout_seconds = _require_request(request)
-    except (TypeError, ProviderTransportScopeError) as error:
-        raise ProviderTransportError(
+    except (_type_error, _scope_error) as error:
+        raise _transport_error(
             "direct authenticated-read receipt requires canonical HTTP request"
         ) from error
     material = {
@@ -2626,6 +2625,8 @@ def _canonical_bybit_authenticated_read_query(
     _str=str,
     _rule_type=AuthenticatedReadEndpointRule,
     _rule_snapshot=_BYBIT_DIRECT_AUTHENTICATED_READ_RULE_SNAPSHOT,
+    _scope_error=ProviderTransportScopeError,
+    _transport_error=ProviderTransportError,
 ) -> str:
     rule = _rule(query_binding)
     expected_rule = _rule_snapshot.get(query_binding.endpoint)
@@ -2640,23 +2641,23 @@ def _canonical_bybit_authenticated_read_query(
         )
         != expected_rule
     ):
-        raise ProviderTransportError(
+        raise _transport_error(
             "Bybit authenticated-read endpoint rule authority changed"
         )
     query: dict[str, str] = {}
     for raw_key, raw_value in query_binding.query.items():
         key = _canonical_text_fn(raw_key, name="query parameter")
         if _type(raw_value) is not _str or raw_value != raw_value.strip():
-            raise ProviderTransportScopeError(
+            raise _scope_error(
                 "Bybit authenticated-read query values must be canonical strings"
             )
         if key in query:
-            raise ProviderTransportScopeError(
+            raise _scope_error(
                 "Bybit authenticated-read query keys must be unique"
             )
         query[key] = raw_value
     if not query:
-        raise ProviderTransportScopeError(
+        raise _scope_error(
             "Bybit authenticated-read query must not be empty"
         )
     if query_binding.endpoint == _option_endpoint:
@@ -2689,6 +2690,10 @@ def _validated_bybit_authenticated_read_wire_semantics_digest(
     _sha256=sha256,
     _json_dumps=json.dumps,
     _sorted=sorted,
+    _exception=Exception,
+    _transport_error=ProviderTransportError,
+    _policy_class=ProviderEndpointPolicy,
+    _policy_absolute_url=ProviderEndpointPolicy.absolute_url,
 ) -> str:
     try:
         _require_query(query_binding)
@@ -2718,7 +2723,7 @@ def _validated_bybit_authenticated_read_wire_semantics_digest(
         raise _transport_error(
             "Bybit direct authenticated-read provider policy authority changed"
         )
-    if ProviderEndpointPolicy.absolute_url is not _policy_absolute_url:
+    if _policy_class.absolute_url is not _policy_absolute_url:
         raise _transport_error(
             "Bybit provider policy executable authority changed"
         )
@@ -6341,6 +6346,7 @@ def _install_bybit_direct_authenticated_read_executor(
     signer,
     observer,
     require_current_capability,
+    validate_query_rule,
     canonical_sha256,
 ):
     canonical_type = type
@@ -6463,6 +6469,10 @@ def _install_bybit_direct_authenticated_read_executor(
                 query_binding,
             )
             require_transport_unchanged()
+            # Provider I/O is an unbounded concurrency window. Re-resolve the
+            # exact endpoint rule after the response before any success status
+            # can become accepted provider state.
+            validate_query_rule(query_binding)
             if canonical_type(wire_response) is not response_type:
                 raise transport_error(
                     "Bybit direct authenticated-read wire must preserve HTTP status"
@@ -6518,6 +6528,7 @@ BybitV5AuthenticatedReadTransport.execute_direct = (
         BybitV5AuthenticatedReadSigner.sign,
         observe_authenticated_json_response,
         BybitV5AuthenticatedReadTransport._require_current_capability,
+        _canonical_bybit_authenticated_read_query,
         sha256,
     )
 )

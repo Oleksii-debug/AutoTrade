@@ -416,7 +416,7 @@ class HostNetworkTests(unittest.TestCase):
         )
         self.assertEqual(response.status, 400)
         self.assertEqual(self.app.store.state_version, 0)
-        self.assertEqual(self.app.store.journal.current_journal_sequence(), 0)
+        self.assertEqual(JournalStore(self.path).current_journal_sequence(), 0)
 
     def test_ui_command_distinct_schema_valid_idempotency_keys_do_not_alias(self):
         first = self.command(idempotency_key="host-network-key-distinct")

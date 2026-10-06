@@ -24,6 +24,7 @@ from .provider_core import (
     ProviderCoreError,
     ProviderResponseObservation,
     Surface,
+    provider_response_observation_require_scope,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
@@ -480,14 +481,15 @@ def parse_account_trades(
 
     if type(observation) is not ProviderResponseObservation:
         raise TypeError("observation must be exact ProviderResponseObservation")
-    observation.require_scope(
+    projection = provider_response_observation_require_scope(
+        observation,
         provider_id="BINANCE",
         surface=Surface.AUTHENTICATED_READ,
         endpoint=BINANCE_USDM_ENDPOINTS["EXECUTIONS"],
     )
-    rows = observation.payload
-    account_id = observation.account_id
-    environment = observation.environment
+    rows = projection["payload"]
+    account_id = projection["account_id"]
+    environment = projection["environment"]
     if type(rows) is not tuple:
         raise BinanceUsdmAdapterError("trade rows must be an exact decoded array")
     if type(instrument_versions) is not dict:
@@ -588,7 +590,7 @@ def parse_account_trades(
                 raw.get("commissionAsset"), name="commissionAsset"
             ),
             trade_time=_millis(raw.get("time"), name="trade.time"),
-            evidence_refs=(observation.evidence_ref,),
+            evidence_refs=(projection["evidence_ref"],),
         )
         previous = by_id.get(execution_id)
         if previous is not None and previous != fill:

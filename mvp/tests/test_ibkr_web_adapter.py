@@ -23,6 +23,7 @@ from mvp.autotrade_mvp.provider_core import (
 from mvp.autotrade_mvp.ibkr_web import (
     IBKR_WEB_DOCS,
     IbkrAbsenceEvidence,
+    IbkrBrokerageAccountsObservation,
     IbkrBrokerageSessionStatus,
     IbkrCancelRequest,
     IbkrContractIdentity,
@@ -31,6 +32,7 @@ from mvp.autotrade_mvp.ibkr_web import (
     IbkrReplyRequest,
     IbkrWebAdapterError,
     IbkrWebOrderIntent,
+    brokerage_accounts_from_observation,
     brokerage_session_status_from_observation,
     execution_to_reconciliation_fill,
     parse_cancel_response,
@@ -191,6 +193,95 @@ def ready_session(*, account_id="U1234567", environment="PAPER", **overrides):
     )
 
 
+def ibkr_accounts_observation(
+    payload,
+    *,
+    account_id="U1234567",
+    environment="PAPER",
+    observed_at=None,
+    endpoint="/iserver/accounts",
+    query=None,
+    permission_scope="ORDER.READ",
+):
+    point = NOW if observed_at is None else observed_at
+    binding = prepare_authenticated_read_query(
+        capability=capability(
+            account_id=account_id,
+            environment=environment,
+        ),
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint=endpoint,
+        query={} if query is None else query,
+        at=point,
+        permission_scope=permission_scope,
+    )
+    return observe_authenticated_json_response(
+        query_binding=binding,
+        http_status=200,
+        response_bytes=json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        observed_at=point,
+    )
+
+
+def ready_accounts(
+    *,
+    account_id="U1234567",
+    environment="PAPER",
+    observed_at=None,
+    accounts=None,
+    selected_account=None,
+    session_id="ibkr-session-1",
+    is_paper=None,
+):
+    provider_accounts = (
+        [account_id]
+        if accounts is None
+        else accounts
+    )
+    selected = account_id if selected_account is None else selected_account
+    paper = (environment == "PAPER") if is_paper is None else is_paper
+    return brokerage_accounts_from_observation(
+        ibkr_accounts_observation(
+            {
+                "accounts": provider_accounts,
+                "selectedAccount": selected,
+                "sessionId": session_id,
+                "isPaper": paper,
+                "serverInfo": {
+                    "serverName": "JifN19053",
+                    "serverVersion": "Build test",
+                },
+            },
+            account_id=account_id,
+            environment=environment,
+            observed_at=NOW if observed_at is None else observed_at,
+        )
+    )
+
+
+_product_prepare_normalized_order = prepare_normalized_order
+
+
+def prepare_normalized_order(
+    *args,
+    accounts=None,
+    maximum_accounts_age_seconds=30,
+    **kwargs,
+):
+    if accounts is None:
+        accounts = ready_accounts()
+    return _product_prepare_normalized_order(
+        *args,
+        accounts=accounts,
+        maximum_accounts_age_seconds=maximum_accounts_age_seconds,
+        **kwargs,
+    )
+
+
 def ibkr_trade_observation(payload, *, account_id="U1234567"):
     binding = prepare_authenticated_read_query(
         capability=capability(account_id=account_id),
@@ -220,6 +311,296 @@ execution_to_reconciliation_fill = partial(
 
 
 class IbkrWebAdapterTests(unittest.TestCase):
+    def test_brokerage_accounts_are_source_bound_and_capture_provider_session(self):
+        observed = ready_accounts()
+        self.assertEqual(observed.accounts, ("U1234567",))
+        self.assertEqual(observed.selected_account, "U1234567")
+        self.assertEqual(observed.session_id, "ibkr-session-1")
+        self.assertIs(observed.is_paper, True)
+        self.assertEqual(observed.observed_at, NOW)
+
+    def test_brokerage_accounts_reject_local_forgery_as_financial_authority(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        forged = IbkrBrokerageAccountsObservation(
+            accounts=("U1234567",),
+            selected_account="U1234567",
+            session_id="forged-session",
+            is_paper=True,
+            observed_at=NOW,
+        )
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "/iserver/accounts provider observation",
+        ):
+            _product_prepare_normalized_order(
+                intent,
+                client_order_id="at-forged-accounts",
+                capability=capability(),
+                session=ready_session(),
+                accounts=forged,
+                at=NOW,
+                maximum_session_age_seconds=30,
+                maximum_accounts_age_seconds=30,
+            )
+
+    def test_brokerage_accounts_require_exact_endpoint_empty_query_and_read_scope(self):
+        payload = {
+            "accounts": ["U1234567"],
+            "selectedAccount": "U1234567",
+            "sessionId": "session-1",
+            "isPaper": True,
+        }
+        with self.assertRaisesRegex(ProviderCoreError, "endpoint mismatch"):
+            brokerage_accounts_from_observation(
+                ibkr_accounts_observation(
+                    payload,
+                    endpoint="/iserver/auth/status",
+                )
+            )
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "empty authenticated query",
+        ):
+            brokerage_accounts_from_observation(
+                ibkr_accounts_observation(
+                    payload,
+                    query={"caller": "selected"},
+                )
+            )
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "ORDER.READ scope",
+        ):
+            brokerage_accounts_from_observation(
+                ibkr_accounts_observation(
+                    payload,
+                    permission_scope="ORDER_WRITE",
+                )
+            )
+
+    def test_brokerage_accounts_reject_malformed_membership_and_environment(self):
+        base = {
+            "accounts": ["U1234567"],
+            "selectedAccount": "U1234567",
+            "sessionId": "session-1",
+            "isPaper": True,
+        }
+        cases = (
+            (dict(base, accounts=[]), "non-empty array"),
+            (
+                dict(base, accounts=["U1234567", "U1234567"]),
+                "duplicate account ids",
+            ),
+            (
+                dict(base, selectedAccount="OTHER"),
+                "selected brokerage account is absent",
+            ),
+            (dict(base, sessionId=" session-1 "), "session id"),
+            (dict(base, isPaper=1), "isPaper must be exact boolean"),
+        )
+        for payload, message in cases:
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(IbkrWebAdapterError, message):
+                    brokerage_accounts_from_observation(
+                        ibkr_accounts_observation(payload)
+                    )
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "isPaper does not match authenticated environment",
+        ):
+            brokerage_accounts_from_observation(
+                ibkr_accounts_observation(
+                    dict(base, isPaper=False),
+                    environment="PAPER",
+                )
+            )
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "scope is absent from provider accounts",
+        ):
+            brokerage_accounts_from_observation(
+                ibkr_accounts_observation(
+                    {
+                        "accounts": ["OTHER"],
+                        "selectedAccount": "OTHER",
+                        "sessionId": "session-1",
+                        "isPaper": True,
+                    },
+                    account_id="U1234567",
+                )
+            )
+
+    def test_order_preparation_requires_current_post_status_account_membership(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        session = ready_session(observed_at=NOW - timedelta(seconds=1))
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "predates authenticated session status",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-predating-accounts",
+                capability=capability(),
+                session=session,
+                accounts=ready_accounts(
+                    observed_at=NOW - timedelta(seconds=2),
+                ),
+                at=NOW,
+                maximum_session_age_seconds=30,
+                maximum_accounts_age_seconds=30,
+            )
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "brokerage accounts evidence is from the future",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-future-accounts",
+                capability=capability(),
+                session=session,
+                accounts=ready_accounts(
+                    observed_at=NOW + timedelta(seconds=1),
+                ),
+                at=NOW,
+                maximum_session_age_seconds=30,
+                maximum_accounts_age_seconds=30,
+            )
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "brokerage accounts evidence is stale",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-stale-accounts",
+                capability=capability(),
+                session=ready_session(
+                    observed_at=NOW - timedelta(seconds=40),
+                ),
+                accounts=ready_accounts(
+                    observed_at=NOW - timedelta(seconds=31),
+                ),
+                at=NOW,
+                maximum_session_age_seconds=60,
+                maximum_accounts_age_seconds=30,
+            )
+
+    def test_order_preparation_rejects_cross_environment_and_mutated_accounts(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "accounts environment",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-cross-env-accounts",
+                capability=capability(),
+                session=ready_session(),
+                accounts=ready_accounts(environment="LIVE"),
+                at=NOW,
+                maximum_session_age_seconds=30,
+                maximum_accounts_age_seconds=30,
+            )
+
+        observed = ready_accounts()
+        object.__setattr__(observed, "session_id", "mutated-session")
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "changed after authenticated provider observation",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-mutated-accounts",
+                capability=capability(),
+                session=ready_session(),
+                accounts=observed,
+                at=NOW,
+                maximum_session_age_seconds=30,
+                maximum_accounts_age_seconds=30,
+            )
+
+    def test_accounts_financial_guard_ignores_runtime_private_rebinding(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        forged = IbkrBrokerageAccountsObservation(
+            accounts=("U1234567",),
+            selected_account="U1234567",
+            session_id="forged-session",
+            is_paper=True,
+            observed_at=NOW,
+        )
+        self.assertFalse(
+            hasattr(
+                ibkr_web_module,
+                "_require_ibkr_brokerage_accounts_observation",
+            )
+        )
+        ibkr_web_module._require_ibkr_brokerage_accounts_observation = (
+            lambda *_args, **_kwargs: (
+                ("U1234567",),
+                "U1234567",
+                "forged-session",
+                True,
+                NOW,
+                "forged",
+                "forged",
+            )
+        )
+        try:
+            with self.assertRaisesRegex(
+                IbkrWebAdapterError,
+                "/iserver/accounts provider observation",
+            ):
+                _product_prepare_normalized_order(
+                    intent,
+                    client_order_id="at-runtime-accounts-rebind",
+                    capability=capability(),
+                    session=ready_session(),
+                    accounts=forged,
+                    at=NOW,
+                    maximum_session_age_seconds=30,
+                    maximum_accounts_age_seconds=30,
+                )
+        finally:
+            delattr(
+                ibkr_web_module,
+                "_require_ibkr_brokerage_accounts_observation",
+            )
+
     def test_trade_session_requires_all_ready_flags_and_no_competitor(self):
         self.assertTrue(ready_session().trade_ready)
         for override in (

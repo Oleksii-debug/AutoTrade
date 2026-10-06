@@ -3438,6 +3438,41 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             )
             self.assertEqual(restored.attempt_id, "binding-type-a1")
 
+    def test_binding_loader_rejects_in_place_json_decoder_kwdefault_retarget(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+
+            decoder_init = dispatch_module.json.JSONDecoder.__dict__["__init__"]
+            kwdefaults = decoder_init.__kwdefaults__
+            self.assertIs(type(kwdefaults), dict)
+            original_items = tuple(kwdefaults.items())
+            try:
+                kwdefaults["strict"] = False
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "submission response binding authority is unavailable",
+                ):
+                    load_submission_response_binding(
+                        JournalStore(path),
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id="binding-type-a1",
+                    )
+            finally:
+                kwdefaults.clear()
+                kwdefaults.update(dict(original_items))
+
+            restored = load_submission_response_binding(
+                JournalStore(path),
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-type-a1",
+            )
+            self.assertEqual(restored.attempt_id, "binding-type-a1")
+
     def test_response_binding_constructor_rejects_polymorphic_authority_inputs(self):
         from mvp.autotrade_mvp import dispatch as dispatch_module
 

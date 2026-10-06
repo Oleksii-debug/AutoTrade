@@ -381,6 +381,33 @@ class VerticalSliceTests(unittest.TestCase):
                 with self.assertRaises(TypeError):
                     run_vertical_slice([100, 101, 102, 103], directory, **kwargs)
 
+    def test_money_quantization_ignores_mutable_module_aliases(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        expected = pipeline_module._money("1.234567895")
+        with (
+            patch.object(pipeline_module, "MONEY_QUANTUM", Decimal("1")),
+            patch.object(
+                pipeline_module,
+                "round_fraction_to_quantum",
+                side_effect=AssertionError("mutable rounder alias executed"),
+            ),
+            patch.object(
+                pipeline_module,
+                "as_fraction",
+                side_effect=AssertionError("mutable fraction alias executed"),
+            ),
+            patch.object(
+                pipeline_module,
+                "parse_bounded_exact_decimal",
+                side_effect=AssertionError("mutable parser alias executed"),
+            ),
+        ):
+            observed = pipeline_module._money("1.234567895")
+
+        self.assertEqual(observed, expected)
+        self.assertEqual(observed, Decimal("1.23456790"))
+
     def test_financial_outputs_ignore_ambient_decimal_context(self):
         prices = ["100.12345678", "101.23456789", "102.34567891", "103.45678912"]
         kwargs = {

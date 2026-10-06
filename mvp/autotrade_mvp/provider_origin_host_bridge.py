@@ -123,6 +123,7 @@ def _journal_identity_material(identity: JournalStoreIdentity) -> dict[str, obje
 def canonical_provider_origin_journal_identity(
     store: JournalStore,
     _require_store=require_exact_journal_store_authority,
+    _material=_journal_identity_material,
     _digest=payload_digest,
 ) -> str:
     """Content-address the exact selected physical journal generation."""
@@ -132,7 +133,7 @@ def canonical_provider_origin_journal_identity(
             store,
             subject="provider-origin Host bridge JournalStore",
         )
-        digest = _digest(_journal_identity_material(identity))
+        digest = _digest(_material(identity))
     except (TypeError, RuntimeError, ValueError) as error:
         raise ProviderOriginHostBridgeError(
             "canonical provider-origin JournalStore authority is unavailable"
@@ -147,6 +148,7 @@ def canonical_provider_origin_journal_identity(
 def canonical_bybit_authenticated_read_rule_identity(
     query_binding: AuthenticatedReadQueryBinding,
     _rule_resolver=_bybit_authenticated_read_rule,
+    _rule_type=AuthenticatedReadEndpointRule,
     _digest=payload_digest,
 ) -> tuple[str, AuthenticatedReadEndpointRule]:
     """Derive Host rule identity from the existing canonical Bybit registry."""
@@ -157,7 +159,7 @@ def canonical_bybit_authenticated_read_rule_identity(
         raise ProviderOriginHostBridgeError(
             "Bybit authenticated-read endpoint rule authority is unavailable"
         ) from error
-    if type(rule) is not AuthenticatedReadEndpointRule:
+    if type(rule) is not _rule_type:
         raise ProviderOriginHostBridgeError(
             "Bybit authenticated-read endpoint rule authority is non-canonical"
         )
@@ -186,10 +188,11 @@ def canonical_bybit_authenticated_read_rule_identity(
 
 def _exact_query_snapshot(
     query_binding: AuthenticatedReadQueryBinding,
+    _binding_type=AuthenticatedReadQueryBinding,
     _require_query=_require_authenticated_read_query_binding_authority,
     _snapshot=_query_snapshot,
 ) -> dict[str, object]:
-    if type(query_binding) is not AuthenticatedReadQueryBinding:
+    if type(query_binding) is not _binding_type:
         raise TypeError("query_binding must be exact AuthenticatedReadQueryBinding")
     try:
         _require_query(query_binding)
@@ -213,15 +216,18 @@ def _require_host_subject_matches(
     *,
     query_binding: AuthenticatedReadQueryBinding,
     pins: HostProviderOriginPins,
+    _verified_type=VerifiedHostPreparedAttestation,
+    _pins_type=HostProviderOriginPins,
+    _snapshot=_exact_query_snapshot,
     _rule_identity=canonical_bybit_authenticated_read_rule_identity,
 ) -> tuple[dict[str, object], AuthenticatedReadEndpointRule]:
-    if type(verified) is not VerifiedHostPreparedAttestation:
+    if type(verified) is not _verified_type:
         raise ProviderOriginHostBridgeError(
             "Host Prepared verification result is non-canonical"
         )
-    if type(pins) is not HostProviderOriginPins:
+    if type(pins) is not _pins_type:
         raise TypeError("pins must be exact HostProviderOriginPins")
-    snapshot = _exact_query_snapshot(query_binding)
+    snapshot = _snapshot(query_binding)
     rule_identity, rule = _rule_identity(query_binding)
     subject = verified.attempt.subject
     expected = {
@@ -288,16 +294,19 @@ def _verify_bybit_host_prepared_against_binding_impl(
     expected_session_identity: str,
     expected_public_key_sha256: str,
     verifier,
+    _snapshot=_exact_query_snapshot,
+    _pin_text=_require_pin_text,
+    _subject_check=_require_host_subject_matches,
 ) -> VerifiedHostPreparedAttestation:
-    snapshot = _exact_query_snapshot(query_binding)
+    snapshot = _snapshot(query_binding)
     try:
         verified = verifier(
             envelope,
-            expected_session_identity=_require_pin_text(
+            expected_session_identity=_pin_text(
                 expected_session_identity,
                 name="expected_session_identity",
             ),
-            expected_public_key_sha256=_require_pin_text(
+            expected_public_key_sha256=_pin_text(
                 expected_public_key_sha256,
                 name="expected_public_key_sha256",
             ),
@@ -307,7 +316,7 @@ def _verify_bybit_host_prepared_against_binding_impl(
         raise ProviderOriginHostBridgeError(
             "Host Prepared attestation is not independently verified"
         ) from error
-    _require_host_subject_matches(
+    _subject_check(
         verified,
         query_binding=query_binding,
         pins=pins,
@@ -315,7 +324,10 @@ def _verify_bybit_host_prepared_against_binding_impl(
     return verified
 
 
-def _install_prepared_bridge(verifier):
+def _install_prepared_bridge(
+    verifier,
+    implementation=_verify_bybit_host_prepared_against_binding_impl,
+):
     def verify_bybit_host_prepared_against_binding(
         envelope: object,
         *,
@@ -324,7 +336,7 @@ def _install_prepared_bridge(verifier):
         expected_session_identity: str,
         expected_public_key_sha256: str,
     ) -> VerifiedHostPreparedAttestation:
-        return _verify_bybit_host_prepared_against_binding_impl(
+        return implementation(
             envelope,
             query_binding=query_binding,
             pins=pins,
@@ -376,13 +388,15 @@ def _require_durable_events_match_verified_host(
     *,
     query_binding: AuthenticatedReadQueryBinding,
     store: JournalStore,
+    _verified_type=VerifiedHostObservedAttestation,
     _require_store=require_exact_journal_store_authority,
     _load=_load_origin_events,
     _event_check=_require_origin_event,
     _snapshot_check=_require_snapshot,
+    _journal_time_key=_host_key_from_journal_utc,
     _host_time_key=_host_utc_key,
 ) -> None:
-    if type(verified) is not VerifiedHostObservedAttestation:
+    if type(verified) is not _verified_type:
         raise ProviderOriginHostBridgeError(
             "Host Observed verification result is non-canonical"
         )
@@ -440,12 +454,12 @@ def _require_durable_events_match_verified_host(
         )
 
     if (
-        _host_key_from_journal_utc(prepared.get("committed_at"))
+        _journal_time_key(prepared.get("committed_at"))
         != _host_time_key(
             prepared_receipt.committed_at_utc,
             name="durable Prepared committed_at_utc",
         )
-        or _host_key_from_journal_utc(observed.get("committed_at"))
+        or _journal_time_key(observed.get("committed_at"))
         != _host_time_key(
             observed_receipt.committed_at_utc,
             name="durable Observed committed_at_utc",
@@ -467,7 +481,7 @@ def _require_durable_events_match_verified_host(
         or observed_payload.get("query_digest") != subject.query_digest
         or observed_payload.get("http_status") != verified.receipt.http_status
         or observed_payload.get("response_sha256") != verified.receipt.response_sha256
-        or _host_key_from_journal_utc(observed_payload.get("observed_at"))
+        or _journal_time_key(observed_payload.get("observed_at"))
         != _host_time_key(
             verified.receipt.observed_at_utc,
             name="provider observed_at_utc",
@@ -503,17 +517,22 @@ def _verify_bybit_host_observed_against_journal_impl(
     expected_session_identity: str,
     expected_public_key_sha256: str,
     verify_observed,
+    _snapshot=_exact_query_snapshot,
+    _journal_identity=canonical_provider_origin_journal_identity,
+    _pin_text=_require_pin_text,
+    _subject_check=_require_host_subject_matches,
+    _durable_check=_require_durable_events_match_verified_host,
 ) -> VerifiedHostObservedAttestation:
-    snapshot = _exact_query_snapshot(query_binding)
-    journal_identity = canonical_provider_origin_journal_identity(store)
+    snapshot = _snapshot(query_binding)
+    journal_identity = _journal_identity(store)
     try:
         verified = verify_observed(
             envelope,
-            expected_session_identity=_require_pin_text(
+            expected_session_identity=_pin_text(
                 expected_session_identity,
                 name="expected_session_identity",
             ),
-            expected_public_key_sha256=_require_pin_text(
+            expected_public_key_sha256=_pin_text(
                 expected_public_key_sha256,
                 name="expected_public_key_sha256",
             ),
@@ -524,12 +543,12 @@ def _verify_bybit_host_observed_against_journal_impl(
         raise ProviderOriginHostBridgeError(
             "Host Observed attestation is not independently verified"
         ) from error
-    _require_host_subject_matches(
+    _subject_check(
         verified.prepared,
         query_binding=query_binding,
         pins=pins,
     )
-    _require_durable_events_match_verified_host(
+    _durable_check(
         verified,
         query_binding=query_binding,
         store=store,
@@ -537,7 +556,10 @@ def _verify_bybit_host_observed_against_journal_impl(
     return verified
 
 
-def _install_observed_bridge(verifier):
+def _install_observed_bridge(
+    verifier,
+    implementation=_verify_bybit_host_observed_against_journal_impl,
+):
     def verify_bybit_host_observed_against_canonical_journal(
         envelope: object,
         *,
@@ -547,7 +569,7 @@ def _install_observed_bridge(verifier):
         expected_session_identity: str,
         expected_public_key_sha256: str,
     ) -> VerifiedHostObservedAttestation:
-        return _verify_bybit_host_observed_against_journal_impl(
+        return implementation(
             envelope,
             query_binding=query_binding,
             store=store,

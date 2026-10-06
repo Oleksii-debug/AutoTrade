@@ -804,16 +804,18 @@ class DurableOptionLifecycleAuthority:
     ) -> None:
         if type(store) is not JournalStore:
             raise TypeError("store must be exact JournalStore")
-        if not isinstance(registry, InstrumentRegistry):
-            raise TypeError("registry must be InstrumentRegistry")
+        if type(registry) is not InstrumentRegistry:
+            raise TypeError("registry must be exact InstrumentRegistry")
         if type(economic_book) is not DurableProviderEconomicBook:
             raise TypeError("economic_book must be exact DurableProviderEconomicBook")
         if economic_book.store is not store:
             raise ValueError("lifecycle and economic authorities must share one JournalStore")
         if not callable(evidence_resolver):
             raise TypeError("evidence_resolver must be callable")
-        if not isinstance(lifecycle_endpoints, frozenset) or not lifecycle_endpoints:
-            raise TypeError("lifecycle_endpoints must be a non-empty frozenset")
+        if type(lifecycle_endpoints) is not frozenset or not lifecycle_endpoints:
+            raise TypeError("lifecycle_endpoints must be an exact non-empty frozenset")
+        if any(type(endpoint) is not str for endpoint in lifecycle_endpoints):
+            raise TypeError("lifecycle_endpoints must contain exact strings")
         endpoints = frozenset(
             _text(endpoint, "lifecycle endpoint")
             for endpoint in lifecycle_endpoints
@@ -822,6 +824,8 @@ class DurableOptionLifecycleAuthority:
             raise OptionLifecycleError(
                 "lifecycle endpoints must be canonical provider-relative paths"
             )
+        if type(permission_scope) is not str:
+            raise TypeError("permission_scope must be exact str")
         scope = _text(permission_scope, "permission_scope")
         scoped_provider_environment = _provider_environment(provider_environment)
         self.store = store

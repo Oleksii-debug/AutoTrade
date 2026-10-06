@@ -215,13 +215,11 @@ class MarketNormalizationTests(unittest.TestCase):
     def test_funding_payload_rejects_custom_timezone_without_callbacks(self):
         hostile = CallbackTimezone()
         next_funding = datetime(2026, 9, 24, 17, tzinfo=hostile)
-        normalizer = MarketNormalizer(registry())
-        update = raw(
-            "FUNDING",
-            {"rate": "0.0001", "next_funding_at": next_funding},
-        )
         with self.assertRaisesRegex(MarketDataError, "built-in timezone"):
-            normalizer.normalize(update)
+            raw(
+                "FUNDING",
+                {"rate": "0.0001", "next_funding_at": next_funding},
+            )
         self.assertEqual(hostile.calls, 0)
 
     def test_builtin_fixed_offset_timezone_remains_supported(self):

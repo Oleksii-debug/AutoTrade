@@ -181,6 +181,38 @@ class AccessibleStatusTests(unittest.TestCase):
         self.assertNotIn("Instrument: SIM", text)
         self.assertIn("Economic edge: unproven", text)
 
+    def test_explicit_unknown_state_format_fails_closed_before_financial_details(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "future_journal",
+                "symbol": "SIM",
+                "initial_cash": "999999",
+                "cash": "999999",
+                "position": "999",
+                "fills": {},
+            }
+        )
+        self.assertIn("System state: Corrupt or unreadable state", text)
+        self.assertIn("Replay verification: unavailable", text)
+        self.assertNotIn("Instrument: SIM", text)
+        self.assertNotIn("Initial capital: 999999", text)
+        self.assertNotIn("Position (shares): 999", text)
+        self.assertIn("Economic edge: unproven", text)
+
+    def test_absent_state_format_preserves_legacy_status_compatibility(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+            }
+        )
+        self.assertIn("System state: Running", text)
+        self.assertIn("Instrument: SIM", text)
+        self.assertIn("Initial capital: 1000", text)
+
     def test_hostile_enum_subclasses_are_rejected_before_equality_callbacks(self):
         class TrapEnum(str):
             def __eq__(self, other):

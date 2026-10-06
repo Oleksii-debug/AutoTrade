@@ -75,6 +75,48 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 [],
             )
 
+    def test_observed_at_rejects_tzinfo_subclass_before_callback_or_observed_event(self):
+        query = authenticated_read_binding()
+        hostile_tz = _HostileTimezone()
+        hostile_time = datetime(
+            READ_NOW.year,
+            READ_NOW.month,
+            READ_NOW.day,
+            READ_NOW.hour,
+            READ_NOW.minute,
+            READ_NOW.second + 1,
+            READ_NOW.microsecond,
+            tzinfo=hostile_tz,
+        )
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            journal = ProviderOriginJournal(store)
+            attempt_id = journal.prepare(
+                query,
+                transport_identity="UrllibJsonWireClient:v1",
+                network_policy_identity="sha256:" + "d" * 64,
+                recorded_at=READ_NOW,
+            )
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "exact datetime.timezone tzinfo",
+            ):
+                journal._record_test_injected_response(
+                    attempt_id,
+                    query,
+                    http_status=200,
+                    response_bytes=b'{"ok":true}',
+                    observed_at=hostile_time,
+                )
+            self.assertEqual(hostile_tz.calls, 0)
+            events = JournalStore.load_events(
+                store,
+                "authenticated_provider_read",
+                attempt_id,
+            )
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["event_type"], "AuthenticatedReadPrepared")
+
     def test_prepare_accepts_exact_fixed_offset_timezone_and_normalizes_to_utc(self):
         query = authenticated_read_binding()
         fixed = READ_NOW.astimezone(timezone(timedelta(hours=2)))

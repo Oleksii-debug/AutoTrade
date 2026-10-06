@@ -771,6 +771,14 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(projected["response_bytes"], raw)
             self.assertEqual(projected["terminal_state"], "SENT")
 
+            with patch.object(
+                SubmissionResponseBinding,
+                "terminal_state",
+                property(lambda _binding: "UNKNOWN"),
+            ):
+                descriptor_spoofed = submission_response_binding_projection(binding)
+                self.assertEqual(descriptor_spoofed["terminal_state"], "SENT")
+
             forged = object.__new__(SubmissionResponseBinding)
             for field_name, field_value in vars(binding).items():
                 object.__setattr__(forged, field_name, field_value)

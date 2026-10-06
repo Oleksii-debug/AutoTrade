@@ -17,7 +17,7 @@ import json
 from typing import Literal
 
 from .exact_decimal import as_fraction, bounded_fraction, exact_multiply, is_exact_decimal_multiple, round_fraction_to_quantum
-from .instruments import InstrumentVersion
+from .instruments import InstrumentRegistry, InstrumentVersion
 
 
 class ExecutionRealismError(ValueError):

@@ -31,6 +31,7 @@ from .provider_core import (
     ProviderSubmissionObservation,
     Surface,
     _decode_exact_json,
+    provider_response_observation_require_scope,
     provider_submission_observation_projection,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
@@ -1222,14 +1223,15 @@ def parse_position_executions(
 
     if not isinstance(observation, ProviderResponseObservation):
         raise TypeError("observation must be ProviderResponseObservation")
-    observation.require_scope(
+    projection = provider_response_observation_require_scope(
+        observation,
         provider_id="KRAKEN",
         surface=Surface.AUTHENTICATED_READ,
         endpoint=KRAKEN_FUTURES_ENDPOINTS["POSITION_HISTORY"],
     )
-    response = observation.payload
-    account_id = observation.account_id
-    environment = observation.environment
+    response = projection["payload"]
+    account_id = projection["account_id"]
+    environment = projection["environment"]
     envelope = _mapping(response, name="response")
     elements = envelope.get("elements")
     if not isinstance(elements, (list, tuple)):

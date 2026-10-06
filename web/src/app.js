@@ -29,14 +29,16 @@
   });
 
   const TABLE_TOOLS = Object.freeze([
-    Object.freeze({bodyId: "permissions-body", filterId: "permissions-filter", copyId: "permissions-copy", statusId: "permissions-filter-status", label: "permission and capability"}),
-    Object.freeze({bodyId: "strategy-body", filterId: "strategy-filter", copyId: "strategy-copy", statusId: "strategy-filter-status", label: "strategy and decision"}),
-    Object.freeze({bodyId: "portfolio-body", filterId: "portfolio-filter", copyId: "portfolio-copy", statusId: "portfolio-filter-status", label: "portfolio"}),
-    Object.freeze({bodyId: "operations-body", filterId: "operations-filter", copyId: "operations-copy", statusId: "operations-filter-status", label: "current host operation"}),
-    Object.freeze({bodyId: "risk-body", filterId: "risk-filter", copyId: "risk-copy", statusId: "risk-filter-status", label: "risk and authority"}),
-    Object.freeze({bodyId: "jobs-body", filterId: "jobs-filter", copyId: "jobs-copy", statusId: "jobs-filter-status", label: "research and replay jobs"}),
-    Object.freeze({bodyId: "event-history-body", filterId: "event-history-filter", copyId: "event-history-copy", statusId: "event-history-filter-status", label: "received host events"})
+    Object.freeze({bodyId: "permissions-body", filterId: "permissions-filter", copyId: "permissions-copy", sortId: "permissions-sort", previousId: "permissions-previous", nextId: "permissions-next", statusId: "permissions-filter-status", label: "permission and capability"}),
+    Object.freeze({bodyId: "strategy-body", filterId: "strategy-filter", copyId: "strategy-copy", sortId: "strategy-sort", previousId: "strategy-previous", nextId: "strategy-next", statusId: "strategy-filter-status", label: "strategy and decision"}),
+    Object.freeze({bodyId: "portfolio-body", filterId: "portfolio-filter", copyId: "portfolio-copy", sortId: "portfolio-sort", previousId: "portfolio-previous", nextId: "portfolio-next", statusId: "portfolio-filter-status", label: "portfolio"}),
+    Object.freeze({bodyId: "operations-body", filterId: "operations-filter", copyId: "operations-copy", sortId: "operations-sort", previousId: "operations-previous", nextId: "operations-next", statusId: "operations-filter-status", label: "current host operation"}),
+    Object.freeze({bodyId: "risk-body", filterId: "risk-filter", copyId: "risk-copy", sortId: "risk-sort", previousId: "risk-previous", nextId: "risk-next", statusId: "risk-filter-status", label: "risk and authority"}),
+    Object.freeze({bodyId: "jobs-body", filterId: "jobs-filter", copyId: "jobs-copy", sortId: "jobs-sort", previousId: "jobs-previous", nextId: "jobs-next", statusId: "jobs-filter-status", label: "research and replay jobs"}),
+    Object.freeze({bodyId: "event-history-body", filterId: "event-history-filter", copyId: "event-history-copy", sortId: "event-history-sort", previousId: "event-history-previous", nextId: "event-history-next", statusId: "event-history-filter-status", label: "received host events"})
   ]);
+  const TABLE_PAGE_SIZE = 25;
+  const tableViewState = new Map();
 
   const state = {
     cursor: 0n,
@@ -55,6 +57,7 @@
     pendingAnnouncements: [],
     urgentAnnouncementTimer: null,
     pendingUrgentAnnouncements: [],
+    announcementGeneration: 0,
     restoreFocusId: null,
     pendingCommand: null,
     pendingCommandHostId: null
@@ -84,6 +87,27 @@
     "jobs-copy",
     "event-history-filter",
     "event-history-copy",
+    "permissions-sort",
+    "permissions-previous",
+    "permissions-next",
+    "strategy-sort",
+    "strategy-previous",
+    "strategy-next",
+    "portfolio-sort",
+    "portfolio-previous",
+    "portfolio-next",
+    "operations-sort",
+    "operations-previous",
+    "operations-next",
+    "risk-sort",
+    "risk-previous",
+    "risk-next",
+    "jobs-sort",
+    "jobs-previous",
+    "jobs-next",
+    "event-history-sort",
+    "event-history-previous",
+    "event-history-next",
     "host-action",
     "authority-policy-id",
     "authority-instrument-id",
@@ -608,8 +632,21 @@
       body: JSON.stringify(payload)
     });
     if (response.status !== 200 && response.status !== 409) {
+      let errorBody = null;
+      try {
+        const contentType = response.headers.get("Content-Type") || "";
+        if (contentType.includes("application/json")) {
+          errorBody = await response.json();
+        }
+      } catch {
+        errorBody = null;
+      }
       const error = new Error("Host command failed with status " + response.status);
       error.status = response.status;
+      if (errorBody && typeof errorBody === "object" && !Array.isArray(errorBody) &&
+          typeof errorBody.error === "string") {
+        error.code = errorBody.error;
+      }
       throw error;
     }
     return parseCommandResult(await response.json(), payload.command_id);
@@ -647,7 +684,6 @@
     }
     return String(value);
   }
-
   function renderCommandValidationDetails(fieldErrors, stateName) {
     const list = byId("command-validation-list");
     if (!list) return;
@@ -720,9 +756,140 @@
     return rows;
   }
 
-  function appendProjectionRow(body, label, value) {
+  function selectedCellEndpoint(body, node, offset) {
+    const element = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+    const cell = element && element.closest ? element.closest("th, td") : null;
+    const row = cell && cell.parentElement;
+    if (!cell || !row || !body.contains(row) || !row.dataset.selectionKey) return null;
+    const cellIndex = [...row.cells].indexOf(cell);
+    if (cellIndex < 0) return null;
+    const prefix = document.createRange();
+    prefix.selectNodeContents(cell);
+    try {
+      prefix.setEnd(node, offset);
+    } catch {
+      return null;
+    }
+    return Object.freeze({
+      rowKey: row.dataset.selectionKey,
+      rowText: row.dataset.selectionExact === "true" ? row.textContent : null,
+      cellIndex,
+      textOffset: prefix.toString().length
+    });
+  }
+
+  function captureTableSelection(body) {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
+    const anchor = selectedCellEndpoint(body, selection.anchorNode, selection.anchorOffset);
+    const focus = selectedCellEndpoint(body, selection.focusNode, selection.focusOffset);
+    return anchor !== null && focus !== null ? Object.freeze({anchor, focus}) : null;
+  }
+
+  function textPointAtOffset(cell, requestedOffset) {
+    let remaining = Math.max(0, requestedOffset);
+    const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    let last = null;
+    while (node !== null) {
+      last = node;
+      if (remaining <= node.data.length) {
+        return Object.freeze({node, offset: remaining});
+      }
+      remaining -= node.data.length;
+      node = walker.nextNode();
+    }
+    return last === null
+      ? null
+      : Object.freeze({node: last, offset: last.data.length});
+  }
+
+  function rowForSelectionEndpoint(body, endpoint) {
+    return [...body.rows].find(
+      (candidate) => candidate.dataset.selectionKey === endpoint.rowKey &&
+        (endpoint.rowText === null || candidate.textContent === endpoint.rowText)) || null;
+  }
+
+  function revealBookmarkedTablePage(body, bookmark) {
+    if (bookmark === null) return;
+    const tool = toolForBody(body.id);
+    const filter = tool === null ? null : byId(tool.filterId);
+    if (tool === null || !filter) return;
+
+    const rows = filterableRows(body);
+    const anchorRow = rowForSelectionEndpoint(body, bookmark.anchor);
+    const focusRow = rowForSelectionEndpoint(body, bookmark.focus);
+    if (anchorRow === null || focusRow === null) return;
+
+    ensureTableHostOrder(rows);
+    const query = normalizedTableQuery(filter.value);
+    const ordered = orderedTableRows(tool, rows, tableSortMode(tool));
+    const matching = ordered.filter(
+      (row) => query === "" || tableSearchText(row).includes(query));
+    const anchorIndex = matching.indexOf(anchorRow);
+    const focusIndex = matching.indexOf(focusRow);
+    if (anchorIndex < 0 || focusIndex < 0) return;
+
+    const anchorPage = Math.floor(anchorIndex / TABLE_PAGE_SIZE);
+    const focusPage = Math.floor(focusIndex / TABLE_PAGE_SIZE);
+    if (anchorPage !== focusPage) return;
+
+    const view = tableViewFor(tool);
+    if (view.page === anchorPage) return;
+    view.page = anchorPage;
+    applyTableFilter(tool, {announce: false});
+  }
+
+  function restoreTableSelection(body, bookmark) {
+    if (bookmark === null) return;
+    const findPoint = (endpoint) => {
+      const row = rowForSelectionEndpoint(body, endpoint);
+      if (!row || row.hidden) return null;
+      const cell = row.cells[endpoint.cellIndex];
+      return cell ? textPointAtOffset(cell, endpoint.textOffset) : null;
+    };
+    const anchor = findPoint(bookmark.anchor);
+    const focus = findPoint(bookmark.focus);
+    if (anchor === null || focus === null) return;
+    const selection = window.getSelection();
+    if (!selection) return;
+    selection.removeAllRanges();
+    if (typeof selection.setBaseAndExtent === "function") {
+      try {
+        selection.setBaseAndExtent(
+          anchor.node, anchor.offset, focus.node, focus.offset);
+      } catch {
+        return;
+      }
+      return;
+    }
+    const range = document.createRange();
+    try {
+      range.setStart(anchor.node, anchor.offset);
+      range.setEnd(focus.node, focus.offset);
+      if (range.collapsed) {
+        range.setStart(focus.node, focus.offset);
+        range.setEnd(anchor.node, anchor.offset);
+      }
+    } catch {
+      return;
+    }
+    selection.addRange(range);
+  }
+
+  function preserveTableSelection(body, enabled, render) {
+    const bookmark = enabled ? captureTableSelection(body) : null;
+    render();
+    revealBookmarkedTablePage(body, bookmark);
+    restoreTableSelection(body, bookmark);
+  }
+
+  
+function appendProjectionRow(body, label, value) {
     const row = document.createElement("tr");
     row.dataset.filterableRow = "true";
+    row.dataset.tableHostOrder = String(filterableRows(body).length);
+    row.dataset.selectionKey = "projection:" + label;
     const header = document.createElement("th");
     header.scope = "row";
     header.textContent = label;
@@ -730,77 +897,89 @@
     cell.textContent = value;
     row.append(header, cell);
     body.appendChild(row);
+    return row;
   }
 
-  function renderProjection(bodyId, record, emptyMessage) {
+  function renderProjection(bodyId, record, emptyMessage, {preserveSelection = true} = {}) {
     const body = byId(bodyId);
     if (!body) return;
-    body.replaceChildren();
-    const entries = flattenProjectionRows(record);
-    if (entries.length === 0) {
-      const row = document.createElement("tr");
-      const cell = document.createElement("td");
-      cell.colSpan = 2;
-      cell.textContent = emptyMessage;
-      row.appendChild(cell);
-      body.appendChild(row);
+    preserveTableSelection(body, preserveSelection, () => {
+      body.replaceChildren();
+      const entries = flattenProjectionRows(record);
+      if (entries.length === 0) {
+        const row = document.createElement("tr");
+        row.dataset.selectionKey = "empty";
+        const cell = document.createElement("td");
+        cell.colSpan = 2;
+        cell.textContent = emptyMessage;
+        row.appendChild(cell);
+        body.appendChild(row);
+      } else {
+        for (const [key, value] of entries) {
+          appendProjectionRow(body, key, value);
+        }
+      }
       reapplyTableFilter(bodyId);
-      return;
-    }
-    for (const [key, value] of entries) {
-      appendProjectionRow(body, key, value);
-    }
-    reapplyTableFilter(bodyId);
+    });
   }
-
-  function renderPermissionSummary(permissionSummary) {
+  function renderPermissionSummary(permissionSummary, {preserveSelection = true} = {}) {
     const body = byId("permissions-body");
     if (!body) return;
-    body.replaceChildren();
-    appendProjectionRow(body, "Actor", permissionSummary.actor);
-    appendProjectionRow(body, "Session", permissionSummary.session);
-    appendProjectionRow(body, "Role", permissionSummary.role);
-    if (permissionSummary.capabilities.length === 0) {
-      appendProjectionRow(
-        body, "Capabilities", "No capabilities reported by the host snapshot.");
+    preserveTableSelection(body, preserveSelection, () => {
+      body.replaceChildren();
+      appendProjectionRow(body, "Actor", permissionSummary.actor);
+      appendProjectionRow(body, "Session", permissionSummary.session);
+      appendProjectionRow(body, "Role", permissionSummary.role);
+      if (permissionSummary.capabilities.length === 0) {
+        appendProjectionRow(
+          body, "Capabilities", "No capabilities reported by the host snapshot.");
+      } else {
+        permissionSummary.capabilities.forEach((capability, index) => {
+          const row = appendProjectionRow(
+            body, "Capability " + String(index + 1), capability);
+          // Capability position is not durable identity; do not retarget a
+          // selection if different evidence later occupies the same position.
+          row.dataset.selectionExact = "true";
+        });
+      }
       reapplyTableFilter("permissions-body");
-      return;
-    }
-    permissionSummary.capabilities.forEach((capability, index) => {
-      appendProjectionRow(
-        body, "Capability " + String(index + 1), capability);
     });
-    reapplyTableFilter("permissions-body");
   }
-
-  function renderJobs(jobs) {
+  function renderJobs(jobs, {preserveSelection = true} = {}) {
     const body = byId("jobs-body");
     if (!body) return;
-    body.replaceChildren();
-    if (jobs.length === 0) {
-      const row = document.createElement("tr");
-      const cell = document.createElement("td");
-      cell.colSpan = 2;
-      cell.textContent = "No background jobs reported by the host snapshot.";
-      row.appendChild(cell);
-      body.appendChild(row);
+    preserveTableSelection(body, preserveSelection, () => {
+      body.replaceChildren();
+      if (jobs.length === 0) {
+        const row = document.createElement("tr");
+        row.dataset.selectionKey = "empty";
+        const cell = document.createElement("td");
+        cell.colSpan = 2;
+        cell.textContent = "No background jobs reported by the host snapshot.";
+        row.appendChild(cell);
+        body.appendChild(row);
+      } else {
+        jobs.forEach((job, index) => {
+          const row = document.createElement("tr");
+          row.dataset.filterableRow = "true";
+          row.dataset.tableHostOrder = String(index);
+          row.dataset.selectionKey = "job:" + String(index + 1);
+          // UiSnapshot.jobs has no required durable job identifier. Position
+          // alone is not identity, so preserve a selected row only while its
+          // complete rendered evidence remains unchanged.
+          row.dataset.selectionExact = "true";
+          const header = document.createElement("th");
+          header.scope = "row";
+          header.textContent = "Job " + String(index + 1);
+          const cell = document.createElement("td");
+          cell.textContent = projectionText(job);
+          row.append(header, cell);
+          body.appendChild(row);
+        });
+      }
       reapplyTableFilter("jobs-body");
-      return;
-    }
-    jobs.forEach((job, index) => {
-      const row = document.createElement("tr");
-      row.dataset.filterableRow = "true";
-      const header = document.createElement("th");
-      header.scope = "row";
-      header.textContent = "Job " + String(index + 1);
-      const cell = document.createElement("td");
-      cell.textContent = projectionText(job);
-      row.append(header, cell);
-      body.appendChild(row);
     });
-    reapplyTableFilter("jobs-body");
   }
-
   function normalizedTableQuery(value) {
     return String(value ?? "").trim().toLowerCase();
   }
@@ -820,26 +999,102 @@
     return [...body.querySelectorAll('tr[data-filterable-row="true"]')];
   }
 
-  function applyTableFilter(tool, {announce = true} = {}) {
+  function tableViewFor(tool) {
+    let view = tableViewState.get(tool.bodyId);
+    if (view === undefined) {
+      view = {page: 0};
+      tableViewState.set(tool.bodyId, view);
+    }
+    return view;
+  }
+
+  function tableSortMode(tool) {
+    const control = byId(tool.sortId);
+    const value = control ? control.value : "host";
+    return ["host", "text-asc", "text-desc"].includes(value) ? value : "host";
+  }
+
+  function ensureTableHostOrder(rows) {
+    rows.forEach((row, index) => {
+      if (row.dataset.tableHostOrder === undefined) {
+        row.dataset.tableHostOrder = String(index);
+      }
+    });
+  }
+
+  function compareHostOrder(tool, left, right) {
+    if (tool.bodyId === "event-history-body") {
+      const a = BigInt(left.dataset.tableHostOrder);
+      const b = BigInt(right.dataset.tableHostOrder);
+      return a === b ? 0 : (a > b ? -1 : 1);
+    }
+    return Number(left.dataset.tableHostOrder) - Number(right.dataset.tableHostOrder);
+  }
+
+  function orderedTableRows(tool, rows, mode) {
+    const ordered = [...rows];
+    ordered.sort((left, right) => {
+      if (mode === "host") return compareHostOrder(tool, left, right);
+      const a = tableSearchText(left);
+      const b = tableSearchText(right);
+      const primary = a < b ? -1 : (a > b ? 1 : 0);
+      if (primary !== 0) return mode === "text-desc" ? -primary : primary;
+      return compareHostOrder(tool, left, right);
+    });
+    return ordered;
+  }
+
+  function tableSortDescription(mode) {
+    if (mode === "text-asc") return "rendered text ascending";
+    if (mode === "text-desc") return "rendered text descending";
+    return "host order";
+  }
+
+  function applyTableFilter(tool, {announce = true, resetPage = false} = {}) {
     const body = byId(tool.bodyId);
     const filter = byId(tool.filterId);
-    if (!body || !filter) return;
+    const previous = byId(tool.previousId);
+    const next = byId(tool.nextId);
+    if (!body || !filter || !previous || !next) return;
     const rows = filterableRows(body);
     const query = normalizedTableQuery(filter.value);
-    let visible = 0;
-    for (const row of rows) {
+    const view = tableViewFor(tool);
+    if (resetPage) view.page = 0;
+    ensureTableHostOrder(rows);
+    const mode = tableSortMode(tool);
+    const ordered = orderedTableRows(tool, rows, mode);
+    for (const row of ordered) body.appendChild(row);
+
+    const matching = [];
+    for (const row of ordered) {
       const matches = query === "" || tableSearchText(row).includes(query);
       row.hidden = !matches;
-      if (matches) visible += 1;
+      if (matches) matching.push(row);
     }
+
+    const pageCount = Math.max(1, Math.ceil(matching.length / TABLE_PAGE_SIZE));
+    view.page = Math.min(Math.max(0, view.page), pageCount - 1);
+    const pageStart = view.page * TABLE_PAGE_SIZE;
+    const pageEnd = Math.min(pageStart + TABLE_PAGE_SIZE, matching.length);
+    matching.forEach((row, index) => {
+      if (index < pageStart || index >= pageEnd) row.hidden = true;
+    });
+    previous.disabled = matching.length === 0 || view.page === 0;
+    next.disabled = matching.length === 0 || view.page >= pageCount - 1;
+
     let statusMessage;
     if (rows.length === 0) {
       statusMessage = "No host rows are available to filter.";
-    } else if (query === "") {
-      statusMessage = String(rows.length) + " rows shown.";
+    } else if (matching.length === 0) {
+      statusMessage = "0 of " + String(rows.length) +
+        " rows match the current filter. Sort: " + tableSortDescription(mode) + ".";
     } else {
-      statusMessage = String(visible) + " of " + String(rows.length) +
-        " rows match the current filter.";
+      statusMessage =
+        "Rows " + String(pageStart + 1) + "-" + String(pageEnd) +
+        " of " + String(matching.length) +
+        (query === "" ? " rows" : " matching rows") +
+        " shown. Page " + String(view.page + 1) + " of " + String(pageCount) +
+        ". Sort: " + tableSortDescription(mode) + ".";
     }
     text(tool.statusId, statusMessage);
     if (announce) queuePoliteAnnouncement(statusMessage);
@@ -853,10 +1108,13 @@
   function resetTableFiltersForScopeChange() {
     for (const tool of TABLE_TOOLS) {
       const filter = byId(tool.filterId);
+      const sort = byId(tool.sortId);
       if (filter) filter.value = "";
-      text(tool.statusId, "Filter cleared for new account/environment scope.");
+      if (sort) sort.value = "host";
+      tableViewFor(tool).page = 0;
+      text(tool.statusId, "Table view reset for new account/environment scope.");
     }
-    queuePoliteAnnouncement("Table filters cleared for new account/environment scope.");
+    queuePoliteAnnouncement("Table filters, sort order, and pages reset for new account/environment scope.");
   }
 
   function visibleTableRows(tool) {
@@ -867,6 +1125,15 @@
 
   function tabSeparatedRowText(row) {
     return [...row.cells]
+      .map((cell) => cell.textContent.replace(/\s+/g, " ").trim())
+      .join("\t");
+  }
+
+  function tabSeparatedTableHeaderText(tool) {
+    const body = byId(tool.bodyId);
+    const table = body ? body.closest("table") : null;
+    if (!table) return "";
+    return [...table.querySelectorAll("thead th")]
       .map((cell) => cell.textContent.replace(/\s+/g, " ").trim())
       .join("\t");
   }
@@ -886,19 +1153,18 @@
       queuePoliteAnnouncement(message);
       return;
     }
-    const payload = rows.map((row) => tabSeparatedRowText(row)).join("\n");
+    const rowPayload = rows.map((row) => tabSeparatedRowText(row));
+    const header = tabSeparatedTableHeaderText(tool);
+    const payload = (header === "" ? rowPayload : [header, ...rowPayload]).join("\n");
     try {
       await navigator.clipboard.writeText(payload);
-      if (scopeEpoch !== state.scopeEpoch) {
-        return;
-      }
-      const message = String(rows.length) + " visible " + tool.label + " rows copied.";
+      if (scopeEpoch !== state.scopeEpoch) return;
+      const message = String(rows.length) + " visible " + tool.label + " rows copied." +
+        (header === "" ? "" : " Column headings included.");
       text(tool.statusId, message);
       queuePoliteAnnouncement(message);
     } catch {
-      if (scopeEpoch !== state.scopeEpoch) {
-        return;
-      }
+      if (scopeEpoch !== state.scopeEpoch) return;
       const message = "Clipboard copy was not permitted. Use normal text selection and copy.";
       text(tool.statusId, message);
       queuePoliteAnnouncement(message);
@@ -909,8 +1175,24 @@
     for (const tool of TABLE_TOOLS) {
       const filter = byId(tool.filterId);
       const copy = byId(tool.copyId);
-      if (!filter || !copy) continue;
-      filter.addEventListener("input", () => applyTableFilter(tool));
+      const sort = byId(tool.sortId);
+      const previous = byId(tool.previousId);
+      const next = byId(tool.nextId);
+      if (!filter || !copy || !sort || !previous || !next) continue;
+      filter.addEventListener("input", () =>
+        applyTableFilter(tool, {resetPage: true}));
+      sort.addEventListener("change", () =>
+        applyTableFilter(tool, {resetPage: true}));
+      previous.addEventListener("click", () => {
+        const view = tableViewFor(tool);
+        view.page = Math.max(0, view.page - 1);
+        applyTableFilter(tool);
+      });
+      next.addEventListener("click", () => {
+        const view = tableViewFor(tool);
+        view.page += 1;
+        applyTableFilter(tool);
+      });
       copy.addEventListener("click", () => { void copyVisibleTableRows(tool); });
       applyTableFilter(tool, {announce: false});
     }
@@ -919,12 +1201,31 @@
   function announceLiveText(id, message) {
     const element = byId(id);
     if (!element) return;
-    // A repeated identical message must still produce a DOM change so screen
-    // readers can announce a second independent material event.
+    // Bind deferred speech to the evidence generation that scheduled it.
+    // A host/account/environment reset must never speak old-context text.
+    const generation = state.announcementGeneration;
     element.textContent = "";
     window.setTimeout(() => {
-      element.textContent = message;
+      if (generation === state.announcementGeneration) {
+        element.textContent = message;
+      }
     }, 0);
+  }
+
+  function discardQueuedAnnouncementsForEvidenceReset() {
+    state.announcementGeneration += 1;
+    if (state.announcementTimer !== null) {
+      window.clearTimeout(state.announcementTimer);
+      state.announcementTimer = null;
+    }
+    if (state.urgentAnnouncementTimer !== null) {
+      window.clearTimeout(state.urgentAnnouncementTimer);
+      state.urgentAnnouncementTimer = null;
+    }
+    state.pendingAnnouncements = [];
+    state.pendingUrgentAnnouncements = [];
+    text("polite-status", "");
+    text("urgent-status", "");
   }
 
   function queuePoliteAnnouncement(message) {
@@ -940,9 +1241,15 @@
     }, 750);
   }
 
-  function announce(message, urgent = false) {
+  function announce(message, urgent = false, historyKey = null) {
     if (!message) return;
     const history = byId("notification-history");
+    const normalizedHistoryKey = historyKey === null ? null : String(historyKey);
+    if (history && normalizedHistoryKey !== null &&
+        [...history.children].some(
+          (item) => item.dataset.notificationKey === normalizedHistoryKey)) {
+      return;
+    }
     if (history && history.children.length === 1 &&
         history.firstElementChild.textContent.startsWith("No material")) {
       history.replaceChildren();
@@ -950,6 +1257,9 @@
     if (history) {
       const item = document.createElement("li");
       item.textContent = message;
+      if (normalizedHistoryKey !== null) {
+        item.dataset.notificationKey = normalizedHistoryKey;
+      }
       history.prepend(item);
       while (history.children.length > 50) {
         history.lastElementChild.remove();
@@ -963,13 +1273,41 @@
         const pending = state.pendingUrgentAnnouncements;
         state.pendingUrgentAnnouncements = [];
         state.urgentAnnouncementTimer = null;
-        // Preserve every urgent event in the burst, including identical ones,
-        // while producing one stable assertive live-region mutation for NVDA.
         announceLiveText("urgent-status", pending.join(" "));
       }, 0);
       return;
     }
+    queuePoliteAnnouncement(message);
+  }
 
+  function invalidateSnapshotAuthority() {
+    state.snapshotReady = false;
+    state.sessionIdentity = null;
+    state.accountId = null;
+    state.environment = null;
+    setCommandAvailability(false);
+  }
+
+  function isSnapshotBusy(error) {
+    return error !== null && typeof error === "object" &&
+      error.status === 503 &&
+      error.code === "SNAPSHOT_BUSY" &&
+      error.retryable === true;
+  }
+
+  function isCommandAuthRejection(error) {
+    return error !== null && typeof error === "object" &&
+      error.status === 403 &&
+      error.code === "AUTHENTICATION_OR_AUTHORIZATION_FAILED";
+  }
+
+
+  function reportSnapshotBusy() {
+    invalidateSnapshotAuthority();
+    const message =
+      "Host snapshot is temporarily busy while durable state changes; waiting for one coherent snapshot. " +
+      "Commands remain blocked and displayed values may be stale.";
+    text("freshness", message);
     queuePoliteAnnouncement(message);
   }
 
@@ -985,16 +1323,31 @@
       ...options
     });
     if (!response.ok) {
+      let errorBody = null;
+      try {
+        const contentType = response.headers.get("Content-Type") || "";
+        if (contentType.includes("application/json")) {
+          errorBody = await response.json();
+        }
+      } catch {
+        errorBody = null;
+      }
       const error = new Error(`Host request failed with status ${response.status}`);
       error.status = response.status;
+      if (errorBody && typeof errorBody === "object" && !Array.isArray(errorBody)) {
+        if (typeof errorBody.error === "string") error.code = errorBody.error;
+        if (errorBody.retryable === true) error.retryable = true;
+      }
       throw error;
     }
     return response.json();
   }
 
-  function renderOperation(operation) {
+  
+function renderOperation(operation) {
     const body = byId("operations-body");
     if (!body) return;
+    const bookmark = captureTableSelection(body);
 
     let row = [...body.querySelectorAll("tr")].find(
       (item) => item.dataset.operationId === operation.operationId);
@@ -1005,6 +1358,7 @@
       }
       row = document.createElement("tr");
       row.dataset.operationId = operation.operationId;
+      row.dataset.tableHostOrder = String(filterableRows(body).length);
       const rowHeader = document.createElement("th");
       rowHeader.scope = "row";
       row.appendChild(rowHeader);
@@ -1015,6 +1369,8 @@
     }
 
     row.dataset.filterableRow = "true";
+    row.dataset.selectionKey = "operation:" + operation.operationId;
+    row.dataset.selectionExact = "true";
     row.children[0].textContent = operation.operationId;
     row.children[1].textContent = operation.phase;
     row.children[2].textContent = operation.updatedAt;
@@ -1022,6 +1378,8 @@
       ? operation.remainingUncertainty.join(", ")
       : "None reported";
     reapplyTableFilter("operations-body");
+    revealBookmarkedTablePage(body, bookmark);
+    restoreTableSelection(body, bookmark);
   }
 
   async function refreshOperation(operationId) {
@@ -1060,35 +1418,69 @@
   function renderHostEvent(event, cursor, stateVersion) {
     const body = byId("event-history-body");
     if (!body) return;
+    const bookmark = captureTableSelection(body);
     const kind = requiredText(
       event.kind ?? event.event_type,
       "event.kind");
     const payload = event.payload === undefined ? {} : event.payload;
+    const cursorText = cursor.toString();
+    const stateVersionText = stateVersion.toString();
+    const payloadText = projectionText(payload);
 
     if (body.children.length === 1 &&
         body.firstElementChild.dataset.hostEventCursor === undefined) {
       body.replaceChildren();
     }
 
-    const row = document.createElement("tr");
-    row.dataset.hostEventCursor = cursor.toString();
-    row.dataset.filterableRow = "true";
-    const rowHeader = document.createElement("th");
-    rowHeader.scope = "row";
-    row.appendChild(rowHeader);
-    for (let index = 1; index < 4; index += 1) {
-      row.appendChild(document.createElement("td"));
+    const matchingRows = [...body.querySelectorAll("tr")].filter(
+      (candidate) => candidate.dataset.hostEventCursor === cursorText);
+    if (matchingRows.length > 1) {
+      throw new Error("received host-event history contains a duplicate cursor");
     }
-    row.children[0].textContent = cursor.toString();
-    row.children[1].textContent = stateVersion.toString();
-    row.children[2].textContent = kind;
-    row.children[3].textContent = projectionText(payload);
-    body.prepend(row);
+    let row = matchingRows.length === 1 ? matchingRows[0] : null;
+    const expectedCells = [cursorText, stateVersionText, kind, payloadText];
+    if (row !== null) {
+      const renderedCells = [...row.cells].map((cell) => cell.textContent);
+      if (
+        row.dataset.tableHostOrder !== cursorText ||
+        row.dataset.selectionKey !== "event:" + cursorText ||
+        row.dataset.selectionExact !== "true" ||
+        renderedCells.length !== expectedCells.length ||
+        renderedCells.some((value, index) => value !== expectedCells[index])
+      ) {
+        throw new Error("host event cursor was reused with conflicting rendered content");
+      }
+    } else {
+      row = document.createElement("tr");
+      row.dataset.hostEventCursor = cursorText;
+      row.dataset.filterableRow = "true";
+      row.dataset.tableHostOrder = cursorText;
+      row.dataset.selectionKey = "event:" + cursorText;
+      row.dataset.selectionExact = "true";
+      const rowHeader = document.createElement("th");
+      rowHeader.scope = "row";
+      row.appendChild(rowHeader);
+      for (let index = 1; index < 4; index += 1) {
+        row.appendChild(document.createElement("td"));
+      }
+      row.children[0].textContent = cursorText;
+      row.children[1].textContent = stateVersionText;
+      row.children[2].textContent = kind;
+      row.children[3].textContent = payloadText;
+      body.prepend(row);
+    }
 
-    while (body.children.length > 100) {
-      body.lastElementChild.remove();
-    }
+    const retained = filterableRows(body)
+      .filter((candidate) => candidate.dataset.hostEventCursor !== undefined)
+      .sort((left, right) => {
+        const a = BigInt(left.dataset.hostEventCursor);
+        const b = BigInt(right.dataset.hostEventCursor);
+        return a === b ? 0 : (a > b ? -1 : 1);
+      });
+    for (const expired of retained.slice(100)) expired.remove();
     reapplyTableFilter("event-history-body");
+    revealBookmarkedTablePage(body, bookmark);
+    restoreTableSelection(body, bookmark);
   }
 
   function resetNotificationsForScope(
@@ -1193,6 +1585,7 @@
       state.scopeEpoch += 1;
       state.cursor = 0n;
       state.version = 0n;
+      discardQueuedAnnouncementsForEvidenceReset();
       resetNotificationsForScope();
       resetTableFiltersForScopeChange();
       resetOperationsForScope();
@@ -1211,6 +1604,7 @@
         "Canonical snapshot advanced from event cursor " + priorCursor.toString() +
         " to " + parsed.cursor.toString() +
         " before those host events were received by this page.";
+      discardQueuedAnnouncementsForEvidenceReset();
       resetNotificationsForScope(
         "Notification history was cleared because " + gap);
       resetOperationsForScope(
@@ -1244,20 +1638,23 @@
         ". Environment: " + parsed.environment + ".");
     text("freshness", freshnessText(parsed));
     text("server-time", parsed.serverTime);
-    renderPermissionSummary(parsed.permissionSummary);
+    renderPermissionSummary(parsed.permissionSummary, {preserveSelection: !displayContextChanged});
     renderProjection(
       "portfolio-body",
       parsed.portfolio,
-      "No portfolio projection reported by the host snapshot.");
+      "No portfolio projection reported by the host snapshot.",
+      {preserveSelection: !displayContextChanged});
     renderProjection(
       "risk-body",
       parsed.risk,
-      "No risk projection reported by the host snapshot.");
+      "No risk projection reported by the host snapshot.",
+      {preserveSelection: !displayContextChanged});
     renderProjection(
       "strategy-body",
       parsed.strategy,
-      "No strategy or decision projection reported by the host snapshot.");
-    renderJobs(parsed.jobs);
+      "No strategy or decision projection reported by the host snapshot.",
+      {preserveSelection: !displayContextChanged});
+    renderJobs(parsed.jobs, {preserveSelection: !displayContextChanged});
     state.renderedHostId = parsed.hostId;
     state.renderedAccountId = parsed.accountId;
     state.renderedEnvironment = parsed.environment;
@@ -1394,7 +1791,10 @@
           }
         }
         if (MATERIAL_EVENTS.has(kind)) {
-          announce(eventMessage(event), URGENT_EVENTS.has(kind));
+          announce(
+            eventMessage(event),
+            URGENT_EVENTS.has(kind),
+            "event:" + cursor.toString());
         }
         renderHostEvent(event, cursor, version);
         // Commit the local event position only after every required side effect
@@ -1428,27 +1828,21 @@
       if (error.status === 409 || error.status === 410) {
         try {
           await refreshSnapshot({announceRefresh: true});
-        } catch {
-          state.scopeEpoch += 1;
-          state.snapshotReady = false;
-          state.sessionIdentity = null;
-          state.accountId = null;
-          state.environment = null;
-          setCommandAvailability(false);
-          text(
-            "freshness",
-            "Host synchronization gap could not be recovered; displayed values may be stale.");
-          announce(
-            "Host synchronization gap recovery failed. Commands remain blocked until a fresh canonical snapshot is available.",
-            true);
+        } catch (recoveryError) {
+          if (isSnapshotBusy(recoveryError)) {
+            reportSnapshotBusy();
+          } else {
+            invalidateSnapshotAuthority();
+            text(
+              "freshness",
+              "Host synchronization gap could not be recovered; displayed values may be stale.");
+            announce(
+              "Host synchronization gap recovery failed. Commands remain blocked until a fresh canonical snapshot is available.",
+              true);
+          }
         }
       } else {
-        state.scopeEpoch += 1;
-        state.snapshotReady = false;
-        state.sessionIdentity = null;
-        state.accountId = null;
-        state.environment = null;
-        setCommandAvailability(false);
+        invalidateSnapshotAuthority();
         text("freshness", "Host synchronization unavailable; displayed values may be stale.");
         announce("Host synchronization failed. Displayed values may be stale.", true);
       }
@@ -1769,21 +2163,26 @@
           "Host state refresh failed after the command response. The confirmed command response remains unchanged.",
           true);
       }
-    } catch {
-      if (commandContextMatchesCurrentSnapshot(payload, submittedHostId)) {
-        state.scopeEpoch += 1;
-        state.snapshotReady = false;
-        state.sessionIdentity = null;
-        state.accountId = null;
-        state.environment = null;
-        setCommandAvailability(false);
-        text(
-          "command-result",
+    } catch (error) {
+      if (!recovering && isCommandAuthRejection(error)) {
+        clearConfirmedCommand(payload);
+        invalidateSnapshotAuthority();
+        text("command-result",
+          "Command " + commandId +
+            " was not accepted because the authenticated host session was rejected before command acceptance. Its fresh command identity was discarded; re-establish a valid session and canonical snapshot before trying again.");
+      } else if (isSnapshotBusy(error) && commandContextMatchesCurrentSnapshot(payload, submittedHostId)) {
+        invalidateSnapshotAuthority();
+        reportSnapshotBusy();
+        text("command-result",
+          "Command " + commandId +
+            " could not be confirmed while the host snapshot was temporarily busy. Its original command identity remains retained for exact retry.");
+      } else if (commandContextMatchesCurrentSnapshot(payload, submittedHostId)) {
+        invalidateSnapshotAuthority();
+        text("command-result",
           "Command " + commandId +
             " could not be confirmed. Its original command_id and idempotency_key are retained for exact retry after host state recovers. No durable financial or safety outcome is being claimed.");
       } else {
-        text(
-          "command-result",
+        text("command-result",
           "Command " + commandId + " from original scope " +
             payload.account_id + " / " + payload.environment +
             " could not be confirmed after the authenticated host scope changed. " +
@@ -1799,26 +2198,32 @@
 
   async function refreshStateFromUser() {
     const button = byId("refresh-state");
+    const restoreKeyboardFocus = button !== null && document.activeElement === button;
     if (button) button.disabled = true;
     try {
-      const refreshed = await refreshSnapshot();
-      if (refreshed) {
-        announce("Host state refreshed from the canonical snapshot.");
+      await refreshSnapshot();
+      announce("Host state refreshed from the canonical snapshot.");
+    } catch (error) {
+      if (isSnapshotBusy(error)) {
+        reportSnapshotBusy();
+      } else {
+        invalidateSnapshotAuthority();
+        text("freshness", "Host unavailable; displayed values may be stale.");
+        announce("Host state refresh failed. Displayed values may be stale.", true);
       }
-    } catch {
-      state.scopeEpoch += 1;
-      state.snapshotReady = false;
-      state.sessionIdentity = null;
-      state.accountId = null;
-      state.environment = null;
-      setCommandAvailability(false);
-      text("freshness", "Host unavailable; displayed values may be stale.");
-      announce("Host state refresh failed. Displayed values may be stale.", true);
     } finally {
-      if (button) button.disabled = false;
+      if (button) {
+        button.disabled = false;
+        const active = document.activeElement;
+        if (restoreKeyboardFocus && (
+            active === button ||
+            active === document.body ||
+            active === document.documentElement)) {
+          button.focus();
+        }
+      }
     }
   }
-
   async function start() {
     bindTableTools();
     bindAuthorityPolicyReviewInvalidation();
@@ -1831,15 +2236,14 @@
     setCommandAvailability(false);
     try {
       await refreshSnapshot();
-    } catch {
-      state.scopeEpoch += 1;
-      state.snapshotReady = false;
-      state.sessionIdentity = null;
-      state.accountId = null;
-      state.environment = null;
-      setCommandAvailability(false);
-      text("freshness", "Host unavailable; no current state has been confirmed.");
-      announce("Host unavailable. No current state has been confirmed.", true);
+    } catch (error) {
+      if (isSnapshotBusy(error)) {
+        reportSnapshotBusy();
+      } else {
+        invalidateSnapshotAuthority();
+        text("freshness", "Host unavailable; no current state has been confirmed.");
+        announce("Host unavailable. No current state has been confirmed.", true);
+      }
     }
     window.setInterval(pollEvents, 2000);
   }
@@ -1865,21 +2269,18 @@
     state.environment = null;
     setCommandAvailability(false);
     try {
-      const restored = await refreshSnapshot();
-      if (restored) {
-        announce("Host state refreshed after page restoration.");
+      await refreshSnapshot();
+      announce("Host state refreshed after page restoration.");
+    } catch (error) {
+      if (isSnapshotBusy(error)) {
+        reportSnapshotBusy();
+      } else {
+        invalidateSnapshotAuthority();
+        text("freshness", "Host unavailable after page restoration; displayed values may be stale.");
+        announce(
+          "Host synchronization failed after page restoration. Commands remain blocked.",
+          true);
       }
-    } catch {
-      state.scopeEpoch += 1;
-      state.snapshotReady = false;
-      state.sessionIdentity = null;
-      state.accountId = null;
-      state.environment = null;
-      setCommandAvailability(false);
-      text("freshness", "Host unavailable after page restoration; displayed values may be stale.");
-      announce(
-        "Host synchronization failed after page restoration. Commands remain blocked.",
-        true);
     } finally {
       restoreFocusAfterPageRestore();
     }

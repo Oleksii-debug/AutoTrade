@@ -36,7 +36,8 @@ internal static class Program
         string version = "0",
         string hostFreshness = "CURRENT",
         string? freshnessAsOf = null,
-        string? eventCursor = null)
+        string? eventCursor = null,
+        string hostId = "host-local-1")
     {
         string serverTime = NowUtc();
         return new
@@ -44,7 +45,7 @@ internal static class Program
             state_version = version,
             event_cursor = eventCursor ?? version,
             server_time = serverTime,
-            host_id = "host-local-1",
+            host_id = hostId,
             account_id = "paper-account-1",
             environment = "PAPER",
             permission_summary = new
@@ -1041,8 +1042,11 @@ internal static class Program
                 StringComparison.Ordinal),
             "durable recovery record did not persist the canonical public session reference");
         Check.True(
-            pendingStore.Payload!.Contains("\"schema_version\":\"2\"", StringComparison.Ordinal),
-            "durable recovery record was not upgraded to the bearer-free v2 schema");
+            pendingStore.Payload!.Contains("\"schema_version\":\"3\"", StringComparison.Ordinal)
+                && pendingStore.Payload.Contains(
+                    "\"host_id\":\"host-local-1\"",
+                    StringComparison.Ordinal),
+            "new unresolved emergency command did not persist the host-bound bearer-free v3 schema");
 
         AuthenticatedEmergencyHostClient restartedProcess = new(
             new HttpClient(handler),
@@ -1091,6 +1095,345 @@ internal static class Program
             "terminal recovered operation did not clear the secure recovery record");
     }
 
+
+    static async Task SnapshotBusyIsExplicitRetryableConditionTest()
+    {
+        const string token = "session-token-snapshot-busy";
+        MutableSessionProvider sessions = new(PairedSession(token));
+        DelegateHandler busyHandler = new((request, _, _) =>
+        {
+            AssertAuth(request, token);
+            Check.True(
+                request.Method == HttpMethod.Get
+                    && request.RequestUri!.AbsolutePath == "/api/v1/state",
+                "snapshot-busy test issued an unexpected request");
+            return Task.FromResult(
+                Json(
+                    HttpStatusCode.ServiceUnavailable,
+                    new { error = "SNAPSHOT_BUSY", retryable = true }));
+        });
+        MemoryPendingCommandStore pendingStore = new();
+        AuthenticatedEmergencyHostClient busyClient = new(
+            new HttpClient(busyHandler),
+            HostOrigin,
+            sessions,
+            pendingStore);
+
+        await Check.ThrowsAsync<EmergencySnapshotBusyException>(
+            () => busyClient.GetStatusAsync(CancellationToken.None),
+            "canonical SNAPSHOT_BUSY was collapsed into a generic disconnect/error");
+        await Check.ThrowsAsync<EmergencySnapshotBusyException>(
+            () => busyClient.BlockNewExposureAsync(CancellationToken.None),
+            "emergency block did not stop at the retryable pre-command snapshot boundary");
+        Check.True(
+            pendingStore.Payload is null,
+            "snapshot contention minted or persisted an emergency command before coherent state existed");
+
+        DelegateHandler malformedHandler = new((request, _, _) =>
+        {
+            AssertAuth(request, token);
+            return Task.FromResult(
+                Json(
+                    HttpStatusCode.ServiceUnavailable,
+                    new { error = "SNAPSHOT_BUSY", retryable = false }));
+        });
+        AuthenticatedEmergencyHostClient malformedClient = new(
+            new HttpClient(malformedHandler),
+            HostOrigin,
+            sessions);
+        await Check.ThrowsAsync<HttpRequestException>(
+            () => malformedClient.GetStatusAsync(CancellationToken.None),
+            "non-retryable/malformed 503 was trusted as canonical SNAPSHOT_BUSY");
+    }
+
+    static async Task RestartedCommandRecoversAcceptedOperationAfterSessionRotationWithoutResendTest()
+    {
+        const string originalToken = "session-token-restart-rotation-original";
+        const string replacementToken = "session-token-restart-rotation-replacement";
+        MutableSessionProvider sessions =
+            new(PairedSession(originalToken));
+        MemoryPendingCommandStore pendingStore = new();
+        int stateReads = 0;
+        int posts = 0;
+        int operationReads = 0;
+        string? operationId = null;
+
+        DelegateHandler handler = new(async (request, _, cancellationToken) =>
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            if (request.Method == HttpMethod.Get && path == "/api/v1/state")
+            {
+                stateReads++;
+                string expectedToken =
+                    stateReads == 1 ? originalToken : replacementToken;
+                AssertAuth(request, expectedToken);
+                return Json(
+                    HttpStatusCode.OK,
+                    Snapshot(expectedToken, stateReads == 1 ? "11" : "13"));
+            }
+
+            if (request.Method == HttpMethod.Post
+                && path == "/api/v1/commands")
+            {
+                AssertAuth(request, originalToken);
+                posts++;
+                string body =
+                    await request.Content!.ReadAsStringAsync(cancellationToken);
+                using JsonDocument parsed = JsonDocument.Parse(body);
+                string commandId =
+                    parsed.RootElement.GetProperty("command_id").GetString()!;
+                operationId = HostOperationIdentity.Derive(
+                    "paper-account-1",
+                    "PAPER",
+                    commandId);
+                throw new HttpRequestException(
+                    "response lost after durable acceptance");
+            }
+
+            if (request.Method == HttpMethod.Get
+                && operationId is not null
+                && path == "/api/v1/operations/" + operationId)
+            {
+                AssertAuth(request, replacementToken);
+                operationReads++;
+                return Json(
+                    HttpStatusCode.OK,
+                    new
+                    {
+                        operation_id = operationId,
+                        phase = "SUCCEEDED",
+                        started_at = NowUtc(),
+                        updated_at = NowUtc(),
+                        affected_refs = Array.Empty<string>(),
+                        evidence = Array.Empty<object>(),
+                        remaining_uncertainty = Array.Empty<string>(),
+                    });
+            }
+
+            throw new InvalidOperationException(
+                "session-rotation recovery issued an unexpected request "
+                + request.Method + " " + path);
+        });
+
+        AuthenticatedEmergencyHostClient firstProcess = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions,
+            pendingStore);
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => firstProcess.BlockNewExposureAsync(CancellationToken.None),
+            "lost first response must persist an unresolved command");
+        Check.True(
+            pendingStore.Payload is not null,
+            "uncertain command was not persisted before session rotation");
+        Check.True(
+            pendingStore.Payload!.Contains(
+                "\"schema_version\":\"3\"",
+                StringComparison.Ordinal)
+                && pendingStore.Payload.Contains(
+                    "\"host_id\":\"host-local-1\"",
+                    StringComparison.Ordinal),
+            "new unresolved emergency command did not persist the exact authenticated host identity");
+
+        sessions.Session = PairedSession(replacementToken);
+        AuthenticatedEmergencyHostClient restartedProcess = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions,
+            pendingStore);
+        EmergencyCommandResult recovered =
+            await restartedProcess.BlockNewExposureAsync(CancellationToken.None);
+
+        Check.True(
+            recovered.Accepted && recovered.DurableBlockConfirmed,
+            "replacement session did not recover the already-accepted durable operation");
+        Check.True(
+            recovered.OperationId == operationId,
+            "replacement-session recovery observed the wrong operation identity");
+        Check.True(
+            posts == 1,
+            "replacement session resent or retargeted the unresolved command");
+        Check.True(
+            stateReads == 2 && operationReads == 1,
+            "replacement-session recovery did not perform one scope proof and one exact operation read");
+        Check.True(
+            pendingStore.Payload is null,
+            "terminal operation recovery did not clear the durable pending record");
+    }
+
+    static async Task RestartedCommandRemainsUnresolvedWhenExactOperationIsAbsentAfterSessionRotationTest()
+    {
+        const string originalToken = "session-token-restart-absent-original";
+        const string replacementToken = "session-token-restart-absent-replacement";
+        MutableSessionProvider sessions =
+            new(PairedSession(originalToken));
+        MemoryPendingCommandStore pendingStore = new();
+        int stateReads = 0;
+        int posts = 0;
+        int operationReads = 0;
+        string? operationId = null;
+
+        DelegateHandler handler = new(async (request, _, cancellationToken) =>
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            if (request.Method == HttpMethod.Get && path == "/api/v1/state")
+            {
+                stateReads++;
+                string expectedToken =
+                    stateReads == 1 ? originalToken : replacementToken;
+                AssertAuth(request, expectedToken);
+                return Json(
+                    HttpStatusCode.OK,
+                    Snapshot(expectedToken, stateReads == 1 ? "21" : "22"));
+            }
+
+            if (request.Method == HttpMethod.Post
+                && path == "/api/v1/commands")
+            {
+                AssertAuth(request, originalToken);
+                posts++;
+                string body =
+                    await request.Content!.ReadAsStringAsync(cancellationToken);
+                using JsonDocument parsed = JsonDocument.Parse(body);
+                string commandId =
+                    parsed.RootElement.GetProperty("command_id").GetString()!;
+                operationId = HostOperationIdentity.Derive(
+                    "paper-account-1",
+                    "PAPER",
+                    commandId);
+                throw new HttpRequestException(
+                    "response lost without a provable durable operation");
+            }
+
+            if (request.Method == HttpMethod.Get
+                && operationId is not null
+                && path == "/api/v1/operations/" + operationId)
+            {
+                AssertAuth(request, replacementToken);
+                operationReads++;
+                return Json(
+                    HttpStatusCode.NotFound,
+                    new { error = "OPERATION_NOT_FOUND" });
+            }
+
+            throw new InvalidOperationException(
+                "absent-operation recovery issued an unexpected request "
+                + request.Method + " " + path);
+        });
+
+        AuthenticatedEmergencyHostClient firstProcess = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions,
+            pendingStore);
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => firstProcess.BlockNewExposureAsync(CancellationToken.None),
+            "lost first response must persist an unresolved command");
+
+        sessions.Session = PairedSession(replacementToken);
+        AuthenticatedEmergencyHostClient restartedProcess = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions,
+            pendingStore);
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => restartedProcess.BlockNewExposureAsync(CancellationToken.None),
+            "missing exact operation must remain unresolved after session rotation");
+
+        Check.True(
+            posts == 1,
+            "missing exact operation caused a replacement-session command resend");
+        Check.True(
+            stateReads == 2 && operationReads == 1,
+            "missing-operation path did not remain bounded to scope proof plus exact read");
+        Check.True(
+            pendingStore.Payload is not null,
+            "missing exact operation cleared the durable unresolved command");
+    }
+
+    static async Task RestartedCommandRejectsDifferentHostAfterSessionRotationWithoutResendTest()
+    {
+        const string originalToken = "session-token-restart-host-original";
+        const string replacementToken = "session-token-restart-host-replacement";
+        MutableSessionProvider sessions = new(PairedSession(originalToken));
+        MemoryPendingCommandStore pendingStore = new();
+        int stateReads = 0;
+        int posts = 0;
+        int operationReads = 0;
+
+        DelegateHandler handler = new(async (request, _, cancellationToken) =>
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            if (request.Method == HttpMethod.Get && path == "/api/v1/state")
+            {
+                stateReads++;
+                string token =
+                    stateReads == 1 ? originalToken : replacementToken;
+                AssertAuth(request, token);
+                return Json(
+                    HttpStatusCode.OK,
+                    Snapshot(
+                        token,
+                        stateReads == 1 ? "31" : "32",
+                        hostId: stateReads == 1
+                            ? "host-local-1"
+                            : "foreign-host"));
+            }
+
+            if (request.Method == HttpMethod.Post
+                && path == "/api/v1/commands")
+            {
+                AssertAuth(request, originalToken);
+                posts++;
+                await request.Content!.ReadAsStringAsync(cancellationToken);
+                throw new HttpRequestException(
+                    "response lost before host-continuity recovery");
+            }
+
+            if (request.Method == HttpMethod.Get
+                && path.StartsWith(
+                    "/api/v1/operations/",
+                    StringComparison.Ordinal))
+            {
+                operationReads++;
+                throw new InvalidOperationException(
+                    "foreign host must be rejected before operation lookup");
+            }
+
+            throw new InvalidOperationException(
+                "host-continuity recovery issued an unexpected request "
+                + request.Method + " " + path);
+        });
+
+        AuthenticatedEmergencyHostClient firstProcess = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions,
+            pendingStore);
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => firstProcess.BlockNewExposureAsync(CancellationToken.None),
+            "first response loss must retain the unresolved command");
+
+        sessions.Session = PairedSession(replacementToken);
+        AuthenticatedEmergencyHostClient restartedProcess = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions,
+            pendingStore);
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => restartedProcess.BlockNewExposureAsync(CancellationToken.None),
+            "replacement session on a foreign host must not recover the pending command");
+
+        Check.True(
+            posts == 1,
+            "foreign-host recovery resent or retargeted the unresolved command");
+        Check.True(
+            stateReads == 2 && operationReads == 0,
+            "foreign-host recovery did not fail before deterministic operation lookup");
+        Check.True(
+            pendingStore.Payload is not null,
+            "foreign-host recovery cleared the unresolved command");
+    }
     static async Task RestartedCommandCannotRetargetSessionTest()
     {
         const string originalToken = "session-token-restart-original";
@@ -1390,6 +1733,10 @@ internal static class Program
         await ForeignOperationIdentityFailsClosedTest();
         await UncertainCommandCannotRetargetSessionTest();
         await UncertainCommandSurvivesDesktopRestartTest();
+        await SnapshotBusyIsExplicitRetryableConditionTest();
+        await RestartedCommandRecoversAcceptedOperationAfterSessionRotationWithoutResendTest();
+        await RestartedCommandRemainsUnresolvedWhenExactOperationIsAbsentAfterSessionRotationTest();
+        await RestartedCommandRejectsDifferentHostAfterSessionRotationWithoutResendTest();
         await RestartedCommandCannotRetargetSessionTest();
         await LegacyBearerRecoveryRecordMigratesFailClosedTest();
         CorruptPersistedCommandFailsClosedTest();

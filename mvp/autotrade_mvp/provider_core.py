@@ -424,115 +424,215 @@ def _install_authenticated_provider_read_authority():
 
     query_states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
     response_states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+    canonical_type = type
+    canonical_id = id
+    canonical_str = str
+    canonical_int = int
+    canonical_weakref_ref = weakref.ref
+    object_getattribute = object.__getattribute__
+    mapping_proxy_type = MappingProxyType
+    canonical_text = _text
 
     def prune(states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]]) -> None:
         for object_id, (value_ref, _snapshot) in tuple(states.items()):
             if value_ref() is None:
                 states.pop(object_id, None)
 
+    def query_snapshot(value: object) -> tuple[object, ...]:
+        return (
+            object_getattribute(value, "provider_id"),
+            object_getattribute(value, "account_id"),
+            object_getattribute(value, "entity_id"),
+            object_getattribute(value, "environment"),
+            object_getattribute(value, "capability_snapshot_id"),
+            object_getattribute(value, "instrument_version"),
+            object_getattribute(value, "surface"),
+            object_getattribute(value, "endpoint"),
+            object_getattribute(value, "query"),
+            object_getattribute(value, "prepared_at"),
+            object_getattribute(value, "permission_scope"),
+            object_getattribute(value, "query_digest"),
+        )
+
     def register_query(value: object) -> None:
-        if type(value) is not AuthenticatedReadQueryBinding:
+        if canonical_type(value) is not AuthenticatedReadQueryBinding:
             raise ProviderCoreError(
                 "authenticated-read construction authority requires exact binding"
             )
         prune(query_states)
-        object_id = id(value)
+        object_id = canonical_id(value)
         current = query_states.get(object_id)
         if current is not None and current[0]() is not None:
             raise ProviderCoreError(
                 "authenticated-read construction authority identity collision"
             )
         query_states[object_id] = (
-            weakref.ref(value),
-            (
-                value.provider_id, value.account_id, value.entity_id, value.environment,
-                value.capability_snapshot_id, value.instrument_version, value.surface,
-                value.endpoint, value.query, value.prepared_at, value.permission_scope,
-                value.query_digest,
-            ),
+            canonical_weakref_ref(value),
+            query_snapshot(value),
         )
 
-    def require_query(value: object) -> None:
-        if type(value) is not AuthenticatedReadQueryBinding:
+    def require_query(value: object) -> tuple[object, ...]:
+        if canonical_type(value) is not AuthenticatedReadQueryBinding:
             raise ProviderCoreError(
                 "authenticated-read construction authority requires exact binding"
             )
         prune(query_states)
-        state = query_states.get(id(value))
+        state = query_states.get(canonical_id(value))
         if state is None or state[0]() is not value:
             raise ProviderCoreError(
                 "authenticated-read construction authority is unavailable"
             )
-        (
-            provider_id, account_id, entity_id, environment, capability_snapshot_id,
-            instrument_version, surface, endpoint, query, prepared_at,
-            permission_scope, query_digest,
-        ) = state[1]
-        scalar_pairs = (
-            (value.provider_id, provider_id),
-            (value.account_id, account_id),
-            (value.entity_id, entity_id),
-            (value.environment, environment),
-            (value.capability_snapshot_id, capability_snapshot_id),
-            (value.instrument_version, instrument_version),
-            (value.endpoint, endpoint),
-            (value.prepared_at, prepared_at),
-            (value.permission_scope, permission_scope),
-            (value.query_digest, query_digest),
+        expected = state[1]
+        current = query_snapshot(value)
+        for index in (0, 1, 2, 3, 4, 5, 7, 9, 10, 11):
+            if (
+                canonical_type(current[index]) is not canonical_str
+                or current[index] != expected[index]
+            ):
+                raise ProviderCoreError(
+                    "authenticated-read binding changed after preparation"
+                )
+        if (
+            canonical_type(current[6]) is not Surface
+            or current[6] is not expected[6]
+            or current[8] is not expected[8]
+        ):
+            raise ProviderCoreError(
+                "authenticated-read binding changed after preparation"
+            )
+        return expected
+
+    def response_snapshot(value: object) -> tuple[object, ...]:
+        return (
+            object_getattribute(value, "query_binding"),
+            object_getattribute(value, "observed_at"),
+            object_getattribute(value, "http_status"),
+            object_getattribute(value, "response_sha256"),
+            object_getattribute(value, "evidence_ref"),
+            object_getattribute(value, "payload"),
         )
-        if any(type(current) is not str or current != expected for current, expected in scalar_pairs):
-            raise ProviderCoreError("authenticated-read binding changed after preparation")
-        if type(value.surface) is not Surface or value.surface is not surface:
-            raise ProviderCoreError("authenticated-read binding changed after preparation")
-        if value.query is not query:
-            raise ProviderCoreError("authenticated-read binding changed after preparation")
 
     def register_response(value: object) -> None:
-        if type(value) is not ProviderResponseObservation:
+        if canonical_type(value) is not ProviderResponseObservation:
             raise ProviderCoreError(
                 "provider-response construction authority requires exact observation"
             )
-        require_query(value.query_binding)
+        current = response_snapshot(value)
+        require_query(current[0])
         prune(response_states)
-        object_id = id(value)
-        current = response_states.get(object_id)
-        if current is not None and current[0]() is not None:
+        object_id = canonical_id(value)
+        previous = response_states.get(object_id)
+        if previous is not None and previous[0]() is not None:
             raise ProviderCoreError(
                 "provider-response construction authority identity collision"
             )
         response_states[object_id] = (
-            weakref.ref(value),
-            (
-                value.query_binding, value.observed_at, value.http_status,
-                value.response_sha256, value.evidence_ref, value.payload,
-            ),
+            canonical_weakref_ref(value),
+            current,
         )
 
-    def require_response(value: object) -> None:
-        if type(value) is not ProviderResponseObservation:
+    def require_response(value: object) -> tuple[object, ...]:
+        if canonical_type(value) is not ProviderResponseObservation:
             raise ProviderCoreError(
                 "provider-response construction authority requires exact observation"
             )
         prune(response_states)
-        state = response_states.get(id(value))
+        state = response_states.get(canonical_id(value))
         if state is None or state[0]() is not value:
             raise ProviderCoreError(
                 "provider-response construction authority is unavailable"
             )
-        query_binding, observed_at, http_status, response_sha256, evidence_ref, payload = state[1]
-        if value.query_binding is not query_binding:
-            raise ProviderCoreError("provider response changed after exact-byte observation")
-        require_query(value.query_binding)
+        expected = state[1]
+        current = response_snapshot(value)
+        if current[0] is not expected[0]:
+            raise ProviderCoreError(
+                "provider response changed after exact-byte observation"
+            )
+        require_query(current[0])
         if (
-            type(value.observed_at) is not str or value.observed_at != observed_at
-            or type(value.http_status) is not int or value.http_status != http_status
-            or type(value.response_sha256) is not str or value.response_sha256 != response_sha256
-            or type(value.evidence_ref) is not str or value.evidence_ref != evidence_ref
-            or value.payload is not payload
+            canonical_type(current[1]) is not canonical_str
+            or current[1] != expected[1]
+            or canonical_type(current[2]) is not canonical_int
+            or current[2] != expected[2]
+            or canonical_type(current[3]) is not canonical_str
+            or current[3] != expected[3]
+            or canonical_type(current[4]) is not canonical_str
+            or current[4] != expected[4]
+            or current[5] is not expected[5]
         ):
-            raise ProviderCoreError("provider response changed after exact-byte observation")
+            raise ProviderCoreError(
+                "provider response changed after exact-byte observation"
+            )
+        return expected
 
-    return register_query, require_query, register_response, require_response
+    def provider_response_observation_projection(value: object):
+        response = require_response(value)
+        query = require_query(response[0])
+        return mapping_proxy_type(
+            {
+                "query_binding": response[0],
+                "provider_id": query[0],
+                "account_id": query[1],
+                "entity_id": query[2],
+                "environment": query[3],
+                "capability_snapshot_id": query[4],
+                "instrument_version": query[5],
+                "surface": query[6],
+                "endpoint": query[7],
+                "query": query[8],
+                "prepared_at": query[9],
+                "permission_scope": query[10],
+                "query_digest": query[11],
+                "observed_at": response[1],
+                "http_status": response[2],
+                "response_sha256": response[3],
+                "evidence_ref": response[4],
+                "payload": response[5],
+            }
+        )
+
+    def provider_response_observation_require_scope(
+        value: object,
+        *,
+        provider_id: str,
+        surface: Surface,
+        endpoint: str,
+        account_id: str | None = None,
+        environment: str | None = None,
+    ) -> Mapping[str, object]:
+        projection = provider_response_observation_projection(value)
+        if canonical_type(surface) is not Surface:
+            raise TypeError("surface must be exact Surface")
+        if (
+            canonical_text(provider_id, "provider_id").upper()
+            != projection["provider_id"]
+        ):
+            raise ProviderCoreError("provider-read provenance provider mismatch")
+        if surface is not projection["surface"]:
+            raise ProviderCoreError("provider-read provenance surface mismatch")
+        if canonical_text(endpoint, "endpoint") != projection["endpoint"]:
+            raise ProviderCoreError("provider-read provenance endpoint mismatch")
+        if (
+            account_id is not None
+            and canonical_text(account_id, "account_id") != projection["account_id"]
+        ):
+            raise ProviderCoreError("provider-read provenance account mismatch")
+        if (
+            environment is not None
+            and canonical_text(environment, "environment").upper()
+            != projection["environment"]
+        ):
+            raise ProviderCoreError("provider-read provenance environment mismatch")
+        return projection
+
+    return (
+        register_query,
+        require_query,
+        register_response,
+        require_response,
+        provider_response_observation_projection,
+        provider_response_observation_require_scope,
+    )
 
 
 (
@@ -540,6 +640,8 @@ def _install_authenticated_provider_read_authority():
     _require_authenticated_read_query_binding_authority,
     _register_provider_response_observation_authority,
     _require_provider_response_observation_authority,
+    provider_response_observation_projection,
+    provider_response_observation_require_scope,
 ) = _install_authenticated_provider_read_authority()
 del _install_authenticated_provider_read_authority
 

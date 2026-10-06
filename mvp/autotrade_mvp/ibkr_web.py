@@ -25,9 +25,10 @@ from autotrade_numeric.exact_decimal import (
 
 from .capabilities import CapabilitySnapshot
 from .provider_core import (
-    AuthenticatedReadQueryBinding,
     ProviderResponseObservation,
     Surface,
+    provider_response_observation_projection,
+    provider_response_observation_require_scope,
 )
 from .reconciliation import ProviderFillEvidence
 
@@ -272,7 +273,7 @@ def _install_ibkr_brokerage_session_observation_authority():
 
     session_type = IbkrBrokerageSessionStatus
     observation_type = ProviderResponseObservation
-    canonical_require_scope = observation_type.require_scope
+    canonical_observation_projection = provider_response_observation_projection
     canonical_instant = _instant
     canonical_text = _text
     mapping_proxy_type = MappingProxyType
@@ -295,7 +296,8 @@ def _install_ibkr_brokerage_session_observation_authority():
         if (
             IbkrBrokerageSessionStatus is not session_type
             or ProviderResponseObservation is not observation_type
-            or observation_type.require_scope is not canonical_require_scope
+            or provider_response_observation_projection
+            is not canonical_observation_projection
             or IBKR_WEB_BROKERAGE_STATUS_ENDPOINT != status_endpoint
             or datetime is not datetime_type
             or _instant is not canonical_instant
@@ -316,13 +318,16 @@ def _install_ibkr_brokerage_session_observation_authority():
             raise TypeError(
                 "observation must be exact ProviderResponseObservation"
             )
-        canonical_require_scope(
-            observation,
-            provider_id="IBKR",
-            surface=surface,
-            endpoint=status_endpoint,
-        )
-        payload = object_getattribute(observation, "payload")
+        projection = canonical_observation_projection(observation)
+        if (
+            projection["provider_id"] != "IBKR"
+            or projection["surface"] is not surface
+            or projection["endpoint"] != status_endpoint
+        ):
+            raise IbkrWebAdapterError(
+                "brokerage session status observation scope mismatch"
+            )
+        payload = projection["payload"]
         if canonical_type(payload) is not mapping_proxy_type:
             raise IbkrWebAdapterError(
                 "brokerage session status payload must be an exact provider object"
@@ -373,7 +378,7 @@ def _install_ibkr_brokerage_session_observation_authority():
                         "brokerage session status reports provider failure"
                     )
 
-        observed_text = object_getattribute(observation, "observed_at")
+        observed_text = projection["observed_at"]
         if (
             canonical_type(observed_text) is not str
             or not observed_text.endswith("Z")
@@ -394,12 +399,8 @@ def _install_ibkr_brokerage_session_observation_authority():
             name="brokerage session observed_at",
         )
 
-        query_binding = object_getattribute(observation, "query_binding")
-        query = object_getattribute(query_binding, "query")
-        permission_scope = object_getattribute(
-            query_binding,
-            "permission_scope",
-        )
+        query = projection["query"]
+        permission_scope = projection["permission_scope"]
         if canonical_type(query) is not mapping_proxy_type or len(query) != 0:
             raise IbkrWebAdapterError(
                 "brokerage session status requires an empty authenticated query"
@@ -408,10 +409,10 @@ def _install_ibkr_brokerage_session_observation_authority():
             raise IbkrWebAdapterError(
                 "brokerage session status requires ORDER.READ scope"
             )
-        account_id = object_getattribute(query_binding, "account_id")
-        environment = object_getattribute(query_binding, "environment")
-        evidence_ref = object_getattribute(observation, "evidence_ref")
-        response_sha256 = object_getattribute(observation, "response_sha256")
+        account_id = projection["account_id"]
+        environment = projection["environment"]
+        evidence_ref = projection["evidence_ref"]
+        response_sha256 = projection["response_sha256"]
         if (
             canonical_type(account_id) is not str
             or canonical_type(environment) is not str
@@ -2197,48 +2198,41 @@ def parse_web_api_trades(
 
     if type(observation) is not ProviderResponseObservation:
         raise TypeError("observation must be exact ProviderResponseObservation")
-    binding = observation.query_binding
-    if type(binding) is not AuthenticatedReadQueryBinding:
-        raise TypeError(
-            "observation query_binding must be exact AuthenticatedReadQueryBinding"
-        )
+    projection = provider_response_observation_require_scope(
+        observation,
+        provider_id="IBKR",
+        surface=Surface.ACTIVITIES,
+        endpoint="/iserver/account/trades",
+    )
     binding_provider = _provider_text(
-        binding.provider_id,
+        projection["provider_id"],
         name="observation.provider_id",
     )
     binding_account = _provider_text(
-        binding.account_id,
+        projection["account_id"],
         name="observation.account_id",
     )
     binding_environment = _provider_text(
-        binding.environment,
+        projection["environment"],
         name="observation.environment",
     )
     binding_endpoint = _provider_text(
-        binding.endpoint,
+        projection["endpoint"],
         name="observation.endpoint",
     )
-    if type(binding.surface) is not Surface:
-        raise TypeError("observation surface must be exact Surface")
     evidence_ref = _provider_text(
-        observation.evidence_ref,
+        projection["evidence_ref"],
         name="observation.evidence_ref",
     )
     if re.fullmatch(r"provider-read:sha256:[0-9a-f]{64}", evidence_ref) is None:
         raise IbkrWebAdapterError(
             "observation evidence_ref must be canonical provider-read evidence"
         )
-    AuthenticatedReadQueryBinding.require_scope(
-        binding,
-        provider_id="IBKR",
-        surface=Surface.ACTIVITIES,
-        endpoint="/iserver/account/trades",
-    )
     if binding_provider != "IBKR":
         raise IbkrWebAdapterError("trade observation belongs to another provider")
     if binding_endpoint != "/iserver/account/trades":
         raise IbkrWebAdapterError("trade observation endpoint is not canonical")
-    payload = observation.payload
+    payload = projection["payload"]
     if type(payload) is not tuple:
         raise IbkrWebAdapterError(
             "trades response must be the canonical frozen JSON array"

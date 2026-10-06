@@ -25,6 +25,7 @@ from .provider_core import (
     ProviderResponseObservation,
     ProviderSubmissionObservation,
     Surface,
+    provider_response_observation_require_scope,
     provider_submission_observation_projection,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
@@ -1749,12 +1750,13 @@ def pagination_page_from_observation(
     if spec is None:
         raise KrakenSpotAdapterError("unsupported Kraken pagination surface")
     endpoint, records_key, maximum_limit = spec
-    observation.require_scope(
+    projection = provider_response_observation_require_scope(
+        observation,
         provider_id="KRAKEN",
         surface=Surface.ACTIVITIES,
         endpoint=endpoint,
     )
-    payload = observation.payload
+    payload = projection["payload"]
     if not isinstance(payload, Mapping):
         raise KrakenSpotAdapterError("Kraken pagination response must be an object")
     raw_errors = payload.get("error")
@@ -1784,7 +1786,7 @@ def pagination_page_from_observation(
             "Kraken pagination requires non-negative provider count"
         )
 
-    query = observation.query_binding.query
+    query = projection["query"]
     if query.get("without_count") == "true":
         raise KrakenSpotAdapterError(
             "without_count response cannot prove Kraken pagination coverage"
@@ -1808,8 +1810,8 @@ def pagination_page_from_observation(
 
     return KrakenSpotPageEvidence(
         surface=normalized,
-        account_id=observation.account_id,
-        environment=observation.environment,
+        account_id=projection["account_id"],
+        environment=projection["environment"],
         offset=offset,
         limit=limit,
         record_count=len(records),
@@ -1820,7 +1822,7 @@ def pagination_page_from_observation(
             )
         ),
         total_count=total_count,
-        evidence_ref=observation.evidence_ref,
+        evidence_ref=projection["evidence_ref"],
         filter_items=tuple(
             sorted(
                 (str(key), str(value))
@@ -1901,12 +1903,13 @@ def open_orders_snapshot_from_observation(
 
     if not isinstance(observation, ProviderResponseObservation):
         raise TypeError("observation must be ProviderResponseObservation")
-    observation.require_scope(
+    projection = provider_response_observation_require_scope(
+        observation,
         provider_id="KRAKEN",
         surface=Surface.ACTIVITIES,
         endpoint="/0/private/OpenOrders",
     )
-    payload = observation.payload
+    payload = projection["payload"]
     if not isinstance(payload, Mapping):
         raise KrakenSpotAdapterError(
             "Kraken open-orders response must be an object"
@@ -1930,16 +1933,16 @@ def open_orders_snapshot_from_observation(
         raise KrakenSpotAdapterError(
             "Kraken open-orders result must contain open object"
         )
-    query = observation.query_binding.query
+    query = projection["query"]
     restricting = {"userref", "cl_ord_id"} & set(query)
     if restricting:
         raise KrakenSpotAdapterError(
             "filtered Kraken OpenOrders cannot prove account-wide completeness"
         )
     return KrakenSpotOpenOrdersSnapshotEvidence(
-        account_id=observation.account_id,
-        environment=observation.environment,
-        evidence_ref=observation.evidence_ref,
+        account_id=projection["account_id"],
+        environment=projection["environment"],
+        evidence_ref=projection["evidence_ref"],
         order_ids=tuple(sorted(_text(str(value), name="provider_order_id") for value in orders)),
         filter_items=tuple(sorted((str(key), str(value)) for key, value in query.items())),
         _factory_token=_KRAKEN_SPOT_OPEN_ORDERS_FACTORY_TOKEN,
@@ -2043,14 +2046,15 @@ def parse_trade_history(
 
     if not isinstance(observation, ProviderResponseObservation):
         raise TypeError("observation must be ProviderResponseObservation")
-    observation.require_scope(
+    projection = provider_response_observation_require_scope(
+        observation,
         provider_id="KRAKEN",
         surface=Surface.ACTIVITIES,
         endpoint="/0/private/TradesHistory",
     )
-    response = observation.payload
-    account_id = observation.account_id
-    environment = observation.environment
+    response = projection["payload"]
+    account_id = projection["account_id"]
+    environment = projection["environment"]
     if not isinstance(response, Mapping):
         raise TypeError("response must be a mapping")
     raw_errors = response.get("error")
@@ -2113,7 +2117,7 @@ def parse_trade_history(
                 fee_amount=raw["fee"],
                 fee_currency=_text(fee_currency_by_pair[pair], name="fee_currency"),
                 trade_time=_seconds_to_utc(raw.get("time"), name="time"),
-                evidence_refs=(observation.evidence_ref,),
+                evidence_refs=(projection["evidence_ref"],),
             )
         )
     return tuple(fills)

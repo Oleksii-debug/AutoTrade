@@ -205,8 +205,6 @@ class TrustedChronologyCutTests(unittest.TestCase):
             verification_method="RSA_PKCS1V15_SHA256",
             release_artifact_id=release_id,
             release_artifact_sha256=release_sha,
-            attestation_json="{}",
-            signature_b64="AA==",
         )
 
     def _prepare(

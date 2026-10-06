@@ -1033,6 +1033,69 @@ class BybitV5AdapterTests(unittest.TestCase):
                 observation=observation,
             )
 
+    def test_submission_response_ignores_prepared_getattribute_callback(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-prepared-callback",
+                    "orderLinkId": "__CLIENT__",
+                },
+            }
+        )
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            raise AssertionError("prepared virtual callback executed")
+
+        with patch.object(BybitPreparedSubmission, "__getattribute__", forged):
+            result = parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+        self.assertEqual(callbacks, [])
+        self.assertEqual(result["outcome"], "ACKNOWLEDGED")
+        self.assertEqual(result["provider_order_id"], "provider-prepared-callback")
+
+    def test_submission_response_rejects_rebound_prepared_projection_without_callback(self):
+        prepared = prepare_order_submission(
+            capability=submission_write_capability(),
+            at=READ_AT,
+            provider_environment="MAINNET",
+            product_family="SPOT",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="0.01",
+            client_order_id="prepared-projection-rebound",
+            time_in_force="IOC",
+        )
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            return {}
+
+        with patch.object(
+            bybit_v5_module,
+            "guarded_order_projection",
+            forged,
+        ) as rebound:
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "submission response parser authority changed",
+            ):
+                parse_submission_response(
+                    attempt_id=str(uuid4()),
+                    prepared_request=prepared,
+                    observation=None,
+                    transport_ambiguous=True,
+                )
+        rebound.assert_not_called()
+        self.assertEqual(callbacks, [])
+
     def test_transport_ambiguity_requires_boolean_flag(self):
         client_id = stable_client_order_id(
             "BYBIT",

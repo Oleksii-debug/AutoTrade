@@ -174,7 +174,7 @@ def _require_canonical_durable_text(value: object, *, name: str) -> str:
 def _sequence(value: object, *, name: str, positive: bool = False) -> int:
     """Validate canonical Sequence text before integer persistence/arithmetic."""
 
-    if not isinstance(value, str) or _SEQUENCE_RE.fullmatch(value) is None:
+    if type(value) is not str or _SEQUENCE_RE.fullmatch(value) is None:
         qualifier = "positive " if positive else ""
         raise ValueError(
             f"{name} must be a {qualifier}canonical integer sequence string"
@@ -2548,11 +2548,7 @@ class JournalStore:
             environment=environment,
             idempotency_key=idempotency_key,
         )
-        if (
-            not isinstance(state_version, int)
-            or isinstance(state_version, bool)
-            or state_version < 0
-        ):
+        if type(state_version) is not int or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
         request_snapshot = _detach_json_value(request)
         result_snapshot = _detach_json_value(result)
@@ -2622,7 +2618,7 @@ class JournalStore:
             environment=environment,
             idempotency_key=idempotency_key,
         )
-        if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
+        if type(state_version) is not int or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
         if type(events) is not list:
             raise TypeError("events must be an exact list")

@@ -1166,14 +1166,24 @@ def _install_submission_response_parser(
 
         if code == 0:
             result = exact_mapping(envelope.get("result"), "result")
+            raw_provider_order_id = result.get("orderId")
             provider_order_id = exact_text(
-                result.get("orderId"),
+                raw_provider_order_id,
                 "result.orderId",
             )
+            if provider_order_id != raw_provider_order_id:
+                raise error_type(
+                    "Bybit orderId response must be canonical exact text"
+                )
+            raw_echoed_client_id = result.get("orderLinkId")
             echoed_client_id = exact_text(
-                result.get("orderLinkId"),
+                raw_echoed_client_id,
                 "result.orderLinkId",
             )
+            if echoed_client_id != raw_echoed_client_id:
+                raise error_type(
+                    "Bybit orderLinkId response must be canonical exact text"
+                )
             if echoed_client_id != cid:
                 raise error_type(
                     "Bybit orderLinkId response does not match request"

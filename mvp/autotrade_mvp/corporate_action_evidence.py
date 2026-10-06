@@ -177,18 +177,26 @@ class CorporateActionObservation:
     pay_at: datetime | None = None
     corrects_external_event_id: str | None = None
 
-    def __post_init__(self) -> None:
-        provider = _text(self.provider_id, "provider_id").upper()
-        account = _text(self.account_id, "account_id")
-        environment = _text(self.environment, "environment").upper()
-        if environment not in _ENVIRONMENTS:
+    def __post_init__(
+        self,
+        _text_fn=_text,
+        _environments=_ENVIRONMENTS,
+        _kinds=_KINDS,
+        _utc_fn=_utc,
+        _digest_pattern=_DIGEST,
+        _exact_payload_fn=_exact_payload,
+    ) -> None:
+        provider = _text_fn(self.provider_id, "provider_id").upper()
+        account = _text_fn(self.account_id, "account_id")
+        environment = _text_fn(self.environment, "environment").upper()
+        if environment not in _environments:
             raise CorporateActionEvidenceError(
                 "environment must be canonical"
             )
-        provider_version = _text(
+        provider_version = _text_fn(
             self.provider_instrument_version, "provider_instrument_version"
         )
-        instrument_id = _text(self.instrument_id, "instrument_id")
+        instrument_id = _text_fn(self.instrument_id, "instrument_id")
         if (
             isinstance(self.instrument_version, bool)
             or not isinstance(self.instrument_version, int)
@@ -197,20 +205,20 @@ class CorporateActionObservation:
             raise CorporateActionEvidenceError(
                 "instrument_version must be a positive integer"
             )
-        external_id = _text(self.external_event_id, "external_event_id")
-        revision = _text(self.provider_revision, "provider_revision")
-        kind = _text(self.kind, "kind").upper()
-        if kind not in _KINDS:
+        external_id = _text_fn(self.external_event_id, "external_event_id")
+        revision = _text_fn(self.provider_revision, "provider_revision")
+        kind = _text_fn(self.kind, "kind").upper()
+        if kind not in _kinds:
             raise CorporateActionEvidenceError(
                 "unsupported corporate action kind"
             )
-        effective = _utc(self.effective_at, "effective_at")
-        observed = _utc(self.observed_at, "observed_at")
+        effective = _utc_fn(self.effective_at, "effective_at")
+        observed = _utc_fn(self.observed_at, "observed_at")
         # Corporate actions are commonly announced before their economic effective
         # time.  Preserve causal observation time independently from effective time;
         # the durable financial writer must gate mutation on effective/pay semantics.
-        digest = _text(self.raw_evidence_digest, "raw_evidence_digest")
-        if _DIGEST.fullmatch(digest) is None:
+        digest = _text_fn(self.raw_evidence_digest, "raw_evidence_digest")
+        if _digest_pattern.fullmatch(digest) is None:
             raise CorporateActionEvidenceError(
                 "raw_evidence_digest must be canonical SHA-256"
             )
@@ -227,12 +235,12 @@ class CorporateActionObservation:
         for name in ("announcement_at", "record_at", "ex_at", "pay_at"):
             value = getattr(self, name)
             if value is not None:
-                object.__setattr__(self, name, _utc(value, name))
+                object.__setattr__(self, name, _utc_fn(value, name))
         if self.corrects_external_event_id is not None:
             object.__setattr__(
                 self,
                 "corrects_external_event_id",
-                _text(
+                _text_fn(
                     self.corrects_external_event_id,
                     "corrects_external_event_id",
                 ),
@@ -251,7 +259,7 @@ class CorporateActionObservation:
         object.__setattr__(self, "effective_at", effective)
         object.__setattr__(self, "observed_at", observed)
         object.__setattr__(self, "raw_evidence_digest", digest)
-        object.__setattr__(self, "payload", _exact_payload(self.payload))
+        object.__setattr__(self, "payload", _exact_payload_fn(self.payload))
 
 
 def _provider_instant(value: object, name: str) -> datetime:
@@ -271,11 +279,15 @@ def _provider_instant(value: object, name: str) -> datetime:
 
 def _canonical_observation_from_sealed_response(
     projection: Mapping[str, object],
+    _mapping_type=Mapping,
+    _provider_instant_fn=_provider_instant,
+    _reserved_fields=_CORPORATE_ACTION_RESERVED_FIELDS,
+    _observation_type=CorporateActionObservation,
 ) -> CorporateActionObservation:
     """Parse financially authoritative fields only from one verified snapshot."""
 
     payload = projection["payload"]
-    if not isinstance(payload, Mapping):
+    if not isinstance(payload, _mapping_type):
         raise CorporateActionEvidenceError(
             "corporate-action provider payload must be an object"
         )
@@ -323,18 +335,18 @@ def _canonical_observation_from_sealed_response(
     for name in ("announcement_at", "record_at", "ex_at", "pay_at"):
         raw = payload.get(name)
         optional_times[name] = (
-            None if raw is None else _provider_instant(raw, name)
+            None if raw is None else _provider_instant_fn(raw, name)
         )
 
     event_payload = {
         key: value
         for key, value in payload.items()
-        if key not in _CORPORATE_ACTION_RESERVED_FIELDS
+        if key not in _reserved_fields
     }
-    source_observed = _provider_instant(
+    source_observed = _provider_instant_fn(
         projection["observed_at"], "observed_at"
     )
-    return CorporateActionObservation(
+    return _observation_type(
         provider_id=projection["provider_id"],
         account_id=projection["account_id"],
         environment=projection["environment"],
@@ -344,7 +356,7 @@ def _canonical_observation_from_sealed_response(
         external_event_id=payload["external_event_id"],
         provider_revision=payload["provider_revision"],
         kind=payload["kind"],
-        effective_at=_provider_instant(payload["effective_at"], "effective_at"),
+        effective_at=_provider_instant_fn(payload["effective_at"], "effective_at"),
         observed_at=source_observed,
         raw_evidence_digest=projection["response_sha256"],
         payload=event_payload,
@@ -584,6 +596,7 @@ def _resolve_authoritative_corporate_action_impl(
     _register_authority,
     _provider_projection,
     _provider_require_scope,
+    _observation_parser,
     _instrument_registry_type,
     _corporate_event_create,
     _authoritative_action_type,
@@ -701,7 +714,7 @@ def _resolve_authoritative_corporate_action_impl(
             "corporate-action evidence permission scope mismatch"
         )
 
-    observation = _canonical_observation_from_sealed_response(projection)
+    observation = _observation_parser(projection)
     if observation.complete is not True:
         raise CorporateActionEvidenceError(
             "incomplete corporate-action evidence cannot authorize mutation"
@@ -826,6 +839,7 @@ def _bind_authoritative_corporate_action_resolver(
     register_authority,
     provider_projection,
     provider_require_scope,
+    observation_parser,
     instrument_registry_type,
     corporate_event_create,
     authoritative_action_type,
@@ -857,6 +871,7 @@ def _bind_authoritative_corporate_action_resolver(
             _register_authority=register_authority,
             _provider_projection=provider_projection,
             _provider_require_scope=provider_require_scope,
+            _observation_parser=observation_parser,
             _instrument_registry_type=instrument_registry_type,
             _corporate_event_create=corporate_event_create,
             _authoritative_action_type=authoritative_action_type,
@@ -870,6 +885,7 @@ resolve_authoritative_corporate_action = _bind_authoritative_corporate_action_re
     _register_authoritative_corporate_action,
     provider_response_observation_projection,
     provider_response_observation_require_scope,
+    _canonical_observation_from_sealed_response,
     InstrumentRegistry,
     CorporateEvent.create,
     AuthoritativeCorporateAction,

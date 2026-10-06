@@ -90,7 +90,7 @@ internal static class InstalledCandidateInventory
             if (!IsSha256(expectedDigest) || expectedSize < 0)
                 throw new InvalidOperationException("An installed inventory digest or size is invalid.");
 
-            if (relative.Contains('\') || relative.Contains(':') || relative.StartsWith('/')
+            if (relative.Contains('\\') || relative.Contains(':') || relative.StartsWith('/')
                 || relative.Split('/').Any(part => part is "" or "." or "..") || !paths.Add(relative))
                 throw new InvalidOperationException("The installed inventory contains unsafe or duplicated paths.");
             string target = Path.GetFullPath(Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar)));

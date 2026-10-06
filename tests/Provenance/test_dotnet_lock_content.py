@@ -912,6 +912,47 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             ):
                 dotnet_locked_dependency_graph(root, [project])
 
+    def test_project_cannot_localize_restore_locked_mode(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'AutoTrade.Desktop' / 'AutoTrade.Desktop.csproj'
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                '<Project TreatAsLocalProperty="RestoreLockedMode">'
+                '<PropertyGroup><RestoreLockedMode>false</RestoreLockedMode>'
+                '</PropertyGroup><ItemGroup>'
+                '<PackageReference Include="Microsoft.Web.WebView2" '
+                'Version="1.0.4191.47" />'
+                '</ItemGroup></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [
+                    'DOTNET_RESTORE_AUTHORITY_LOCAL_OVERRIDE_UNSUPPORTED:'
+                    'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj:'
+                    'RestoreLockedMode'
+                ],
+            )
+
+    def test_props_cannot_localize_restore_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            props = root / 'Directory.Build.props'
+            props.write_text(
+                '<Project TreatAsLocalProperty="Other; RestoreForceEvaluate">'
+                '<PropertyGroup><Other>value</Other></PropertyGroup>'
+                '</Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [
+                    'DOTNET_RESTORE_AUTHORITY_LOCAL_OVERRIDE_UNSUPPORTED:'
+                    'Directory.Build.props:RestoreForceEvaluate'
+                ],
+            )
+
     def test_project_restore_force_evaluate_property_fails_closed(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

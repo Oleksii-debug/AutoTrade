@@ -211,6 +211,11 @@ _RESTORE_AUTHORITY_PROPERTIES = (
     'RestoreForceEvaluate',
     'NuGetLockFilePath',
 )
+_RESTORE_GLOBAL_AUTHORITY_PROPERTIES = (
+    'RestoreLockedMode',
+    'RestoreForceEvaluate',
+    'NuGetLockFilePath',
+)
 
 
 def _restore_authority_property_names(tree: ET.ElementTree) -> tuple[str, ...]:
@@ -218,6 +223,22 @@ def _restore_authority_property_names(tree: ET.ElementTree) -> tuple[str, ...]:
         name
         for name in _RESTORE_AUTHORITY_PROPERTIES
         if _xml_elements(tree, name)
+    )
+
+
+def _restore_local_override_names(tree: ET.ElementTree) -> tuple[str, ...]:
+    raw = tree.getroot().attrib.get('TreatAsLocalProperty')
+    if not isinstance(raw, str) or not raw.strip():
+        return ()
+    declared = {
+        token.strip()
+        for token in raw.split(';')
+        if token.strip()
+    }
+    return tuple(
+        name
+        for name in _RESTORE_GLOBAL_AUTHORITY_PROPERTIES
+        if name in declared
     )
 
 
@@ -260,6 +281,11 @@ def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
                     f'DOTNET_RESTORE_AUTHORITY_PROPERTY_UNSUPPORTED:'
                     f'{relative}:{property_name}'
                 )
+            for property_name in _restore_local_override_names(tree):
+                blockers.append(
+                    f'DOTNET_RESTORE_AUTHORITY_LOCAL_OVERRIDE_UNSUPPORTED:'
+                    f'{relative}:{property_name}'
+                )
 
     for path in sorted(candidates):
         relative = path.relative_to(root).as_posix()
@@ -279,6 +305,11 @@ def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
         for property_name in _restore_authority_property_names(tree):
             blockers.append(
                 f'DOTNET_RESTORE_AUTHORITY_PROPERTY_UNSUPPORTED:'
+                f'{relative}:{property_name}'
+            )
+        for property_name in _restore_local_override_names(tree):
+            blockers.append(
+                f'DOTNET_RESTORE_AUTHORITY_LOCAL_OVERRIDE_UNSUPPORTED:'
                 f'{relative}:{property_name}'
             )
     return blockers

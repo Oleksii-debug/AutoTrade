@@ -1874,5 +1874,97 @@ class QualificationAttestationTests(unittest.TestCase):
                 )
 
 
+    def test_canonical_text_and_rsa_scalars_reject_polymorphic_values_before_callbacks(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self, *_args):
+                callbacks.append("strip")
+                raise AssertionError("hostile strip executed")
+
+            def lower(self):
+                callbacks.append("lower")
+                raise AssertionError("hostile lower executed")
+
+            def upper(self):
+                callbacks.append("upper")
+                raise AssertionError("hostile upper executed")
+
+        class HostileInt(int):
+            def __lt__(self, _other):
+                callbacks.append("lt")
+                raise AssertionError("hostile lt executed")
+
+            def __ge__(self, _other):
+                callbacks.append("ge")
+                raise AssertionError("hostile ge executed")
+
+            def __mod__(self, _other):
+                callbacks.append("mod")
+                raise AssertionError("hostile mod executed")
+
+            def bit_length(self):
+                callbacks.append("bit_length")
+                raise AssertionError("hostile bit_length executed")
+
+        with self.assertRaisesRegex(
+            QualificationTrustError,
+            "canonical non-empty string",
+        ):
+            qualification_attestation_module._text(
+                HostileText("ok"),
+                name="synthetic",
+            )
+        self.assertEqual(callbacks, [])
+
+        with self.assertRaisesRegex(
+            QualificationTrustError,
+            "lowercase 40-character Git SHA",
+        ):
+            qualification_attestation_module._git_sha(
+                HostileText(SOURCE),
+                name="source_sha",
+            )
+        self.assertEqual(callbacks, [])
+
+        with self.assertRaisesRegex(
+            QualificationTrustError,
+            "sha256:<64 lowercase hex>",
+        ):
+            qualification_attestation_module._digest(
+                HostileText(RELEASE_A_SHA),
+                name="digest",
+            )
+        self.assertEqual(callbacks, [])
+
+        with self.assertRaisesRegex(
+            QualificationTrustError,
+            "canonical lowercase hex",
+        ):
+            TrustRoot(
+                producer_id="qualifier.release.service",
+                verifier_id="autotrade.trust.verifier",
+                public_modulus_hex=HostileText(format(_RSA_N, "x")),
+                public_exponent=65537,
+                allowed_scopes=(QualificationScope("RELEASE", "FREEZE"),),
+                valid_from="2026-09-01T00:00:00Z",
+            )
+        self.assertEqual(callbacks, [])
+
+        with self.assertRaisesRegex(
+            QualificationTrustError,
+            "public_exponent is invalid",
+        ):
+            TrustRoot(
+                producer_id="qualifier.release.service",
+                verifier_id="autotrade.trust.verifier",
+                public_modulus_hex=format(_RSA_N, "x"),
+                public_exponent=HostileInt(65537),
+                allowed_scopes=(QualificationScope("RELEASE", "FREEZE"),),
+                valid_from="2026-09-01T00:00:00Z",
+            )
+        self.assertEqual(callbacks, [])
+
+
 if __name__ == "__main__":
     unittest.main()

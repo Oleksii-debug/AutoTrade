@@ -20,6 +20,8 @@ from mvp.autotrade_mvp.fill_accounting import (
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
+    ProviderHistoricalRealizedEquityEvidence,
+    reverify_provider_historical_realized_equity_evidence,
     _book_id,
     _economic_batch_digest,
 )
@@ -205,6 +207,84 @@ class DurableFillAccountingTests(unittest.TestCase):
             )
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["event_type"], "EconomicTransactionBatchBooked")
+
+    def test_verified_pre_correction_cut_keeps_realized_fifo_history_frozen(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            book = durable_book(JournalStore(path))
+            buy = root_buy()
+            sell = later_sell()
+            corrected = correction_one()
+
+            book_fill(book, buy, observed_at="2026-01-01T10:00:01Z")
+            book_fill(book, sell, observed_at="2026-01-02T10:00:01Z")
+            pre_correction = book.resolve_historical_cut(2)
+
+            correct(
+                book,
+                buy,
+                corrected,
+                observed_at="2026-01-03T10:00:00Z",
+            )
+            self.assertEqual(projection(book).realized_pnl, Decimal("9"))
+
+            historical = book.project_historical_equity_position(
+                pre_correction,
+                expected_visibility_journal_sequence=(
+                    pre_correction.visibility_journal_sequence
+                ),
+                instrument="ABC",
+                settlement_currency="USD",
+            )
+            self.assertEqual(historical.quantity, Decimal("1"))
+            self.assertEqual(historical.open_cost_basis, Decimal("100"))
+            self.assertEqual(historical.realized_pnl, Decimal("10"))
+            self.assertIsNone(historical.unrealized_pnl)
+            self.assertIsNone(historical.mark_price)
+
+            evidence = book.resolve_historical_realized_equity_evidence(
+                pre_correction,
+                expected_visibility_journal_sequence=(
+                    pre_correction.visibility_journal_sequence
+                ),
+                instrument="ABC",
+                settlement_currency="USD",
+            )
+            self.assertEqual(evidence.realized_pnl, Decimal("10"))
+            self.assertEqual(evidence.quantity, Decimal("1"))
+            self.assertEqual(evidence.economic_cut_digest, pre_correction.cut_digest)
+            reopened = durable_book(JournalStore(path))
+            self.assertEqual(
+                reverify_provider_historical_realized_equity_evidence(
+                    reopened,
+                    pre_correction,
+                    evidence,
+                    expected_visibility_journal_sequence=(
+                        pre_correction.visibility_journal_sequence
+                    ),
+                ),
+                evidence,
+            )
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "must come from canonical owner replay",
+            ):
+                ProviderHistoricalRealizedEquityEvidence(
+                    provider_id=evidence.provider_id,
+                    account_id=evidence.account_id,
+                    environment=evidence.environment,
+                    economic_cut_digest=evidence.economic_cut_digest,
+                    resulting_book_digest=evidence.resulting_book_digest,
+                    aggregate_version=evidence.aggregate_version,
+                    visibility_journal_sequence=evidence.visibility_journal_sequence,
+                    instrument=evidence.instrument,
+                    settlement_currency=evidence.settlement_currency,
+                    quantity=evidence.quantity,
+                    open_cost_basis=evidence.open_cost_basis,
+                    realized_pnl=evidence.realized_pnl,
+                    projection_policy_version=evidence.projection_policy_version,
+                    evidence_digest=evidence.evidence_digest,
+                )
 
     def test_correction_batch_reopens_with_effective_time_fifo_restatement(self):
         with TemporaryDirectory() as directory:

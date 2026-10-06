@@ -18,8 +18,12 @@ from decimal import (
 from fractions import Fraction
 from hashlib import sha256
 import json
+import os
+from pathlib import Path
 import re
+from threading import RLock
 from typing import Iterable
+from weakref import ref as weakref_ref
 
 from autotrade_numeric.exact_decimal import (
     ExactDecimalError,
@@ -30,8 +34,9 @@ from autotrade_numeric.exact_decimal import (
 )
 from autotrade_research.artifacts.store import ArtifactStore
 from autotrade_research.io.strict_json import strict_json_loads
+from autotrade_research.learning.population_coverage import build_population_coverage
 from autotrade_research.memory.episodes import ExperienceMemory
-from autotrade_research.science.registry import ScientificRegistry
+from autotrade_research.science.registry import ProtocolViolation, ScientificRegistry
 
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -146,19 +151,42 @@ def _report_lower_bound(
 
 
 def _digest(value: str, field: str) -> str:
-    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+    if type(value) is not str or _SHA256.fullmatch(value) is None:
         raise ValueError(f"{field} must be canonical sha256:<64 lowercase hex>")
     return value
 
 
+def _identity_text(value: object, field: str) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{field} must be a non-empty string")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{field} must be a non-empty string")
+    return normalized
+
+
+def _canonical_identity_text(value: object, field: str) -> str:
+    """Require already-canonical built-in text without normalizing authority identity."""
+
+    if type(value) is not str:
+        raise ValueError(f"{field} must be exact canonical non-empty text")
+    if not value or value != value.strip():
+        raise ValueError(f"{field} must be exact canonical non-empty text")
+    return value
+
+
 def _utc(value: datetime, field: str) -> datetime:
-    if (
-        not isinstance(value, datetime)
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
-        raise ValueError(f"{field} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    # Scientific/economic evidence timestamps are authority-bearing UtcInstant
+    # values. Reject caller-controlled datetime/tzinfo subclasses before any
+    # virtual method can run, and reject non-UTC offsets rather than silently
+    # normalizing them into a canonical-looking timestamp.
+    if type(value) is not datetime:
+        raise TypeError(f"{field} must use exact built-in datetime")
+    if value.tzinfo is None or type(value.tzinfo) is not timezone:
+        raise ValueError(f"{field} must be canonical timezone-aware UTC")
+    if value.utcoffset() != timezone.utc.utcoffset(value):
+        raise ValueError(f"{field} must be canonical timezone-aware UTC")
+    return value.replace(tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -173,10 +201,11 @@ class CausalInputEvidence:
 
     def __post_init__(self) -> None:
         for field_name in ("evidence_id", "component_id"):
-            value = getattr(self, field_name)
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"{field_name} must be a non-empty string")
-            object.__setattr__(self, field_name, value.strip())
+            object.__setattr__(
+                self,
+                field_name,
+                _identity_text(getattr(self, field_name), field_name),
+            )
         object.__setattr__(
             self,
             "content_digest",
@@ -188,17 +217,10 @@ class CausalInputEvidence:
             _utc(self.available_utc, "available_utc"),
         )
         if self.syndication_group is not None:
-            if (
-                not isinstance(self.syndication_group, str)
-                or not self.syndication_group.strip()
-            ):
-                raise ValueError(
-                    "syndication_group must be None or a non-empty string"
-                )
             object.__setattr__(
                 self,
                 "syndication_group",
-                self.syndication_group.strip(),
+                _identity_text(self.syndication_group, "syndication_group"),
             )
 
 
@@ -219,22 +241,26 @@ class AblationOutcome:
     input_evidence: tuple[CausalInputEvidence, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.case_id, str) or not self.case_id.strip():
-            raise ValueError("case_id must be a non-empty string")
-        object.__setattr__(self, "case_id", self.case_id.strip())
+        object.__setattr__(
+            self,
+            "case_id",
+            _identity_text(self.case_id, "case_id"),
+        )
         population_unit = self.population_unit_id
         if population_unit is None:
             population_unit = self.case_id
-        if not isinstance(population_unit, str) or not population_unit.strip():
-            raise ValueError("population_unit_id must be a non-empty string")
-        object.__setattr__(self, "population_unit_id", population_unit.strip())
+        object.__setattr__(
+            self,
+            "population_unit_id",
+            _identity_text(population_unit, "population_unit_id"),
+        )
         object.__setattr__(
             self,
             "input_fingerprint",
             _digest(self.input_fingerprint, "input_fingerprint"),
         )
-        if self.variant not in {"FULL", "ABLATED"}:
-            raise ValueError("variant must be FULL or ABLATED")
+        if type(self.variant) is not str or self.variant not in {"FULL", "ABLATED"}:
+            raise ValueError("variant must be exact FULL or ABLATED text")
         if (
             not isinstance(self.elapsed_ms, int)
             or isinstance(self.elapsed_ms, bool)
@@ -244,11 +270,12 @@ class AblationOutcome:
             raise TypeError("elapsed_ms and deadline_ms must be integers")
         if self.elapsed_ms < 0 or self.deadline_ms <= 0:
             raise ValueError("elapsed_ms must be non-negative and deadline_ms positive")
-        if not isinstance(self.components, tuple):
-            raise TypeError("components must be an immutable tuple")
-        if any(not isinstance(item, str) or not item.strip() for item in self.components):
-            raise ValueError("component identities must be non-empty strings")
-        normalized_components = tuple(item.strip() for item in self.components)
+        if type(self.components) is not tuple:
+            raise TypeError("components must be an exact immutable tuple")
+        normalized_components = tuple(
+            _identity_text(item, "component identity")
+            for item in self.components
+        )
         if len(normalized_components) != len(set(normalized_components)):
             raise ValueError("components must use deduplicated canonical identities")
         object.__setattr__(self, "components", normalized_components)
@@ -278,11 +305,11 @@ class AblationOutcome:
         if not isinstance(self.input_evidence, tuple):
             raise TypeError("input_evidence must be an immutable tuple")
         if any(
-            not isinstance(item, CausalInputEvidence)
+            type(item) is not CausalInputEvidence
             for item in self.input_evidence
         ):
             raise TypeError(
-                "input_evidence entries must be CausalInputEvidence"
+                "input_evidence entries must be exact CausalInputEvidence"
             )
         evidence_ids = [item.evidence_id for item in self.input_evidence]
         if len(evidence_ids) != len(set(evidence_ids)):
@@ -320,9 +347,13 @@ class AblationPair:
     ablated: AblationOutcome
 
     def __post_init__(self) -> None:
-        if not isinstance(self.target_component, str) or not self.target_component.strip():
-            raise ValueError("target_component is required")
-        object.__setattr__(self, "target_component", self.target_component.strip())
+        object.__setattr__(
+            self,
+            "target_component",
+            _identity_text(self.target_component, "target_component"),
+        )
+        if type(self.full) is not AblationOutcome or type(self.ablated) is not AblationOutcome:
+            raise TypeError("pair outcomes must be exact AblationOutcome values")
         if self.full.variant != "FULL" or self.ablated.variant != "ABLATED":
             raise ValueError("pair must contain FULL and ABLATED outcomes")
         if self.full.case_id != self.ablated.case_id:
@@ -548,10 +579,10 @@ class AblationEvaluation:
             raise ValueError("ablation evaluation status is not canonical")
 
 def _validate_pairs(target_component: str, pairs: Iterable[AblationPair]) -> list[AblationPair]:
-    if not isinstance(target_component, str) or not target_component.strip():
-        raise ValueError("target_component is required")
-    target_component = target_component.strip()
+    target_component = _identity_text(target_component, "target_component")
     selected = list(pairs)
+    if any(type(pair) is not AblationPair for pair in selected):
+        raise TypeError("pairs must contain exact AblationPair values")
     if any(pair.target_component != target_component for pair in selected):
         raise ValueError("all pairs must target the requested component")
 
@@ -687,7 +718,7 @@ def _build_exact_decision(
 
 
 def summarize_ablation(target_component: str, pairs: Iterable[AblationPair]) -> AblationSummary:
-    target_component = target_component.strip() if isinstance(target_component, str) else target_component
+    target_component = _identity_text(target_component, "target_component")
     selected = _validate_pairs(target_component, pairs)
     comparable = [pair for pair in selected if pair.utility_comparable]
 
@@ -707,15 +738,19 @@ def summarize_ablation(target_component: str, pairs: Iterable[AblationPair]) -> 
         mean_latency_fraction = (
             _mean_fraction(latency_fractions) or Fraction(0, 1)
         )
-        mean_utility_report = (
+        mean_utility_candidate = (
             None
             if mean_utility_fraction is None
             else _report_fraction(mean_utility_fraction)
         )
-        mean_cost_report = _report_fraction(mean_cost_fraction)
-        mean_latency_report = _report_fraction(mean_latency_fraction)
+        mean_cost_candidate = _report_fraction(mean_cost_fraction)
+        mean_latency_candidate = _report_fraction(mean_latency_fraction)
     except (DecimalException, ExactDecimalError):
         reporting_status = _REPORTING_UNAVAILABLE
+    else:
+        mean_utility_report = mean_utility_candidate
+        mean_cost_report = mean_cost_candidate
+        mean_latency_report = mean_latency_candidate
 
     return AblationSummary(
         target_component=target_component,
@@ -754,7 +789,7 @@ def evaluate_incremental_value(
     if multiplier < 0:
         raise ValueError("uncertainty_multiplier must be non-negative")
 
-    target = target_component.strip() if isinstance(target_component, str) else target_component
+    target = _identity_text(target_component, "target_component")
     selected = _validate_pairs(target, pairs)
     if any(not pair.full.input_evidence for pair in selected):
         return AblationEvaluation(
@@ -872,10 +907,12 @@ class AblationEvidenceBundle:
     content_digest: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.target_component, str) or not self.target_component.strip():
-            raise ValueError("target_component is required")
-        object.__setattr__(self, "target_component", self.target_component.strip())
-        if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
+        object.__setattr__(
+            self,
+            "target_component",
+            _identity_text(self.target_component, "target_component"),
+        )
+        if type(self.source_revision) is not str or _GIT_SHA.fullmatch(self.source_revision) is None:
             raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
         object.__setattr__(
             self,
@@ -1090,6 +1127,8 @@ class AblationOutcomeArtifactRef:
     def __post_init__(self) -> None:
         from uuid import UUID
 
+        if type(self.artifact_id) is not str:
+            raise TypeError("artifact_id must use exact canonical UUID text")
         try:
             canonical_id = str(UUID(self.artifact_id))
         except (ValueError, AttributeError, TypeError) as error:
@@ -1100,11 +1139,166 @@ class AblationOutcomeArtifactRef:
 
 
 _ABLATION_OUTCOME_MEDIA_TYPE = "application/vnd.autotrade.ablation-outcome+json"
+_ABLATION_VALUE_PROJECTION_MEDIA_TYPE = (
+    "application/vnd.autotrade.ablation-value-projection+json"
+)
+_ABLATION_PROJECTION_OWNER = {
+    "UTILITY": "CANONICAL_RECONCILED_OUTCOME",
+    "COST": "CANONICAL_ABLATION_COST_COMPOSITE",
+}
+
+_REQUIRED_ABLATION_COST_COMPONENTS = (
+    "commission",
+    "spread",
+    "slippage",
+    "financing",
+    "funding",
+    "borrow",
+    "market_data",
+    "model_compute",
+    "infrastructure",
+    "tax_estimate",
+)
+
+_ABLATION_PROJECTION_RULE = {
+    "UTILITY": "reconciled-outcome-net-value-v1",
+    "COST": "complete-after-cost-attribution-v1",
+}
+
+
+@dataclass(frozen=True)
+class RegisteredAblationProjectionDescriptor:
+    """Frozen preregistered rule identity; never an outcome-value authority."""
+
+    artifact_id: str
+    sha256: str
+    projection_kind: str
+    value_unit: str
+    owner_authority: str
+    rule_id: str
+    cost_components: tuple[str, ...]
+
+
+def _registered_projection_reference(reference: object, field: str) -> tuple[str, str]:
+    """Parse the registry's immutable artifact:<uuid>@sha256:<digest> identity."""
+
+    from uuid import UUID
+
+    if type(reference) is not str or not reference.startswith("artifact:"):
+        raise ValueError(f"{field} must be an immutable artifact reference")
+    material = reference.removeprefix("artifact:")
+    if material.count("@") != 1:
+        raise ValueError(f"{field} must contain one immutable artifact digest")
+    artifact_id, digest = material.split("@", 1)
+    try:
+        canonical_id = str(UUID(artifact_id))
+    except (ValueError, AttributeError, TypeError) as error:
+        raise ValueError(f"{field} artifact identity is invalid") from error
+    if canonical_id != artifact_id:
+        raise ValueError(f"{field} artifact identity is not canonical")
+    return canonical_id, _digest(digest, f"{field} digest")
+
+
+def _load_registered_projection_descriptor(
+    artifact_store: ArtifactStore,
+    reference: object,
+    *,
+    projection_kind: str,
+    value_unit: str,
+) -> RegisteredAblationProjectionDescriptor:
+    """Authenticate one preregistered projection rule without trusting its operands.
+
+    The rule may select how a later canonical owner is interpreted, but cannot
+    itself mint utility/cost.  Terminal values remain unavailable until the
+    named independent owner is composed and reverified at the frozen cut.
+    """
+
+    if type(artifact_store) is not ArtifactStore:
+        raise TypeError("projection descriptor requires exact ArtifactStore")
+    if projection_kind not in _ABLATION_PROJECTION_OWNER:
+        raise ValueError("projection_kind is unsupported")
+    unit = _canonical_identity_text(value_unit, "value_unit")
+    artifact_id, digest = _registered_projection_reference(
+        reference,
+        f"{projection_kind.lower()}_projection_ref",
+    )
+    manifest, data = ArtifactStore.read_authenticated_snapshot(
+        artifact_store,
+        artifact_id,
+    )
+    if manifest.get("sha256") != digest:
+        raise ValueError("registered ablation projection digest mismatch")
+    if manifest.get("media_type") != _ABLATION_VALUE_PROJECTION_MEDIA_TYPE:
+        raise ValueError("registered ablation projection media type is not qualified")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("registered ablation projection must be UTF-8 JSON") from error
+    try:
+        payload = strict_json_loads(text)
+    except ValueError as error:
+        raise ValueError("registered ablation projection JSON is invalid") from error
+    required = {
+        "schema_version",
+        "projection_kind",
+        "value_unit",
+        "owner_authority",
+        "rule_id",
+        "cost_components",
+    }
+    if type(payload) is not dict or set(payload) != required:
+        raise ValueError("registered ablation projection schema is not canonical")
+    if payload.get("schema_version") != 1:
+        raise ValueError("registered ablation projection schema version is unsupported")
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    if canonical != text:
+        raise ValueError("registered ablation projection JSON must be canonical")
+    if payload.get("projection_kind") != projection_kind:
+        raise ValueError("registered ablation projection kind mismatch")
+    if payload.get("value_unit") != unit:
+        raise ValueError("registered ablation projection value unit mismatch")
+    expected_owner = _ABLATION_PROJECTION_OWNER[projection_kind]
+    if payload.get("owner_authority") != expected_owner:
+        raise ValueError("registered ablation projection owner authority mismatch")
+    rule_id = _canonical_identity_text(payload.get("rule_id"), "projection rule_id")
+    if rule_id != _ABLATION_PROJECTION_RULE[projection_kind]:
+        raise ValueError("registered ablation projection rule is unsupported")
+    raw_components = payload.get("cost_components")
+    if type(raw_components) is not list or any(
+        type(item) is not str for item in raw_components
+    ):
+        raise ValueError("registered ablation projection cost_components are invalid")
+    components = tuple(raw_components)
+    expected_components = (
+        _REQUIRED_ABLATION_COST_COMPONENTS
+        if projection_kind == "COST"
+        else ()
+    )
+    if components != expected_components:
+        raise ValueError(
+            "registered ablation projection cost component coverage is incomplete"
+        )
+    return RegisteredAblationProjectionDescriptor(
+        artifact_id=artifact_id,
+        sha256=digest,
+        projection_kind=projection_kind,
+        value_unit=unit,
+        owner_authority=expected_owner,
+        rule_id=rule_id,
+        cost_components=components,
+    )
+
+
 
 
 def _parse_utc_text(value: object, field: str) -> datetime:
-    if not isinstance(value, str) or not value.endswith("Z"):
-        raise ValueError(f"{field} must be canonical UTC text")
+    if type(value) is not str or not value.endswith("Z"):
+        raise ValueError(f"{field} must be exact canonical UTC text")
     try:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as error:
@@ -1133,15 +1327,13 @@ class CanonicalAblationOutcomeEvidence:
 
     def __post_init__(self) -> None:
         for name in ("case_id", "population_unit_id"):
-            value = getattr(self, name)
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"{name} is required")
-            canonical = value.strip()
-            if canonical != value:
-                raise ValueError(f"{name} must use canonical text")
-            object.__setattr__(self, name, canonical)
-        if self.variant not in {"FULL", "ABLATED"}:
-            raise ValueError("variant must be FULL or ABLATED")
+            object.__setattr__(
+                self,
+                name,
+                _canonical_identity_text(getattr(self, name), name),
+            )
+        if type(self.variant) is not str or self.variant not in {"FULL", "ABLATED"}:
+            raise ValueError("variant must be exact FULL or ABLATED text")
         object.__setattr__(self, "utility", _decimal(self.utility, "utility"))
         cost = _decimal(self.cost, "cost")
         if cost < 0:
@@ -1152,7 +1344,7 @@ class CanonicalAblationOutcomeEvidence:
             "outcome_available_utc",
             _utc(self.outcome_available_utc, "outcome_available_utc"),
         )
-        if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
+        if type(self.source_revision) is not str or _GIT_SHA.fullmatch(self.source_revision) is None:
             raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
         for name in (
             "utility_evidence_digest",
@@ -1181,6 +1373,7 @@ class RegisteredAblationPopulation:
     evaluation_cutoff_utc: datetime
     population_unit_ids: tuple[str, ...]
     complete: bool = True
+    coverage_digest: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -1189,7 +1382,7 @@ class RegisteredAblationPopulation:
             "stopping_rule_digest",
         ):
             object.__setattr__(self, name, _digest(getattr(self, name), name))
-        if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
+        if type(self.source_revision) is not str or _GIT_SHA.fullmatch(self.source_revision) is None:
             raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
         registered = _utc(self.registered_at_utc, "registered_at_utc")
         cutoff = _utc(self.evaluation_cutoff_utc, "evaluation_cutoff_utc")
@@ -1197,15 +1390,14 @@ class RegisteredAblationPopulation:
             raise ValueError("evaluation cutoff cannot precede population registration")
         object.__setattr__(self, "registered_at_utc", registered)
         object.__setattr__(self, "evaluation_cutoff_utc", cutoff)
-        if not isinstance(self.population_unit_ids, tuple) or not self.population_unit_ids:
-            raise ValueError("population_unit_ids must be a non-empty immutable tuple")
+        if type(self.population_unit_ids) is not tuple or not self.population_unit_ids:
+            raise ValueError(
+                "population_unit_ids must be a non-empty exact immutable tuple"
+            )
         normalized = tuple(
-            value.strip()
+            _canonical_identity_text(value, "population_unit_id")
             for value in self.population_unit_ids
-            if isinstance(value, str) and value.strip()
         )
-        if len(normalized) != len(self.population_unit_ids):
-            raise ValueError("population_unit_ids must contain canonical non-empty strings")
         if tuple(sorted(normalized)) != normalized:
             raise ValueError("population_unit_ids must be sorted canonically")
         if len(set(normalized)) != len(normalized):
@@ -1213,16 +1405,287 @@ class RegisteredAblationPopulation:
         object.__setattr__(self, "population_unit_ids", normalized)
         if type(self.complete) is not bool:
             raise TypeError("complete must be a boolean")
+        if self.coverage_digest is not None:
+            object.__setattr__(
+                self,
+                "coverage_digest",
+                _digest(self.coverage_digest, "coverage_digest"),
+            )
 
 
-class AblationQualificationAuthority:
-    """Resolve qualification evidence only through canonical persistent authorities.
+def _ablation_population_candidate_hash(
+    target_component: str,
+    pairs: tuple[AblationPair, ...],
+    *,
+    source_revision: str,
+) -> str:
+    """Bind one selected ablation population without trusting outcome economics."""
 
-    The authority never publishes evidence. It consumes an append-only scientific
-    protocol, recomputes the complete ExperienceMemory population at the frozen
-    causal cutoff, and reads pre-existing immutable outcome artifacts from the
-    canonical ArtifactStore.
-    """
+    target = _identity_text(target_component, "target_component")
+    material = {
+        "schema_version": "ablation-population-candidate.v1",
+        "source_revision": source_revision,
+        "target_component": target,
+        "pairs": [
+            {
+                "case_id": pair.full.case_id,
+                "input_cutoff_utc": _canonical_utc_text(pair.full.input_cutoff_utc),
+                "input_fingerprint": pair.full.input_fingerprint,
+                "population_unit_id": pair.full.population_unit_id,
+            }
+            for pair in sorted(
+                pairs,
+                key=lambda item: (
+                    item.full.population_unit_id,
+                    item.full.case_id,
+                    item.full.input_fingerprint,
+                ),
+            )
+        ],
+    }
+    raw = json.dumps(
+        material,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + sha256(raw).hexdigest()
+
+
+def _canonical_database_path_binding(
+    value: object,
+    label: str,
+    *,
+    _path_type: type = type(Path()),
+) -> tuple[str, str | None]:
+    """Bind one exact SQLite pathname without claiming physical-file identity."""
+
+    state = object.__getattribute__(value, "__dict__")
+    if type(state) is not dict:
+        raise ProtocolViolation(
+            f"ablation qualification {label} state is not canonical"
+        )
+    if "path" not in state:
+        raise ProtocolViolation(
+            f"ablation qualification {label} database path is unavailable"
+        )
+    path = state["path"]
+    if type(path) is not _path_type:
+        raise ProtocolViolation(
+            f"ablation qualification {label} database path is not canonical"
+        )
+    path_text = os.fspath(path)
+    if type(path_text) is not str or not path_text:
+        raise ProtocolViolation(
+            f"ablation qualification {label} database path is not canonical"
+        )
+    cwd = None if os.path.isabs(path_text) else os.getcwd()
+    return path_text, cwd
+
+
+def _make_ablation_authority_policy_binding(
+    path_binding=_canonical_database_path_binding,
+):
+    """Create one process-local issuance ledger hidden behind closure-owned state."""
+
+    lock = RLock()
+    bindings: dict[
+        int,
+        tuple[
+            object,
+            ScientificRegistry,
+            ExperienceMemory,
+            ArtifactStore,
+            str,
+            str,
+            str,
+            datetime,
+            tuple[str, ...],
+            str | None,
+            str | None,
+        ],
+    ] = {}
+    backing_paths: dict[
+        int,
+        tuple[tuple[str, str | None], tuple[str, str | None]],
+    ] = {}
+    memory_correction_authorities: dict[int, object | None] = {}
+
+    def register(
+        authority: object,
+        *,
+        scientific_registry: ScientificRegistry,
+        experience_memory: ExperienceMemory,
+        artifact_store: ArtifactStore,
+        protocol_id: str,
+        protocol_hash: str,
+        source_revision: str,
+        causal_cutoff: datetime,
+        permission_classes: tuple[str, ...],
+        task: str | None,
+        instrument_family: str | None,
+    ) -> None:
+        if type(authority) is not AblationQualificationAuthority:
+            return
+        authority_id = id(authority)
+        registry_path_binding = path_binding(scientific_registry, "registry")
+        memory_path_binding = path_binding(experience_memory, "memory")
+        memory_state = object.__getattribute__(experience_memory, "__dict__")
+        if type(memory_state) is not dict or "_correction_evidence_resolver" not in memory_state:
+            raise ProtocolViolation(
+                "ablation qualification memory correction authority is unavailable"
+            )
+        memory_correction_authority = memory_state["_correction_evidence_resolver"]
+
+        def release(
+            reference: object,
+            *,
+            authority_id: int = authority_id,
+            bindings: dict[
+                int,
+                tuple[
+                    object,
+                    ScientificRegistry,
+                    ExperienceMemory,
+                    ArtifactStore,
+                    str,
+                    str,
+                    str,
+                    datetime,
+                    tuple[str, ...],
+                    str | None,
+                    str | None,
+                ],
+            ] = bindings,
+            backing_paths: dict[
+                int,
+                tuple[tuple[str, str | None], tuple[str, str | None]],
+            ] = backing_paths,
+            memory_correction_authorities: dict[int, object | None] = (
+                memory_correction_authorities
+            ),
+            lock: RLock = lock,
+        ) -> None:
+            with lock:
+                current = bindings.get(authority_id)
+                if current is not None and current[0] is reference:
+                    bindings.pop(authority_id, None)
+                    backing_paths.pop(authority_id, None)
+                    memory_correction_authorities.pop(authority_id, None)
+
+        reference = weakref_ref(authority, release)
+        with lock:
+            existing = bindings.get(authority_id)
+            if existing is not None and existing[0]() is authority:
+                raise RuntimeError(
+                    "ablation qualification authority policy binding already exists"
+                )
+            if existing is not None and existing[0]() is not None:
+                raise RuntimeError(
+                    "ablation qualification authority identity collision"
+                )
+            bindings[authority_id] = (
+                reference,
+                scientific_registry,
+                experience_memory,
+                artifact_store,
+                protocol_id,
+                protocol_hash,
+                source_revision,
+                causal_cutoff,
+                permission_classes,
+                task,
+                instrument_family,
+            )
+            backing_paths[authority_id] = (
+                registry_path_binding,
+                memory_path_binding,
+            )
+            memory_correction_authorities[authority_id] = memory_correction_authority
+
+    def resolve(
+        authority: object,
+    ) -> tuple[
+        ScientificRegistry,
+        ExperienceMemory,
+        ArtifactStore,
+        str,
+        str,
+        str,
+        datetime,
+        tuple[str, ...],
+        str | None,
+        str | None,
+    ]:
+        if type(authority) is not AblationQualificationAuthority:
+            raise ProtocolViolation(
+                "ablation qualification authority type is invalid"
+            )
+        authority_id = id(authority)
+        with lock:
+            bound = bindings.get(authority_id)
+            if bound is None or bound[0]() is not authority:
+                raise ProtocolViolation(
+                    "ablation qualification authority was not issued by "
+                    "the canonical constructor"
+                )
+            bound_paths = backing_paths.get(authority_id)
+            if bound_paths is None:
+                raise ProtocolViolation(
+                    "ablation qualification database path binding is unavailable"
+                )
+            if path_binding(bound[1], "registry") != bound_paths[0]:
+                raise ProtocolViolation(
+                    "ablation qualification registry database path changed after issuance"
+                )
+            if path_binding(bound[2], "memory") != bound_paths[1]:
+                raise ProtocolViolation(
+                    "ablation qualification memory database path changed after issuance"
+                )
+            if authority_id not in memory_correction_authorities:
+                raise ProtocolViolation(
+                    "ablation qualification memory correction binding is unavailable"
+                )
+            memory_state = object.__getattribute__(bound[2], "__dict__")
+            if (
+                type(memory_state) is not dict
+                or "_correction_evidence_resolver" not in memory_state
+            ):
+                raise ProtocolViolation(
+                    "ablation qualification memory correction authority is unavailable"
+                )
+            if (
+                memory_state["_correction_evidence_resolver"]
+                is not memory_correction_authorities[authority_id]
+            ):
+                raise ProtocolViolation(
+                    "ablation qualification memory correction authority changed after issuance"
+                )
+            return (
+                bound[1],
+                bound[2],
+                bound[3],
+                bound[4],
+                bound[5],
+                bound[6],
+                bound[7],
+                bound[8],
+                bound[9],
+                bound[10],
+            )
+
+    return register, resolve
+
+
+(
+    _register_ablation_authority_policy_binding,
+    _issued_ablation_authority_policy_binding,
+) = _make_ablation_authority_policy_binding()
+
+
+def _make_ablation_qualification_authority_init(register_policy_binding):
+    """Capture the private policy issuer without exposing it as constructor input."""
 
     def __init__(
         self,
@@ -1238,30 +1701,87 @@ class AblationQualificationAuthority:
         task: str | None = None,
         instrument_family: str | None = None,
     ) -> None:
-        if not isinstance(scientific_registry, ScientificRegistry):
-            raise TypeError("scientific_registry must be ScientificRegistry")
-        if not isinstance(experience_memory, ExperienceMemory):
-            raise TypeError("experience_memory must be ExperienceMemory")
-        if not isinstance(artifact_store, ArtifactStore):
-            raise TypeError("artifact_store must be ArtifactStore")
-        if not isinstance(protocol_id, str) or not protocol_id.strip():
-            raise ValueError("protocol_id is required")
-        if not isinstance(protocol_hash, str):
-            raise TypeError("protocol_hash must be text")
-        if not isinstance(source_revision, str) or _GIT_SHA.fullmatch(source_revision) is None:
-            raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
-        if not isinstance(granted_permissions, set) or not granted_permissions:
-            raise ValueError("granted_permissions must be a non-empty set")
+        if type(scientific_registry) is not ScientificRegistry:
+            raise TypeError("scientific_registry must be exact ScientificRegistry")
+        if type(experience_memory) is not ExperienceMemory:
+            raise TypeError("experience_memory must be exact ExperienceMemory")
+        if type(artifact_store) is not ArtifactStore:
+            raise TypeError("artifact_store must be exact ArtifactStore")
+        protocol_id = _identity_text(protocol_id, "protocol_id")
+        protocol_hash = _digest(protocol_hash, "protocol_hash")
+        if (
+            type(source_revision) is not str
+            or _GIT_SHA.fullmatch(source_revision) is None
+        ):
+            raise ValueError(
+                "source_revision must be an exact 40-character lowercase git SHA"
+            )
+        if type(granted_permissions) is not set or not granted_permissions:
+            raise ValueError("granted_permissions must be a non-empty exact set")
+        if any(type(value) is not str for value in granted_permissions):
+            raise ValueError(
+                "granted_permissions must contain exact canonical text"
+            )
+        if any(
+            not value
+            or value != value.strip()
+            for value in granted_permissions
+        ):
+            raise ValueError(
+                "granted_permissions must contain canonical non-empty text"
+            )
+        normalized_permissions = tuple(sorted(granted_permissions))
+        if task is not None and (
+            type(task) is not str or not task or task != task.strip()
+        ):
+            raise ValueError("task must be None or canonical non-empty text")
+        if instrument_family is not None and (
+            type(instrument_family) is not str
+            or not instrument_family
+            or instrument_family != instrument_family.strip()
+        ):
+            raise ValueError(
+                "instrument_family must be None or canonical non-empty text"
+            )
         self.scientific_registry = scientific_registry
         self.experience_memory = experience_memory
         self.artifact_store = artifact_store
-        self.protocol_id = protocol_id.strip()
-        self.protocol_hash = _digest(protocol_hash, "protocol_hash")
+        self.protocol_id = protocol_id
+        self.protocol_hash = protocol_hash
         self.source_revision = source_revision
         self.causal_cutoff = _utc(causal_cutoff, "causal_cutoff")
-        self.granted_permissions = set(granted_permissions)
+        self.granted_permissions = set(normalized_permissions)
         self.task = task
         self.instrument_family = instrument_family
+        register_policy_binding(
+            self,
+            scientific_registry=scientific_registry,
+            experience_memory=experience_memory,
+            artifact_store=artifact_store,
+            protocol_id=self.protocol_id,
+            protocol_hash=self.protocol_hash,
+            source_revision=self.source_revision,
+            causal_cutoff=self.causal_cutoff,
+            permission_classes=normalized_permissions,
+            task=self.task,
+            instrument_family=self.instrument_family,
+        )
+
+    return __init__
+
+
+class AblationQualificationAuthority:
+    """Resolve qualification evidence only through canonical persistent authorities.
+
+    The authority never publishes evidence. It consumes an append-only scientific
+    protocol, recomputes the complete ExperienceMemory population at the frozen
+    causal cutoff, and reads pre-existing immutable outcome artifacts from the
+    canonical ArtifactStore.
+    """
+
+    __init__ = _make_ablation_qualification_authority_init(
+        _register_ablation_authority_policy_binding
+    )
 
     def _load_outcome(
         self,
@@ -1269,14 +1789,28 @@ class AblationQualificationAuthority:
         *,
         population_root: str,
     ) -> CanonicalAblationOutcomeEvidence:
-        if not isinstance(reference, AblationOutcomeArtifactRef):
+        (
+            _science,
+            _memory,
+            artifact_store,
+            protocol_id,
+            protocol_hash,
+            source_revision,
+            _cutoff,
+            _permissions,
+            _task,
+            _family,
+        ) = _registered_policy_context(self)
+        if type(reference) is not AblationOutcomeArtifactRef:
             raise TypeError("outcome_refs must contain AblationOutcomeArtifactRef")
-        manifest = self.artifact_store.load_manifest(reference.artifact_id)
+        manifest, data = ArtifactStore.read_authenticated_snapshot(
+            artifact_store,
+            reference.artifact_id,
+        )
         if manifest.get("sha256") != reference.sha256:
             raise ValueError("ablation outcome artifact digest mismatch")
         if manifest.get("media_type") != _ABLATION_OUTCOME_MEDIA_TYPE:
             raise ValueError("ablation outcome artifact media type is not qualified")
-        data = self.artifact_store.read_bytes(reference.artifact_id)
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError as error:
@@ -1314,10 +1848,10 @@ class AblationQualificationAuthority:
         if canonical != text:
             raise ValueError("ablation outcome artifact JSON must be canonical")
         if (
-            payload.get("protocol_id") != self.protocol_id
-            or payload.get("protocol_hash") != self.protocol_hash
+            payload.get("protocol_id") != protocol_id
+            or payload.get("protocol_hash") != protocol_hash
             or payload.get("population_root") != population_root
-            or payload.get("source_revision") != self.source_revision
+            or payload.get("source_revision") != source_revision
         ):
             raise ValueError("ablation outcome artifact authority binding mismatch")
         superseded_raw = payload.get("superseded_at_utc")
@@ -1343,15 +1877,43 @@ class AblationQualificationAuthority:
             superseded_at_utc=superseded,
         )
 
-    def resolve(
+    def resolve_population(
         self,
         pairs: Iterable[AblationPair],
-        *,
-        outcome_refs: Iterable[AblationOutcomeArtifactRef],
-    ) -> tuple[RegisteredAblationPopulation, tuple[CanonicalAblationOutcomeEvidence, ...]]:
+    ) -> RegisteredAblationPopulation:
+        """Resolve only canonical frozen population evidence, never outcome economics."""
+
+        if type(pairs) not in {list, tuple}:
+            raise TypeError(
+                "pairs must be an exact list or tuple for authority-backed qualification"
+            )
+        (
+            scientific_registry,
+            experience_memory,
+            _artifact_store,
+            protocol_id,
+            protocol_hash,
+            source_revision,
+            causal_cutoff,
+            permission_classes,
+            task,
+            instrument_family,
+        ) = _registered_policy_context(self)
         selected = tuple(pairs)
-        registration = self.scientific_registry.protocol_registration(self.protocol_id)
-        if registration.protocol_hash != self.protocol_hash:
+        if not selected:
+            raise ValueError("qualified ablation requires a non-empty matched population")
+        target = selected[0].target_component
+        _validate_pairs(target, selected)
+        if any(
+            pair.full.outcome_available_utc > causal_cutoff
+            for pair in selected
+        ):
+            raise ValueError(
+                "selected ablation outcome was not available by causal cutoff"
+            )
+
+        registration = scientific_registry.protocol_registration(protocol_id)
+        if registration.protocol_hash != protocol_hash:
             raise ValueError("registered protocol hash does not match qualification binding")
         try:
             registered_raw = datetime.fromisoformat(registration.created_at)
@@ -1360,45 +1922,390 @@ class AblationQualificationAuthority:
         registered_at = _utc(registered_raw, "protocol registered_at")
         if registered_at.isoformat() != registration.created_at:
             raise ValueError("protocol registered_at is not canonical")
-        snapshot = self.experience_memory.coverage_population_snapshot(
-            causal_cutoff=self.causal_cutoff,
-            granted_permissions=set(self.granted_permissions),
-            task=self.task,
-            instrument_family=self.instrument_family,
+
+        snapshot = experience_memory.coverage_population_snapshot(
+            causal_cutoff=causal_cutoff,
+            granted_permissions=set(permission_classes),
+            task=task,
+            instrument_family=instrument_family,
         )
         snapshot.verify_integrity()
-        completeness = self.scientific_registry.completeness(self.protocol_id)
-        population = RegisteredAblationPopulation(
-            protocol_digest=self.protocol_hash,
+        selected_units = tuple(
+            sorted(pair.full.population_unit_id for pair in selected)
+        )
+        eligible_units = tuple(
+            sorted(row["episode_id"] for row in snapshot.rows)
+        )
+        selected_set = set(selected_units)
+        exclusions = {
+            episode_id: "not_selected_by_registered_ablation_population"
+            for episode_id in eligible_units
+            if episode_id not in selected_set
+        }
+        coverage = build_population_coverage(
+            snapshot,
+            candidate_hash=_ablation_population_candidate_hash(
+                target,
+                selected,
+                source_revision=source_revision,
+            ),
+            frozen_protocol_hash=protocol_hash,
+            input_snapshot_hash=snapshot.root_hash,
+            causal_cutoff=causal_cutoff,
+            permission_classes=permission_classes,
+            included_episode_ids=selected_units,
+            exclusions=exclusions,
+            task=task,
+            instrument_family=instrument_family,
+        )
+        labels_complete = all(
+            complete
+            for _regime, complete in coverage.included_labels_complete_by_regime
+        )
+        completeness = scientific_registry.completeness(protocol_id)
+        return RegisteredAblationPopulation(
+            protocol_digest=protocol_hash,
             population_digest=snapshot.root_hash,
             stopping_rule_digest=completeness["stopping_rules_hash"],
-            source_revision=self.source_revision,
+            source_revision=source_revision,
             registered_at_utc=registered_at,
-            evaluation_cutoff_utc=self.causal_cutoff,
-            population_unit_ids=tuple(
-                sorted(row["episode_id"] for row in snapshot.rows)
-            ),
-            complete=True,
+            evaluation_cutoff_utc=causal_cutoff,
+            population_unit_ids=coverage.included_episode_ids,
+            complete=coverage.complete and labels_complete,
+            coverage_digest=coverage.digest,
         )
+
+    def resolve(
+        self,
+        pairs: Iterable[AblationPair],
+        *,
+        outcome_refs: Iterable[AblationOutcomeArtifactRef],
+    ) -> tuple[RegisteredAblationPopulation, tuple[CanonicalAblationOutcomeEvidence, ...]]:
+        if type(pairs) not in {list, tuple}:
+            raise TypeError(
+                "pairs must be an exact list or tuple for authority-backed qualification"
+            )
+        if type(outcome_refs) not in {list, tuple}:
+            raise TypeError(
+                "outcome_refs must be an exact list or tuple for authority-backed qualification"
+            )
+        (
+            _science,
+            experience_memory,
+            _artifacts,
+            _protocol_id,
+            _protocol_hash,
+            _source_revision,
+            causal_cutoff,
+            permission_classes,
+            task,
+            instrument_family,
+        ) = _registered_policy_context(self)
+        selected = tuple(pairs)
+        refs = tuple(outcome_refs)
+        population = self.resolve_population(selected)
+        snapshot = experience_memory.coverage_population_snapshot(
+            causal_cutoff=causal_cutoff,
+            granted_permissions=set(permission_classes),
+            task=task,
+            instrument_family=instrument_family,
+        )
+        snapshot.verify_integrity()
+        if snapshot.root_hash != population.population_digest:
+            raise ValueError("ablation population changed during authority resolution")
         outcomes = tuple(
             self._load_outcome(reference, population_root=snapshot.root_hash)
-            for reference in outcome_refs
+            for reference in refs
         )
-        if selected:
-            earliest_cutoff = min(pair.full.input_cutoff_utc for pair in selected)
-            if registered_at > earliest_cutoff:
-                # Keep the normal evaluator's fail-closed reason deterministic.
-                population = RegisteredAblationPopulation(
-                    protocol_digest=population.protocol_digest,
-                    population_digest=population.population_digest,
-                    stopping_rule_digest=population.stopping_rule_digest,
-                    source_revision=population.source_revision,
-                    registered_at_utc=registered_at,
-                    evaluation_cutoff_utc=population.evaluation_cutoff_utc,
-                    population_unit_ids=population.population_unit_ids,
-                    complete=True,
-                )
+        if any(
+            evidence.outcome_available_utc > causal_cutoff
+            for evidence in outcomes
+        ):
+            raise ValueError(
+                "ablation outcome artifact became available after causal cutoff"
+            )
+        expected_outcomes = {
+            (item.case_id, item.variant)
+            for pair in selected
+            for item in (pair.full, pair.ablated)
+        }
+        observed_outcomes = [
+            (evidence.case_id, evidence.variant)
+            for evidence in outcomes
+        ]
+        if len(observed_outcomes) != len(set(observed_outcomes)):
+            raise ValueError("duplicate canonical ablation outcome artifact identity")
+        if set(observed_outcomes) != expected_outcomes:
+            raise ValueError(
+                "canonical ablation outcomes do not exactly match selected pairs"
+            )
         return population, outcomes
+
+
+del _register_ablation_authority_policy_binding
+del _make_ablation_qualification_authority_init
+del _make_ablation_authority_policy_binding
+
+
+def _make_registered_policy_context(resolve_policy_binding):
+    """Capture all authority-bearing construction state outside public attributes."""
+
+    def _assert_canonical_method_surface(
+        value: object,
+        owner_type: type,
+        label: str,
+    ) -> None:
+        state = object.__getattribute__(value, "__dict__")
+        if type(state) is not dict:
+            raise ProtocolViolation(
+                f"ablation qualification {label} state is not canonical"
+            )
+        names = tuple(state.keys())
+        if any(type(name) is not str for name in names):
+            raise ProtocolViolation(
+                f"ablation qualification {label} state keys are not canonical"
+            )
+        shadowed = tuple(
+            sorted(
+                name
+                for name in names
+                if name in owner_type.__dict__
+                and callable(getattr(owner_type, name, None))
+            )
+        )
+        if shadowed:
+            raise ProtocolViolation(
+                f"ablation qualification {label} shadows canonical methods: "
+                + ", ".join(shadowed)
+            )
+
+    def _registered_policy_context(
+        authority: object,
+    ) -> tuple[
+        ScientificRegistry,
+        ExperienceMemory,
+        ArtifactStore,
+        str,
+        str,
+        str,
+        datetime,
+        tuple[str, ...],
+        str | None,
+        str | None,
+    ]:
+        (
+            scientific_registry,
+            experience_memory,
+            artifact_store,
+            protocol_id,
+            protocol_hash,
+            source_revision,
+            causal_cutoff,
+            permission_classes,
+            task,
+            instrument_family,
+        ) = resolve_policy_binding(authority)
+        try:
+            current_registry = object.__getattribute__(authority, "scientific_registry")
+            current_memory = object.__getattribute__(authority, "experience_memory")
+            current_artifacts = object.__getattribute__(authority, "artifact_store")
+            current_protocol_id = object.__getattribute__(authority, "protocol_id")
+            current_protocol_hash = object.__getattribute__(authority, "protocol_hash")
+            current_source_revision = object.__getattribute__(authority, "source_revision")
+            current_cutoff = object.__getattribute__(authority, "causal_cutoff")
+            current_permissions = object.__getattribute__(authority, "granted_permissions")
+            current_task = object.__getattribute__(authority, "task")
+            current_family = object.__getattribute__(authority, "instrument_family")
+        except AttributeError as error:
+            raise ProtocolViolation(
+                "ablation qualification authority state is unavailable"
+            ) from error
+
+        if current_registry is not scientific_registry:
+            raise ProtocolViolation(
+                "ablation qualification authority registry binding changed after issuance"
+            )
+        if current_memory is not experience_memory:
+            raise ProtocolViolation(
+                "ablation qualification authority memory binding changed after issuance"
+            )
+        if current_artifacts is not artifact_store:
+            raise ProtocolViolation(
+                "ablation qualification authority artifact binding changed after issuance"
+            )
+        if current_protocol_id != protocol_id:
+            raise ProtocolViolation(
+                "ablation qualification authority protocol_id binding changed after issuance"
+            )
+        if current_protocol_hash != protocol_hash:
+            raise ProtocolViolation(
+                "ablation qualification authority protocol_hash binding changed after issuance"
+            )
+        if current_source_revision != source_revision:
+            raise ProtocolViolation(
+                "ablation qualification authority source revision changed after issuance"
+            )
+        if current_cutoff != causal_cutoff:
+            raise ProtocolViolation(
+                "ablation qualification authority causal cutoff changed after issuance"
+            )
+        if type(current_permissions) is not set:
+            raise ProtocolViolation(
+                "ablation qualification authority permissions changed after issuance"
+            )
+        if any(type(value) is not str for value in current_permissions):
+            raise ProtocolViolation(
+                "ablation qualification authority permissions are not canonical"
+            )
+        if tuple(sorted(current_permissions)) != permission_classes:
+            raise ProtocolViolation(
+                "ablation qualification authority permissions changed after issuance"
+            )
+        if current_task != task:
+            raise ProtocolViolation(
+                "ablation qualification authority task changed after issuance"
+            )
+        if current_family != instrument_family:
+            raise ProtocolViolation(
+                "ablation qualification authority instrument family changed after issuance"
+            )
+
+        if type(scientific_registry) is not ScientificRegistry:
+            raise ProtocolViolation(
+                "ablation qualification authority registry is not canonical"
+            )
+        if type(experience_memory) is not ExperienceMemory:
+            raise ProtocolViolation(
+                "ablation qualification authority memory is not canonical"
+            )
+        if type(artifact_store) is not ArtifactStore:
+            raise ProtocolViolation(
+                "ablation qualification authority artifact store is not canonical"
+            )
+        _assert_canonical_method_surface(
+            scientific_registry,
+            ScientificRegistry,
+            "registry",
+        )
+        _assert_canonical_method_surface(
+            experience_memory,
+            ExperienceMemory,
+            "memory",
+        )
+        _assert_canonical_method_surface(
+            artifact_store,
+            ArtifactStore,
+            "artifact store",
+        )
+        memory_state = object.__getattribute__(experience_memory, "__dict__")
+        if "_correction_evidence_resolver" not in memory_state:
+            raise ProtocolViolation(
+                "ablation qualification memory correction authority is unavailable"
+            )
+        if memory_state["_correction_evidence_resolver"] is not None:
+            raise ProtocolViolation(
+                "ablation qualification does not admit caller correction-evidence resolvers"
+            )
+        if (
+            type(protocol_id) is not str
+            or not protocol_id
+            or protocol_id != protocol_id.strip()
+        ):
+            raise ProtocolViolation(
+                "ablation qualification authority protocol_id is not canonical"
+            )
+        try:
+            exact_hash = _digest(protocol_hash, "protocol_hash")
+        except (TypeError, ValueError) as error:
+            raise ProtocolViolation(
+                "ablation qualification authority protocol_hash is not canonical"
+            ) from error
+        if type(source_revision) is not str or _GIT_SHA.fullmatch(source_revision) is None:
+            raise ProtocolViolation(
+                "ablation qualification authority source revision is not canonical"
+            )
+        if _utc(causal_cutoff, "causal_cutoff") != causal_cutoff:
+            raise ProtocolViolation(
+                "ablation qualification authority causal cutoff is not canonical"
+            )
+        if (
+            not permission_classes
+            or tuple(sorted(set(permission_classes))) != permission_classes
+        ):
+            raise ProtocolViolation(
+                "ablation qualification authority permissions are not canonical"
+            )
+        return (
+            scientific_registry,
+            experience_memory,
+            artifact_store,
+            protocol_id,
+            exact_hash,
+            source_revision,
+            causal_cutoff,
+            permission_classes,
+            task,
+            instrument_family,
+        )
+
+    return _registered_policy_context
+
+_registered_policy_context = _make_registered_policy_context(
+    _issued_ablation_authority_policy_binding
+)
+del _issued_ablation_authority_policy_binding
+del _make_registered_policy_context
+del _canonical_database_path_binding
+
+def _registered_decision_policy(authority: object):
+    registry, _memory, _artifacts, protocol_id, protocol_hash, *_rest = (
+        _registered_policy_context(authority)
+    )
+    policy = ScientificRegistry.ablation_decision_policy(registry, protocol_id)
+    if (
+        policy.protocol_id != protocol_id
+        or policy.protocol_hash != protocol_hash
+    ):
+        raise ProtocolViolation(
+            "registered ablation decision policy does not match qualification binding"
+        )
+    return policy
+
+
+def _registered_value_policy(authority: object):
+    registry, _memory, _artifacts, protocol_id, protocol_hash, *_rest = (
+        _registered_policy_context(authority)
+    )
+    policy = ScientificRegistry.ablation_value_policy(registry, protocol_id)
+    if (
+        policy.protocol_id != protocol_id
+        or policy.protocol_hash != protocol_hash
+    ):
+        raise ProtocolViolation(
+            "registered ablation value policy does not match qualification binding"
+        )
+    return policy
+
+
+def _registered_projection_descriptors(authority: object, value_policy: object):
+    """Resolve preregistered rule bytes while keeping utility/cost owners separate."""
+
+    _registry, _memory, artifacts, _protocol_id, _protocol_hash, *_rest = (
+        _registered_policy_context(authority)
+    )
+    utility = _load_registered_projection_descriptor(
+        artifacts,
+        value_policy.utility_projection_ref,
+        projection_kind="UTILITY",
+        value_unit=value_policy.value_unit,
+    )
+    cost = _load_registered_projection_descriptor(
+        artifacts,
+        value_policy.cost_projection_ref,
+        projection_kind="COST",
+        value_unit=value_policy.value_unit,
+    )
+    return utility, cost
 
 
 def _qualified_inconclusive(
@@ -1443,15 +2350,26 @@ def evaluate_qualified_incremental_value(
     owner evidence and one immutable historical economic cut are available.
     """
 
-    selected_input = tuple(pairs)
     trusted = authority is not None
     if trusted:
         if type(authority) is not AblationQualificationAuthority:
             raise TypeError(
                 "authority must be the canonical AblationQualificationAuthority or None"
             )
-        caller_outcomes = tuple(canonical_outcomes)
-        if population is not None or caller_outcomes:
+        if type(pairs) not in {list, tuple}:
+            raise TypeError(
+                "pairs must be an exact list or tuple for authority-backed qualification"
+            )
+        if type(canonical_outcomes) not in {list, tuple}:
+            raise TypeError(
+                "canonical_outcomes must be an exact list or tuple for authority-backed qualification"
+            )
+        if type(outcome_refs) not in {list, tuple}:
+            raise TypeError(
+                "outcome_refs must be an exact list or tuple for authority-backed qualification"
+            )
+        selected_input = tuple(pairs)
+        if population is not None or len(canonical_outcomes) != 0:
             raise ValueError(
                 "authority-backed qualification does not accept caller-authored population/outcomes"
             )
@@ -1460,31 +2378,130 @@ def evaluate_qualified_incremental_value(
             raise TypeError(
                 "outcome_refs must contain canonical AblationOutcomeArtifactRef values"
             )
-        if (
-            not isinstance(minimum_pairs, int)
-            or isinstance(minimum_pairs, bool)
-            or minimum_pairs < 2
-        ):
-            raise ValueError("minimum_pairs must be an integer >= 2")
-        required = _decimal(required_lower_bound, "required_lower_bound")
-        multiplier = _decimal(
-            uncertainty_multiplier,
-            "uncertainty_multiplier",
-        )
-        if multiplier < 0:
-            raise ValueError("uncertainty_multiplier must be non-negative")
-        target = (
-            target_component.strip()
-            if isinstance(target_component, str)
-            else target_component
-        )
+        target = _identity_text(target_component, "target_component")
         _validate_pairs(target, selected_input)
 
-        # #718/#1097: the current authority can authenticate the outcome envelope
-        # but cannot independently resolve utility, cost, correction lineage, and
-        # one immutable historical economic cut from their canonical owners.
-        # Do not execute a caller-selected persistent authority and then treat
-        # hash-shaped fields in that envelope as terminal economic evidence.
+        # Caller thresholds are API-compatibility inputs only on the trusted
+        # path. Terminal scientific geometry must be fixed by the append-only
+        # protocol before any candidate outcome artifact can be consulted.
+        try:
+            registered_decision = _registered_decision_policy(authority)
+        except (ProtocolViolation, KeyError, TypeError, ValueError):
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=Decimal("0"),
+                uncertainty_multiplier=Decimal("0"),
+                reason="registered_ablation_decision_policy_unavailable",
+            )
+        required = _decimal(
+            registered_decision.required_lower_bound,
+            "registered required_lower_bound",
+        )
+        multiplier = _decimal(
+            registered_decision.uncertainty_multiplier,
+            "registered uncertainty_multiplier",
+        )
+        if registered_decision.decision_rule != _ABLATION_DECISION_RULE:
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="registered_ablation_decision_rule_unsupported",
+            )
+        if (
+            type(registered_decision.minimum_pairs) is not int
+            or registered_decision.minimum_pairs < 2
+        ):
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="registered_ablation_decision_policy_unavailable",
+            )
+
+        try:
+            registered_value = _registered_value_policy(authority)
+        except (ProtocolViolation, KeyError, TypeError, ValueError):
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="registered_ablation_value_policy_unavailable",
+            )
+        if registered_value.fx_valuation_ref is not None:
+            # The value policy has explicitly frozen an FX dependency.  Until
+            # the canonical FX owner (quote availability, freshness, side and
+            # rounding policy) is composed at the same causal cut, silently
+            # ignoring this preregistered dependency would make the value
+            # dimension post-hoc selectable.
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="registered_ablation_fx_valuation_evidence_unavailable",
+            )
+
+        # Population completeness is independently safe to resolve before the
+        # utility/cost operand owners exist. This preflight reads only the frozen
+        # ExperienceMemory population and registered scientific protocol; it does
+        # not load candidate-authored outcome utility/cost artifacts.
+        try:
+            trusted_population = AblationQualificationAuthority.resolve_population(
+                authority,
+                selected_input,
+            )
+        except (ProtocolViolation, KeyError, TypeError, ValueError):
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="canonical_population_evidence_unavailable",
+            )
+        if not trusted_population.complete:
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="incomplete_registered_population",
+            )
+        if trusted_population.coverage_digest is None:
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="canonical_population_evidence_unavailable",
+            )
+        if selected_input:
+            earliest_cutoff = min(
+                pair.full.input_cutoff_utc for pair in selected_input
+            )
+            if trusted_population.registered_at_utc > earliest_cutoff:
+                return _qualified_inconclusive(
+                    target_component=target,
+                    required_lower_bound=required,
+                    uncertainty_multiplier=multiplier,
+                    reason="post_hoc_population_or_protocol_registration",
+                )
+
+        # Projection-rule bytes are safe to authenticate now: they were frozen
+        # in the preregistered protocol before these outcomes.  They still do
+        # not own any utility/cost value, so successful rule preflight must not
+        # remove the terminal economic-evidence interlock.
+        try:
+            _registered_projection_descriptors(authority, registered_value)
+        except (KeyError, TypeError, ValueError):
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="registered_ablation_projection_evidence_unavailable",
+            )
+
+        # #718/#1097: protocol, complete mature population and immutable rule
+        # identities are now preflighted.  The project still lacks the later
+        # reconciled utility issuer and terminal composition with the canonical
+        # historical economic cut. Never treat the descriptor itself, or the
+        # candidate-authored utility/cost fields, as an owned economic fact.
         return _qualified_inconclusive(
             target_component=target,
             required_lower_bound=required,
@@ -1492,6 +2509,7 @@ def evaluate_qualified_incremental_value(
             reason="canonical_utility_cost_owner_evidence_unavailable",
         )
     else:
+        selected_input = tuple(pairs)
         if tuple(outcome_refs):
             raise ValueError("outcome_refs require AblationQualificationAuthority")
         if not isinstance(population, RegisteredAblationPopulation):
@@ -1503,7 +2521,7 @@ def evaluate_qualified_incremental_value(
     multiplier = _decimal(uncertainty_multiplier, "uncertainty_multiplier")
     if multiplier < 0:
         raise ValueError("uncertainty_multiplier must be non-negative")
-    target = target_component.strip() if isinstance(target_component, str) else target_component
+    target = _identity_text(target_component, "target_component")
     selected = _validate_pairs(target, selected_input)
 
     def inconclusive(reason: str) -> AblationEvaluation:
@@ -1525,6 +2543,11 @@ def evaluate_qualified_incremental_value(
         earliest_cutoff = min(pair.full.input_cutoff_utc for pair in selected)
         if population.registered_at_utc > earliest_cutoff:
             return inconclusive("post_hoc_population_or_protocol_registration")
+        if any(
+            pair.full.outcome_available_utc > population.evaluation_cutoff_utc
+            for pair in selected
+        ):
+            return inconclusive("outcome_unavailable_at_evaluation_cutoff")
 
     evidence_index: dict[tuple[str, str], CanonicalAblationOutcomeEvidence] = {}
     for evidence in canonical_outcomes:
@@ -1581,7 +2604,7 @@ def build_ablation_evidence_bundle(
         raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
     protocol = _digest(protocol_digest, "protocol_digest")
     dataset = _digest(dataset_digest, "dataset_digest")
-    target = target_component.strip() if isinstance(target_component, str) else target_component
+    target = _identity_text(target_component, "target_component")
     selected = sorted(
         _validate_pairs(target, pairs),
         key=lambda pair: (pair.full.case_id, pair.full.input_fingerprint),

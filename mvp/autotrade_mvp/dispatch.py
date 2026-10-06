@@ -2050,6 +2050,46 @@ class GuardedDispatcher:
             for base, members in dispatcher_class_surfaces
             for name, _member in members
         )
+        dispatcher_class_executable_states = []
+        for _base, members in dispatcher_class_surfaces:
+            for _name, member in members:
+                member_code = getattr(member, "__code__", None)
+                if member_code is None:
+                    continue
+                member_kwdefaults = getattr(member, "__kwdefaults__", None)
+                if (
+                    member_kwdefaults is not None
+                    and type(member_kwdefaults) is not dict
+                ):
+                    raise RuntimeError(
+                        "dispatcher method keyword defaults are unavailable"
+                    )
+                member_kwdefaults_copy = (
+                    dict(member_kwdefaults)
+                    if type(member_kwdefaults) is dict
+                    else None
+                )
+                member_kwdefaults_fingerprint = (
+                    tuple(
+                        (id(key), id(value))
+                        for key, value in dict.items(member_kwdefaults)
+                    )
+                    if type(member_kwdefaults) is dict
+                    else None
+                )
+                dispatcher_class_executable_states.append(
+                    (
+                        member,
+                        member_code,
+                        getattr(member, "__defaults__", None),
+                        member_kwdefaults,
+                        member_kwdefaults_copy,
+                        member_kwdefaults_fingerprint,
+                    )
+                )
+        dispatcher_class_executable_states = tuple(
+            dispatcher_class_executable_states
+        )
         initial_instance_state = vars(self)
         initial_instance_class_shadow = tuple(
             (name, initial_instance_state[name])
@@ -2059,8 +2099,9 @@ class GuardedDispatcher:
 
         def restore_dispatcher_class_surface() -> None:
             # A callback may mutate GuardedDispatcher after the send barrier.
-            # Restore the exact per-call class surface before any reconciliation
-            # read/write can dispatch through self._events/self._append again.
+            # Restore the exact per-call class surface and executable function
+            # state before any reconciliation read/write can dispatch through
+            # self._events/self._append again.
             for base, members in dispatcher_class_surfaces:
                 expected_members = dict(members)
                 current_names = set(base.__dict__)
@@ -2072,6 +2113,35 @@ class GuardedDispatcher:
                         or base.__dict__[name] is not member
                     ):
                         setattr(base, name, member)
+            for (
+                member,
+                expected_code,
+                expected_defaults,
+                expected_kwdefaults,
+                expected_kwdefaults_copy,
+                expected_kwdefaults_fingerprint,
+            ) in dispatcher_class_executable_states:
+                if getattr(member, "__code__", None) is not expected_code:
+                    setattr(member, "__code__", expected_code)
+                if getattr(member, "__defaults__", None) is not expected_defaults:
+                    setattr(member, "__defaults__", expected_defaults)
+                current_kwdefaults = getattr(member, "__kwdefaults__", None)
+                if current_kwdefaults is not expected_kwdefaults:
+                    setattr(member, "__kwdefaults__", expected_kwdefaults)
+                if (
+                    expected_kwdefaults_fingerprint is not None
+                    and type(expected_kwdefaults) is dict
+                ):
+                    current_fingerprint = tuple(
+                        (id(key), id(value))
+                        for key, value in dict.items(expected_kwdefaults)
+                    )
+                    if current_fingerprint != expected_kwdefaults_fingerprint:
+                        dict.clear(expected_kwdefaults)
+                        dict.update(
+                            expected_kwdefaults,
+                            expected_kwdefaults_copy,
+                        )
 
         def require_dispatch_call_authority() -> None:
             (
@@ -2128,6 +2198,35 @@ class GuardedDispatcher:
                 ):
                     class_surface_is_unchanged = False
                     break
+            executable_state_is_unchanged = True
+            for (
+                member,
+                expected_code,
+                expected_defaults,
+                expected_kwdefaults,
+                _expected_kwdefaults_copy,
+                expected_kwdefaults_fingerprint,
+            ) in dispatcher_class_executable_states:
+                if (
+                    getattr(member, "__code__", None) is not expected_code
+                    or getattr(member, "__defaults__", None)
+                    is not expected_defaults
+                    or getattr(member, "__kwdefaults__", None)
+                    is not expected_kwdefaults
+                ):
+                    executable_state_is_unchanged = False
+                    break
+                if (
+                    expected_kwdefaults_fingerprint is not None
+                    and type(expected_kwdefaults) is dict
+                    and tuple(
+                        (id(key), id(value))
+                        for key, value in dict.items(expected_kwdefaults)
+                    )
+                    != expected_kwdefaults_fingerprint
+                ):
+                    executable_state_is_unchanged = False
+                    break
             if (
                 self.store is authority_store
                 and self._journal_store_path is authority_path
@@ -2135,6 +2234,7 @@ class GuardedDispatcher:
                 and self._dispatch_authority_state is authority_state
                 and shadow_is_unchanged
                 and class_surface_is_unchanged
+                and executable_state_is_unchanged
                 and type(self.environment) is str
                 and type(self.account_id) is str
                 and type(self.scope_key) is str
@@ -2149,7 +2249,10 @@ class GuardedDispatcher:
             # the failure. Error handling must not continue through a store,
             # scope, instance shadow or rebound class method that an external
             # callback retargeted.
-            if not class_surface_is_unchanged:
+            if (
+                not class_surface_is_unchanged
+                or not executable_state_is_unchanged
+            ):
                 restore_dispatcher_class_surface()
             self.store = authority_store
             self._journal_store_path = authority_path

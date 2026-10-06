@@ -1019,6 +1019,72 @@ class PostSendBuiltinAuthorityTests(unittest.TestCase):
             self.assertEqual(probe, [])
             self.assertEqual(outbound, 1)
 
+    def test_postsend_builtin_module_shadows_are_restored_before_firebreak(self):
+        callbacks = 0
+        sentinel = object()
+        originals = {
+            name: vars(dispatch_module).get(name, sentinel)
+            for name in ("list", "zip", "KeyError", "UnicodeError")
+        }
+
+        def hostile_list(*_args, **_kwargs):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("module-global list shadow executed")
+
+        def hostile_zip(*_args, **_kwargs):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("module-global zip shadow executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                dispatch_module.list = hostile_list
+                dispatch_module.zip = hostile_zip
+                dispatch_module.KeyError = object
+                dispatch_module.UnicodeError = object
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-builtin-global-firebreak-a1",
+                    transport=transport,
+                )
+                self.assertEqual(callbacks, 0)
+                self.assertEqual(result.status, "SENT")
+                self.assertEqual(result.reason, "sent_confirmed")
+                for name, original in originals.items():
+                    if original is sentinel:
+                        self.assertNotIn(name, vars(dispatch_module))
+                    else:
+                        self.assertIs(getattr(dispatch_module, name), original)
+            finally:
+                for name, original in originals.items():
+                    if original is sentinel:
+                        vars(dispatch_module).pop(name, None)
+                    else:
+                        setattr(dispatch_module, name, original)
+
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-builtin-global-firebreak-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
+            )
+            self.assertEqual(callbacks, 0)
+
     def test_transport_helper_rebinding_before_final_guard_is_zero_wire(self):
         surfaces = (
             "_canonical_journal_authority_snapshot",

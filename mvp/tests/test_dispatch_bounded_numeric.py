@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.dispatch import (
     submission_attempt_aggregate_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.provider_response_limits import HARD_MAX_PROVIDER_RESPONSE_BYTES
 
 
 class DispatchBoundedNumericTransportTests(unittest.TestCase):
@@ -130,6 +131,23 @@ class DispatchBoundedNumericTransportTests(unittest.TestCase):
                 dispatcher._events("wrong-generation")
 
         self.assertEqual(touched, [])
+
+    def test_reconciliation_required_opaque_response_keeps_shared_byte_ceiling(self):
+        at_limit = b"x" * HARD_MAX_PROVIDER_RESPONSE_BYTES
+        exact = ExactJsonTransportResponse(
+            at_limit,
+            http_status=503,
+            requires_reconciliation=True,
+            ambiguity_reason="provider_http_5xx_execution_unknown",
+        )
+        self.assertEqual(len(exact.response_bytes), HARD_MAX_PROVIDER_RESPONSE_BYTES)
+        with self.assertRaisesRegex(ValueError, "shared byte budget"):
+            ExactJsonTransportResponse(
+                at_limit + b"x",
+                http_status=503,
+                requires_reconciliation=True,
+                ambiguity_reason="provider_http_5xx_execution_unknown",
+            )
 
     def test_shared_depth_boundary_and_parser_recursion_remain_redacted(self):
         at_limit = b"[" * 64 + b"0" + b"]" * 64

@@ -19,7 +19,11 @@ from autotrade_numeric.exact_decimal import (
 )
 
 from .persistence import JournalStore, canonical_json, payload_digest
-from .provider_response_limits import require_provider_json_depth
+from .provider_response_limits import (
+    HARD_MAX_PROVIDER_RESPONSE_BYTES,
+    require_provider_json_depth,
+    require_provider_response_bytes,
+)
 from .sender_authority import sender_authority_window
 
 
@@ -129,15 +133,24 @@ class ExactJsonTransportResponse:
 
     def __post_init__(self) -> None:
         raw = self.response_bytes
-        _decode_exact_json_bytes(raw)
+        if type(self.requires_reconciliation) is not bool:
+            raise TypeError("requires_reconciliation must be boolean")
+        try:
+            require_provider_response_bytes(
+                raw,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=self.requires_reconciliation,
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "provider response bytes violate shared byte budget"
+            ) from error
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
             or self.http_status > 599
         ):
             raise ValueError("http_status must be an integer 100..599 when provided")
-        if type(self.requires_reconciliation) is not bool:
-            raise TypeError("requires_reconciliation must be boolean")
         if self.requires_reconciliation:
             if (
                 type(self.ambiguity_reason) is not str
@@ -151,10 +164,15 @@ class ExactJsonTransportResponse:
                 "ambiguity_reason",
                 self.ambiguity_reason.strip(),
             )
-        elif self.ambiguity_reason is not None:
-            raise ValueError(
-                "ambiguity_reason is only valid when reconciliation is required"
-            )
+        else:
+            # Definitive responses remain strict JSON. Opaque wire bytes are
+            # admissible only after the provider classifier has already made
+            # the irreversible post-SEND result reconciliation-required.
+            _decode_exact_json_bytes(raw)
+            if self.ambiguity_reason is not None:
+                raise ValueError(
+                    "ambiguity_reason is only valid when reconciliation is required"
+                )
 
     @property
     def response_text(self) -> str:
@@ -186,6 +204,10 @@ class SubmissionResponseBinding:
     submission_scope_hash: str
     response_bytes: bytes
     response_sha256: str
+    response_encoding: str = "utf-8-json"
+    terminal_state: str = "SENT"
+    ambiguity_reason: str | None = None
+    retry_disposition: str | None = None
     http_status: int | None = None
     _factory_token: object = field(default=None, repr=False, compare=False)
 
@@ -211,14 +233,52 @@ class SubmissionResponseBinding:
             )
         if re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None:
             raise ValueError("response_sha256 must be a canonical SHA-256 digest")
-        if type(self.response_bytes) is not bytes or not self.response_bytes:
-            raise ValueError("response_bytes must be non-empty bytes")
+        try:
+            require_provider_response_bytes(
+                self.response_bytes,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "durable provider response bytes violate shared byte budget"
+            ) from error
         if (
             "sha256:" + sha256(self.response_bytes).hexdigest()
             != self.response_sha256
         ):
             raise ValueError("durable provider response digest mismatch")
-        _decode_exact_json_bytes(self.response_bytes)
+        if (
+            type(self.response_encoding) is not str
+            or self.response_encoding not in {"utf-8-json", "hex"}
+        ):
+            raise ValueError("durable provider response encoding is invalid")
+        if self.response_encoding == "utf-8-json":
+            _decode_exact_json_bytes(self.response_bytes)
+        if (
+            type(self.terminal_state) is not str
+            or self.terminal_state not in {"SENT", "UNKNOWN"}
+        ):
+            raise ValueError("terminal_state must be SENT or UNKNOWN")
+        if self.terminal_state == "UNKNOWN":
+            if (
+                type(self.ambiguity_reason) is not str
+                or not self.ambiguity_reason.strip()
+                or self.ambiguity_reason != self.ambiguity_reason.strip()
+            ):
+                raise ValueError(
+                    "UNKNOWN durable response requires a canonical ambiguity_reason"
+                )
+            if self.retry_disposition != "RECONCILE_FIRST":
+                raise ValueError(
+                    "UNKNOWN durable response must remain RECONCILE_FIRST"
+                )
+        elif self.ambiguity_reason is not None or self.retry_disposition is not None:
+            raise ValueError(
+                "SENT durable response cannot carry UNKNOWN retry semantics"
+            )
+        if self.response_encoding == "hex" and self.terminal_state != "UNKNOWN":
+            raise ValueError("opaque provider response must remain UNKNOWN")
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -254,6 +314,8 @@ class SubmissionResponseBinding:
 
     @property
     def payload(self) -> Any:
+        if self.response_encoding != "utf-8-json":
+            raise ValueError("opaque provider response has no JSON payload")
         return _freeze_json(_decode_exact_json_bytes(self.response_bytes))
 
 
@@ -475,21 +537,16 @@ def load_submission_response_binding(
 ) -> SubmissionResponseBinding:
     """Load exact provider response provenance from the canonical submission journal."""
 
-    # This factory mints the private durable-response binding token. Reject
-    # subclasses plus any exact-instance shadow state before the authority read.
-    # Full product-selected store capability/recovery composition remains owned
-    # by the canonical WP-48/WP-49 lineage.
     _canonical_journal_authority_snapshot(store)
     aggregate_id = submission_attempt_aggregate_id(
         environment=environment,
         account_id=account_id,
         attempt_id=attempt_id,
     )
-    # Resolve the method from the canonical class after rejecting all instance
-    # shadow state; never dispatch through a caller-attached load_events.
     events = JournalStore.load_events(store, "submission_attempt", aggregate_id)
     if not events:
         raise ValueError("durable submission attempt was not found")
+
     event_types = [event.get("event_type") for event in events]
     if (
         len(event_types) != 3
@@ -499,59 +556,145 @@ def load_submission_response_binding(
         raise ValueError(
             "durable exact response requires Prepared -> Sending -> Sent/Unknown"
         )
-    prepared, sending, sent = events
-    payload = prepared.get("payload")
-    if not isinstance(payload, dict):
-        raise ValueError("durable SubmissionPrepared payload is invalid")
-    sent_payload = sent.get("payload")
-    if not isinstance(sent_payload, dict):
-        raise ValueError("durable terminal submission payload is invalid")
-    response_text = sent_payload.get("response_text")
-    response_sha256 = sent_payload.get("response_sha256")
-    if (
-        sent_payload.get("response_encoding") != "utf-8-json"
-        or not isinstance(response_text, str)
-        or not response_text
-        or not isinstance(response_sha256, str)
-    ):
+    versions = [event.get("aggregate_version") for event in events]
+    if any(type(version) is not int for version in versions) or versions != [1, 2, 3]:
         raise ValueError(
-            "durable exact provider response bytes are unavailable"
+            "durable exact response requires aggregate versions 1 -> 2 -> 3"
         )
-    response_bytes = response_text.encode("utf-8")
+    if any(
+        event.get("aggregate_type") != "submission_attempt"
+        or event.get("aggregate_id") != aggregate_id
+        for event in events
+    ):
+        raise ValueError("durable submission aggregate identity mismatch")
+
+    prepared, sending, terminal = events
+    prepared_payload = prepared.get("payload")
+    sending_payload = sending.get("payload")
+    terminal_payload = terminal.get("payload")
+    if type(prepared_payload) is not dict:
+        raise ValueError("durable SubmissionPrepared payload is invalid")
+    if type(sending_payload) is not dict:
+        raise ValueError("durable SubmissionSending payload is invalid")
+    if type(terminal_payload) is not dict:
+        raise ValueError("durable terminal submission payload is invalid")
+
+    durable_attempt_id = prepared_payload.get("attempt_id")
+    durable_environment = prepared_payload.get("environment")
+    durable_account_id = prepared_payload.get("account_id")
+    if durable_attempt_id != attempt_id:
+        raise ValueError("durable submission attempt identity mismatch")
+    try:
+        prepared_aggregate_id = submission_attempt_aggregate_id(
+            environment=durable_environment,
+            account_id=durable_account_id,
+            attempt_id=attempt_id,
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError("durable prepared submission identity is invalid") from error
+    if prepared_aggregate_id != aggregate_id:
+        raise ValueError("durable prepared submission aggregate mismatch")
+
+    client_order_id = prepared_payload.get("client_order_id")
+    if type(client_order_id) is not str or not client_order_id:
+        raise ValueError("durable prepared client_order_id is invalid")
+    if (
+        sending_payload.get("client_order_id") != client_order_id
+        or terminal_payload.get("client_order_id") != client_order_id
+    ):
+        raise ValueError("durable submission client_order_id continuity mismatch")
+
+    terminal_state = (
+        "UNKNOWN"
+        if terminal.get("event_type") == "SubmissionUnknown"
+        else "SENT"
+    )
+    ambiguity_reason = terminal_payload.get("reason")
+    retry_disposition = terminal_payload.get("retry_disposition")
+    if terminal_state == "UNKNOWN":
+        if (
+            type(ambiguity_reason) is not str
+            or not ambiguity_reason.strip()
+            or ambiguity_reason != ambiguity_reason.strip()
+            or retry_disposition != "RECONCILE_FIRST"
+        ):
+            raise ValueError(
+                "response-bearing SubmissionUnknown must remain RECONCILE_FIRST"
+            )
+    elif ambiguity_reason is not None or retry_disposition is not None:
+        raise ValueError("SubmissionSent cannot carry UNKNOWN retry semantics")
+
+    response_text = terminal_payload.get("response_text")
+    response_sha256 = terminal_payload.get("response_sha256")
+    response_encoding = terminal_payload.get("response_encoding")
+    if type(response_text) is not str or type(response_sha256) is not str:
+        raise ValueError("durable exact provider response bytes are unavailable")
+
+    if response_encoding == "utf-8-json":
+        if not response_text:
+            raise ValueError("durable exact provider response bytes are unavailable")
+        response_bytes = response_text.encode("utf-8")
+        _decode_exact_json_bytes(response_bytes)
+    elif response_encoding == "hex" and terminal_state == "UNKNOWN":
+        if (
+            len(response_text) > HARD_MAX_PROVIDER_RESPONSE_BYTES * 2
+            or len(response_text) % 2
+        ):
+            raise ValueError("durable exact provider response bytes are unavailable")
+        try:
+            response_bytes = bytes.fromhex(response_text)
+        except ValueError as error:
+            raise ValueError(
+                "durable exact provider response bytes are unavailable"
+            ) from error
+        if response_text != response_bytes.hex():
+            raise ValueError("durable exact provider response bytes are unavailable")
+        require_provider_response_bytes(
+            response_bytes,
+            max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+            allow_empty=True,
+        )
+    else:
+        raise ValueError("durable exact provider response bytes are unavailable")
+
     if "sha256:" + sha256(response_bytes).hexdigest() != response_sha256:
         raise ValueError("durable provider response digest mismatch")
-    http_status = sent_payload.get("http_status")
+
+    http_status = terminal_payload.get("http_status")
     if http_status is not None and (
-        isinstance(http_status, bool)
-        or not isinstance(http_status, int)
+        type(http_status) is not int
         or http_status < 100
         or http_status > 599
     ):
         raise ValueError("durable provider HTTP status is invalid")
-    scope = payload.get("submission_scope")
-    scope_hash = payload.get("submission_scope_hash")
-    if not isinstance(scope, dict) or not isinstance(scope_hash, str):
+
+    scope = prepared_payload.get("submission_scope")
+    scope_hash = prepared_payload.get("submission_scope_hash")
+    if type(scope) is not dict or type(scope_hash) is not str:
         raise ValueError("durable submission scope is unavailable")
-    prepared_at = payload.get("prepared_at")
-    sent_at = sent.get("observed_at")
-    if not isinstance(prepared_at, str) or not isinstance(sent_at, str):
+    prepared_at = prepared_payload.get("prepared_at")
+    sent_at = terminal.get("observed_at")
+    if type(prepared_at) is not str or type(sent_at) is not str:
         raise ValueError("durable submission timestamps are unavailable")
-    if sending.get("aggregate_id") != aggregate_id or sent.get("aggregate_id") != aggregate_id:
-        raise ValueError("durable submission aggregate identity mismatch")
+
     return SubmissionResponseBinding(
         attempt_id=attempt_id,
         aggregate_id=aggregate_id,
-        provider=str(payload.get("provider", "")),
-        request_hash=str(payload.get("request_hash", "")),
-        client_order_id=str(payload.get("client_order_id", "")),
-        environment=str(payload.get("environment", "")),
-        account_id=str(payload.get("account_id", "")),
+        provider=str(prepared_payload.get("provider", "")),
+        request_hash=str(prepared_payload.get("request_hash", "")),
+        client_order_id=client_order_id,
+        environment=str(durable_environment or ""),
+        account_id=str(durable_account_id or ""),
         prepared_at=prepared_at,
         sent_at=sent_at,
         submission_scope=scope,
         submission_scope_hash=scope_hash,
         response_bytes=response_bytes,
         response_sha256=response_sha256,
+        response_encoding=response_encoding,
+        terminal_state=terminal_state,
+        ambiguity_reason=ambiguity_reason,
+        retry_disposition=retry_disposition,
         http_status=http_status,
         _factory_token=_SUBMISSION_RESPONSE_BINDING_TOKEN,
     )
@@ -1404,16 +1547,29 @@ class GuardedDispatcher:
         terminal_reason = "sent_confirmed"
         try:
             if type(response) is ExactJsonTransportResponse:
+                terminal_requires_reconciliation = response.requires_reconciliation
+                if terminal_requires_reconciliation:
+                    try:
+                        response.payload
+                    except (TypeError, ValueError):
+                        response_text = response.response_bytes.hex()
+                        response_encoding = "hex"
+                    else:
+                        response_text = response.response_text
+                        response_encoding = "utf-8-json"
+                    outcome_response = None
+                else:
+                    response_text = response.response_text
+                    response_encoding = "utf-8-json"
+                    outcome_response = response.payload
                 sent_payload = {
                     "client_order_id": client_order_id,
-                    "response_text": response.response_text,
+                    "response_text": response_text,
                     "response_sha256": response.response_sha256,
-                    "response_encoding": "utf-8-json",
+                    "response_encoding": response_encoding,
                 }
                 if response.http_status is not None:
                     sent_payload["http_status"] = response.http_status
-                outcome_response = response.payload
-                terminal_requires_reconciliation = response.requires_reconciliation
                 if terminal_requires_reconciliation:
                     terminal_reason = (
                         response.ambiguity_reason or "provider_response_ambiguous"

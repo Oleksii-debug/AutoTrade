@@ -11,7 +11,11 @@ from mvp.autotrade_mvp.dispatch import (
     load_submission_response_binding,
     stable_client_order_id,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.provider_core import (
+    ProviderCoreError,
+    observe_submission_json_response,
+)
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.tests.test_reconciliation_journal import reconciliation
 from mvp.autotrade_mvp.recovery import RecoveryController
@@ -738,6 +742,7 @@ class DispatchTests(unittest.TestCase):
             )
             self.assertIsInstance(binding, SubmissionResponseBinding)
             self.assertEqual(binding.response_bytes, raw)
+            self.assertEqual(binding.response_encoding, "utf-8-json")
             self.assertEqual(
                 binding.response_sha256,
                 "sha256:" + __import__("hashlib").sha256(raw).hexdigest(),
@@ -753,11 +758,243 @@ class DispatchTests(unittest.TestCase):
                 attempt_id="exact-response-a1",
             )
             self.assertEqual(after_restart.response_bytes, binding.response_bytes)
+            self.assertEqual(after_restart.response_encoding, "utf-8-json")
             self.assertEqual(after_restart.response_sha256, binding.response_sha256)
             self.assertEqual(
                 after_restart.submission_scope_hash,
                 binding.submission_scope_hash,
             )
+
+    def test_unknown_json_binding_cannot_mint_provider_observation(self):
+        request = {"symbol": "BTCUSDT", "side": "BUY", "quantity": "1"}
+        request_hash = (
+            "sha256:"
+            + __import__("hashlib").sha256(
+                canonical_json(request).encode("utf-8")
+            ).hexdigest()
+        )
+        scope = {
+            "endpoint": "/v5/order/create",
+            "prepared_request_sha256": request_hash,
+            "capability_snapshot_ids": ["cap-1"],
+            "instrument_versions": ["BTCUSDT:v1"],
+        }
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            result = dispatcher.dispatch(
+                attempt_id="unknown-json-observation-a1",
+                intent_id="unknown-json-observation-i1",
+                intent_hash="unknown-json-observation-h1",
+                provider="BYBIT",
+                request=request,
+                now="2026-10-06T00:25:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(
+                        b'{"retCode":10016,"retMsg":"server error","result":{}}',
+                        http_status=503,
+                        requires_reconciliation=True,
+                        ambiguity_reason="bybit_http_5xx_execution_unknown",
+                    ),
+                )[1],
+                submission_scope=scope,
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+            binding = load_submission_response_binding(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="unknown-json-observation-a1",
+            )
+            self.assertEqual(binding.response_encoding, "utf-8-json")
+            self.assertEqual(binding.terminal_state, "UNKNOWN")
+            self.assertEqual(
+                binding.ambiguity_reason,
+                "bybit_http_5xx_execution_unknown",
+            )
+            self.assertEqual(binding.retry_disposition, "RECONCILE_FIRST")
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "requires definitive SENT response",
+            ):
+                observe_submission_json_response(
+                    response_binding=binding,
+                    provider_id="BYBIT",
+                    endpoint="/v5/order/create",
+                    prepared_request_sha256=request_hash,
+                    capability_snapshot_ids=("cap-1",),
+                    instrument_versions=("BTCUSDT:v1",),
+                )
+
+    def test_response_binding_rejects_client_order_id_discontinuity(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            attempt_id = "binding-client-discontinuity"
+            now = "2026-10-06T00:26:00Z"
+            scope = {"endpoint": "/orders"}
+            scope_hash = (
+                "sha256:"
+                + __import__("hashlib").sha256(
+                    canonical_json(scope).encode("utf-8")
+                ).hexdigest()
+            )
+            dispatcher._append(
+                attempt_id=attempt_id,
+                event_type="SubmissionPrepared",
+                version=1,
+                payload={
+                    "attempt_id": attempt_id,
+                    "provider": "BYBIT",
+                    "request_hash": "sha256:" + "1" * 64,
+                    "client_order_id": "client-a",
+                    "environment": "SIMULATION",
+                    "account_id": "acct",
+                    "prepared_at": now,
+                    "submission_scope": scope,
+                    "submission_scope_hash": scope_hash,
+                },
+                now=now,
+            )
+            dispatcher._append(
+                attempt_id=attempt_id,
+                event_type="SubmissionSending",
+                version=2,
+                payload={
+                    "client_order_id": "client-b",
+                    "reason": "final_send_barrier_passed",
+                },
+                now=now,
+            )
+            raw = b'{"ok":true}'
+            dispatcher._append(
+                attempt_id=attempt_id,
+                event_type="SubmissionSent",
+                version=3,
+                payload={
+                    "client_order_id": "client-a",
+                    "response_text": raw.decode("utf-8"),
+                    "response_sha256": (
+                        "sha256:" + __import__("hashlib").sha256(raw).hexdigest()
+                    ),
+                    "response_encoding": "utf-8-json",
+                },
+                now=now,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "client_order_id continuity mismatch",
+            ):
+                load_submission_response_binding(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    attempt_id=attempt_id,
+                )
+
+    def test_opaque_binding_requires_unknown_reconciliation_markers(self):
+        raw = b"opaque-upstream-response"
+        response_hash = (
+            "sha256:" + __import__("hashlib").sha256(raw).hexdigest()
+        )
+        scope = {"endpoint": "/orders"}
+        scope_hash = (
+            "sha256:"
+            + __import__("hashlib").sha256(
+                canonical_json(scope).encode("utf-8")
+            ).hexdigest()
+        )
+        cases = (
+            (
+                "missing-retry",
+                "SubmissionUnknown",
+                {
+                    "client_order_id": "client-opaque",
+                    "response_text": raw.hex(),
+                    "response_sha256": response_hash,
+                    "response_encoding": "hex",
+                    "http_status": 503,
+                    "reason": "provider_http_5xx_execution_unknown",
+                },
+                "remain RECONCILE_FIRST",
+            ),
+            (
+                "sent-opaque",
+                "SubmissionSent",
+                {
+                    "client_order_id": "client-opaque",
+                    "response_text": raw.hex(),
+                    "response_sha256": response_hash,
+                    "response_encoding": "hex",
+                    "http_status": 503,
+                },
+                "exact provider response bytes are unavailable",
+            ),
+        )
+        for suffix, terminal_type, terminal_payload, message in cases:
+            with self.subTest(suffix=suffix), TemporaryDirectory() as directory:
+                store = self.store(directory)
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+                attempt_id = "opaque-marker-" + suffix
+                now = "2026-10-06T00:27:00Z"
+                dispatcher._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionPrepared",
+                    version=1,
+                    payload={
+                        "attempt_id": attempt_id,
+                        "provider": "provider",
+                        "request_hash": "sha256:" + "1" * 64,
+                        "client_order_id": "client-opaque",
+                        "environment": "SIMULATION",
+                        "account_id": "acct",
+                        "prepared_at": now,
+                        "submission_scope": scope,
+                        "submission_scope_hash": scope_hash,
+                    },
+                    now=now,
+                )
+                dispatcher._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionSending",
+                    version=2,
+                    payload={
+                        "client_order_id": "client-opaque",
+                        "reason": "final_send_barrier_passed",
+                    },
+                    now=now,
+                )
+                dispatcher._append(
+                    attempt_id=attempt_id,
+                    event_type=terminal_type,
+                    version=3,
+                    payload=terminal_payload,
+                    now=now,
+                )
+                with self.assertRaisesRegex(ValueError, message):
+                    load_submission_response_binding(
+                        store,
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id=attempt_id,
+                    )
 
     def test_mapping_response_cannot_mint_exact_durable_response_provenance(self):
         with TemporaryDirectory() as directory:

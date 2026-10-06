@@ -255,6 +255,21 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 ):
                     dotnet_restore_command_tokens(command)
 
+
+    def test_current_canonical_restore_targets_exist(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (
+            root / ".github" / "workflows" / "dotnet-foundation.yml"
+        ).read_text(encoding="utf-8")
+        commands, unscoped_lines = dotnet_restore_workflow_commands(workflow)
+        self.assertEqual(unscoped_lines, [])
+        self.assertTrue(commands)
+        for command in commands:
+            tokens = dotnet_restore_command_tokens(command)
+            target = dotnet_restore_project_target(tokens)
+            self.assertIsNotNone(target, command)
+            self.assertTrue((root / target).is_file(), target)
+
     def test_restore_target_must_be_canonical_repo_relative_csproj(self):
         valid = dotnet_restore_command_tokens(
             "run: dotnet restore src/App/App.csproj --locked-mode"

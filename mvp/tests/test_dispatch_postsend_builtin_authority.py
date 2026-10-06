@@ -378,5 +378,139 @@ class PostSendBuiltinAuthorityTests(unittest.TestCase):
                     vars(dispatch_module).pop("type", None)
 
 
+    def test_persistence_error_reason_uses_pretransport_type_builtin(self):
+        callbacks = 0
+
+        def hostile_type(*_args):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("rebound type executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original = getattr(dispatch_module, "type", None)
+            had_global = "type" in vars(dispatch_module)
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                object.__setattr__(response, "http_status", True)
+                dispatch_module.type = hostile_type
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-type-persistence-error-a1",
+                    transport=transport,
+                )
+                self.assertEqual(callbacks, 0)
+                if had_global:
+                    self.assertIs(dispatch_module.type, original)
+                else:
+                    self.assertNotIn("type", vars(dispatch_module))
+            finally:
+                if had_global:
+                    dispatch_module.type = original
+                else:
+                    vars(dispatch_module).pop("type", None)
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            event_types, events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-type-persistence-error-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:ValueError",
+            )
+            self.assertEqual(callbacks, 0)
+
+    def test_masked_final_guard_failure_uses_pretransport_type_builtin(self):
+        callbacks = 0
+        authority_calls = 0
+
+        def hostile_type(*_args):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("rebound type executed")
+
+        def authority(_intent_hash, _now):
+            nonlocal authority_calls
+            authority_calls += 1
+            if authority_calls == 1:
+                return True, "allowed"
+            return False, "operator_revoked"
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original = getattr(dispatch_module, "type", None)
+            had_global = "type" in vars(dispatch_module)
+
+            def transport(_client_order_id, _request, final_guard):
+                try:
+                    final_guard()
+                except Exception:
+                    dispatch_module.type = hostile_type
+                    raise RuntimeError("wrapper masked guard failure")
+                raise AssertionError("final guard unexpectedly allowed")
+
+            try:
+                result = dispatcher.dispatch(
+                    attempt_id="postsend-type-masked-guard-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T18:15:00Z",
+                    authority_check=authority,
+                    transport_send=transport,
+                    submission_scope={"endpoint": "/orders"},
+                )
+                self.assertEqual(callbacks, 0)
+                if had_global:
+                    self.assertIs(dispatch_module.type, original)
+                else:
+                    self.assertNotIn("type", vars(dispatch_module))
+            finally:
+                if had_global:
+                    dispatch_module.type = original
+                else:
+                    vars(dispatch_module).pop("type", None)
+
+            self.assertEqual(authority_calls, 2)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "provider_guard_contract_violation")
+            event_types, events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-type-masked-guard-a1",
+            )
+            self.assertEqual(
+                event_types,
+                [
+                    "SubmissionPrepared",
+                    "SubmissionBlocked",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "provider_wrapper_masked_final_guard_failure:RuntimeError",
+            )
+            self.assertEqual(callbacks, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

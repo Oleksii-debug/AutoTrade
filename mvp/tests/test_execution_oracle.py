@@ -635,13 +635,68 @@ class ExecutionOracleTests(unittest.TestCase):
         self.assertEqual(ambiguous.status, "AMBIGUOUS_NO_FILL")
         with self.assertRaisesRegex(
             ExecutionOracleError,
-            "BAR interval overlapping arrival must remain AMBIGUOUS_NO_FILL",
+            "BAR causal ambiguity must remain AMBIGUOUS_NO_FILL",
         ):
             assert_conservative_execution(
                 order=o,
                 observation=q,
                 model=m,
                 result=replace(ambiguous, status="NO_FILL"),
+            )
+
+    def test_oracle_requires_ambiguous_status_for_same_bar_stop_limit_ordering(self):
+        o = order(
+            order_type="STOP_LIMIT",
+            stop_price="105",
+            limit_price="103",
+        )
+        q = LiquidityObservation.create(
+            instrument_version="ABC@v1",
+            market_time="2026-09-24T10:01:00Z",
+            available_at="2026-09-24T10:01:01Z",
+            available_volume="100",
+            interval_start="2026-09-24T10:00:30Z",
+            bar_low="100",
+            bar_high="110",
+        )
+        m = model(data_fidelity="BAR", latency_ms=0)
+        ambiguous = simulate_execution(o, q, m)
+        self.assertEqual(ambiguous.status, "AMBIGUOUS_NO_FILL")
+        self.assertTrue(ambiguous.triggered)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "BAR causal ambiguity must remain AMBIGUOUS_NO_FILL",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=replace(ambiguous, status="NO_FILL"),
+            )
+
+    def test_oracle_rejects_bar_ambiguity_without_causal_ambiguity(self):
+        o = order(order_type="LIMIT", limit_price="90")
+        q = LiquidityObservation.create(
+            instrument_version="ABC@v1",
+            market_time="2026-09-24T10:01:00Z",
+            available_at="2026-09-24T10:01:01Z",
+            available_volume="100",
+            interval_start="2026-09-24T10:00:30Z",
+            bar_low="100",
+            bar_high="110",
+        )
+        m = model(data_fidelity="BAR", latency_ms=0)
+        no_fill = simulate_execution(o, q, m)
+        self.assertEqual(no_fill.status, "NO_FILL")
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "AMBIGUOUS_NO_FILL lacks BAR causal ambiguity",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=replace(no_fill, status="AMBIGUOUS_NO_FILL"),
             )
 
     def test_oracle_rejects_ambiguous_status_outside_bar_fidelity(self):

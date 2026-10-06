@@ -1051,23 +1051,32 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 evidence_artifact_store=artifacts,
             )
 
-            owner_refs = weakref.getweakrefs(book)
-            self.assertTrue(owner_refs, "OMS authority registry did not retain an owner weakref")
-            self.assertTrue(
-                all(reference.__callback__ is None for reference in owner_refs),
-                "OMS owner weakref exposed an invokable trust-binding cleanup callback",
-            )
-
             book_ref = weakref.ref(book)
             store_ref = weakref.ref(store)
             artifacts_ref = weakref.ref(artifacts)
 
+            # Registry weakrefs must remain callback-free: callbacks are
+            # enumerable and caller-invokable through weakref.getweakrefs().
+            self.assertTrue(
+                all(reference.__callback__ is None for reference in weakref.getweakrefs(book))
+            )
+            self.assertTrue(
+                all(reference.__callback__ is None for reference in weakref.getweakrefs(store))
+            )
+            self.assertTrue(
+                all(
+                    reference.__callback__ is None
+                    for reference in weakref.getweakrefs(artifacts)
+                )
+            )
+
             del book
+            gc.collect()
+            self.assertIsNone(book_ref())
+
             del store
             del artifacts
             gc.collect()
-
-            self.assertIsNone(book_ref())
             self.assertIsNone(
                 store_ref(),
                 "OMS binding registry retained JournalStore after OMS collection",

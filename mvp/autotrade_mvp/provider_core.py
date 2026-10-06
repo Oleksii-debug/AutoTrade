@@ -831,18 +831,8 @@ def observe_submission_json_response(
         payload=_decode_exact_json(response_binding.response_bytes),
         _observation_token=_SUBMISSION_OBSERVED_RESPONSE_TOKEN,
     )
-    # Freeze the entire exact observation payload before handing it to consumers.
-    # The durable response bytes remain the restart-compatible source of truth;
-    # the in-process authority prevents object impersonation/mutation.
-    observation = ProviderSubmissionObservation(
-        response_binding=observation.response_binding,
-        endpoint=observation.endpoint,
-        capability_snapshot_ids=observation.capability_snapshot_ids,
-        instrument_versions=observation.instrument_versions,
-        evidence_ref=observation.evidence_ref,
-        payload=_freeze_json(observation.payload),
-        _observation_token=_SUBMISSION_OBSERVED_RESPONSE_TOKEN,
-    )
+    # Freeze nested payload state before any consumer sees the observation.
+    object.__setattr__(observation, "payload", _freeze_json(observation.payload))
     _register_provider_submission_observation_authority(observation)
     return observation
 

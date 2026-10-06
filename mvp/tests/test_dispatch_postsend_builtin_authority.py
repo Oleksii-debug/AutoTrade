@@ -512,5 +512,184 @@ class PostSendBuiltinAuthorityTests(unittest.TestCase):
             self.assertEqual(callbacks, 0)
 
 
+    def test_transport_exception_restores_exception_class_globals_before_matching(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            names = (
+                "Exception",
+                "ValueError",
+                "TypeError",
+                "DispatchBlocked",
+                "_DispatchAuthorityChanged",
+            )
+            missing = object()
+            original = {
+                name: vars(dispatch_module).get(name, missing)
+                for name in names
+            }
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                for name in names:
+                    setattr(dispatch_module, name, object())
+                raise RuntimeError("provider result lost after send")
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-exception-globals-a1",
+                    transport=transport,
+                )
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertEqual(result.reason, "transport_result_ambiguous")
+                for name, expected in original.items():
+                    if expected is missing:
+                        self.assertNotIn(name, vars(dispatch_module))
+                    else:
+                        self.assertIs(vars(dispatch_module)[name], expected)
+            finally:
+                for name, expected in original.items():
+                    if expected is missing:
+                        vars(dispatch_module).pop(name, None)
+                    else:
+                        setattr(dispatch_module, name, expected)
+
+            event_types, events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-exception-globals-a1",
+            )
+            self.assertEqual(
+                event_types,
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "transport_exception_after_send_barrier:RuntimeError",
+            )
+
+    def test_masked_guard_failure_uses_pretransport_int_builtin(self):
+        callbacks = 0
+        authority_calls = 0
+
+        def hostile_int(*_args):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("rebound int executed")
+
+        def authority(_intent_hash, _now):
+            nonlocal authority_calls
+            authority_calls += 1
+            if authority_calls == 1:
+                return True, "allowed"
+            return False, "operator_revoked"
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original = getattr(dispatch_module, "int", None)
+            had_global = "int" in vars(dispatch_module)
+
+            def transport(_client_order_id, _request, final_guard):
+                try:
+                    final_guard()
+                except Exception:
+                    dispatch_module.int = hostile_int
+                    raise RuntimeError("wrapper masked guard failure")
+                raise AssertionError("final guard unexpectedly allowed")
+
+            try:
+                result = dispatcher.dispatch(
+                    attempt_id="postsend-int-masked-guard-a1",
+                    intent_id="intent-1",
+                    intent_hash="sha256:" + "1" * 64,
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T18:15:00Z",
+                    authority_check=authority,
+                    transport_send=transport,
+                    submission_scope={"endpoint": "/orders"},
+                )
+                self.assertEqual(callbacks, 0)
+                if had_global:
+                    self.assertIs(dispatch_module.int, original)
+                else:
+                    self.assertNotIn("int", vars(dispatch_module))
+            finally:
+                if had_global:
+                    dispatch_module.int = original
+                else:
+                    vars(dispatch_module).pop("int", None)
+
+            self.assertEqual(authority_calls, 2)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "provider_guard_contract_violation")
+            event_types, events = self._event_types(
+                path,
+                dispatcher,
+                "postsend-int-masked-guard-a1",
+            )
+            self.assertEqual(
+                event_types,
+                [
+                    "SubmissionPrepared",
+                    "SubmissionBlocked",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "provider_wrapper_masked_final_guard_failure:RuntimeError",
+            )
+            self.assertEqual(callbacks, 0)
+
+    def test_pre_guard_dispatch_blocked_uses_pretransport_str_builtin(self):
+        callbacks = 0
+
+        def hostile_str(*_args):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("rebound str executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original = getattr(dispatch_module, "str", None)
+            had_global = "str" in vars(dispatch_module)
+
+            def transport(_client_order_id, _request, _final_guard):
+                error = dispatch_module.DispatchBlocked("provider wrapper blocked")
+                dispatch_module.str = hostile_str
+                raise error
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    attempt_id="preguard-str-dispatch-blocked-a1",
+                    transport=transport,
+                )
+                self.assertEqual(callbacks, 0)
+                if had_global:
+                    self.assertIs(dispatch_module.str, original)
+                else:
+                    self.assertNotIn("str", vars(dispatch_module))
+            finally:
+                if had_global:
+                    dispatch_module.str = original
+                else:
+                    vars(dispatch_module).pop("str", None)
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "provider wrapper blocked")
+            event_types, _events = self._event_types(
+                path,
+                dispatcher,
+                "preguard-str-dispatch-blocked-a1",
+            )
+            self.assertEqual(event_types, ["SubmissionPrepared"])
+            self.assertEqual(callbacks, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

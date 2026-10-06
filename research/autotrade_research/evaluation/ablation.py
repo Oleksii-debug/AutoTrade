@@ -18,8 +18,12 @@ from decimal import (
 from fractions import Fraction
 from hashlib import sha256
 import json
+import os
+from pathlib import Path
 import re
+from threading import RLock
 from typing import Iterable
+from weakref import ref as weakref_ref
 
 from autotrade_numeric.exact_decimal import (
     ExactDecimalError,
@@ -31,7 +35,7 @@ from autotrade_numeric.exact_decimal import (
 from autotrade_research.artifacts.store import ArtifactStore
 from autotrade_research.io.strict_json import strict_json_loads
 from autotrade_research.memory.episodes import ExperienceMemory
-from autotrade_research.science.registry import ScientificRegistry
+from autotrade_research.science.registry import ProtocolViolation, ScientificRegistry
 
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -1235,15 +1239,282 @@ class RegisteredAblationPopulation:
             raise TypeError("complete must be a boolean")
 
 
-class AblationQualificationAuthority:
-    """Resolve qualification evidence only through canonical persistent authorities.
+def _canonical_database_path_binding(
+    value: object,
+    label: str,
+    *,
+    _path_type: type = type(Path()),
+) -> tuple[str, str | None]:
+    """Bind one exact SQLite pathname without claiming physical-file identity."""
 
-    The authority never publishes evidence. It consumes an append-only scientific
-    protocol, recomputes the complete ExperienceMemory population at the frozen
-    causal cutoff, and reads pre-existing immutable outcome artifacts from the
-    canonical ArtifactStore.
-    """
+    state = object.__getattribute__(value, "__dict__")
+    if type(state) is not dict or "path" not in state:
+        raise ProtocolViolation(
+            f"ablation qualification {label} database path is unavailable"
+        )
+    path = state["path"]
+    if type(path) is not _path_type:
+        raise ProtocolViolation(
+            f"ablation qualification {label} database path is not canonical"
+        )
+    path_text = os.fspath(path)
+    if type(path_text) is not str or not path_text:
+        raise ProtocolViolation(
+            f"ablation qualification {label} database path is not canonical"
+        )
+    cwd = None if os.path.isabs(path_text) else os.getcwd()
+    return path_text, cwd
 
+
+def _make_ablation_authority_binding(
+    path_binding=_canonical_database_path_binding,
+):
+    """Create one process-local issuance ledger hidden behind closure-owned state."""
+
+    lock = RLock()
+    bindings: dict[int, tuple[object, ...]] = {}
+    backing_paths: dict[
+        int,
+        tuple[tuple[str, str | None], tuple[str, str | None]],
+    ] = {}
+    memory_correction_authorities: dict[int, object | None] = {}
+
+    def register(
+        authority: object,
+        *,
+        scientific_registry: ScientificRegistry,
+        experience_memory: ExperienceMemory,
+        artifact_store: ArtifactStore,
+        protocol_id: str,
+        protocol_hash: str,
+        source_revision: str,
+        causal_cutoff: datetime,
+        permission_classes: tuple[str, ...],
+        task: str | None,
+        instrument_family: str | None,
+    ) -> None:
+        if type(authority) is not AblationQualificationAuthority:
+            return
+        authority_id = id(authority)
+        registry_path_binding = path_binding(scientific_registry, "registry")
+        memory_path_binding = path_binding(experience_memory, "memory")
+        memory_state = object.__getattribute__(experience_memory, "__dict__")
+        if (
+            type(memory_state) is not dict
+            or "_correction_evidence_resolver" not in memory_state
+        ):
+            raise ProtocolViolation(
+                "ablation qualification memory correction authority is unavailable"
+            )
+        memory_correction_authority = memory_state["_correction_evidence_resolver"]
+
+        def release(
+            reference: object,
+            *,
+            authority_id: int = authority_id,
+            lock: RLock = lock,
+        ) -> None:
+            with lock:
+                current = bindings.get(authority_id)
+                if current is not None and current[0] is reference:
+                    bindings.pop(authority_id, None)
+                    backing_paths.pop(authority_id, None)
+                    memory_correction_authorities.pop(authority_id, None)
+
+        reference = weakref_ref(authority, release)
+        with lock:
+            existing = bindings.get(authority_id)
+            if existing is not None and existing[0]() is not None:
+                raise RuntimeError(
+                    "ablation qualification authority identity collision"
+                )
+            bindings[authority_id] = (
+                reference,
+                scientific_registry,
+                experience_memory,
+                artifact_store,
+                protocol_id,
+                protocol_hash,
+                source_revision,
+                causal_cutoff,
+                permission_classes,
+                task,
+                instrument_family,
+            )
+            backing_paths[authority_id] = (
+                registry_path_binding,
+                memory_path_binding,
+            )
+            memory_correction_authorities[authority_id] = memory_correction_authority
+
+    def resolve(
+        authority: object,
+    ) -> tuple[
+        ScientificRegistry,
+        ExperienceMemory,
+        ArtifactStore,
+        str,
+        str,
+        str,
+        datetime,
+        tuple[str, ...],
+        str | None,
+        str | None,
+    ]:
+        if type(authority) is not AblationQualificationAuthority:
+            raise ProtocolViolation(
+                "ablation qualification authority type is invalid"
+            )
+        authority_id = id(authority)
+        with lock:
+            bound = bindings.get(authority_id)
+            if bound is None or bound[0]() is not authority:
+                raise ProtocolViolation(
+                    "ablation qualification authority was not issued by "
+                    "the canonical constructor"
+                )
+            bound_paths = backing_paths.get(authority_id)
+            if bound_paths is None:
+                raise ProtocolViolation(
+                    "ablation qualification database path binding is unavailable"
+                )
+
+            scientific_registry = bound[1]
+            experience_memory = bound[2]
+            artifact_store = bound[3]
+            protocol_id = bound[4]
+            protocol_hash = bound[5]
+            source_revision = bound[6]
+            causal_cutoff = bound[7]
+            permission_classes = bound[8]
+            task = bound[9]
+            instrument_family = bound[10]
+
+            if path_binding(scientific_registry, "registry") != bound_paths[0]:
+                raise ProtocolViolation(
+                    "ablation qualification registry database path changed after issuance"
+                )
+            if path_binding(experience_memory, "memory") != bound_paths[1]:
+                raise ProtocolViolation(
+                    "ablation qualification memory database path changed after issuance"
+                )
+
+            memory_state = object.__getattribute__(experience_memory, "__dict__")
+            if (
+                authority_id not in memory_correction_authorities
+                or type(memory_state) is not dict
+                or "_correction_evidence_resolver" not in memory_state
+                or memory_state["_correction_evidence_resolver"]
+                is not memory_correction_authorities[authority_id]
+            ):
+                raise ProtocolViolation(
+                    "ablation qualification memory correction authority changed after issuance"
+                )
+
+            try:
+                current = (
+                    object.__getattribute__(authority, "scientific_registry"),
+                    object.__getattribute__(authority, "experience_memory"),
+                    object.__getattribute__(authority, "artifact_store"),
+                    object.__getattribute__(authority, "protocol_id"),
+                    object.__getattribute__(authority, "protocol_hash"),
+                    object.__getattribute__(authority, "source_revision"),
+                    object.__getattribute__(authority, "causal_cutoff"),
+                    object.__getattribute__(authority, "granted_permissions"),
+                    object.__getattribute__(authority, "task"),
+                    object.__getattribute__(authority, "instrument_family"),
+                )
+            except AttributeError as error:
+                raise ProtocolViolation(
+                    "ablation qualification authority state is unavailable"
+                ) from error
+
+            if current[0] is not scientific_registry:
+                raise ProtocolViolation(
+                    "ablation qualification authority registry binding changed after issuance"
+                )
+            if current[1] is not experience_memory:
+                raise ProtocolViolation(
+                    "ablation qualification authority memory binding changed after issuance"
+                )
+            if current[2] is not artifact_store:
+                raise ProtocolViolation(
+                    "ablation qualification authority artifact binding changed after issuance"
+                )
+            if current[3] != protocol_id or current[4] != protocol_hash:
+                raise ProtocolViolation(
+                    "ablation qualification authority protocol binding changed after issuance"
+                )
+            if current[5] != source_revision or current[6] != causal_cutoff:
+                raise ProtocolViolation(
+                    "ablation qualification authority causal/source binding changed after issuance"
+                )
+            permissions = current[7]
+            if (
+                type(permissions) is not set
+                or any(type(value) is not str for value in permissions)
+                or tuple(sorted(permissions)) != permission_classes
+            ):
+                raise ProtocolViolation(
+                    "ablation qualification authority permissions changed after issuance"
+                )
+            if current[8] != task or current[9] != instrument_family:
+                raise ProtocolViolation(
+                    "ablation qualification authority query binding changed after issuance"
+                )
+
+            for owner, owner_type, label in (
+                (scientific_registry, ScientificRegistry, "registry"),
+                (experience_memory, ExperienceMemory, "memory"),
+                (artifact_store, ArtifactStore, "artifact store"),
+            ):
+                if type(owner) is not owner_type:
+                    raise ProtocolViolation(
+                        f"ablation qualification {label} is not canonical"
+                    )
+                state = object.__getattribute__(owner, "__dict__")
+                if type(state) is not dict:
+                    raise ProtocolViolation(
+                        f"ablation qualification {label} state is not canonical"
+                    )
+                shadowed = tuple(
+                    sorted(
+                        name
+                        for name in state
+                        if type(name) is str
+                        and name in owner_type.__dict__
+                        and callable(getattr(owner_type, name, None))
+                    )
+                )
+                if shadowed:
+                    raise ProtocolViolation(
+                        f"ablation qualification {label} shadows canonical methods: "
+                        + ", ".join(shadowed)
+                    )
+
+            return (
+                scientific_registry,
+                experience_memory,
+                artifact_store,
+                protocol_id,
+                protocol_hash,
+                source_revision,
+                causal_cutoff,
+                permission_classes,
+                task,
+                instrument_family,
+            )
+
+    return register, resolve
+
+
+(
+    _register_ablation_authority_binding,
+    _resolve_ablation_authority_binding,
+) = _make_ablation_authority_binding()
+
+
+def _make_ablation_qualification_authority_init(register_binding):
     def __init__(
         self,
         *,
@@ -1267,18 +1538,22 @@ class AblationQualificationAuthority:
         canonical_protocol_id = _identity_text(protocol_id, "protocol_id")
         if canonical_protocol_id != protocol_id:
             raise ValueError("protocol_id must use canonical text")
-        if type(protocol_hash) is not str:
-            raise TypeError("protocol_hash must be exact text")
+        protocol_hash = _digest(protocol_hash, "protocol_hash")
         if type(source_revision) is not str or _GIT_SHA.fullmatch(source_revision) is None:
-            raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
+            raise ValueError(
+                "source_revision must be an exact 40-character lowercase git SHA"
+            )
         if type(granted_permissions) is not set or not granted_permissions:
             raise ValueError("granted_permissions must be a non-empty exact set")
         canonical_permissions: set[str] = set()
         for value in granted_permissions:
             canonical_permission = _identity_text(value, "granted_permission")
             if canonical_permission != value:
-                raise ValueError("granted_permissions must contain canonical text")
+                raise ValueError(
+                    "granted_permissions must contain canonical text"
+                )
             canonical_permissions.add(canonical_permission)
+        permission_classes = tuple(sorted(canonical_permissions))
         canonical_task = None
         if task is not None:
             canonical_task = _identity_text(task, "task")
@@ -1292,16 +1567,65 @@ class AblationQualificationAuthority:
             )
             if canonical_instrument_family != instrument_family:
                 raise ValueError("instrument_family must use canonical text")
+        canonical_cutoff = _utc(causal_cutoff, "causal_cutoff")
+
         self.scientific_registry = scientific_registry
         self.experience_memory = experience_memory
         self.artifact_store = artifact_store
         self.protocol_id = canonical_protocol_id
-        self.protocol_hash = _digest(protocol_hash, "protocol_hash")
+        self.protocol_hash = protocol_hash
         self.source_revision = source_revision
-        self.causal_cutoff = _utc(causal_cutoff, "causal_cutoff")
-        self.granted_permissions = canonical_permissions
+        self.causal_cutoff = canonical_cutoff
+        self.granted_permissions = set(permission_classes)
         self.task = canonical_task
         self.instrument_family = canonical_instrument_family
+
+        register_binding(
+            self,
+            scientific_registry=scientific_registry,
+            experience_memory=experience_memory,
+            artifact_store=artifact_store,
+            protocol_id=canonical_protocol_id,
+            protocol_hash=protocol_hash,
+            source_revision=source_revision,
+            causal_cutoff=canonical_cutoff,
+            permission_classes=permission_classes,
+            task=canonical_task,
+            instrument_family=canonical_instrument_family,
+        )
+
+    return __init__
+
+
+class AblationQualificationAuthority:
+    """Resolve qualification evidence only through canonical persistent authorities.
+
+    The authority never publishes evidence. It consumes an append-only scientific
+    protocol, recomputes the complete ExperienceMemory population at the frozen
+    causal cutoff, and reads pre-existing immutable outcome artifacts from the
+    canonical ArtifactStore.
+    """
+
+    __init__ = _make_ablation_qualification_authority_init(
+        _register_ablation_authority_binding
+    )
+
+    def _bound_context(
+        self,
+        _resolver=_resolve_ablation_authority_binding,
+    ) -> tuple[
+        ScientificRegistry,
+        ExperienceMemory,
+        ArtifactStore,
+        str,
+        str,
+        str,
+        datetime,
+        tuple[str, ...],
+        str | None,
+        str | None,
+    ]:
+        return _resolver(self)
 
     def _load_outcome(
         self,
@@ -1309,14 +1633,26 @@ class AblationQualificationAuthority:
         *,
         population_root: str,
     ) -> CanonicalAblationOutcomeEvidence:
+        (
+            _science,
+            _memory,
+            artifact_store,
+            protocol_id,
+            protocol_hash,
+            source_revision,
+            _cutoff,
+            _permissions,
+            _task,
+            _family,
+        ) = AblationQualificationAuthority._bound_context(self)
         if type(reference) is not AblationOutcomeArtifactRef:
             raise TypeError("outcome_refs must contain AblationOutcomeArtifactRef")
-        manifest = self.artifact_store.load_manifest(reference.artifact_id)
+        manifest = ArtifactStore.load_manifest(artifact_store, reference.artifact_id)
         if manifest.get("sha256") != reference.sha256:
             raise ValueError("ablation outcome artifact digest mismatch")
         if manifest.get("media_type") != _ABLATION_OUTCOME_MEDIA_TYPE:
             raise ValueError("ablation outcome artifact media type is not qualified")
-        data = self.artifact_store.read_bytes(reference.artifact_id)
+        data = ArtifactStore.read_bytes(artifact_store, reference.artifact_id)
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError as error:
@@ -1354,10 +1690,10 @@ class AblationQualificationAuthority:
         if canonical != text:
             raise ValueError("ablation outcome artifact JSON must be canonical")
         if (
-            payload.get("protocol_id") != self.protocol_id
-            or payload.get("protocol_hash") != self.protocol_hash
+            payload.get("protocol_id") != protocol_id
+            or payload.get("protocol_hash") != protocol_hash
             or payload.get("population_root") != population_root
-            or payload.get("source_revision") != self.source_revision
+            or payload.get("source_revision") != source_revision
         ):
             raise ValueError("ablation outcome artifact authority binding mismatch")
         superseded_raw = payload.get("superseded_at_utc")
@@ -1389,9 +1725,28 @@ class AblationQualificationAuthority:
         *,
         outcome_refs: Iterable[AblationOutcomeArtifactRef],
     ) -> tuple[RegisteredAblationPopulation, tuple[CanonicalAblationOutcomeEvidence, ...]]:
+        (
+            scientific_registry,
+            experience_memory,
+            _artifact_store,
+            protocol_id,
+            protocol_hash,
+            source_revision,
+            causal_cutoff,
+            permission_classes,
+            task,
+            instrument_family,
+        ) = AblationQualificationAuthority._bound_context(self)
+        if type(pairs) not in {list, tuple}:
+            raise TypeError("pairs must be an exact list or tuple")
+        if type(outcome_refs) not in {list, tuple}:
+            raise TypeError("outcome_refs must be an exact list or tuple")
         selected = tuple(pairs)
-        registration = self.scientific_registry.protocol_registration(self.protocol_id)
-        if registration.protocol_hash != self.protocol_hash:
+        registration = ScientificRegistry.protocol_registration(
+            scientific_registry,
+            protocol_id,
+        )
+        if registration.protocol_hash != protocol_hash:
             raise ValueError("registered protocol hash does not match qualification binding")
         try:
             registered_raw = datetime.fromisoformat(registration.created_at)
@@ -1400,28 +1755,36 @@ class AblationQualificationAuthority:
         registered_at = _utc(registered_raw, "protocol registered_at")
         if registered_at.isoformat() != registration.created_at:
             raise ValueError("protocol registered_at is not canonical")
-        snapshot = self.experience_memory.coverage_population_snapshot(
-            causal_cutoff=self.causal_cutoff,
-            granted_permissions=set(self.granted_permissions),
-            task=self.task,
-            instrument_family=self.instrument_family,
+        snapshot = ExperienceMemory.coverage_population_snapshot(
+            experience_memory,
+            causal_cutoff=causal_cutoff,
+            granted_permissions=set(permission_classes),
+            task=task,
+            instrument_family=instrument_family,
         )
         snapshot.verify_integrity()
-        completeness = self.scientific_registry.completeness(self.protocol_id)
+        completeness = ScientificRegistry.completeness(
+            scientific_registry,
+            protocol_id,
+        )
         population = RegisteredAblationPopulation(
-            protocol_digest=self.protocol_hash,
+            protocol_digest=protocol_hash,
             population_digest=snapshot.root_hash,
             stopping_rule_digest=completeness["stopping_rules_hash"],
-            source_revision=self.source_revision,
+            source_revision=source_revision,
             registered_at_utc=registered_at,
-            evaluation_cutoff_utc=self.causal_cutoff,
+            evaluation_cutoff_utc=causal_cutoff,
             population_unit_ids=tuple(
                 sorted(row["episode_id"] for row in snapshot.rows)
             ),
             complete=True,
         )
         outcomes = tuple(
-            self._load_outcome(reference, population_root=snapshot.root_hash)
+            AblationQualificationAuthority._load_outcome(
+                self,
+                reference,
+                population_root=snapshot.root_hash,
+            )
             for reference in outcome_refs
         )
         if selected:
@@ -1439,6 +1802,13 @@ class AblationQualificationAuthority:
                     complete=True,
                 )
         return population, outcomes
+
+
+del _register_ablation_authority_binding
+del _resolve_ablation_authority_binding
+del _make_ablation_qualification_authority_init
+del _make_ablation_authority_binding
+del _canonical_database_path_binding
 
 
 def _qualified_inconclusive(

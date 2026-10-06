@@ -1338,6 +1338,7 @@ class BybitOptionDeliveryPage:
     environment: str
     capability_snapshot_id: str
     instrument_version: str
+    provider_symbol: str
     surface: Surface
     endpoint: str
     permission_scope: str
@@ -1614,6 +1615,7 @@ def parse_option_delivery_page(
         environment=binding.environment,
         capability_snapshot_id=binding.capability_snapshot_id,
         instrument_version=binding.instrument_version,
+        provider_symbol=requested_symbol,
         surface=binding.surface,
         endpoint=binding.endpoint,
         permission_scope=binding.permission_scope,

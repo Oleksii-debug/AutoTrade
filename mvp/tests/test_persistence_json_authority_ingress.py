@@ -475,6 +475,45 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
             ):
                 reopened.get_event("evt-restart-canonical")
 
+    def test_restart_rejects_semantically_equal_noncanonical_payload_bytes(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            candidate = _event("evt-noncanonical-payload-bytes")
+            store.append_event(candidate)
+
+            connection = sqlite3.connect(path)
+            try:
+                raw_payload = connection.execute(
+                    "SELECT payload_json FROM events WHERE event_id = ?",
+                    ("evt-noncanonical-payload-bytes",),
+                ).fetchone()[0]
+                payload = json.loads(raw_payload)
+                replacement_payload_json = json.dumps(
+                    payload,
+                    sort_keys=False,
+                    separators=(", ", ": "),
+                    ensure_ascii=False,
+                )
+                self.assertNotEqual(replacement_payload_json, canonical_json(payload))
+                connection.execute(
+                    "UPDATE events SET payload_json = ? WHERE event_id = ?",
+                    (
+                        replacement_payload_json,
+                        "evt-noncanonical-payload-bytes",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(
+                ValueError,
+                "journal event payload is not canonical JSON",
+            ):
+                reopened.get_event("evt-noncanonical-payload-bytes")
+
     def test_exact_tuple_keeps_legacy_json_array_semantics(self):
         self.assertEqual(
             canonical_json(("a", {"b": 1}, [True, None])),

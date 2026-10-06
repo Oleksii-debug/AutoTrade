@@ -1,4 +1,5 @@
 from hashlib import sha256
+from pathlib import Path
 import inspect
 from tempfile import TemporaryDirectory
 from types import MappingProxyType
@@ -382,17 +383,25 @@ def qualify(
                     evidence_root=directory,
                     qualification_receipt=receipt,
                 )
-            verify_canonical.assert_called_once()
-            call = verify_canonical.call_args
+            if verify_canonical.call_count < 1:
+                raise AssertionError("canonical recovery verifier was not called")
+            if (
+                decision.status is RecoveryEvidenceStatus.PASS
+                and verify_canonical.call_count != 2
+            ):
+                raise AssertionError(
+                    "PASS recovery decision must independently re-verify attestation"
+                )
             self_selected = {
                 "policy",
                 "expected_policy_id",
                 "expected_policy_version",
             }
-            if self_selected & set(call.kwargs):
-                raise AssertionError(
-                    "recovery qualification forwarded caller-selected trust authority"
-                )
+            for call in verify_canonical.call_args_list:
+                if self_selected & set(call.kwargs):
+                    raise AssertionError(
+                        "recovery qualification forwarded caller-selected trust authority"
+                    )
             return decision
         return qualify_recovery_release(
             policy=policy,
@@ -1062,6 +1071,65 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             )
 
 
+    def test_invalid_evidence_fails_before_trusted_reader_touch(self):
+        item = evidence(RecoveryScenario.POWER_LOSS)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            with patch.object(
+                recovery_qualification_module,
+                "trusted_authenticated_reader",
+                side_effect=AssertionError(
+                    "trusted reader must not run before evidence validation"
+                ),
+            ) as trusted_reader:
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "RecoveryScenarioEvidence",
+                ):
+                    qualify_recovery_release(
+                        policy=policy(),
+                        evidence=[object()],
+                        evidence_store=store,
+                        evidence_root=directory,
+                    )
+                with self.assertRaisesRegex(ValueError, "duplicate evidence"):
+                    qualify_recovery_release(
+                        policy=policy(),
+                        evidence=[item, item],
+                        evidence_store=store,
+                        evidence_root=directory,
+                    )
+                trusted_reader.assert_not_called()
+
+
+    def test_caller_cannot_mint_pass_decision_with_copied_trust_identity(self):
+        current_policy = policy()
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires exact recovery policy evidence",
+        ):
+            RecoveryQualificationDecision(
+                status=RecoveryEvidenceStatus.PASS,
+                source_sha=SOURCE_SHA,
+                release_artifact_id=RELEASE_ARTIFACT_ID,
+                release_artifact_sha256=ARTIFACT_SHA,
+                evidence_schema_version=EVIDENCE_SCHEMA,
+                protocol_id=PROTOCOL_ID,
+                evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
+                blockers=(),
+                measured_downtime_ms={
+                    scenario: 10
+                    for scenario in RecoveryScenario
+                },
+                qualification_attestation_id=RELEASE_ARTIFACT_ID,
+                qualification_attestation_digest="sha256:" + ("1" * 64),
+                qualification_policy_id="sha256:" + ("2" * 64),
+                qualification_trust_root_id="sha256:" + ("3" * 64),
+                recovery_policy_requirement=(
+                    recovery_policy_subject_requirement(current_policy)
+                ),
+            )
+
     def test_direct_pass_decision_cannot_omit_required_scenarios(self):
         with self.assertRaisesRegex(ValueError, "measure every required scenario"):
             RecoveryQualificationDecision(
@@ -1126,6 +1194,11 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
         self.assertEqual(decision.protocol_id, current_policy.protocol_id)
         self.assertRegex(decision.evidence_set_sha256, r"^sha256:[0-9a-f]{64}$")
         self.assertTrue(decision.matches_policy(current_policy))
+
+        stricter_policy = policy(
+            limits={RecoveryScenario.POWER_LOSS: 30_000},
+        )
+        self.assertFalse(decision.matches_policy(stricter_policy))
 
         other_release = policy(
             artifact_id=str(
@@ -1240,14 +1313,14 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
     def test_decision_copies_measured_mapping_and_rejects_boolean_downtime(self):
         measured = {scenario: 10 for scenario in RecoveryScenario}
         decision = RecoveryQualificationDecision(
-            status=RecoveryEvidenceStatus.PASS,
+            status=RecoveryEvidenceStatus.FAIL,
             source_sha=SOURCE_SHA,
             release_artifact_id=RELEASE_ARTIFACT_ID,
             release_artifact_sha256=ARTIFACT_SHA,
             evidence_schema_version=EVIDENCE_SCHEMA,
             protocol_id=PROTOCOL_ID,
             evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
-            blockers=(),
+            blockers=("test:nonpass",),
             measured_downtime_ms=measured,
         )
         measured[RecoveryScenario.POWER_LOSS] = 999
@@ -1270,6 +1343,47 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                     for scenario in RecoveryScenario
                 },
             )
+
+
+    def test_evidence_root_rejects_executable_subclasses_before_callbacks(self):
+        calls = []
+
+        class HostileStr(str):
+            def __fspath__(self):
+                calls.append("str-fspath")
+                raise AssertionError("caller path callback must not execute")
+
+            def encode(self, *args, **kwargs):
+                calls.append("str-encode")
+                raise AssertionError("caller string callback must not execute")
+
+        ConcretePath = type(Path())
+
+        class HostilePath(ConcretePath):
+            def __fspath__(self):
+                calls.append("path-fspath")
+                raise AssertionError("caller path callback must not execute")
+
+            def __str__(self):
+                calls.append("path-str")
+                raise AssertionError("caller path callback must not execute")
+
+        for hostile_root in (
+            HostileStr("/tmp/autotrade-hostile-root"),
+            HostilePath("/tmp/autotrade-hostile-root"),
+        ):
+            with self.subTest(root_type=type(hostile_root).__name__):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "exact str or concrete pathlib path",
+                ):
+                    qualify_recovery_release(
+                        policy=policy(),
+                        evidence=complete_evidence(),
+                        evidence_root=hostile_root,
+                    )
+
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

@@ -7,11 +7,11 @@ evidence produced by the canonical recovery/runtime components.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from enum import StrEnum
 from hashlib import sha256
 import json
-from pathlib import Path
+from pathlib import Path, PosixPath, WindowsPath
 import re
 from types import MappingProxyType
 from typing import Mapping, Sequence
@@ -43,6 +43,9 @@ _QUALIFICATION_GATE = "RELEASE"
 _QUALIFICATION_PACKAGE = "WP-59"
 _QUALIFICATION_REQUIREMENT = "recovery-release-qualification"
 _RECOVERY_POLICY_REQUIREMENT_PREFIX = "recovery-decision-policy/sha256:"
+_RECOVERY_POLICY_REQUIREMENT_RE = re.compile(
+    r"^recovery-decision-policy/sha256:[0-9a-f]{64}$"
+)
 
 
 class RecoveryScenario(StrEnum):
@@ -123,6 +126,18 @@ def _boolean(value: bool, *, name: str) -> bool:
     if type(value) is not bool:
         raise TypeError(f"{name} must be boolean")
     return value
+
+
+def _canonical_evidence_root(value: str | Path, *, name: str) -> str | Path:
+    """Reject executable path/string subclasses before trust-root resolution."""
+
+    if type(value) is str:
+        if not value:
+            raise ValueError(f"{name} must be non-empty")
+        return value
+    if type(value) in {PosixPath, WindowsPath}:
+        return value
+    raise TypeError(f"{name} must be an exact str or concrete pathlib path")
 
 
 def _text_tuple(
@@ -832,8 +847,21 @@ class RecoveryQualificationDecision:
     qualification_attestation_digest: str | None = None
     qualification_policy_id: str | None = None
     qualification_trust_root_id: str | None = None
+    recovery_policy_requirement: str | None = None
+    _verification_policy: InitVar[RecoveryQualificationPolicy | None] = None
+    _verification_evidence: InitVar[Sequence[RecoveryScenarioEvidence] | None] = None
+    _verification_store: InitVar[ArtifactStore | None] = None
+    _verification_root: InitVar[str | Path | None] = None
+    _verification_receipt: InitVar[SignedQualificationAttestation | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _verification_policy: RecoveryQualificationPolicy | None,
+        _verification_evidence: Sequence[RecoveryScenarioEvidence] | None,
+        _verification_store: ArtifactStore | None,
+        _verification_root: str | Path | None,
+        _verification_receipt: SignedQualificationAttestation | None,
+    ) -> None:
         if type(self.status) is not RecoveryEvidenceStatus:
             raise TypeError("status must be RecoveryEvidenceStatus")
         object.__setattr__(
@@ -868,11 +896,10 @@ class RecoveryQualificationDecision:
         )
         if type(self.blockers) is not tuple:
             raise TypeError("blockers must be a tuple")
-        blockers = tuple(
-            _text(value, name="blocker") for value in self.blockers
-        )
+        blockers = tuple(_text(value, name="blocker") for value in self.blockers)
         if len(blockers) != len(set(blockers)):
             raise ValueError("blockers must be unique")
+
         measured_downtime_ms = _exact_mapping(
             self.measured_downtime_ms,
             name="measured_downtime_ms",
@@ -890,19 +917,17 @@ class RecoveryQualificationDecision:
                 name=f"measured_downtime_ms[{scenario.value}]",
             )
 
-        if self.status is RecoveryEvidenceStatus.PASS:
-            if blockers:
+        qualification_values = (
+            self.qualification_attestation_id,
+            self.qualification_attestation_digest,
+            self.qualification_policy_id,
+            self.qualification_trust_root_id,
+        )
+        if any(value is not None for value in qualification_values):
+            if not all(value is not None for value in qualification_values):
                 raise ValueError(
-                    "PASS recovery decision cannot contain blockers"
+                    "qualification trust identity must be complete when present"
                 )
-            if set(measured) != _REQUIRED_SCENARIOS:
-                raise ValueError(
-                    "PASS recovery decision must measure every required scenario"
-                )
-        elif not blockers:
-            raise ValueError("non-PASS recovery decision requires blockers")
-
-        if self.qualification_attestation_id is not None:
             object.__setattr__(
                 self,
                 "qualification_attestation_id",
@@ -911,18 +936,281 @@ class RecoveryQualificationDecision:
                     name="qualification_attestation_id",
                 ),
             )
-        for field in (
-            "qualification_attestation_digest",
-            "qualification_policy_id",
-            "qualification_trust_root_id",
-        ):
-            value = getattr(self, field)
-            if value is not None:
+            for field in (
+                "qualification_attestation_digest",
+                "qualification_policy_id",
+                "qualification_trust_root_id",
+            ):
                 object.__setattr__(
                     self,
                     field,
-                    _sha256(value, name=field),
+                    _sha256(getattr(self, field), name=field),
                 )
+
+        if self.recovery_policy_requirement is not None:
+            if (
+                type(self.recovery_policy_requirement) is not str
+                or _RECOVERY_POLICY_REQUIREMENT_RE.fullmatch(
+                    self.recovery_policy_requirement
+                )
+                is None
+            ):
+                raise ValueError(
+                    "recovery_policy_requirement must bind exact recovery policy"
+                )
+
+        if self.status is RecoveryEvidenceStatus.PASS:
+            if blockers:
+                raise ValueError("PASS recovery decision cannot contain blockers")
+            if set(measured) != _REQUIRED_SCENARIOS:
+                raise ValueError(
+                    "PASS recovery decision must measure every required scenario"
+                )
+            if self.recovery_policy_requirement is None:
+                raise ValueError(
+                    "PASS recovery decision requires exact recovery policy identity"
+                )
+            if not all(value is not None for value in qualification_values):
+                raise ValueError(
+                    "PASS recovery decision requires accepted qualification trust"
+                )
+            if type(_verification_policy) is not RecoveryQualificationPolicy:
+                raise ValueError(
+                    "PASS recovery decision requires exact recovery policy evidence"
+                )
+            if (
+                type(_verification_evidence) is not tuple
+                or any(
+                    type(item) is not RecoveryScenarioEvidence
+                    for item in _verification_evidence
+                )
+            ):
+                raise ValueError(
+                    "PASS recovery decision requires exact recovery scenario evidence"
+                )
+            if type(_verification_store) is not ArtifactStore:
+                raise ValueError(
+                    "PASS recovery decision requires canonical evidence store authority"
+                )
+            try:
+                verification_root = _canonical_evidence_root(
+                    _verification_root,
+                    name="_verification_root",
+                )
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "PASS recovery decision requires independent evidence root authority"
+                ) from error
+            if type(_verification_receipt) is not SignedQualificationAttestation:
+                raise ValueError(
+                    "PASS recovery decision requires signed qualification evidence"
+                )
+
+            verification_evidence = tuple(_verification_evidence)
+            by_scenario = {
+                item.scenario: item
+                for item in verification_evidence
+            }
+            if (
+                len(verification_evidence) != len(_REQUIRED_SCENARIOS)
+                or len(by_scenario) != len(verification_evidence)
+                or set(by_scenario) != _REQUIRED_SCENARIOS
+            ):
+                raise ValueError(
+                    "PASS recovery decision evidence must cover every scenario exactly once"
+                )
+            if not self.matches_policy(_verification_policy):
+                raise ValueError(
+                    "PASS recovery decision does not match recovery policy"
+                )
+            expected_policy_requirement = recovery_policy_subject_requirement(
+                _verification_policy
+            )
+            if self.recovery_policy_requirement != expected_policy_requirement:
+                raise ValueError(
+                    "PASS recovery decision recovery policy identity is stale"
+                )
+            if (
+                _recovery_evidence_set_sha256(verification_evidence)
+                != self.evidence_set_sha256
+            ):
+                raise ValueError(
+                    "PASS recovery decision evidence-set digest is not canonical"
+                )
+            expected_measured = {
+                scenario: by_scenario[scenario].downtime_ms
+                for scenario in _REQUIRED_SCENARIOS
+            }
+            if measured != expected_measured:
+                raise ValueError(
+                    "PASS recovery decision measured downtime differs from evidence"
+                )
+
+            try:
+                trusted_read = trusted_authenticated_reader(
+                    verification_root,
+                    publication_store=_verification_store,
+                )
+            except (
+                ArtifactIntegrityError,
+                FileNotFoundError,
+                OSError,
+                TypeError,
+                ValueError,
+            ) as error:
+                raise ValueError(
+                    "PASS recovery decision evidence root is not verifiable"
+                ) from error
+
+            if not _store_artifact_matches(
+                trusted_read,
+                artifact_id=self.release_artifact_id,
+                artifact_sha256=self.release_artifact_sha256,
+                media_type=_RELEASE_ARTIFACT_MEDIA_TYPE,
+                source_sha=self.source_sha,
+                metadata={
+                    "evidence_kind": "RECOVERY_RELEASE_ARTIFACT",
+                    "source_sha": self.source_sha,
+                },
+            ):
+                raise ValueError(
+                    "PASS recovery decision release artifact is not verified"
+                )
+
+            if _raw_universe_blockers(verification_evidence):
+                raise ValueError(
+                    "PASS recovery decision raw evidence universe is invalid"
+                )
+
+            for item in verification_evidence:
+                if (
+                    item.source_sha != self.source_sha
+                    or item.release_artifact_id != self.release_artifact_id
+                    or item.release_artifact_sha256 != self.release_artifact_sha256
+                    or item.evidence_schema_version != self.evidence_schema_version
+                    or item.protocol_id != self.protocol_id
+                    or item.status is not RecoveryEvidenceStatus.PASS
+                    or item.unresolved_limits
+                    or item.downtime_ms
+                    > _verification_policy.max_downtime_ms[item.scenario]
+                    or not set(
+                        _verification_policy.required_tests[item.scenario]
+                    ).issubset(item.tests_run)
+                    or item.data_loss_events
+                    or item.duplicate_external_actions
+                    or item.unknown_submissions
+                    or item.unresolved_reconciliation_items
+                    or not item.journal_integrity_verified
+                    or not item.backup_integrity_verified
+                    or not item.reconciliation_complete
+                    or not item.authority_reacquired
+                    or not item.old_sender_fenced
+                    or (
+                        item.scenario is RecoveryScenario.UPGRADE_FAILURE
+                        and not item.rollback_completed
+                    )
+                    or (
+                        item.open_risk_present
+                        and item.protection_state
+                        not in {"PROVIDER_NATIVE", "QUALIFIED_EMERGENCY"}
+                    )
+                ):
+                    raise ValueError(
+                        "PASS recovery decision evidence violates recovery policy"
+                    )
+                if not _store_artifact_matches(
+                    trusted_read,
+                    artifact_id=item.evidence_artifact_id,
+                    artifact_sha256=item.evidence_artifact_sha256,
+                    media_type=_RECOVERY_EVIDENCE_MEDIA_TYPE,
+                    source_sha=item.source_sha,
+                    metadata=recovery_evidence_receipt_metadata(item),
+                    expected_bytes=recovery_evidence_receipt_bytes(item),
+                ):
+                    raise ValueError(
+                        "PASS recovery decision summary evidence is not verified"
+                    )
+                raw_by_role = {
+                    ref.role: ref
+                    for ref in item.raw_evidence_refs
+                }
+                if frozenset(raw_by_role) != _required_raw_roles(item):
+                    raise ValueError(
+                        "PASS recovery decision raw evidence roles are incomplete"
+                    )
+                for role in sorted(
+                    raw_by_role,
+                    key=lambda current: current.value,
+                ):
+                    ref = raw_by_role[role]
+                    raw = _read_raw_evidence_artifact(trusted_read, ref)
+                    if raw is None:
+                        raise ValueError(
+                            "PASS recovery decision raw evidence is not verified"
+                        )
+                    if not _canonical_recovery_raw_semantics_verified(
+                        item,
+                        ref,
+                        raw,
+                    ):
+                        raise ValueError(
+                            "PASS recovery decision raw semantics are not verified"
+                        )
+
+            try:
+                accepted = verify_canonical_qualification_attestation(
+                    _verification_receipt,
+                    evidence_store=_verification_store,
+                    evidence_root=verification_root,
+                    expected_source_sha=self.source_sha,
+                    expected_domain=_QUALIFICATION_DOMAIN,
+                    expected_gate=_QUALIFICATION_GATE,
+                    expected_package_id=_QUALIFICATION_PACKAGE,
+                    expected_protocol_id=self.protocol_id,
+                    expected_protocol_version=self.evidence_schema_version,
+                    expected_requirement_id=_QUALIFICATION_REQUIREMENT,
+                    expected_release_artifact_id=self.release_artifact_id,
+                    expected_release_artifact_sha256=self.release_artifact_sha256,
+                )
+            except (QualificationTrustError, TypeError, ValueError) as error:
+                raise ValueError(
+                    "PASS recovery decision qualification receipt is not verified"
+                ) from error
+            if accepted.result != "PASS":
+                raise ValueError(
+                    "PASS recovery decision requires canonical PASS attestation"
+                )
+            accepted_refs = {
+                _evidence_ref_identity(ref)
+                for ref in accepted.evidence_refs
+            }
+            if accepted_refs != _expected_evidence_ref_identities(
+                verification_evidence
+            ):
+                raise ValueError(
+                    "PASS recovery decision attestation evidence set mismatches"
+                )
+            if expected_policy_requirement not in accepted.requirement_ids:
+                raise ValueError(
+                    "PASS recovery decision attestation lacks exact recovery policy"
+                )
+            accepted_identity = (
+                accepted.attestation_id,
+                accepted.attestation_digest,
+                accepted.policy_id,
+                accepted.trust_root_id,
+            )
+            if accepted_identity != (
+                self.qualification_attestation_id,
+                self.qualification_attestation_digest,
+                self.qualification_policy_id,
+                self.qualification_trust_root_id,
+            ):
+                raise ValueError(
+                    "PASS recovery decision trust identity mismatches verification"
+                )
+        elif not blockers:
+            raise ValueError("non-PASS recovery decision requires blockers")
 
         object.__setattr__(self, "blockers", blockers)
         object.__setattr__(
@@ -944,6 +1232,8 @@ class RecoveryQualificationDecision:
             and self.release_artifact_sha256 == policy.release_artifact_sha256
             and self.evidence_schema_version == policy.evidence_schema_version
             and self.protocol_id == policy.protocol_id
+            and self.recovery_policy_requirement
+            == recovery_policy_subject_requirement(policy)
         )
 
 
@@ -965,6 +1255,11 @@ def qualify_recovery_release(
         raise TypeError(
             "evidence_store must be ArtifactStore (canonical exact type required)"
         )
+    if evidence_root is not None:
+        evidence_root = _canonical_evidence_root(
+            evidence_root,
+            name="evidence_root",
+        )
     if (
         qualification_receipt is not None
         and type(qualification_receipt) is not SignedQualificationAttestation
@@ -974,6 +1269,15 @@ def qualify_recovery_release(
         )
 
     by_scenario: dict[RecoveryScenario, RecoveryScenarioEvidence] = {}
+    for item in evidence:
+        if type(item) is not RecoveryScenarioEvidence:
+            raise TypeError(
+                "evidence must contain RecoveryScenarioEvidence"
+            )
+        if item.scenario in by_scenario:
+            raise ValueError(f"duplicate evidence for {item.scenario.value}")
+        by_scenario[item.scenario] = item
+
     blockers: list[str] = []
     hard_failure = False
     inconclusive = False
@@ -992,15 +1296,6 @@ def qualify_recovery_release(
             ValueError,
         ):
             trusted_read = None
-
-    for item in evidence:
-        if type(item) is not RecoveryScenarioEvidence:
-            raise TypeError(
-                "evidence must contain RecoveryScenarioEvidence"
-            )
-        if item.scenario in by_scenario:
-            raise ValueError(f"duplicate evidence for {item.scenario.value}")
-        by_scenario[item.scenario] = item
 
     missing = sorted(
         (
@@ -1251,4 +1546,10 @@ def qualify_recovery_release(
         qualification_trust_root_id=(
             None if accepted is None else accepted.trust_root_id
         ),
+        recovery_policy_requirement=recovery_policy_subject_requirement(policy),
+        _verification_policy=policy,
+        _verification_evidence=tuple(by_scenario.values()),
+        _verification_store=evidence_store,
+        _verification_root=evidence_root,
+        _verification_receipt=qualification_receipt,
     )

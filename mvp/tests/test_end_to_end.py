@@ -2120,6 +2120,58 @@ class VerticalSliceTests(unittest.TestCase):
             store.append_event(forged)
             self.assertFalse(verify_replay(directory))
 
+    def test_resume_rejects_jointly_forged_risk_outcome_before_mutation(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            checkpoint_path = root / "checkpoint.json"
+            evidence_path = root / "learning-evidence.jsonl"
+            journal_path = root / "journal.sqlite3"
+
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            evidence_id = checkpoint["evidence_ids"][-1]
+            checkpoint["evidence_records"][evidence_id]["risk_outcome"] = "forged"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            row = json.loads(evidence_path.read_text(encoding="utf-8"))
+            row["risk_outcome"] = "forged"
+            evidence_path.write_text(
+                json.dumps(row, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            checkpoint_before = checkpoint_path.read_bytes()
+            evidence_before = evidence_path.read_bytes()
+            journal_before = journal_path.read_bytes()
+            intents_before = {
+                path.name: path.read_bytes()
+                for path in (root / "order-intents").glob("*.json")
+            }
+
+            import mvp.autotrade_mvp.pipeline as pipeline_module
+
+            with patch.object(
+                pipeline_module,
+                "_atomic_json",
+                side_effect=AssertionError("checkpoint rewrite before risk rejection"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Checkpoint replay fill violates bound risk admission",
+                ):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
+            self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertEqual(evidence_path.read_bytes(), evidence_before)
+            self.assertEqual(journal_path.read_bytes(), journal_before)
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in (root / "order-intents").glob("*.json")
+                },
+                intents_before,
+            )
+
     def test_replay_verification_detects_tampered_evidence(self):
         with TemporaryDirectory() as directory:
             run_multi_episode([[100, 101, 102, 103], [103, 102, 101, 100]], directory)

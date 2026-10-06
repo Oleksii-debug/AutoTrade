@@ -119,6 +119,31 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertEqual(replay.evidence_count, 1)
             self.assertEqual(len(evidence.read_text(encoding="utf-8").splitlines()), 1)
 
+    def test_replay_rejects_jointly_tampered_checkpoint_and_jsonl_economics(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            evidence_path = Path(directory) / "learning-evidence.jsonl"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            evidence_id = checkpoint["evidence_ids"][0]
+            checkpoint["evidence_records"][evidence_id]["cash"] = "999999.99"
+            checkpoint["evidence_records"][evidence_id]["equity"] = "999999.99"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            row = json.loads(evidence_path.read_text(encoding="utf-8"))
+            row["cash"] = "999999.99"
+            row["equity"] = "999999.99"
+            evidence_path.write_text(
+                json.dumps(row, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Checkpoint evidence conflicts with this episode",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
     def test_checkpoint_ledger_mismatch_is_rejected(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

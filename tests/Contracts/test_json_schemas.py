@@ -194,7 +194,7 @@ class ContractSchemaTests(unittest.TestCase):
             "trailing ",
             "contains space",
             "x" * 129,
-            "valid-token@1\\n",
+            "valid-token@1\n",
         ):
             candidate = dict(fixture)
             candidate["adapter_version"] = invalid

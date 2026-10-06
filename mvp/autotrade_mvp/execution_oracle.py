@@ -352,6 +352,39 @@ def assert_conservative_execution(
     market_time = _instant(observation.market_time, name="market_time")
     canonical_arrival = arrival.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
+    if market_time <= arrival:
+        if result.status != "WAITING_FOR_LATENCY":
+            raise ExecutionOracleError(
+                "pre-arrival result must remain WAITING_FOR_LATENCY"
+            )
+    elif result.status == "WAITING_FOR_LATENCY":
+        raise ExecutionOracleError(
+            "post-arrival result cannot claim WAITING_FOR_LATENCY"
+        )
+
+    if result.status == "AMBIGUOUS_NO_FILL" and model.data_fidelity != "BAR":
+        raise ExecutionOracleError(
+            "AMBIGUOUS_NO_FILL requires BAR causal ambiguity"
+        )
+
+    if model.data_fidelity == "BAR":
+        if observation.interval_start is None:
+            raise ExecutionOracleError(
+                "BAR result requires interval_start for causal classification"
+            )
+        interval_start_for_status = _instant(
+            observation.interval_start,
+            name="interval_start",
+        )
+        if (
+            market_time > arrival
+            and interval_start_for_status < arrival
+            and result.status != "AMBIGUOUS_NO_FILL"
+        ):
+            raise ExecutionOracleError(
+                "BAR interval overlapping arrival must remain AMBIGUOUS_NO_FILL"
+            )
+
     if (
         order.order_type == "STOP_LIMIT"
         and not order.already_triggered

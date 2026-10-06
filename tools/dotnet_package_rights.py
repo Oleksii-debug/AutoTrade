@@ -3,8 +3,11 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+from hashlib import sha512
 import json
 from pathlib import Path, PurePosixPath
+import re
+import shlex
 import xml.etree.ElementTree as ET
 
 if __package__:
@@ -22,6 +25,15 @@ else:
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = ROOT / "provenance" / "dotnet-package-rights.json"
 _SCHEMA_VERSION = "1.0.0"
+_VERIFY_RESTORED_PREFIX = (
+    "run: python tools/dotnet_package_rights.py --verify-restored "
+)
+_VERIFY_SHELL_CONTROL = re.compile(r"(?:&&|\\|\\||[;&|<>\\x60]|\\$\\()")
+_CANONICAL_NUGET_PACKAGES_AUTHORITY = (
+    "NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages"
+)
+_CANONICAL_VERIFY_PACKAGES_ROOT = "${{ env.NUGET_PACKAGES }}"
+
 _REQUIRED_PACKAGE_FIELDS = frozenset(
     {
         "name",
@@ -212,6 +224,120 @@ def package_rights_records(root: Path = ROOT) -> list[dict[str, str]]:
     return sorted(records, key=_artifact_key)
 
 
+def workflow_restored_rights_projects(
+    workflow_text: str,
+) -> tuple[list[str], list[int]]:
+    """Return exact projects whose restored package bytes are rights-verified."""
+
+    if type(workflow_text) is not str:
+        raise TypeError("workflow text must be exact str")
+
+    projects: list[str] = []
+    invalid_lines: list[int] = []
+    for line_number, raw in enumerate(workflow_text.splitlines(), start=1):
+        command = raw.strip()
+        if command.startswith("- "):
+            command = command[2:].strip()
+        if (
+            "tools/dotnet_package_rights.py" not in command
+            or "--verify-restored" not in command
+        ):
+            continue
+        if not command.startswith(_VERIFY_RESTORED_PREFIX):
+            invalid_lines.append(line_number)
+            continue
+        payload = command.removeprefix("run: ")
+        if _VERIFY_SHELL_CONTROL.search(payload) is not None:
+            invalid_lines.append(line_number)
+            continue
+        try:
+            tokens = tuple(shlex.split(payload, comments=True))
+        except ValueError:
+            invalid_lines.append(line_number)
+            continue
+        if (
+            len(tokens) != 7
+            or tokens[:4]
+            != (
+                "python",
+                "tools/dotnet_package_rights.py",
+                "--verify-restored",
+                "--packages-root",
+            )
+            or tokens[4] != _CANONICAL_VERIFY_PACKAGES_ROOT
+            or tokens[5] != "--project"
+        ):
+            invalid_lines.append(line_number)
+            continue
+        project = tokens[6]
+        path = PurePosixPath(project)
+        if (
+            not project
+            or "\\" in project
+            or path.is_absolute()
+            or path.suffix != ".csproj"
+            or any(part in {"", ".", ".."} for part in path.parts)
+            or path.as_posix() != project
+        ):
+            invalid_lines.append(line_number)
+            continue
+        projects.append(project)
+    return projects, invalid_lines
+
+
+def _workflow_rights_blockers(
+    root: Path,
+    package_projects: list[Path],
+) -> list[str]:
+    if not package_projects:
+        return []
+
+    workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
+    try:
+        workflow_text = workflow.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ["DOTNET_PACKAGE_RIGHTS_WORKFLOW_MISSING"]
+
+    authority_lines = [
+        line_number
+        for line_number, raw in enumerate(workflow_text.splitlines(), start=1)
+        if raw.strip().startswith("NUGET_PACKAGES:")
+    ]
+    canonical_authority_lines = [
+        line_number
+        for line_number, raw in enumerate(workflow_text.splitlines(), start=1)
+        if raw.strip() == _CANONICAL_NUGET_PACKAGES_AUTHORITY
+    ]
+    blockers: list[str] = []
+    if len(authority_lines) != 1 or authority_lines != canonical_authority_lines:
+        blockers.append("DOTNET_PACKAGE_RIGHTS_NUGET_PACKAGES_AUTHORITY_INVALID")
+
+    verified, invalid_lines = workflow_restored_rights_projects(workflow_text)
+    for line_number in invalid_lines:
+        blockers.append(
+            f"DOTNET_PACKAGE_RIGHTS_VERIFY_COMMAND_INVALID:{line_number}"
+        )
+    seen: set[str] = set()
+    for project in verified:
+        if project in seen:
+            blockers.append(
+                f"DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_DUPLICATE:{project}"
+            )
+        seen.add(project)
+        if not (root / project).is_file():
+            blockers.append(
+                f"DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_NOT_FOUND:{project}"
+            )
+
+    for project in sorted(set(package_projects)):
+        relative = project.relative_to(root).as_posix()
+        if relative not in seen:
+            blockers.append(
+                f"DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_MISSING:{relative}"
+            )
+    return sorted(blockers)
+
+
 def package_rights_blockers(root: Path = ROOT) -> list[str]:
     try:
         artifacts = locked_package_artifacts(root)
@@ -237,6 +363,7 @@ def package_rights_blockers(root: Path = ROOT) -> list[str]:
                 "DOTNET_PACKAGE_RIGHTS_ORPHANED:"
                 f"{record['name']}@{record['version']}"
             )
+    blockers.extend(_workflow_rights_blockers(root, _package_projects(root)))
     return sorted(blockers)
 
 
@@ -249,15 +376,41 @@ def _normalized_license_text(path: Path) -> str:
     return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")).strip() + "\n"
 
 
+def _package_regular_file(
+    package_dir: Path,
+    candidate: Path,
+    *,
+    label: str,
+) -> Path:
+    """Require one non-symlink regular file inside the exact restored package dir."""
+
+    if candidate.is_symlink():
+        raise ValueError(f"restored NuGet package {label} must not be a symlink")
+    try:
+        resolved = candidate.resolve(strict=True)
+        package_resolved = package_dir.resolve(strict=True)
+    except OSError as error:
+        raise ValueError(
+            f"restored NuGet package {label} is unavailable"
+        ) from error
+    if not resolved.is_file() or resolved.parent != package_resolved:
+        raise ValueError(
+            f"restored NuGet package {label} is outside the exact package directory"
+        )
+    return resolved
+
+
 def verify_restored_package_rights(
     packages_root: Path,
     *,
     root: Path = ROOT,
     projects: list[Path] | None = None,
 ) -> None:
+    artifacts = locked_package_artifacts(root, projects=projects)
+    if not artifacts:
+        return
     if not packages_root.is_dir():
         raise ValueError("NuGet global-packages root is unavailable")
-    artifacts = locked_package_artifacts(root, projects=projects)
     records = {_artifact_key(item): item for item in package_rights_records(root)}
     for artifact in artifacts:
         key = _artifact_key(artifact)
@@ -266,30 +419,98 @@ def verify_restored_package_rights(
             raise ValueError(
                 f"NuGet package rights are missing for {artifact['name']}@{artifact['version']}"
             )
-        package_dir = packages_root / artifact["name"].casefold() / artifact["version"].casefold()
+        package_name = artifact["name"]
+        package_version = artifact["version"]
+        for value, label in (
+            (package_name, "name"),
+            (package_version, "version"),
+        ):
+            if (
+                value in {".", ".."}
+                or "/" in value
+                or "\\" in value
+                or ":" in value
+                or any(ord(character) < 32 or ord(character) == 127 for character in value)
+            ):
+                raise ValueError(
+                    f"restored NuGet package {label} is not path-safe: "
+                    f"{package_name}@{package_version}"
+                )
+
+        packages_root_resolved = packages_root.resolve(strict=True)
+        name_dir = packages_root / package_name.casefold()
+        package_dir = name_dir / package_version.casefold()
+        if name_dir.is_symlink() or package_dir.is_symlink():
+            raise ValueError(
+                f"restored NuGet package path must not traverse a symlink: "
+                f"{package_name}@{package_version}"
+            )
         if not package_dir.is_dir():
             raise ValueError(
-                f"restored NuGet package is unavailable: {artifact['name']}@{artifact['version']}"
+                f"restored NuGet package is unavailable: {package_name}@{package_version}"
             )
+        package_dir_resolved = package_dir.resolve(strict=True)
+        if not package_dir_resolved.is_relative_to(packages_root_resolved):
+            raise ValueError(
+                f"restored NuGet package path escapes packages root: "
+                f"{package_name}@{package_version}"
+            )
+
         sha_files = tuple(package_dir.glob("*.nupkg.sha512"))
+        nupkg_files = tuple(package_dir.glob("*.nupkg"))
         if len(sha_files) != 1:
             raise ValueError(
-                f"restored NuGet package lacks one SHA-512 authority: {artifact['name']}@{artifact['version']}"
+                f"restored NuGet package lacks one SHA-512 authority: {package_name}@{package_version}"
             )
-        restored_hash = sha_files[0].read_text(encoding="ascii").strip()
+        if len(nupkg_files) != 1:
+            raise ValueError(
+                f"restored NuGet package lacks one nupkg payload: {package_name}@{package_version}"
+            )
+        sha_path = _package_regular_file(
+            package_dir,
+            sha_files[0],
+            label="SHA-512 authority",
+        )
+        nupkg_path = _package_regular_file(
+            package_dir,
+            nupkg_files[0],
+            label="nupkg payload",
+        )
+        restored_hash = sha_path.read_text(encoding="ascii").strip()
         if restored_hash != artifact["content_hash_sha512_base64"]:
             raise ValueError(
-                f"restored NuGet package content hash mismatch: {artifact['name']}@{artifact['version']}"
+                f"restored NuGet package content hash mismatch: {package_name}@{package_version}"
             )
-        license_path = package_dir / record["license_file"]
-        notice_path = package_dir / record["notice_file"]
-        if not license_path.is_file():
+        actual_nupkg_hash = base64.b64encode(
+            sha512(nupkg_path.read_bytes()).digest()
+        ).decode("ascii")
+        if actual_nupkg_hash != artifact["content_hash_sha512_base64"]:
+            raise ValueError(
+                f"restored NuGet package payload hash mismatch: {package_name}@{package_version}"
+            )
+        license_candidate = package_dir / record["license_file"]
+        notice_candidate = package_dir / record["notice_file"]
+        if not license_candidate.is_file():
             raise ValueError(
                 f"restored NuGet package license is missing: {artifact['name']}@{artifact['version']}"
             )
-        if not notice_path.is_file() or not notice_path.read_bytes():
+        if not notice_candidate.is_file():
             raise ValueError(
                 f"restored NuGet package notice is missing: {artifact['name']}@{artifact['version']}"
+            )
+        license_path = _package_regular_file(
+            package_dir,
+            license_candidate,
+            label="license",
+        )
+        notice_path = _package_regular_file(
+            package_dir,
+            notice_candidate,
+            label="notice",
+        )
+        if not notice_path.read_bytes():
+            raise ValueError(
+                f"restored NuGet package notice is empty: {artifact['name']}@{artifact['version']}"
             )
         expected = _normalized_license_text(root / record["expected_license_text_path"])
         actual = _normalized_license_text(license_path)
@@ -302,23 +523,60 @@ def verify_restored_package_rights(
             raise ValueError(
                 f"restored NuGet package lacks one nuspec: {artifact['name']}@{artifact['version']}"
             )
+        nuspec_path = _package_regular_file(
+            package_dir,
+            nuspecs[0],
+            label="nuspec",
+        )
         try:
-            tree = ET.parse(nuspecs[0])
+            tree = ET.parse(nuspec_path)
         except (OSError, ET.ParseError) as error:
             raise ValueError("restored NuGet nuspec is invalid") from error
-        licenses = [
+        metadata_nodes = [
             node
             for node in tree.iter()
+            if isinstance(node.tag, str)
+            and node.tag.rsplit("}", 1)[-1] == "metadata"
+        ]
+        if len(metadata_nodes) != 1:
+            raise ValueError(
+                f"restored NuGet package lacks one metadata declaration: "
+                f"{package_name}@{package_version}"
+            )
+        metadata = metadata_nodes[0]
+        ids = [
+            node
+            for node in metadata
+            if isinstance(node.tag, str) and node.tag.rsplit("}", 1)[-1] == "id"
+        ]
+        versions = [
+            node
+            for node in metadata
+            if isinstance(node.tag, str) and node.tag.rsplit("}", 1)[-1] == "version"
+        ]
+        if len(ids) != 1 or (ids[0].text or "").strip() != package_name:
+            raise ValueError(
+                f"restored NuGet package nuspec id mismatch: "
+                f"{package_name}@{package_version}"
+            )
+        if len(versions) != 1 or (versions[0].text or "").strip() != package_version:
+            raise ValueError(
+                f"restored NuGet package nuspec version mismatch: "
+                f"{package_name}@{package_version}"
+            )
+        licenses = [
+            node
+            for node in metadata
             if isinstance(node.tag, str) and node.tag.rsplit("}", 1)[-1] == "license"
         ]
         if len(licenses) != 1:
             raise ValueError(
-                f"restored NuGet package lacks one license declaration: {artifact['name']}@{artifact['version']}"
+                f"restored NuGet package lacks one license declaration: {package_name}@{package_version}"
             )
         license_node = licenses[0]
         if license_node.attrib.get("type") != "file" or (license_node.text or "").strip() != record["license_file"]:
             raise ValueError(
-                f"restored NuGet package license declaration mismatch: {artifact['name']}@{artifact['version']}"
+                f"restored NuGet package license declaration mismatch: {package_name}@{package_version}"
             )
 
 

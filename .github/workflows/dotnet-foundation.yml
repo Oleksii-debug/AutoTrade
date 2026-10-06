@@ -109,11 +109,7 @@ jobs:
       - run: python tools/dotnet_package_rights.py --check-policy
       - run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --locked-mode
       - name: Verify restored Desktop NuGet package rights
-        run: >-
-          python tools/dotnet_package_rights.py
-          --verify-restored
-          --packages-root "${{ env.NUGET_PACKAGES }}"
-          --project src/AutoTrade.Desktop/AutoTrade.Desktop.csproj
+        run: python tools/dotnet_package_rights.py --verify-restored --packages-root "${{ env.NUGET_PACKAGES }}" --project src/AutoTrade.Desktop/AutoTrade.Desktop.csproj
       - run: dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --configuration Release --no-restore
       - run: dotnet restore tests/Desktop.Client/Desktop.Client.csproj --locked-mode
       - run: dotnet run --project tests/Desktop.Client/Desktop.Client.csproj --configuration Release --no-restore

@@ -174,7 +174,7 @@ _URI_TEXT_RE = re.compile(
 )
 _BAD_PERCENT_ENCODING_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _UTC_INSTANT_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
 )
 _EVENT_ENVELOPE_REQUIRED_FIELDS = frozenset(
     {

@@ -426,6 +426,7 @@ def validate_trusted_nvda_qualification(
         "attestation_digest": accepted.attestation_digest,
         "policy_id": accepted.policy_id,
         "trust_root_id": accepted.trust_root_id,
+        "evidence_artifact_id": exact_refs[0].artifact_id,
         "release_artifact_id": release_artifact_id,
         "artifact_sha256": release_artifact_sha256,
         "evidence_sha256": evidence_sha256,

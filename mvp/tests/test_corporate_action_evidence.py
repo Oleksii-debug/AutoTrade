@@ -12,6 +12,11 @@ from mvp.autotrade_mvp.corporate_action_evidence import (
     DurableCorporateActionEvidenceStore,
     resolve_authoritative_corporate_action,
 )
+from mvp.autotrade_mvp.capabilities import (
+    CapabilityClaim,
+    EvidenceVerification,
+    derive_capability_snapshot,
+)
 from mvp.autotrade_mvp.corporate_actions import CorporateEvent
 from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -20,7 +25,7 @@ from mvp.autotrade_mvp.provider_core import (
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
 )
-from mvp.tests.test_provider_transport import READ_NOW, verified_read_capability
+from mvp.tests.test_provider_transport import READ_NOW
 
 
 ENDPOINT = "/sapi/v1/asset/corporate-action"
@@ -66,6 +71,51 @@ def canonical_instrument(
     )
 
 
+_SIMULATION_SNAPSHOT_ID = "77777777-7777-4777-8777-777777777777"
+_SIMULATION_ARTIFACT_IDS = {
+    "DOCUMENTED": "71111111-1111-4111-8111-111111111111",
+    "API": "72222222-2222-4222-8222-222222222222",
+    "ACCOUNT": "73333333-3333-4333-8333-333333333333",
+    "INSTRUMENT": "74444444-4444-4444-8444-444444444444",
+}
+
+
+def simulation_read_capability():
+    observed = READ_NOW - timedelta(minutes=1)
+    expires = READ_NOW + timedelta(minutes=10)
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            provider_id="BINANCE",
+            account_id="acct-1",
+            entity_id="entity-1",
+            environment="SIMULATION",
+            instrument_version="BTCUSDT@1",
+            observed_at=observed,
+            expires_at=expires,
+            supported_order_types=frozenset({"LIMIT"}),
+            time_in_force=frozenset({"GTC"}),
+            permission_scopes=frozenset({"ORDER.READ"}),
+            position_mode="NET",
+            native_protection=frozenset(),
+            rate_limit_policy_id="binance-simulation-v1",
+            data_entitlements=frozenset({"ACCOUNT"}),
+            evidence_ref={
+                "artifact_id": _SIMULATION_ARTIFACT_IDS[source],
+                "sha256": "sha256:" + "a" * 64,
+                "observed_at": observed.isoformat().replace("+00:00", "Z"),
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
+        snapshot_id=_SIMULATION_SNAPSHOT_ID,
+        claims=claims,
+        observed_at=READ_NOW,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
+
+
 def sealed_dividend(
     *,
     external_event_id="corp-1",
@@ -84,7 +134,7 @@ def sealed_dividend(
     pay_at=None,
 ):
     binding = prepare_authenticated_read_query(
-        capability=verified_read_capability(),
+        capability=simulation_read_capability(),
         surface=Surface.ACTIVITIES,
         endpoint=ENDPOINT,
         query={"symbol": "BTCUSDT"},
@@ -140,7 +190,7 @@ def resolve(
     instrument_registry=None,
     expected_provider_id="BINANCE",
     expected_account_id="acct-1",
-    expected_environment="PAPER",
+    expected_environment="SIMULATION",
 ):
     return resolve_authoritative_corporate_action(
         source.evidence_ref,
@@ -165,7 +215,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
 
         self.assertEqual(accepted.provider_id, "BINANCE")
         self.assertEqual(accepted.account_id, "acct-1")
-        self.assertEqual(accepted.environment, "PAPER")
+        self.assertEqual(accepted.environment, "SIMULATION")
         self.assertEqual(
             accepted.provider_instrument_version,
             source.query_binding.instrument_version,
@@ -220,7 +270,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 instrument_registry=canonical_registry(),
                 expected_provider_id="BINANCE",
                 expected_account_id="acct-1",
-                expected_environment="PAPER",
+                expected_environment="SIMULATION",
                 allowed_endpoints=frozenset({ENDPOINT}),
                 permission_scope="ORDER.READ",
             )
@@ -230,12 +280,37 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         for field, value in (
             ("expected_provider_id", "ALPACA"),
             ("expected_account_id", "other-account"),
-            ("expected_environment", "LIVE"),
+            ("expected_environment", "REPLAY"),
         ):
             with self.subTest(field=field), self.assertRaisesRegex(
                 CorporateActionEvidenceError, "scope mismatch"
             ):
                 resolve(source, **{field: value})
+
+    def test_paper_and_live_require_provider_origin_before_resolver_callback(self):
+        source = sealed_dividend()
+        for environment in ("PAPER", "LIVE"):
+            calls = []
+
+            def resolver(reference):
+                calls.append(reference)
+                return source
+
+            with self.subTest(environment=environment), self.assertRaisesRegex(
+                CorporateActionEvidenceError,
+                "PAPER/LIVE corporate actions require durable provider-origin authority",
+            ):
+                resolve_authoritative_corporate_action(
+                    source.evidence_ref,
+                    evidence_resolver=resolver,
+                    instrument_registry=canonical_registry(),
+                    expected_provider_id="BINANCE",
+                    expected_account_id="acct-1",
+                    expected_environment=environment,
+                    allowed_endpoints=frozenset({ENDPOINT}),
+                    permission_scope="ORDER.READ",
+                )
+            self.assertEqual(calls, [])
 
     def test_arbitrary_normalizer_cannot_become_financial_authority(self):
         source = sealed_dividend()
@@ -244,7 +319,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
             return CorporateActionObservation(
                 provider_id="BINANCE",
                 account_id="acct-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 provider_instrument_version=source.query_binding.instrument_version,
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
@@ -266,7 +341,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 normalizer=forged,
                 expected_provider_id="BINANCE",
                 expected_account_id="acct-1",
-                expected_environment="PAPER",
+                expected_environment="SIMULATION",
                 allowed_endpoints=frozenset({ENDPOINT}),
                 permission_scope="ORDER.READ",
             )
@@ -309,7 +384,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 instrument_resolver=lambda _observation: canonical_instrument(),
                 expected_provider_id="BINANCE",
                 expected_account_id="acct-1",
-                expected_environment="PAPER",
+                expected_environment="SIMULATION",
                 allowed_endpoints=frozenset({ENDPOINT}),
                 permission_scope="ORDER.READ",
             )
@@ -349,7 +424,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 instrument_registry=canonical_registry(),
                 expected_provider_id="BINANCE",
                 expected_account_id="acct-1",
-                expected_environment="PAPER",
+                expected_environment="SIMULATION",
                 allowed_endpoints=frozenset({"/different/activity"}),
                 permission_scope="ORDER.READ",
             )
@@ -369,7 +444,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
             CorporateActionObservation(
                 provider_id="BINANCE",
                 account_id="acct-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 provider_instrument_version=source.query_binding.instrument_version,
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
@@ -431,7 +506,7 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
             journal,
             provider_id="BINANCE",
             account_id=account_id,
-            environment="PAPER",
+            environment="SIMULATION",
         )
         return journal, durable
 
@@ -642,7 +717,7 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
                     ForgedJournalStore(path),
                     provider_id="BINANCE",
                     account_id="acct-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                 )
 
     def test_construction_time_journal_method_shadow_is_rejected(self):
@@ -655,7 +730,7 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
                     journal,
                     provider_id="BINANCE",
                     account_id="acct-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                 )
 
     def test_post_construction_journal_shadow_fails_before_mutation(self):
@@ -805,7 +880,7 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
                     journal,
                     provider_id="BINANCE",
                     account_id="acct-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                 )
 
 

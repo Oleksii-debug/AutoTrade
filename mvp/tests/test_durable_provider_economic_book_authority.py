@@ -82,6 +82,40 @@ class DurableProviderEconomicBookAuthorityTests(unittest.TestCase):
             finally:
                 provider_accounting_impl.payload_digest = original_payload_digest
 
+    def test_durable_read_facade_retains_original_authority_verifier(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            book = economic_book(JournalStore(path), environment="SIMULATION")
+            original_projection = vars(book)["_book"]
+            original_require = (
+                provider_accounting_impl._require_durable_provider_economic_book_authority
+            )
+            provider_accounting_impl._require_durable_provider_economic_book_authority = (
+                lambda _value: None
+            )
+            vars(book)["_book"] = EconomicBook(
+                (cash_transaction(transaction_id="forged"),)
+            )
+            try:
+                for read in (
+                    lambda: book.transactions,
+                    lambda: book.balance("CASH:USD", "USD"),
+                    lambda: book.cash("USD"),
+                    lambda: book.position("ASSET"),
+                    lambda: book.fee_expense("USD"),
+                    lambda: book.audit_digest(),
+                ):
+                    with self.assertRaisesRegex(
+                        AccountingConflict,
+                        "projection changed outside canonical reload",
+                    ):
+                        read()
+            finally:
+                vars(book)["_book"] = original_projection
+                provider_accounting_impl._require_durable_provider_economic_book_authority = (
+                    original_require
+                )
+
     def test_bybit_provider_environment_separates_durable_book_identity(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

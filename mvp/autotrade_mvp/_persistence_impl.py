@@ -1791,7 +1791,7 @@ class JournalStore:
             try:
                 existing = connection.execute(
                     """
-                    SELECT aggregate_version, state_json, state_hash
+                    SELECT aggregate_version, state_json, state_hash, updated_at
                     FROM projection_checkpoints
                     WHERE projection_name = ?
                       AND aggregate_type = ?
@@ -1812,6 +1812,10 @@ class JournalStore:
                     existing_state_hash = _require_canonical_durable_text(
                         existing["state_hash"],
                         name="projection checkpoint state_hash",
+                    )
+                    _require_canonical_durable_text(
+                        existing["updated_at"],
+                        name="projection checkpoint updated_at",
                     )
                     try:
                         existing_state = json.loads(existing_state_json)
@@ -2015,7 +2019,7 @@ class JournalStore:
                     )
                 existing = connection.execute(
                     """
-                    SELECT journal_sequence, state_json, state_hash
+                    SELECT journal_sequence, state_json, state_hash, updated_at
                     FROM global_projection_checkpoints
                     WHERE projection_name = ?
                     """,
@@ -2035,6 +2039,10 @@ class JournalStore:
                     existing_state_hash = _require_canonical_durable_text(
                         existing["state_hash"],
                         name="global projection checkpoint state_hash",
+                    )
+                    _require_canonical_durable_text(
+                        existing["updated_at"],
+                        name="global projection checkpoint updated_at",
                     )
                     try:
                         existing_state = json.loads(existing_state_json)

@@ -318,6 +318,37 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 expected_query=prepared["query"],
             )
 
+    def test_mapping_shape_rejects_string_subclass_before_rehash(self):
+        prepared, _observed, session_id, key_sha, _response = _fixture()
+
+        class ExecutableKey(str):
+            calls = 0
+
+            def __hash__(self):
+                type(self).calls += 1
+                return str.__hash__(self)
+
+        changed = {
+            (ExecutableKey(key) if key == "schema" else key): value
+            for key, value in prepared.items()
+        }
+        ExecutableKey.calls = 0
+        with self.assertRaisesRegex(
+            HostProviderAttestationError,
+            "keys must be exact str",
+        ):
+            verify_host_prepared_attestation(
+                changed,
+                expected_session_identity=session_id,
+                expected_public_key_sha256=key_sha,
+                expected_query=prepared["query"],
+            )
+        self.assertEqual(
+            ExecutableKey.calls,
+            0,
+            "shape validation rehashed executable caller key material",
+        )
+
     def test_noncanonical_or_extra_fields_are_rejected(self):
         prepared, _observed, session_id, key_sha, _response = _fixture()
         changed = deepcopy(prepared)

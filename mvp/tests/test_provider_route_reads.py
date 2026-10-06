@@ -127,6 +127,7 @@ class ProviderRouteReadTests(unittest.TestCase):
                 route.capability_snapshot_id,
             )
             self.assertEqual(binding.provider_environment, "TESTNET")
+            self.assertEqual(binding.query_binding.provider_environment, "TESTNET")
             self.assertTrue(binding.route_semantics_digest.startswith("sha256:"))
             self.assertTrue(binding.endpoint_rule_digest.startswith("sha256:"))
             self.assertTrue(binding.qualified_route_rule_digest.startswith("sha256:"))
@@ -629,6 +630,24 @@ class ProviderRouteReadTests(unittest.TestCase):
             object.__setattr__(neutral, "permission_scope", "ORDER.READ")
             object.__setattr__(neutral, "query_digest", "sha256:" + "0" * 64)
             with self.assertRaisesRegex(ProviderCoreError, "binding changed after preparation"):
+                observe_authenticated_json_response(
+                    query_binding=neutral,
+                    http_status=200,
+                    response_bytes=b'{"retCode":0}',
+                    observed_at=NOW + timedelta(seconds=1),
+                )
+
+    def test_neutral_read_provider_environment_is_sealed(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(directory)
+            qualified = self.prepare(route, capabilities, qualifications)
+            neutral = qualified.query_binding
+            self.assertEqual(neutral.provider_environment, "TESTNET")
+            object.__setattr__(neutral, "provider_environment", "DEMO")
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "binding changed after preparation",
+            ):
                 observe_authenticated_json_response(
                     query_binding=neutral,
                     http_status=200,

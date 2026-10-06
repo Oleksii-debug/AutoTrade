@@ -602,6 +602,7 @@ class BybitExecutionFeeCurrencyProjection:
         *,
         provider_id: object,
         runtime_environment: object,
+        provider_environment: object,
         account_id: object,
         entity_id: object,
         capability_snapshot_id: object,
@@ -617,6 +618,10 @@ class BybitExecutionFeeCurrencyProjection:
         if runtime_environment != self.runtime_environment:
             raise BybitFeeCurrencyAuthorityError(
                 "fee-currency authority runtime environment mismatch"
+            )
+        if provider_environment != self.provider_environment:
+            raise BybitFeeCurrencyAuthorityError(
+                "fee-currency authority provider environment mismatch"
             )
         if account_id != self.account_id:
             raise BybitFeeCurrencyAuthorityError(

@@ -1850,6 +1850,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(len(fills), 1)
         fill = fills[0]
         self.assertEqual((fill.account_id, fill.environment), ("paper-1", "PAPER"))
+        self.assertEqual(fill.provider_environment, "TESTNET")
         self.assertEqual(fill.provider_execution_id, "exec-1")
         self.assertEqual(fill.instrument, "BTCUSDT@v1")
         self.assertEqual(fill.quantity, Decimal("0.25"))
@@ -1859,6 +1860,44 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(fill.side, "BUY")
         self.assertIsNone(fill.position_side)
         self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
+
+    def test_execution_fill_retains_exact_paper_provider_environment(self):
+        response = {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "execId": "exec-provider-domain",
+                        "orderLinkId": "",
+                        "symbol": "BTCUSDT",
+                        "side": "Buy",
+                        "execQty": "0.01",
+                        "execPrice": "65000",
+                        "execFee": "0",
+                        "feeCurrency": "USDT",
+                        "execTime": "1790280000000",
+                    }
+                ]
+            },
+        }
+        for provider_environment in ("TESTNET", "DEMO"):
+            with self.subTest(provider_environment=provider_environment):
+                capability = read_capability(
+                    provider_environment=provider_environment,
+                )
+                observation = bound_execution_response(
+                    response,
+                    capability=capability,
+                )
+                fills = parse_executions(
+                    observation,
+                    instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                )
+                self.assertEqual(fills[0].environment, "PAPER")
+                self.assertEqual(
+                    fills[0].provider_environment,
+                    provider_environment,
+                )
 
     def test_execution_consumer_rejects_observation_subclass_before_virtual_callback(self):
         canonical = bound_execution_response(

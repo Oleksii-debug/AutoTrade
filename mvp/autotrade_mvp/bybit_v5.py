@@ -1484,6 +1484,7 @@ def parse_executions(
     account_id = projection["account_id"]
     entity_id = projection["entity_id"]
     environment = projection["environment"]
+    provider_environment = projection["provider_environment"]
     capability_snapshot_id = projection["capability_snapshot_id"]
     admitted_instrument_version = projection["instrument_version"]
     observation_evidence_ref = projection["evidence_ref"]
@@ -1703,6 +1704,7 @@ def parse_executions(
                 fee_authority.require_execution_scope(
                     provider_id="BYBIT",
                     runtime_environment=environment,
+                    provider_environment=provider_environment,
                     account_id=account_id,
                     entity_id=entity_id,
                     capability_snapshot_id=capability_snapshot_id,
@@ -1744,6 +1746,7 @@ def parse_executions(
             provider_id="BYBIT",
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=instrument,
@@ -1770,7 +1773,7 @@ def parse_executions(
 
 
 BYBIT_EXECUTION_PARSER_IDENTITY = "BYBIT_EXECUTION_V5_JSON_V1"
-BYBIT_EXECUTION_PARSER_VERSION = "1.2.0"
+BYBIT_EXECUTION_PARSER_VERSION = "1.3.0"
 BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST = (
     "sha256:"
     + sha256(
@@ -1784,6 +1787,9 @@ BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST = (
                     "surface": "AUTHENTICATED_READ",
                     "endpoint": "/v5/execution/list",
                     "permission_scope": "ORDER.READ",
+                    "provider_environment": (
+                        "EXACT_CAPABILITY_BOUND_PROVIDER_ENVIRONMENT"
+                    ),
                     "query_category": ["spot", "linear", "inverse", "option"],
                     "response_category": "EXACT_MATCH_QUERY_CATEGORY",
                 },
@@ -1844,7 +1850,10 @@ BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST = (
                 ),
                 "extra_fees": "FAIL_CLOSED_WHEN_ECONOMICALLY_NONEMPTY",
                 "duplicate_execution_id": "IDENTICAL_OR_FAIL_CLOSED",
-                "output": "ProviderFillEvidence_WITH_EXACT_READ_EVIDENCE_REF",
+                "output": (
+                    "ProviderFillEvidence_WITH_EXACT_READ_EVIDENCE_REF_AND_"
+                    "PROVIDER_ENVIRONMENT"
+                ),
             },
             sort_keys=True,
             separators=(",", ":"),

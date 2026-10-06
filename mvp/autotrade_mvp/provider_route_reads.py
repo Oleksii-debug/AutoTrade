@@ -370,6 +370,10 @@ def _validate_qualified_provider_read_material(
         )
     if type(provider_environment) is not str or not provider_environment:
         raise ProviderRouteReadError("provider_environment is required")
+    if query_binding.provider_environment != provider_environment:
+        raise ProviderRouteReadError(
+            "qualified provider environment differs from capability-bound provider read"
+        )
     if (
         type(adapter_code_sha) is not str
         or re.fullmatch(r"[0-9a-f]{40}", adapter_code_sha) is None

@@ -376,6 +376,9 @@ def guarded_order_projection(
     _mapping_proxy_type=MappingProxyType,
     _canonical_dict=dict,
     _canonical_list=list,
+    _canonical_str=str,
+    _canonical_tuple=tuple,
+    _canonical_any=any,
     _type_error=TypeError,
     _error_type=AlpacaAdapterError,
 ) -> Mapping[str, object]:
@@ -392,22 +395,58 @@ def guarded_order_projection(
     body = _object_getattribute(prepared_request, "body")
     if _canonical_type(body) is not _mapping_proxy_type:
         raise _error_type("Alpaca prepared request body authority changed")
+    endpoint = _object_getattribute(prepared_request, "endpoint")
+    account_id = _object_getattribute(prepared_request, "account_id")
+    environment = _object_getattribute(prepared_request, "environment")
+    capability_snapshot_id = _object_getattribute(
+        prepared_request,
+        "capability_snapshot_id",
+    )
+    capability_snapshot_ids = _object_getattribute(
+        prepared_request,
+        "capability_snapshot_ids",
+    )
+    instrument_versions = _object_getattribute(
+        prepared_request,
+        "instrument_versions",
+    )
+    body_sha256 = _object_getattribute(prepared_request, "body_sha256")
+    if _canonical_any(
+        _canonical_type(value) is not _canonical_str
+        for value in (
+            endpoint,
+            account_id,
+            environment,
+            capability_snapshot_id,
+            body_sha256,
+        )
+    ):
+        raise _error_type("Alpaca prepared request authority changed")
+    if (
+        _canonical_type(capability_snapshot_ids) is not _canonical_tuple
+        or not capability_snapshot_ids
+        or _canonical_any(
+            _canonical_type(value) is not _canonical_str
+            for value in capability_snapshot_ids
+        )
+        or _canonical_type(instrument_versions) is not _canonical_tuple
+        or not instrument_versions
+        or _canonical_any(
+            _canonical_type(value) is not _canonical_str
+            for value in instrument_versions
+        )
+    ):
+        raise _error_type("Alpaca prepared request authority changed")
     return _mapping_proxy_type(
         {
-            "endpoint": _object_getattribute(prepared_request, "endpoint"),
+            "endpoint": endpoint,
             "body": _canonical_dict(body),
-            "account_id": _object_getattribute(prepared_request, "account_id"),
-            "environment": _object_getattribute(prepared_request, "environment"),
-            "capability_snapshot_id": _object_getattribute(
-                prepared_request, "capability_snapshot_id"
-            ),
-            "capability_snapshot_ids": _canonical_list(
-                _object_getattribute(prepared_request, "capability_snapshot_ids")
-            ),
-            "instrument_versions": _canonical_list(
-                _object_getattribute(prepared_request, "instrument_versions")
-            ),
-            "body_sha256": _object_getattribute(prepared_request, "body_sha256"),
+            "account_id": account_id,
+            "environment": environment,
+            "capability_snapshot_id": capability_snapshot_id,
+            "capability_snapshot_ids": _canonical_list(capability_snapshot_ids),
+            "instrument_versions": _canonical_list(instrument_versions),
+            "body_sha256": body_sha256,
         }
     )
 

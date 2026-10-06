@@ -106,6 +106,42 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def _tamper_event_timestamp_authority(
+        self,
+        path: str,
+        event_type: str,
+        timestamp: str,
+    ) -> None:
+        connection = sqlite3.connect(path)
+        try:
+            row = connection.execute(
+                "SELECT event_id, envelope_json "
+                "FROM events WHERE event_type = ?",
+                (event_type,),
+            ).fetchone()
+            self.assertIsNotNone(row)
+            event_id, envelope_json = row
+            envelope = json.loads(envelope_json)
+            for field in ("occurred_at", "observed_at", "committed_at"):
+                envelope[field] = timestamp
+            new_envelope_json = canonical_json(envelope)
+            new_envelope_hash = (
+                "sha256:" + sha256(new_envelope_json.encode("utf-8")).hexdigest()
+            )
+            connection.execute(
+                "UPDATE events SET committed_at = ?, envelope_json = ?, "
+                "envelope_hash = ? WHERE event_id = ?",
+                (
+                    timestamp,
+                    new_envelope_json,
+                    new_envelope_hash,
+                    event_id,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
     def _make_exact_response_attempt(self, path: str) -> None:
         store = JournalStore(path)
         dispatcher = GuardedDispatcher(
@@ -362,6 +398,104 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
             result = self._redispatch_exact_response_attempt(path)
             self.assertEqual(result.status, "UNKNOWN")
             self.assertEqual(result.reason, "durable_submission_history_invalid")
+
+    def test_runtime_recovery_rejects_nonmonotonic_durable_chronology(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            self._tamper_event_timestamp_authority(
+                path,
+                "SubmissionSent",
+                "2026-10-06T13:59:59Z",
+            )
+
+            result = self._redispatch_exact_response_attempt(path)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "durable_submission_history_invalid")
+
+    def test_runtime_recovery_rejects_prepared_payload_timestamp_retargeting(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            self._tamper_event_field(
+                path,
+                "SubmissionPrepared",
+                "prepared_at",
+                "2026-10-06T13:59:59Z",
+            )
+
+            result = self._redispatch_exact_response_attempt(path)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "durable_submission_history_invalid")
+
+    def test_restart_rejects_nonmonotonic_durable_chronology(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            self._tamper_event_timestamp_authority(
+                path,
+                "SubmissionSent",
+                "2026-10-06T13:59:59Z",
+            )
+
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(
+                ValueError,
+                "durable submission chronology is not monotonic",
+            ):
+                load_submission_response_binding(
+                    reopened,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    attempt_id="binding-type-a1",
+                )
+
+    def test_restart_rejects_partial_timestamp_authority_retargeting(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            self._tamper_event_field(
+                path,
+                "SubmissionSent",
+                "observed_at",
+                "2026-10-06T13:59:59Z",
+                envelope_field=True,
+            )
+
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(
+                ValueError,
+                "durable terminal timestamp authority is invalid",
+            ):
+                load_submission_response_binding(
+                    reopened,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    attempt_id="binding-type-a1",
+                )
+
+    def test_restart_rejects_prepared_payload_timestamp_retargeting(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            self._make_exact_response_attempt(path)
+            self._tamper_event_field(
+                path,
+                "SubmissionPrepared",
+                "prepared_at",
+                "2026-10-06T13:59:59Z",
+            )
+
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(
+                ValueError,
+                "durable SubmissionPrepared prepared_at mismatches event chronology",
+            ):
+                load_submission_response_binding(
+                    reopened,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    attempt_id="binding-type-a1",
+                )
 
     def test_restart_rejects_non_contiguous_aggregate_versions(self):
         with TemporaryDirectory() as directory:

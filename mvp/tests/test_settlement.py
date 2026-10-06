@@ -120,6 +120,43 @@ class SettlementBookTests(unittest.TestCase):
                 evidence_refs=("provider:rule",),
             )
 
+    def test_obligation_sequences_reject_polymorphic_iterables_before_callbacks(self):
+        class HostileList(list):
+            calls = 0
+
+            def __iter__(self):
+                type(self).calls += 1
+                raise AssertionError("settlement authority invoked polymorphic iterable")
+
+        HostileList.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact tuple or list"):
+            SettlementBook(obligations=HostileList())
+        self.assertEqual(HostileList.calls, 0)
+
+        checkpoint = SettlementCheckpoint.create(
+            checkpoint_id="empty",
+            settled_cash={},
+            settled_obligation_evidence={},
+        )
+        HostileList.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact tuple or list"):
+            SettlementBook.from_history(
+                checkpoint=checkpoint,
+                obligations=HostileList(),
+                settled_obligation_evidence={},
+            )
+        self.assertEqual(HostileList.calls, 0)
+
+        economic = EconomicBook()
+        HostileList.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact tuple or list"):
+            SettlementBook.from_economic_book(
+                economic_book=economic,
+                obligations=HostileList(),
+                settled_obligation_evidence={},
+            )
+        self.assertEqual(HostileList.calls, 0)
+
     def test_direct_checkpoint_constructor_cannot_bypass_canonical_identity(self):
         with self.assertRaisesRegex(
             SettlementConflict,

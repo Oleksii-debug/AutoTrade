@@ -629,6 +629,8 @@ class SettlementBook:
                     "settled_cash contains duplicate normalized currency codes"
                 )
             self._settled_cash[unit] = _decimal(amount, name="settled_cash")
+        if type(obligations) not in {tuple, list}:
+            raise TypeError("obligations must use an exact tuple or list")
         self._obligations: dict[str, SettlementObligation] = {}
         self._by_cause_component: dict[tuple[str, str], SettlementObligation] = {}
         self._settled_ids: set[str] = set()
@@ -704,6 +706,8 @@ class SettlementBook:
         ):
             raise TypeError("retained settlement evidence must use an exact dict")
 
+        if type(obligations) not in {tuple, list}:
+            raise TypeError("retained obligations must use an exact tuple or list")
         obligations_tuple = tuple(obligations)
         validation = cls(
             settled_cash=checkpoint.cash_dict(),
@@ -967,6 +971,17 @@ class SettlementBook:
             EconomicBook,
         )
 
+        if type(obligations) not in {tuple, list}:
+            raise TypeError(
+                "economic-book obligations must use an exact tuple or list"
+            )
+        if (
+            settled_obligation_evidence is not None
+            and type(settled_obligation_evidence) is not dict
+        ):
+            raise TypeError(
+                "economic-book settlement evidence must use an exact dict"
+            )
         items = tuple(obligations)
         if owner_scope is not None:
             provider, account, environment = owner_scope

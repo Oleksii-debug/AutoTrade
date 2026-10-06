@@ -113,6 +113,7 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
                 raw = b'{"forged":true}'
                 return (
                     raw.decode("utf-8"),
+                    "utf-8-json",
                     "sha256:" + sha256(raw).hexdigest(),
                     {"forged": True},
                     200,
@@ -268,18 +269,20 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
             dispatcher = self._dispatcher(path)
             depth_guard = dispatch_module.require_provider_json_depth
             original_code = depth_guard.__code__
+            over_depth = (
+                ("[" * 70) + "0" + ("]" * 70)
+            ).encode("utf-8")
 
             def forged_depth_guard(_raw):
                 return None
 
             def transport(_client_order_id, _request, final_guard):
                 final_guard()
-                response = ExactJsonTransportResponse(
-                    b'{"accepted":true}',
+                depth_guard.__code__ = forged_depth_guard.__code__
+                return ExactJsonTransportResponse(
+                    over_depth,
                     http_status=200,
                 )
-                depth_guard.__code__ = forged_depth_guard.__code__
-                return response
 
             try:
                 result = self._dispatch(

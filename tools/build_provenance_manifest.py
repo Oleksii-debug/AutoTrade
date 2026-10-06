@@ -19,6 +19,7 @@ if __package__:
         dotnet_locked_dependency_graph,
         dotnet_project_package_references,
         dotnet_restore_command_tokens,
+        dotnet_restore_project_target,
         dotnet_restore_targets_project,
         dotnet_restore_tokens_are_locked,
         dotnet_restore_workflow_commands,
@@ -1017,6 +1018,36 @@ def build_manifest() -> dict[str, object]:
                         invalid_restore = True
                         continue
                     restore_tokens.append(tokens)
+                invalid_restore_targets: list[int] = []
+                missing_restore_targets: list[str] = []
+                for index, tokens in enumerate(restore_tokens, start=1):
+                    target = dotnet_restore_project_target(tokens)
+                    if target is None:
+                        invalid_restore_targets.append(index)
+                    elif not (ROOT / target).is_file():
+                        missing_restore_targets.append(target)
+                if invalid_restore_targets:
+                    blockers.append(
+                        {
+                            "code": "DOTNET_RESTORE_PROJECT_TARGET_INVALID",
+                            "commands": invalid_restore_targets,
+                            "detail": (
+                                "Canonical dotnet restore commands must target "
+                                "one repo-relative .csproj path."
+                            ),
+                        }
+                    )
+                if missing_restore_targets:
+                    blockers.append(
+                        {
+                            "code": "DOTNET_RESTORE_PROJECT_NOT_FOUND",
+                            "projects": missing_restore_targets,
+                            "detail": (
+                                "Canonical dotnet restore targets must exist in "
+                                "the exact source tree."
+                            ),
+                        }
+                    )
                 if invalid_restore:
                     blockers.append(
                         {

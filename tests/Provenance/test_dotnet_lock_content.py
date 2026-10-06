@@ -12,6 +12,7 @@ from tools.dotnet_lock import (
     dotnet_locked_dependency_graph,
     dotnet_project_package_references,
     dotnet_restore_command_tokens,
+    dotnet_restore_project_target,
     dotnet_restore_targets_project,
     dotnet_restore_tokens_are_locked,
     dotnet_restore_workflow_commands,
@@ -253,6 +254,28 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                     "shell execution control",
                 ):
                     dotnet_restore_command_tokens(command)
+
+    def test_restore_target_must_be_canonical_repo_relative_csproj(self):
+        valid = dotnet_restore_command_tokens(
+            "run: dotnet restore src/App/App.csproj --locked-mode"
+        )
+        self.assertEqual(
+            dotnet_restore_project_target(valid),
+            "src/App/App.csproj",
+        )
+        for command in (
+            "run: dotnet restore ../App/App.csproj --locked-mode",
+            "run: dotnet restore /tmp/App.csproj --locked-mode",
+            "run: dotnet restore src\\App\\App.csproj --locked-mode",
+            "run: dotnet restore src/App/App.sln --locked-mode",
+            "run: dotnet restore --locked-mode",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(
+                    dotnet_restore_project_target(
+                        dotnet_restore_command_tokens(command)
+                    )
+                )
 
     def test_restore_project_coverage_requires_first_positional_target(self):
         canonical = dotnet_restore_command_tokens(

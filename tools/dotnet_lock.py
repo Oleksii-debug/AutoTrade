@@ -5,7 +5,7 @@ import binascii
 import json
 import re
 import shlex
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import xml.etree.ElementTree as ET
 
 
@@ -115,17 +115,37 @@ def dotnet_restore_command_tokens(command: str) -> tuple[str, ...]:
     return tokens
 
 
+def dotnet_restore_project_target(
+    tokens: tuple[str, ...] | list[str],
+) -> str | None:
+    """Return one canonical repo-relative csproj restore target."""
+    arguments = tuple(tokens[2:])
+    if '--' in arguments:
+        arguments = arguments[:arguments.index('--')]
+    if not arguments or not isinstance(arguments[0], str):
+        return None
+    target = arguments[0]
+    if not target or target.startswith('-') or '\\' in target:
+        return None
+    path = PurePosixPath(target)
+    if (
+        path.is_absolute()
+        or path.suffix != '.csproj'
+        or any(part in ('', '.', '..') for part in path.parts)
+        or path.as_posix() != target
+    ):
+        return None
+    return target
+
+
 def dotnet_restore_targets_project(
     tokens: tuple[str, ...] | list[str],
     project: str,
 ) -> bool:
     """Require the release project as the canonical restore positional target."""
-    if not isinstance(project, str) or not project or project.startswith('-'):
+    if not isinstance(project, str) or not project:
         return False
-    arguments = tuple(tokens[2:])
-    if '--' in arguments:
-        arguments = arguments[:arguments.index('--')]
-    return bool(arguments) and arguments[0] == project
+    return dotnet_restore_project_target(tokens) == project
 
 
 def dotnet_restore_tokens_are_locked(tokens: tuple[str, ...] | list[str]) -> bool:

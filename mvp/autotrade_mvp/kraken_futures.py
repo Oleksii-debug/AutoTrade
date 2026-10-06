@@ -157,6 +157,53 @@ def futures_base_url(environment: str) -> str:
         raise ProviderCoreError("Kraken Futures environment must be LIVE or DEMO") from error
 
 
+def _prepared_submission_projection(
+    prepared_request: "KrakenFuturesPreparedRequest",
+    *,
+    _prepared_type=KrakenFuturesPreparedRequest,
+    _canonical_type=type,
+    _canonical_str=str,
+    _object_getattribute=object.__getattribute__,
+    _mapping_proxy_type=MappingProxyType,
+) -> Mapping[str, object]:
+    """Read one exact prepared request without executing virtual attributes."""
+
+    if _canonical_type(prepared_request) is not _prepared_type:
+        raise TypeError(
+            "prepared_request must be exact KrakenFuturesPreparedRequest"
+        )
+    body = _object_getattribute(prepared_request, "body")
+    if _canonical_type(body) is not _mapping_proxy_type:
+        raise ProviderCoreError(
+            "Kraken Futures prepared request body authority changed"
+        )
+    client_order_id = body.get("cliOrdId")
+    fields = {
+        "endpoint": _object_getattribute(prepared_request, "endpoint"),
+        "account_id": _object_getattribute(prepared_request, "account_id"),
+        "environment": _object_getattribute(prepared_request, "environment"),
+        "provider_environment": _object_getattribute(
+            prepared_request,
+            "provider_environment",
+        ),
+        "capability_snapshot_id": _object_getattribute(
+            prepared_request,
+            "capability_snapshot_id",
+        ),
+        "instrument_version": _object_getattribute(
+            prepared_request,
+            "instrument_version",
+        ),
+        "body_sha256": _object_getattribute(prepared_request, "body_sha256"),
+        "client_order_id": client_order_id,
+    }
+    if any(_canonical_type(value) is not _canonical_str for value in fields.values()):
+        raise ProviderCoreError(
+            "Kraken Futures prepared request authority changed"
+        )
+    return _mapping_proxy_type(fields)
+
+
 def _submission_projection(
     observation: ProviderSubmissionObservation,
     *,
@@ -175,28 +222,25 @@ def _submission_projection(
         raise TypeError(
             "observation must be durable ProviderSubmissionObservation"
         )
-    if type(prepared_request) is not KrakenFuturesPreparedRequest:
-        raise TypeError(
-            "prepared_request must be exact KrakenFuturesPreparedRequest"
-        )
+    prepared = _prepared_submission_projection(prepared_request)
     projected = _projection(observation)
-    cid = _client_order_id(prepared_request.body.get("cliOrdId"))
+    cid = _client_order_id(prepared["client_order_id"])
     expected = (
         ("provider_id", "KRAKEN", "provider"),
-        ("endpoint", prepared_request.endpoint, "endpoint"),
-        ("request_sha256", prepared_request.body_sha256, "request digest"),
+        ("endpoint", prepared["endpoint"], "endpoint"),
+        ("request_sha256", prepared["body_sha256"], "request digest"),
         (
             "capability_snapshot_ids",
-            (prepared_request.capability_snapshot_id,),
+            (prepared["capability_snapshot_id"],),
             "capability",
         ),
         (
             "instrument_versions",
-            (prepared_request.instrument_version,),
+            (prepared["instrument_version"],),
             "instrument",
         ),
-        ("account_id", prepared_request.account_id, "account"),
-        ("environment", prepared_request.environment, "environment"),
+        ("account_id", prepared["account_id"], "account"),
+        ("environment", prepared["environment"], "environment"),
         ("client_order_id", cid, "client-order"),
     )
     for key, expected_value, label in expected:
@@ -214,12 +258,13 @@ def _response_evidence(
 ) -> dict[str, str]:
     """Bind one authenticated provider response to the guarded Futures request."""
 
+    prepared = _prepared_submission_projection(prepared_request)
     provider_environment = _text(
-        prepared_request.provider_environment,
+        prepared["provider_environment"],
         name="provider_environment",
     ).upper()
     runtime_environment = _text(
-        prepared_request.environment,
+        prepared["environment"],
         name="environment",
     ).upper()
     expected_runtime_environment = _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT.get(
@@ -231,7 +276,7 @@ def _response_evidence(
         )
     source = (
         futures_base_url(provider_environment)
-        + prepared_request.endpoint
+        + prepared["endpoint"]
     )
     return {
         "artifact_id": str(
@@ -459,11 +504,8 @@ def parse_submission_response(
     """Map one durable exact Futures sendorder response into SubmissionResult."""
 
     aid = _uuid_text(attempt_id, name="attempt_id")
-    if type(prepared_request) is not KrakenFuturesPreparedRequest:
-        raise TypeError(
-            "prepared_request must be exact KrakenFuturesPreparedRequest"
-        )
-    cid = _client_order_id(prepared_request.body.get("cliOrdId"))
+    prepared = _prepared_submission_projection(prepared_request)
+    cid = _client_order_id(prepared["client_order_id"])
     if type(transport_ambiguous) is not bool:
         raise ProviderCoreError("transport_ambiguous must be boolean")
     if transport_ambiguous:

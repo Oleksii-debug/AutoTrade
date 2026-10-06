@@ -552,6 +552,36 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 observation={"result": "success"},
             )
 
+    def test_submission_consumer_ignores_exact_prepared_getattribute_callback(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "prepared-callback-fence",
+                    "status": "placed",
+                },
+            },
+            intent_id="kraken-futures-prepared-callback-fence",
+            provider_environment="LIVE",
+        )
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            raise AssertionError(
+                "prepared-request virtual callback executed"
+            )
+
+        with patch.object(KrakenFuturesPreparedRequest, "__getattribute__", forged):
+            result = parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+        self.assertEqual(callbacks, [])
+        self.assertEqual(result["outcome"], "ACKNOWLEDGED")
+        self.assertEqual(result["provider_order_id"], "prepared-callback-fence")
+
     def test_submission_consumer_rejects_prepared_subclass_before_virtual_callback(self):
         callbacks = []
 

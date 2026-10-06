@@ -1094,6 +1094,8 @@ class AcceptedQualificationAttestation:
     signed_at: str = ""
     unresolved_limits: tuple[str, ...] = ()
     verification_method: str = _RSA_METHOD
+    attestation_json: str = ""
+    signature_b64: str = ""
 
 
 def _verify_rsa_pkcs1v15_sha256(
@@ -1203,6 +1205,25 @@ def verify_qualification_attestation(
         raise TypeError(
             "policy must be QualificationTrustPolicy"
         )
+    attestation_input = receipt.attestation
+    if type(attestation_input) is not QualificationAttestation:
+        raise TypeError(
+            "receipt must carry the exact canonical QualificationAttestation"
+        )
+    if (
+        type(attestation_input.requirement_ids) is not tuple
+        or not all(type(item) is str for item in attestation_input.requirement_ids)
+        or type(attestation_input.evidence_refs) is not tuple
+        or not all(
+            type(item) is EvidenceArtifactRef
+            for item in attestation_input.evidence_refs
+        )
+        or type(attestation_input.unresolved_limits) is not tuple
+        or not all(type(item) is str for item in attestation_input.unresolved_limits)
+    ):
+        raise TypeError(
+            "receipt attestation graph must use exact canonical tuple/ref types"
+        )
     if type(evidence_store) is not ArtifactStore:
         raise TypeError(
             "evidence_store must be the canonical ArtifactStore"
@@ -1272,7 +1293,49 @@ def verify_qualification_attestation(
             name="expected_release_artifact_sha256",
         )
 
-    attestation = receipt.attestation
+    # Reconstruct a fresh exact canonical signed graph from scalar/ref fields.
+    # The RSA signature is verified over this detached graph, never over a
+    # caller-overridable canonical_bytes() method.
+    attestation = QualificationAttestation(
+        attestation_id=str(attestation_input.attestation_id),
+        source_sha=str(attestation_input.source_sha),
+        domain=str(attestation_input.domain),
+        gate=str(attestation_input.gate),
+        package_id=str(attestation_input.package_id),
+        protocol_id=str(attestation_input.protocol_id),
+        protocol_version=str(attestation_input.protocol_version),
+        requirement_ids=tuple(str(item) for item in attestation_input.requirement_ids),
+        evidence_refs=tuple(
+            EvidenceArtifactRef(
+                artifact_id=str(item.artifact_id),
+                sha256=str(item.sha256),
+                media_type=str(item.media_type),
+                evidence_kind=str(item.evidence_kind),
+                source_sha=str(item.source_sha),
+            )
+            for item in attestation_input.evidence_refs
+        ),
+        producer_id=str(attestation_input.producer_id),
+        verifier_id=str(attestation_input.verifier_id),
+        trust_root_id=str(attestation_input.trust_root_id),
+        runner_id=str(attestation_input.runner_id),
+        harness_version=str(attestation_input.harness_version),
+        started_at=str(attestation_input.started_at),
+        completed_at=str(attestation_input.completed_at),
+        signed_at=str(attestation_input.signed_at),
+        result=str(attestation_input.result),
+        unresolved_limits=tuple(str(item) for item in attestation_input.unresolved_limits),
+        release_artifact_id=(
+            None if attestation_input.release_artifact_id is None
+            else str(attestation_input.release_artifact_id)
+        ),
+        release_artifact_sha256=(
+            None if attestation_input.release_artifact_sha256 is None
+            else str(attestation_input.release_artifact_sha256)
+        ),
+        schema_version=str(attestation_input.schema_version),
+        verification_method=str(attestation_input.verification_method),
+    )
     if attestation.source_sha != expected_source_sha:
         raise QualificationTrustError(
             "attestation source SHA does not match candidate"
@@ -1403,6 +1466,8 @@ def verify_qualification_attestation(
         signed_at=str(attestation.signed_at),
         unresolved_limits=tuple(str(item) for item in attestation.unresolved_limits),
         verification_method=str(attestation.verification_method),
+        attestation_json=attestation.canonical_bytes().decode("utf-8"),
+        signature_b64=str(receipt.signature_b64),
     )
 
 

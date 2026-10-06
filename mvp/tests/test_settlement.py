@@ -980,6 +980,115 @@ class EconomicSettlementCapitalTests(unittest.TestCase):
         self.assertEqual(stale.additional_buying_power, Decimal("0"))
         self.assertTrue(stale.blocks_new_risk)
 
+    def test_margin_buying_power_rejects_executable_ingress_before_callbacks(self):
+        class HostileText(str):
+            calls = 0
+
+            def strip(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile text strip dispatched")
+
+            def upper(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile text upper dispatched")
+
+        class HostileDatetime(datetime):
+            calls = 0
+
+            def utcoffset(self):
+                type(self).calls += 1
+                raise AssertionError("hostile datetime utcoffset dispatched")
+
+        class HostileTuple(tuple):
+            calls = 0
+
+            def __iter__(self):
+                type(self).calls += 1
+                raise AssertionError("hostile tuple iteration dispatched")
+
+        common = {
+            "evidence_id": "bp-hostile",
+            "scope": self.scope,
+            "currency": "USD",
+            "additional_credit": "250",
+            "observed_at": datetime(2026, 9, 24, 15, tzinfo=timezone.utc),
+            "valid_until": datetime(2026, 9, 24, 17, tzinfo=timezone.utc),
+            "evidence_refs": ("provider:buying-power:hostile",),
+        }
+
+        for field, hostile, expected, counter in (
+            ("evidence_id", HostileText("bp-hostile"), "evidence_id must be exact text", HostileText),
+            ("currency", HostileText("USD"), "currency must be exact text", HostileText),
+            (
+                "observed_at",
+                HostileDatetime(2026, 9, 24, 15, tzinfo=timezone.utc),
+                "timestamps must be exact datetime",
+                HostileDatetime,
+            ),
+            (
+                "evidence_refs",
+                HostileTuple(("provider:buying-power:hostile",)),
+                "evidence_refs must be a non-empty exact-text tuple",
+                HostileTuple,
+            ),
+        ):
+            with self.subTest(field=field):
+                before = counter.calls
+                values = dict(common)
+                values[field] = hostile
+                with self.assertRaisesRegex(TypeError, expected):
+                    BuyingPowerEvidence(**values)
+                self.assertEqual(counter.calls, before)
+
+    def test_margin_buying_power_consumer_rejects_authority_subclasses(self):
+        settlement = SettlementBook(settled_cash={"USD": "1000"})
+        exact = BuyingPowerEvidence(
+            evidence_id="bp-exact",
+            scope=self.scope,
+            currency="USD",
+            additional_credit="250",
+            observed_at=datetime(2026, 9, 24, 15, tzinfo=timezone.utc),
+            valid_until=datetime(2026, 9, 24, 17, tzinfo=timezone.utc),
+            evidence_refs=("provider:buying-power:exact",),
+        )
+
+        class ScopeSubclass(SettlementAccountScope):
+            pass
+
+        hostile_scope = ScopeSubclass(
+            provider_id=self.scope.provider_id,
+            account_id=self.scope.account_id,
+            environment=self.scope.environment,
+            provider_environment=self.scope.provider_environment,
+        )
+        with self.assertRaisesRegex(TypeError, "exact SettlementAccountScope"):
+            settlement.available_capital(
+                scope=hostile_scope,
+                currency="USD",
+                as_of=datetime(2026, 9, 24, 16, tzinfo=timezone.utc),
+                buying_power_evidence=exact,
+            )
+
+        class BuyingPowerSubclass(BuyingPowerEvidence):
+            pass
+
+        hostile_evidence = BuyingPowerSubclass(
+            evidence_id="bp-subclass",
+            scope=self.scope,
+            currency="USD",
+            additional_credit="250",
+            observed_at=datetime(2026, 9, 24, 15, tzinfo=timezone.utc),
+            valid_until=datetime(2026, 9, 24, 17, tzinfo=timezone.utc),
+            evidence_refs=("provider:buying-power:subclass",),
+        )
+        with self.assertRaisesRegex(TypeError, "exact BuyingPowerEvidence"):
+            settlement.available_capital(
+                scope=self.scope,
+                currency="USD",
+                as_of=datetime(2026, 9, 24, 16, tzinfo=timezone.utc),
+                buying_power_evidence=hostile_evidence,
+            )
+
     def test_settlement_rule_for_different_instrument_version_fails_closed(self):
         sold = self.fill(transaction_id="wrong-instrument-rule", side="SELL")
         wrong_rule = SettlementRuleBinding(

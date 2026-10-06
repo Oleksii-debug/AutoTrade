@@ -1,4 +1,5 @@
 from decimal import Decimal
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -30,6 +31,7 @@ def matched_fill(
     provider_id="PROVIDER-A",
     account_id="acct-1",
     environment="PAPER",
+    provider_environment=None,
     provider_side="BUY",
     projected_position_side=None,
     provider_position_side=None,
@@ -52,6 +54,7 @@ def matched_fill(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         provider_execution_id="exec-1",
         client_order_id="client-1",
         instrument="ABC",
@@ -68,6 +71,70 @@ def matched_fill(
 
 
 class FillAccountingTests(unittest.TestCase):
+    def test_bybit_fill_economic_identity_is_provider_environment_scoped(self):
+        projected, testnet_fill = matched_fill(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            provider_environment="TESTNET",
+        )
+        _, demo_fill = matched_fill(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            provider_environment="DEMO",
+        )
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            testnet_book = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            demo_book = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="DEMO",
+            )
+            testnet_transaction = build_provider_fill_transaction(
+                book=testnet_book,
+                provider_id="BYBIT",
+                projected_fill=projected,
+                provider_fill=testnet_fill,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
+            demo_transaction = build_provider_fill_transaction(
+                book=demo_book,
+                provider_id="BYBIT",
+                projected_fill=projected,
+                provider_fill=demo_fill,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
+            self.assertNotEqual(
+                testnet_transaction.transaction_id,
+                demo_transaction.transaction_id,
+            )
+            self.assertNotEqual(
+                testnet_transaction.cause_event_id,
+                demo_transaction.cause_event_id,
+            )
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "provider_environment does not match durable economic book",
+            ):
+                build_provider_fill_transaction(
+                    book=testnet_book,
+                    provider_id="BYBIT",
+                    projected_fill=projected,
+                    provider_fill=demo_fill,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                )
+
     def test_admitted_fill_requires_provider_client_order_identity(self):
         projected, provider = matched_fill()
         book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")

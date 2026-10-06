@@ -901,7 +901,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 AccountingConflict,
-                "provider environment scope",
+                "provider_environment.*durable economic book",
             ):
                 build_provider_fill_financial_plan(
                     book=economics,

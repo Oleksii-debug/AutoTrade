@@ -195,12 +195,8 @@ def _provider_fill_accounting_evidence_payload(
     same identity material that originally named the economic transaction.
     """
 
-    material = {
-        "schema_version": (
-            "1.1.0"
-            if provider_fill.provider_environment != provider_fill.environment
-            else "1.0.0"
-        ),
+    payload = {
+        "schema_version": "1.0.0",
         "provider_id": provider,
         "environment": book.environment,
         "account_id": book.account_id,
@@ -219,9 +215,9 @@ def _provider_fill_accounting_evidence_payload(
         "trade_time": provider_fill.trade_time,
         "provider_revision": projected_fill.provider_revision,
     }
-    if provider_fill.provider_environment != provider_fill.environment:
-        material["provider_environment"] = provider_fill.provider_environment
-    return material
+    if provider_fill.provider_environment != book.environment:
+        payload["provider_environment"] = provider_fill.provider_environment
+    return payload
 
 
 def _validated_fill_evidence(
@@ -249,6 +245,14 @@ def _validated_fill_evidence(
         raise AccountingConflict(
             "provider fill provider scope does not match durable economic book"
         )
+    durable_provider_environment = getattr(book, "provider_environment", None)
+    if (
+        durable_provider_environment is not None
+        and provider_fill.provider_environment != durable_provider_environment
+    ):
+        raise AccountingConflict(
+            "provider fill provider_environment does not match durable economic book"
+        )
     instrument = _text(expected_instrument, name="expected_instrument")
     settlement = _text(settlement_currency, name="settlement_currency").upper()
 
@@ -263,14 +267,6 @@ def _validated_fill_evidence(
     if provider_fill.environment != book.environment:
         raise AccountingConflict(
             "provider fill environment scope does not match economic book"
-        )
-    durable_provider_environment = getattr(book, "provider_environment", None)
-    if (
-        durable_provider_environment is not None
-        and provider_fill.provider_environment != durable_provider_environment
-    ):
-        raise AccountingConflict(
-            "provider fill provider environment scope does not match durable economic book"
         )
     if provider_fill.side is None:
         raise AccountingConflict(
@@ -627,8 +623,14 @@ def build_provider_fill_transaction(
     )
     evidence_digest = payload_digest(evidence)
     transaction_id = "provider-fill:" + evidence_digest.removeprefix("sha256:")
+    provider_domain = (
+        ""
+        if provider_fill.provider_environment == book.environment
+        else f"provider-environment:{provider_fill.provider_environment}:"
+    )
     cause_event_id = (
         f"provider:{provider}:environment:{book.environment}:"
+        f"{provider_domain}"
         f"account:{book.account_id}:execution:{provider_fill.provider_execution_id}"
     )
     return book_equity_fill(
@@ -765,11 +767,8 @@ def build_provider_fill_financial_plan(
 
     usage_items = tuple(sorted(usage.items()))
     reservation_cut_digest = reservation_snapshot_digest(reservation_snapshot)
-    provider_domain_is_distinct = (
-        provider_fill.provider_environment != provider_fill.environment
-    )
     material = {
-        "schema_version": "1.2.0" if provider_domain_is_distinct else "1.1.0",
+        "schema_version": "1.1.0",
         "provider_id": provider_fill.provider_id,
         "account_id": provider_fill.account_id,
         "environment": provider_fill.environment,
@@ -783,7 +782,7 @@ def build_provider_fill_financial_plan(
             for key, value in usage_items
         },
     }
-    if provider_domain_is_distinct:
+    if provider_fill.provider_environment != provider_fill.environment:
         material["provider_environment"] = provider_fill.provider_environment
     return ProviderFillFinancialPlan(
         reservation_id=reservation_snapshot.reservation_id,

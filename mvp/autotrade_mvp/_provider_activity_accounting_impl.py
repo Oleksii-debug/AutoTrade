@@ -786,9 +786,7 @@ def _prepare_provider_fill_binding(
             )
         stored_plan_digest = stored_request.get("plan_digest")
         expected_plan_material = {
-            "schema_version": (
-                "1.2.0" if provider_scope_payload is not None else "1.1.0"
-            ),
+            "schema_version": "1.1.0",
             "provider_id": economic_book.provider_id,
             "account_id": economic_book.account_id,
             "environment": economic_book.environment,

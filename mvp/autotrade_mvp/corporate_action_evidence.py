@@ -579,6 +579,8 @@ def _resolve_authoritative_corporate_action_impl(
     normalizer: object | None = None,
     instrument_resolver: object | None = None,
     _register_authority,
+    _provider_projection,
+    _provider_require_scope,
 ) -> AuthoritativeCorporateAction:
     """Resolve one accepted event exclusively from sealed provider evidence.
 
@@ -648,7 +650,7 @@ def _resolve_authoritative_corporate_action_impl(
         )
 
     try:
-        projection = provider_response_observation_projection(source)
+        projection = _provider_projection(source)
     except Exception as error:
         raise CorporateActionEvidenceError(
             "corporate-action provider observation authority mismatch"
@@ -669,7 +671,7 @@ def _resolve_authoritative_corporate_action_impl(
             "corporate-action evidence endpoint is not allowed"
         )
     try:
-        projection = provider_response_observation_require_scope(
+        projection = _provider_require_scope(
             source,
             provider_id=expected_provider,
             surface=Surface.ACTIVITIES,
@@ -814,6 +816,8 @@ def _resolve_authoritative_corporate_action_impl(
 def _bind_authoritative_corporate_action_resolver(
     resolve_impl,
     register_authority,
+    provider_projection,
+    provider_require_scope,
 ):
     def resolve_authoritative_corporate_action(
         evidence_ref: str,
@@ -840,6 +844,8 @@ def _bind_authoritative_corporate_action_resolver(
             normalizer=normalizer,
             instrument_resolver=instrument_resolver,
             _register_authority=register_authority,
+            _provider_projection=provider_projection,
+            _provider_require_scope=provider_require_scope,
         )
 
     return resolve_authoritative_corporate_action
@@ -848,6 +854,8 @@ def _bind_authoritative_corporate_action_resolver(
 resolve_authoritative_corporate_action = _bind_authoritative_corporate_action_resolver(
     _resolve_authoritative_corporate_action_impl,
     _register_authoritative_corporate_action,
+    provider_response_observation_projection,
+    provider_response_observation_require_scope,
 )
 del _bind_authoritative_corporate_action_resolver
 del _resolve_authoritative_corporate_action_impl

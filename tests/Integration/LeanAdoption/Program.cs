@@ -219,6 +219,18 @@ var symbol = new Symbol(
     "SPY");
 var callbacks = new LeanCallbackCharacterizer();
 
+ExpectFailure<ArgumentException>(
+    () => callbacks.Observe(new OrderEvent
+    {
+        OrderId = 41,
+        Id = 1,
+        UtcTime = instant,
+        Status = OrderStatus.Submitted,
+        FillQuantity = decimal.Zero,
+        FillPrice = decimal.Zero
+    }),
+    "callback without symbol identity must fail closed");
+
 var submitted = callbacks.Observe(new OrderEvent
 {
     OrderId = 42,
@@ -386,6 +398,13 @@ var nullSymbolCheckpoint = RehashRestartState(
 ExpectFailure<InvalidDataException>(
     () => LeanCallbackCharacterizer.RestoreRestartState(nullSymbolCheckpoint),
     "rehash-valid restart state with null symbol must fail closed");
+
+var emptySymbolCheckpoint = RehashRestartState(
+    zeroFeeCheckpoint,
+    root => root["Callbacks"]!.AsArray()[0]!.AsObject()["Symbol"] = "");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(emptySymbolCheckpoint),
+    "rehash-valid restart state with empty symbol must fail closed");
 
 var nullFillCurrencyCheckpoint = RehashRestartState(
     zeroFeeCheckpoint,

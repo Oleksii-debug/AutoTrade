@@ -135,6 +135,8 @@ class SettlementRuleBinding:
                 raise TypeError("effective_to must be a date value")
             if self.effective_to <= self.effective_from:
                 raise ValueError("effective_to must be after effective_from")
+        if not isinstance(self.evidence_refs, tuple) or not self.evidence_refs:
+            raise ValueError("evidence_refs must be a non-empty tuple")
         refs = tuple(_text(item, name="evidence_ref") for item in self.evidence_refs)
         if len(refs) != len(set(refs)):
             raise ValueError("evidence_refs must be unique")
@@ -356,8 +358,6 @@ class BuyingPowerEvidence:
             raise ValueError("valid_until must be after observed_at")
         object.__setattr__(self, "observed_at", observed)
         object.__setattr__(self, "valid_until", valid_until)
-        if not isinstance(self.evidence_refs, tuple) or not self.evidence_refs:
-            raise ValueError("evidence_refs must be a non-empty tuple")
         refs = tuple(_text(item, name="evidence_ref") for item in self.evidence_refs)
         if len(refs) != len(set(refs)):
             raise ValueError("evidence_refs must be unique")

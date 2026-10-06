@@ -8,7 +8,10 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
-from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.durable_reservations import (
+    DurableReservationBook,
+    reservation_snapshot_digest,
+)
 from mvp.autotrade_mvp.reconciliation import (
     CoverageSurfaceEvidence,
     ProviderFillEvidence,
@@ -32,6 +35,7 @@ from research.autotrade_research.artifacts import (
 from mvp.autotrade_mvp.reservations import (
     InsufficientAvailable,
     ReservationConflict,
+    ReservationSnapshot,
 )
 
 
@@ -266,6 +270,47 @@ class DurableReservationBookTests(unittest.TestCase):
             requirements={"CASH:USD": amount},
             available={"CASH:USD": "100"},
         )
+
+    def test_durable_environment_text_subclass_callback_does_not_execute(self):
+        book = DurableReservationBook(
+            self.store,
+            environment=_HostileText(" PAPER "),
+            account_id=_HostileText(" paper-account "),
+            resolution_artifact_store=self.artifacts,
+            resolution_artifact_root=self.artifact_root,
+        )
+        self.assertEqual(book.environment, "PAPER")
+        self.assertEqual(book.account_id, "paper-account")
+        self.assertEqual(book.version, 0)
+
+    def test_snapshot_digest_rejects_subclass_before_field_access(self):
+        class HostileSnapshot(ReservationSnapshot):
+            def __getattribute__(self, name):
+                if name in {
+                    "reservation_id",
+                    "intent_id",
+                    "original",
+                    "remaining",
+                    "consumed",
+                    "state",
+                    "resolution_evidence",
+                }:
+                    raise AssertionError("hostile snapshot field access dispatched")
+                return super().__getattribute__(name)
+
+        hostile = HostileSnapshot(
+            reservation_id="r-hostile-digest",
+            intent_id="i-hostile-digest",
+            original=MappingProxyType({"CASH:USD": Decimal("1")}),
+            remaining=MappingProxyType({"CASH:USD": Decimal("1")}),
+            consumed=MappingProxyType({"CASH:USD": Decimal("0")}),
+            state="WORKING",
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "snapshot must be exact ReservationSnapshot",
+        ):
+            reservation_snapshot_digest(hostile)
 
     def test_durable_text_subclass_callbacks_do_not_execute(self):
         book = self.book()

@@ -60,9 +60,11 @@ from .whitebit import (
 from .provider_core import (
     AuthenticatedReadQueryBinding,
     _require_authenticated_read_query_binding_authority,
+    ProviderCoreError,
     ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
+    provider_response_observation_projection,
 )
 from .windows_secrets import PersistentCredentialHandle
 from .provider_response_limits import (

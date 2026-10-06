@@ -1879,8 +1879,28 @@ class AblationQualificationAuthority:
         return population, outcomes
 
 
+def _make_registered_policy_context(resolve_binding):
+    """Expose a read-only view of the already sealed qualification binding.
+
+    The returned resolver captures the canonical closure-owned authority resolver.
+    It cannot register or mint authority and exists only so separately owned
+    evidence/provenance modules can re-resolve the same frozen policy context.
+    """
+
+    def _registered_policy_context(authority: object):
+        return resolve_binding(authority)
+
+    return _registered_policy_context
+
+
+_registered_policy_context = _make_registered_policy_context(
+    _resolve_ablation_authority_binding
+)
+
+
 del _register_ablation_authority_binding
 del _resolve_ablation_authority_binding
+del _make_registered_policy_context
 del _make_ablation_qualification_authority_init
 del _make_ablation_authority_binding
 del _canonical_artifact_store_path_binding

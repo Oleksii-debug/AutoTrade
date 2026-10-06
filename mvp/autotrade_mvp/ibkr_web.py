@@ -959,6 +959,24 @@ def parse_web_api_trades(
         raise TypeError("instrument_versions_by_conid must be an exact dict")
     if type(fee_currency_by_execution_id) is not dict:
         raise TypeError("fee_currency_by_execution_id must be an exact dict")
+    for conid_key, instrument_value in instrument_versions_by_conid.items():
+        if type(conid_key) is not int or conid_key <= 0:
+            raise IbkrWebAdapterError(
+                "instrument_versions_by_conid keys must be positive exact integers"
+            )
+        if type(instrument_value) is not str or not instrument_value.strip():
+            raise IbkrWebAdapterError(
+                "instrument_versions_by_conid values must be exact text"
+            )
+    for execution_key, currency_value in fee_currency_by_execution_id.items():
+        if type(execution_key) is not str or not execution_key.strip():
+            raise IbkrWebAdapterError(
+                "fee_currency_by_execution_id keys must be exact text"
+            )
+        if type(currency_value) is not str or not currency_value.strip():
+            raise IbkrWebAdapterError(
+                "fee_currency_by_execution_id values must be exact text"
+            )
     account = observation.account_id
     environment = observation.environment
     by_execution: dict[str, ProviderFillEvidence] = {}
@@ -968,11 +986,28 @@ def parse_web_api_trades(
             raise IbkrWebAdapterError(
                 f"trades[{index}] must be a canonical frozen JSON object"
             )
-        execution_id = _text(raw.get("execution_id"), name="execution_id")
-        raw_account = raw.get("account", raw.get("accountCode"))
-        observed_account = _text(raw_account, name="trade.account")
+        execution_id = _provider_text(
+            raw.get("execution_id"), name="execution_id"
+        )
+        account_values: list[str] = []
+        for field_name in ("account", "accountCode"):
+            if field_name in raw and raw[field_name] is not None:
+                account_values.append(
+                    _provider_text(raw[field_name], name=f"trade.{field_name}")
+                )
+        if not account_values:
+            raise IbkrWebAdapterError(
+                "trade response must identify the reconciliation account"
+            )
+        if any(value != account_values[0] for value in account_values[1:]):
+            raise IbkrWebAdapterError(
+                "trade account and accountCode identifiers conflict"
+            )
+        observed_account = account_values[0]
         if observed_account != account:
-            raise IbkrWebAdapterError("trade account does not match reconciliation account")
+            raise IbkrWebAdapterError(
+                "trade account does not match reconciliation account"
+            )
 
         conid = raw.get("conid")
         if not isinstance(conid, int) or isinstance(conid, bool) or conid <= 0:

@@ -805,6 +805,72 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_currency_by_execution_id={},
             )
 
+    def test_web_api_trade_rejects_conflicting_account_aliases(self):
+        row = {
+            "execution_id": "exec-account-alias",
+            "order_ref": "at-ibkr-account-alias",
+            "account": "U1234567",
+            "accountCode": "OTHER",
+            "side": "B",
+            "conid": 265598,
+            "size": "1",
+            "price": "100",
+            "commission": "0.25",
+            "trade_time": "2026-09-24T20:00:01Z",
+        }
+        with self.assertRaisesRegex(IbkrWebAdapterError, "identifiers conflict"):
+            parse_web_api_trades(
+                ibkr_trade_observation([row]),
+                instrument_versions_by_conid={265598: "AAPL:v1"},
+                fee_currency_by_execution_id={"exec-account-alias": "USD"},
+            )
+
+    def test_web_api_trade_lookup_authorities_require_inert_exact_content(self):
+        row = {
+            "execution_id": "exec-lookup",
+            "order_ref": "at-ibkr-lookup",
+            "account": "U1234567",
+            "accountCode": "U1234567",
+            "side": "B",
+            "conid": 265598,
+            "size": "1",
+            "price": "100",
+            "commission": "0.25",
+            "trade_time": "2026-09-24T20:00:01Z",
+        }
+        observation = ibkr_trade_observation([row])
+        invalid_cases = (
+            (
+                {True: "AAPL:v1"},
+                {"exec-lookup": "USD"},
+                "positive exact integers",
+            ),
+            (
+                {265598: 123},
+                {"exec-lookup": "USD"},
+                "values must be exact text",
+            ),
+            (
+                {265598: "AAPL:v1"},
+                {1: "USD"},
+                "keys must be exact text",
+            ),
+            (
+                {265598: "AAPL:v1"},
+                {"exec-lookup": 123},
+                "values must be exact text",
+            ),
+        )
+        for instruments, currencies, message in invalid_cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                IbkrWebAdapterError, message
+            ):
+                parse_web_api_trades(
+                    observation,
+                    instrument_versions_by_conid=instruments,
+                    fee_currency_by_execution_id=currencies,
+                )
+
     def test_web_api_trade_preserves_exact_json_number_economics_and_conflicting_execution_id(self):
         base = {
             "execution_id": "exec-1",

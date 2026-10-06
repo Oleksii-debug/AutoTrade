@@ -510,6 +510,10 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 "reservation_availability_evidence"
             ]["settlement_capital_adjustment"]
             self.assertEqual(
+                capital["schema_version"],
+                "settlement-capital-cut.v1",
+            )
+            self.assertEqual(
                 capital["resources"]["CASH:USD"],
                 {
                     "provider_available": "1000",
@@ -602,6 +606,10 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 "reservation_availability_evidence"
             ]["settlement_capital_adjustment"]
             self.assertEqual(
+                capital["schema_version"],
+                "settlement-capital-cut.v2",
+            )
+            self.assertEqual(
                 capital["resources"]["CASH:USD"],
                 {
                     "provider_available": "1000",
@@ -617,6 +625,26 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     "effective_available": "250",
                 },
             )
+            wrong_schema = deepcopy(capital)
+            wrong_schema["schema_version"] = "settlement-capital-cut.v1"
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "schema does not match reservation resources",
+            ):
+                authority_module._canonical_settlement_capital_adjustment(
+                    wrong_schema,
+                    provider_available={
+                        "CASH:USD": "1000",
+                        "MARGIN_CREDIT:USD": "250",
+                    },
+                    required_resources=(
+                        "CASH:USD",
+                        "MARGIN_CREDIT:USD",
+                    ),
+                    provider_id=PROVIDER_ID,
+                    account_id=ACCOUNT_ID,
+                    environment=ENVIRONMENT,
+                )
 
             reservation_event = [
                 event

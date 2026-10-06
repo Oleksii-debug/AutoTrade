@@ -8,7 +8,10 @@ import os
 from pathlib import Path
 import tomllib
 
-from tools.write_ci_evidence import build_evidence
+try:
+    from tools.write_ci_evidence import build_evidence
+except ModuleNotFoundError:  # direct execution: python tools/<script>.py
+    from write_ci_evidence import build_evidence
 
 
 ROOT = Path(__file__).resolve().parents[1]

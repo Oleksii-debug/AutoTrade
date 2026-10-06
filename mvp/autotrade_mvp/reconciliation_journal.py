@@ -193,6 +193,7 @@ def reconciliation_payload(
             identity["provider_id"] != result.provider_id
             or identity["account_id"] != result.account_id
             or identity["environment"] != result.environment
+            or identity["provider_environment"] != result.provider_environment
         ):
             raise ValueError(
                 "unexpected provider fill identity scope must match reconciliation result"

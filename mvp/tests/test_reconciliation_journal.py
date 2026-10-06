@@ -314,6 +314,56 @@ class ReconciliationJournalTests(unittest.TestCase):
                 [],
             )
 
+    def test_unexpected_fill_checkpoint_rejects_cross_provider_environment_binding(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            wrong_domain_fill = ProviderFillEvidence.create(
+                evidence_refs=("test:normalized-fill",),
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="DEMO",
+                provider_execution_id="external-exec-domain-1",
+                client_order_id=None,
+                instrument="BTCUSDT",
+                side="BUY",
+                quantity="1",
+                price="100",
+                fee_currency="USDT",
+                trade_time="2026-09-24T18:00:00Z",
+            )
+            result = reconciliation(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                local_execution_ids=[],
+                provider_fills=[],
+            )
+            forged = type(result)(
+                **{
+                    **result.__dict__,
+                    "unexpected_execution_ids": ("external-exec-domain-1",),
+                    "unexpected_provider_fills": (wrong_domain_fill,),
+                }
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "scope must match reconciliation result",
+            ):
+                record_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id="cross-domain-unexpected-fill",
+                    result=forged,
+                    observed_at="2026-09-24T19:00:00Z",
+                    host_id="test-host",
+                    owner_epoch="epoch-1",
+                )
+            self.assertEqual(
+                store.load_events_by_aggregate_type("account_reconciliation"),
+                [],
+            )
+
     def test_checkpoint_round_trip_is_exact_and_idempotent(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

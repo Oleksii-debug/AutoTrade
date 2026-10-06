@@ -562,6 +562,85 @@ class ExecutionOracleTests(unittest.TestCase):
                 result=replace(result, triggered=False),
             )
 
+    def test_oracle_requires_waiting_status_before_venue_arrival(self):
+        o = order()
+        q = observation(
+            market_time="2026-09-24T10:00:00.100000Z",
+            available_at="2026-09-24T10:00:00.150000Z",
+        )
+        m = model(latency_ms=100)
+        waiting = simulate_execution(o, q, m)
+        self.assertEqual(waiting.status, "WAITING_FOR_LATENCY")
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "pre-arrival result must remain WAITING_FOR_LATENCY",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=replace(waiting, status="NO_FILL"),
+            )
+
+    def test_oracle_rejects_waiting_status_after_venue_arrival(self):
+        o = order(order_type="LIMIT", limit_price="90")
+        q = observation()
+        m = model()
+        no_fill = simulate_execution(o, q, m)
+        self.assertEqual(no_fill.status, "NO_FILL")
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "post-arrival result cannot claim WAITING_FOR_LATENCY",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=replace(no_fill, status="WAITING_FOR_LATENCY"),
+            )
+
+    def test_oracle_requires_ambiguous_status_for_bar_overlapping_arrival(self):
+        o = order(submitted_at="2026-09-24T10:00:30Z")
+        q = LiquidityObservation.create(
+            instrument_version="ABC@v1",
+            market_time="2026-09-24T10:01:00Z",
+            available_at="2026-09-24T10:01:01Z",
+            available_volume="100",
+            interval_start="2026-09-24T10:00:00Z",
+            bar_low="90",
+            bar_high="110",
+        )
+        m = model(data_fidelity="BAR", latency_ms=100)
+        ambiguous = simulate_execution(o, q, m)
+        self.assertEqual(ambiguous.status, "AMBIGUOUS_NO_FILL")
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "BAR interval overlapping arrival must remain AMBIGUOUS_NO_FILL",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=replace(ambiguous, status="NO_FILL"),
+            )
+
+    def test_oracle_rejects_ambiguous_status_outside_bar_fidelity(self):
+        o = order(order_type="LIMIT", limit_price="90")
+        q = observation()
+        m = model()
+        no_fill = simulate_execution(o, q, m)
+        self.assertEqual(no_fill.status, "NO_FILL")
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "AMBIGUOUS_NO_FILL requires BAR causal ambiguity",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=replace(no_fill, status="AMBIGUOUS_NO_FILL"),
+            )
+
     def test_oracle_rejects_status_quantity_contradictions(self):
         o, q, m = order(), observation(), model()
         full = simulate_execution(o, q, m)

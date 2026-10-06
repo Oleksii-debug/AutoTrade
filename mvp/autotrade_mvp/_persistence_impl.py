@@ -862,11 +862,14 @@ class JournalStore:
                         for row in connection.execute(
                             "SELECT outbox_id, payload_json FROM outbox"
                         ):
+                            raw_payload_json = row["payload_json"]
+                            if type(raw_payload_json) is not str:
+                                raise ValueError(
+                                    "legacy outbox payload authority is not exact text"
+                                )
                             envelope_hash = (
                                 "sha256:"
-                                + sha256(
-                                    str(row["payload_json"]).encode("utf-8")
-                                ).hexdigest()
+                                + sha256(raw_payload_json.encode("utf-8")).hexdigest()
                             )
                             connection.execute(
                                 "UPDATE outbox SET envelope_hash = ? "
@@ -877,7 +880,11 @@ class JournalStore:
                         for row in connection.execute(
                             "SELECT command_id, result_json FROM command_dedupe"
                         ):
-                            result_json = str(row["result_json"])
+                            result_json = row["result_json"]
+                            if type(result_json) is not str:
+                                raise ValueError(
+                                    "legacy command result authority is not exact text"
+                                )
                             try:
                                 result_value = json.loads(result_json)
                             except (json.JSONDecodeError, TypeError) as error:
@@ -2476,11 +2483,16 @@ class JournalStore:
 
     @staticmethod
     def _decode_command_result(row: sqlite3.Row) -> Any:
-        result_json = str(row["result_json"])
+        result_json = row["result_json"]
+        if type(result_json) is not str:
+            raise ValueError("command result authority is not exact text")
+        result_hash = row["result_hash"]
+        if type(result_hash) is not str:
+            raise ValueError("command result hash authority is not exact text")
         expected_hash = (
             "sha256:" + sha256(result_json.encode("utf-8")).hexdigest()
         )
-        if row["result_hash"] != expected_hash:
+        if result_hash != expected_hash:
             raise ValueError("command result hash does not match stored result")
         try:
             decoded = json.loads(result_json)
@@ -2506,8 +2518,10 @@ class JournalStore:
             if effect_json is not None or effect_hash is not None:
                 raise ValueError("result-only command carries unexpected effect authority")
         elif kind == "EVENT_BATCH":
-            if not isinstance(effect_json, str) or not isinstance(effect_hash, str):
-                raise ValueError("command event-batch effect authority is missing")
+            if type(effect_json) is not str or type(effect_hash) is not str:
+                raise ValueError(
+                    "command event-batch effect authority must be exact text"
+                )
         else:
             raise ValueError("command effect kind is invalid")
         if kind != expected:
@@ -2644,12 +2658,23 @@ class JournalStore:
             else:
                 if outbox is None:
                     raise ValueError("command event-batch publication intent is missing")
+                stored_topic = _require_canonical_durable_text(
+                    outbox["topic"],
+                    name="command event-batch outbox topic",
+                )
+                stored_payload = outbox["payload_json"]
+                stored_hash = outbox["envelope_hash"]
+                if type(stored_payload) is not str or type(stored_hash) is not str:
+                    raise ValueError(
+                        "command event-batch outbox authority must be exact text"
+                    )
                 if (
-                    outbox["topic"] != descriptor["outbox_topic"]
-                    or outbox["payload_json"] != raw_envelope
-                    or outbox["envelope_hash"] != descriptor["outbox_hash"]
+                    stored_topic != descriptor["outbox_topic"]
+                    or stored_payload != raw_envelope
+                    or stored_hash != descriptor["outbox_hash"]
                     or _outbox_envelope_digest(
-                        str(outbox["topic"]), str(outbox["payload_json"])
+                        stored_topic,
+                        stored_payload,
                     ) != descriptor["outbox_hash"]
                 ):
                     raise ValueError("command event-batch publication intent changed")

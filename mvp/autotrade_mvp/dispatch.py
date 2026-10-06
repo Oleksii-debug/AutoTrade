@@ -667,6 +667,7 @@ def _install_journal_store_authority():
     canonical_getattr = getattr
     canonical_setattr = setattr
     canonical_type = type
+    canonical_str = str
     canonical_dict = dict
     canonical_tuple = tuple
     canonical_id = id
@@ -738,6 +739,25 @@ def _install_journal_store_authority():
                             global_name,
                             global_missing,
                         )
+                        expected_module = canonical_getattr(
+                            expected_global,
+                            "__module__",
+                            "",
+                        )
+                        if (
+                            canonical_getattr(
+                                expected_global,
+                                "__code__",
+                                None,
+                            )
+                            is not None
+                            and canonical_type(expected_module) is canonical_str
+                            and (
+                                expected_module.startswith("mvp.autotrade")
+                                or expected_module.startswith("autotrade_")
+                            )
+                        ):
+                            pending.append(expected_global)
                         global_binding_states.append(
                             (
                                 candidate_globals,

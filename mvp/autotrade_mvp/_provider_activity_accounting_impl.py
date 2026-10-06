@@ -2677,6 +2677,57 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         )
         return _seal_provider_economic_cut(cut)
 
+    def read_historical_cut(
+        self,
+        cut: ProviderEconomicCut,
+        *,
+        expected_visibility_journal_sequence: int,
+    ) -> EconomicBookCut:
+        """Reconstruct the exact descriptive book owned by one verified cut.
+
+        The ProviderEconomicCut remains the authority for provider/account/runtime
+        domain, including provider_environment. This method only exposes the
+        immutable transaction prefix after reverifying that authority at its
+        frozen global visibility cut; it does not create write authority or a
+        second ledger.
+        """
+
+        verified = reverify_provider_economic_cut(
+            self,
+            cut,
+            expected_visibility_journal_sequence=(
+                expected_visibility_journal_sequence
+            ),
+        )
+        events = self._events()
+        if len(events) < verified.aggregate_version:
+            raise AccountingConflict(
+                "verified historical economic prefix disappeared from durable history"
+            )
+        prefix = events[: verified.aggregate_version]
+        current = self._replay(prefix)
+        ordered = tuple(
+            (transaction.transaction_id, transaction_digest(transaction))
+            for transaction in current.transactions
+        )
+        resulting = current.audit_digest()
+        if ordered != verified.transaction_digests:
+            raise AccountingConflict(
+                "historical economic postings do not match verified cut"
+            )
+        if resulting != verified.resulting_book_digest:
+            raise AccountingConflict(
+                "historical economic book digest does not match verified cut"
+            )
+        return EconomicBookCut(
+            provider_id=verified.provider_id,
+            account_id=verified.account_id,
+            environment=verified.environment,
+            transactions=current.transactions,
+            book_digest=resulting,
+            aggregate_version=verified.aggregate_version,
+        )
+
     def prepare_batch_mutation(
         self,
         transactions: Iterable[JournalTransaction],

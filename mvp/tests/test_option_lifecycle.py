@@ -482,6 +482,14 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             evidence["packaged_artifact_digest"],
             "sha256:" + "c" * 64,
         )
+        economic = {
+            item.transaction_id: item
+            for item in authority.economic_book.transactions
+        }[result.active_transaction_ids[0]]
+        self.assertIn(
+            "OPTION_LIFECYCLE:TESTNET:",
+            economic.economic_order_key,
+        )
 
     def test_qualified_provider_environment_mismatch_fails_before_economic_mutation(self):
         self.seed_option_position("1")

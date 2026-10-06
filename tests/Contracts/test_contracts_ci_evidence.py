@@ -38,6 +38,11 @@ class ContractsCiEvidenceTests(unittest.TestCase):
             {"python": "autotrade_numeric/dataset_manifest.py"},
         )
         self.assertEqual(validators[0]["case_count"], 13)
+        shape = versions["shape_conformance"]
+        self.assertEqual(shape["scope"], "closed-object-shape-subset")
+        self.assertEqual(set(shape["bindings"]), {"python", "csharp", "typescript"})
+        self.assertGreater(shape["definition_count"], 0)
+        self.assertGreater(shape["case_count"], 0)
 
     def test_contracts_workflow_executes_every_recorded_base_command(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -53,6 +58,20 @@ class ContractsCiEvidenceTests(unittest.TestCase):
             "python tools/write_contracts_ci_evidence.py --output "
             "\"artifacts/contracts-${{ runner.os }}.json\"",
             workflow,
+        )
+        self.assertIn(
+            "python tools/generate_contract_shape_bindings.py --check",
+            contracts_evidence.BASE_VERIFIED_COMMANDS,
+        )
+        self.assertTrue(
+            any(
+                "contracts/fixtures/contract-shapes.corpus.json" in command
+                for command in contracts_evidence.BASE_VERIFIED_COMMANDS
+            )
+        )
+        self.assertIn(
+            "node tests/Contracts.TypeScript/contract-shapes.test.cjs",
+            contracts_evidence.BASE_VERIFIED_COMMANDS,
         )
 
     def test_contract_evidence_contains_versions_commands_and_limits(self):

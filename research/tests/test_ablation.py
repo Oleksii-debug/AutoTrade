@@ -43,6 +43,32 @@ class _NoOffsetTZ(tzinfo):
         return None
 
 
+class _HostileStr(str):
+    def strip(self, *args, **kwargs):
+        raise AssertionError("hostile str.strip must not execute")
+
+
+class _HostileDateTime(datetime):
+    def utcoffset(self):
+        raise AssertionError("hostile datetime.utcoffset must not execute")
+
+    def astimezone(self, tz=None):
+        raise AssertionError("hostile datetime.astimezone must not execute")
+
+
+class _HostileInt(int):
+    def __lt__(self, other):
+        raise AssertionError("hostile int comparison must not execute")
+
+    def __le__(self, other):
+        raise AssertionError("hostile int comparison must not execute")
+
+
+class _HostileTuple(tuple):
+    def __iter__(self):
+        raise AssertionError("hostile tuple iteration must not execute")
+
+
 def causal_evidence(
     *,
     evidence_id="base-input",
@@ -299,6 +325,117 @@ class AblationTests(unittest.TestCase):
                 cost=1,
                 elapsed=10,
                 components=("wire-story-group-7", "wire-story-group-7"),
+            )
+
+    def test_evidence_container_subclasses_are_rejected_before_iteration(self):
+        with self.assertRaisesRegex(TypeError, "exact immutable tuple"):
+            AblationOutcome(
+                case_id="hostile-components",
+                input_fingerprint=FINGERPRINT_A,
+                variant="FULL",
+                utility=Decimal("1"),
+                cost=Decimal("0"),
+                elapsed_ms=1,
+                deadline_ms=100,
+                components=_HostileTuple(("base",)),
+                input_cutoff_utc=CUT,
+                decision_utc=CUT,
+                outcome_available_utc=CUT + timedelta(hours=1),
+                input_evidence=(causal_evidence(),),
+            )
+
+        with self.assertRaisesRegex(TypeError, "input_evidence"):
+            outcome(
+                variant="FULL",
+                utility=1,
+                cost=0,
+                elapsed=10,
+                components=("base",),
+                input_evidence=_HostileTuple((causal_evidence(),)),
+            )
+
+    def test_causal_evidence_subclass_cannot_enter_outcome_authority(self):
+        class ForgedEvidence(CausalInputEvidence):
+            pass
+
+        forged = ForgedEvidence(
+            evidence_id="forged",
+            content_digest=FINGERPRINT_B,
+            component_id="base",
+            available_utc=CUT,
+        )
+        with self.assertRaisesRegex(TypeError, "exact CausalInputEvidence"):
+            outcome(
+                variant="FULL",
+                utility=1,
+                cost=0,
+                elapsed=10,
+                components=("base",),
+                input_evidence=(forged,),
+            )
+
+    def test_deadline_integer_subclasses_are_rejected_before_comparison(self):
+        with self.assertRaisesRegex(TypeError, "exact built-in integers"):
+            AblationOutcome(
+                case_id="hostile-int",
+                input_fingerprint=FINGERPRINT_A,
+                variant="FULL",
+                utility=Decimal("1"),
+                cost=Decimal("0"),
+                elapsed_ms=_HostileInt(1),
+                deadline_ms=100,
+                components=("base",),
+                input_cutoff_utc=CUT,
+                decision_utc=CUT,
+                outcome_available_utc=CUT + timedelta(hours=1),
+                input_evidence=(causal_evidence(),),
+            )
+
+    def test_minimum_pairs_integer_subclass_is_rejected_before_comparison(self):
+        with self.assertRaisesRegex(ValueError, "minimum_pairs"):
+            evaluate_incremental_value(
+                "agent",
+                [pair("hostile-minimum-a", "1"), pair("hostile-minimum-b", "1")],
+                minimum_pairs=_HostileInt(2),
+                required_lower_bound=Decimal("0"),
+            )
+
+    def test_causal_timestamp_subclass_is_rejected_before_virtual_methods(self):
+        hostile = _HostileDateTime(
+            2026, 9, 25, 0, 0, tzinfo=timezone.utc
+        )
+        with self.assertRaisesRegex(TypeError, "exact built-in datetime"):
+            causal_evidence(available=hostile)
+
+    def test_causal_text_subclasses_are_rejected_before_strip_or_digest_use(self):
+        with self.assertRaisesRegex(ValueError, "evidence_id"):
+            causal_evidence(evidence_id=_HostileStr("hostile-evidence"))
+        with self.assertRaisesRegex(ValueError, "component_id"):
+            causal_evidence(component=_HostileStr("hostile-component"))
+        with self.assertRaisesRegex(ValueError, "content_digest"):
+            causal_evidence(digest=_HostileStr(FINGERPRINT_C))
+        with self.assertRaisesRegex(ValueError, "syndication_group"):
+            causal_evidence(
+                syndication_group=_HostileStr("hostile-syndication")
+            )
+
+    def test_outcome_identity_text_subclasses_are_rejected_before_strip(self):
+        with self.assertRaisesRegex(ValueError, "case_id"):
+            outcome(
+                case_id=_HostileStr("hostile-case"),
+                variant="FULL",
+                utility=1,
+                cost=0,
+                elapsed=10,
+                components=("base",),
+            )
+        with self.assertRaisesRegex(ValueError, "component identities"):
+            outcome(
+                variant="FULL",
+                utility=1,
+                cost=0,
+                elapsed=10,
+                components=(_HostileStr("base"),),
             )
 
     def test_causal_input_after_cutoff_is_rejected(self):
@@ -1161,6 +1298,127 @@ class AblationTests(unittest.TestCase):
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertEqual(result.reason, "canonical_outcome_economic_mismatch")
 
+
+    def test_pair_target_component_subclass_is_rejected_before_strip(self):
+        base_pair = pair("hostile-target", "1")
+        with self.assertRaisesRegex(ValueError, "target_component"):
+            AblationPair(
+                _HostileStr("agent"),
+                base_pair.full,
+                base_pair.ablated,
+            )
+
+    def test_qualification_authority_requires_exact_persistent_authorities(self):
+        class ForgedRegistry(ScientificRegistry):
+            pass
+
+        class ForgedMemory(ExperienceMemory):
+            pass
+
+        class ForgedArtifacts(ArtifactStore):
+            pass
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            common = dict(
+                protocol_id="11111111-1111-4111-8111-111111111111",
+                protocol_hash=FINGERPRINT_A,
+                source_revision="9" * 40,
+                causal_cutoff=CUT,
+                granted_permissions={"RESEARCH"},
+            )
+
+            with self.assertRaisesRegex(TypeError, "exact ScientificRegistry"):
+                AblationQualificationAuthority(
+                    scientific_registry=object.__new__(ForgedRegistry),
+                    experience_memory=memory,
+                    artifact_store=artifacts,
+                    **common,
+                )
+            with self.assertRaisesRegex(TypeError, "exact ExperienceMemory"):
+                AblationQualificationAuthority(
+                    scientific_registry=registry,
+                    experience_memory=object.__new__(ForgedMemory),
+                    artifact_store=artifacts,
+                    **common,
+                )
+            with self.assertRaisesRegex(TypeError, "exact ArtifactStore"):
+                AblationQualificationAuthority(
+                    scientific_registry=registry,
+                    experience_memory=memory,
+                    artifact_store=object.__new__(ForgedArtifacts),
+                    **common,
+                )
+
+    def test_qualification_authority_rejects_polymorphic_identity_inputs(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            common = dict(
+                scientific_registry=registry,
+                experience_memory=memory,
+                artifact_store=artifacts,
+                protocol_id="11111111-1111-4111-8111-111111111111",
+                protocol_hash=FINGERPRINT_A,
+                source_revision="9" * 40,
+                causal_cutoff=CUT,
+                granted_permissions={"RESEARCH"},
+            )
+
+            with self.assertRaisesRegex(ValueError, "protocol_id"):
+                AblationQualificationAuthority(
+                    **{**common, "protocol_id": _HostileStr(common["protocol_id"])}
+                )
+            with self.assertRaisesRegex(TypeError, "protocol_hash"):
+                AblationQualificationAuthority(
+                    **{**common, "protocol_hash": _HostileStr(FINGERPRINT_A)}
+                )
+            with self.assertRaisesRegex(ValueError, "source_revision"):
+                AblationQualificationAuthority(
+                    **{**common, "source_revision": _HostileStr("9" * 40)}
+                )
+            with self.assertRaisesRegex(ValueError, "granted_permissions"):
+                AblationQualificationAuthority(
+                    **{
+                        **common,
+                        "granted_permissions": {_HostileStr("RESEARCH")},
+                    }
+                )
+            with self.assertRaisesRegex(ValueError, "task"):
+                AblationQualificationAuthority(
+                    **{**common, "task": _HostileStr("ablation")}
+                )
+            with self.assertRaisesRegex(ValueError, "instrument_family"):
+                AblationQualificationAuthority(
+                    **{**common, "instrument_family": _HostileStr("EQUITY")}
+                )
+
+    def test_registered_population_rejects_polymorphic_revision_and_units(self):
+        with self.assertRaisesRegex(ValueError, "source_revision"):
+            RegisteredAblationPopulation(
+                protocol_digest=FINGERPRINT_A,
+                population_digest=FINGERPRINT_B,
+                stopping_rule_digest=FINGERPRINT_C,
+                source_revision=_HostileStr("9" * 40),
+                registered_at_utc=CUT - timedelta(days=1),
+                evaluation_cutoff_utc=CUT,
+                population_unit_ids=("unit-a",),
+            )
+        with self.assertRaisesRegex(ValueError, "canonical non-empty strings"):
+            RegisteredAblationPopulation(
+                protocol_digest=FINGERPRINT_A,
+                population_digest=FINGERPRINT_B,
+                stopping_rule_digest=FINGERPRINT_C,
+                source_revision="9" * 40,
+                registered_at_utc=CUT - timedelta(days=1),
+                evaluation_cutoff_utc=CUT,
+                population_unit_ids=(_HostileStr("unit-a"),),
+            )
 
     def test_terminal_interlock_validates_inputs_without_resolving_authority(self):
         authority = object.__new__(AblationQualificationAuthority)

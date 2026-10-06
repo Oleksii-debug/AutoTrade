@@ -130,5 +130,81 @@ class AuthenticatedReadHttpRequestTests(unittest.TestCase):
         self.assertEqual(timeout, 5)
 
 
+    def test_url_validation_and_wire_url_use_the_same_exact_text(self):
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "authenticated-read URL must be canonical HTTPS",
+        ):
+            AuthenticatedReadHttpRequest(
+                url=" https://localhost/iserver/accounts ",
+                headers={"Accept": "application/json"},
+                timeout_seconds=5,
+                method="GET",
+            )
+
+        request = AuthenticatedReadHttpRequest(
+            url="https://localhost/iserver/accounts",
+            headers={"Accept": "application/json"},
+            timeout_seconds=5,
+            method="get",
+        )
+        self.assertEqual(request.url, "https://localhost/iserver/accounts")
+        self.assertEqual(request.method, "GET")
+
+    def test_executable_text_subclasses_are_rejected_before_virtual_text_methods(self):
+        class HostileText(str):
+            def strip(self):
+                raise AssertionError("hostile strip executed")
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "authenticated-read URL must be canonical HTTPS",
+        ):
+            AuthenticatedReadHttpRequest(
+                url=HostileText("https://localhost/iserver/accounts"),
+                headers={"Accept": "application/json"},
+                timeout_seconds=5,
+                method="GET",
+            )
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "authenticated-read method must be canonical text",
+        ):
+            AuthenticatedReadHttpRequest(
+                url="https://localhost/iserver/accounts",
+                headers={"Accept": "application/json"},
+                timeout_seconds=5,
+                method=HostileText("GET"),
+            )
+
+    def test_headers_require_exact_inert_mapping_and_canonical_text(self):
+        class HostileHeaders(dict):
+            def items(self):
+                raise AssertionError("hostile items executed")
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "authenticated-read headers must be an exact inert mapping",
+        ):
+            AuthenticatedReadHttpRequest(
+                url="https://localhost/iserver/accounts",
+                headers=HostileHeaders({"Accept": "application/json"}),
+                timeout_seconds=5,
+                method="GET",
+            )
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "authenticated-read header values must be canonical text",
+        ):
+            AuthenticatedReadHttpRequest(
+                url="https://localhost/iserver/accounts",
+                headers={"Accept": " application/json "},
+                timeout_seconds=5,
+                method="GET",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

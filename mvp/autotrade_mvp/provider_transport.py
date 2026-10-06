@@ -1088,12 +1088,31 @@ class AuthenticatedReadHttpRequest:
     body: bytes = b""
 
     def __post_init__(self) -> None:
-        method = _text(self.method, name="method").upper()
+        raw_method = self.method
+        if (
+            type(raw_method) is not str
+            or not raw_method
+            or raw_method != raw_method.strip()
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read method must be canonical text"
+            )
+        method = raw_method.upper()
         if method not in {"GET", "POST"}:
             raise ProviderTransportScopeError(
                 "authenticated-read method must be GET or POST"
             )
-        parsed = urlsplit(_text(self.url, name="url"))
+
+        raw_url = self.url
+        if (
+            type(raw_url) is not str
+            or not raw_url
+            or raw_url != raw_url.strip()
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read URL must be canonical HTTPS"
+            )
+        parsed = urlsplit(raw_url)
         if (
             parsed.scheme != "https"
             or not parsed.hostname
@@ -1117,17 +1136,40 @@ class AuthenticatedReadHttpRequest:
             raise ProviderTransportScopeError(
                 "authenticated POST requires no URL query"
             )
-        if not isinstance(self.headers, Mapping):
-            raise ProviderTransportScopeError("headers must be a mapping")
+
+        if type(self.headers) not in {dict, MappingProxyType}:
+            raise ProviderTransportScopeError(
+                "authenticated-read headers must be an exact inert mapping"
+            )
         normalized_headers: dict[str, str] = {}
         for raw_key, raw_value in self.headers.items():
-            key = _text(raw_key, name="header name")
-            value = _text(raw_value, name=f"header {key}")
-            if "\r" in key or "\n" in key or "\r" in value or "\n" in value:
+            if (
+                type(raw_key) is not str
+                or not raw_key
+                or raw_key != raw_key.strip()
+            ):
+                raise ProviderTransportScopeError(
+                    "authenticated-read header names must be canonical text"
+                )
+            if (
+                type(raw_value) is not str
+                or not raw_value
+                or raw_value != raw_value.strip()
+            ):
+                raise ProviderTransportScopeError(
+                    "authenticated-read header values must be canonical text"
+                )
+            if (
+                "\r" in raw_key
+                or "\n" in raw_key
+                or "\r" in raw_value
+                or "\n" in raw_value
+            ):
                 raise ProviderTransportScopeError(
                     "header values must not contain line breaks"
                 )
-            normalized_headers[key] = value
+            normalized_headers[raw_key] = raw_value
+
         if (
             isinstance(self.timeout_seconds, bool)
             or not isinstance(self.timeout_seconds, int)
@@ -1135,6 +1177,7 @@ class AuthenticatedReadHttpRequest:
             or self.timeout_seconds > 120
         ):
             raise ProviderTransportScopeError("invalid request timeout")
+        object.__setattr__(self, "url", raw_url)
         object.__setattr__(self, "method", method)
         object.__setattr__(
             self,

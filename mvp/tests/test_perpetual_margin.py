@@ -135,6 +135,7 @@ class EvidenceArtifactStore:
             "account_id": value.account_id,
             "entity_id": value.entity_id,
             "environment": value.environment,
+            "provider_environment": value.provider_environment,
             "instrument_version": value.instrument_version,
             "capability_snapshot_id": value.capability_snapshot_id,
             "position_mode": value.position_mode,
@@ -201,6 +202,7 @@ def publish_margin_artifacts(store: ArtifactStore, value: PerpetualMarginEvidenc
         "account_id": value.account_id,
         "entity_id": value.entity_id,
         "environment": value.environment,
+        "provider_environment": value.provider_environment,
         "instrument_version": value.instrument_version,
         "capability_snapshot_id": value.capability_snapshot_id,
         "position_mode": value.position_mode,
@@ -434,6 +436,41 @@ class PerpetualMarginTests(unittest.TestCase):
     def test_paper_evidence_cannot_be_reused_for_live_scope(self):
         with self.assertRaisesRegex(PerpetualMarginError, "capability scope mismatch"):
             evaluate(capability=capability(environment="LIVE"))
+
+    def test_provider_environment_is_exact_capability_scope(self):
+        testnet_capability = capability(
+            provider_id="BYBIT",
+            provider_environment="TESTNET",
+        )
+        testnet_evidence = evidence(
+            provider_id="BYBIT",
+            provider_environment="TESTNET",
+        )
+        result = evaluate(
+            capability=testnet_capability,
+            evidence=testnet_evidence,
+        )
+        self.assertEqual(result.verdict, "ALLOW_NEW_RISK")
+        self.assertEqual(testnet_evidence.provider_environment, "TESTNET")
+
+        with self.assertRaisesRegex(
+            PerpetualMarginError,
+            "capability scope mismatch",
+        ):
+            evaluate(
+                capability=testnet_capability,
+                evidence=evidence(
+                    provider_id="BYBIT",
+                    provider_environment="DEMO",
+                ),
+            )
+
+    def test_bybit_margin_evidence_requires_explicit_provider_environment(self):
+        with self.assertRaisesRegex(
+            PerpetualMarginError,
+            "BYBIT requires explicit provider_environment",
+        ):
+            evidence(provider_id="BYBIT")
 
     def test_position_and_margin_modes_are_not_portable(self):
         with self.assertRaisesRegex(PerpetualMarginError, "position mode"):

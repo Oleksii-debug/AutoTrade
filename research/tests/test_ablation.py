@@ -1213,6 +1213,127 @@ class AblationTests(unittest.TestCase):
         self.assertEqual(result.reason, "canonical_outcome_economic_mismatch")
 
 
+    def test_pair_target_component_subclass_is_rejected_before_strip(self):
+        base_pair = pair("hostile-target", "1")
+        with self.assertRaisesRegex(ValueError, "target_component"):
+            AblationPair(
+                _HostileStr("agent"),
+                base_pair.full,
+                base_pair.ablated,
+            )
+
+    def test_qualification_authority_requires_exact_persistent_authorities(self):
+        class ForgedRegistry(ScientificRegistry):
+            pass
+
+        class ForgedMemory(ExperienceMemory):
+            pass
+
+        class ForgedArtifacts(ArtifactStore):
+            pass
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            common = dict(
+                protocol_id="11111111-1111-4111-8111-111111111111",
+                protocol_hash=FINGERPRINT_A,
+                source_revision="9" * 40,
+                causal_cutoff=CUT,
+                granted_permissions={"RESEARCH"},
+            )
+
+            with self.assertRaisesRegex(TypeError, "exact ScientificRegistry"):
+                AblationQualificationAuthority(
+                    scientific_registry=object.__new__(ForgedRegistry),
+                    experience_memory=memory,
+                    artifact_store=artifacts,
+                    **common,
+                )
+            with self.assertRaisesRegex(TypeError, "exact ExperienceMemory"):
+                AblationQualificationAuthority(
+                    scientific_registry=registry,
+                    experience_memory=object.__new__(ForgedMemory),
+                    artifact_store=artifacts,
+                    **common,
+                )
+            with self.assertRaisesRegex(TypeError, "exact ArtifactStore"):
+                AblationQualificationAuthority(
+                    scientific_registry=registry,
+                    experience_memory=memory,
+                    artifact_store=object.__new__(ForgedArtifacts),
+                    **common,
+                )
+
+    def test_qualification_authority_rejects_polymorphic_identity_inputs(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            common = dict(
+                scientific_registry=registry,
+                experience_memory=memory,
+                artifact_store=artifacts,
+                protocol_id="11111111-1111-4111-8111-111111111111",
+                protocol_hash=FINGERPRINT_A,
+                source_revision="9" * 40,
+                causal_cutoff=CUT,
+                granted_permissions={"RESEARCH"},
+            )
+
+            with self.assertRaisesRegex(ValueError, "protocol_id"):
+                AblationQualificationAuthority(
+                    **{**common, "protocol_id": _HostileStr(common["protocol_id"])}
+                )
+            with self.assertRaisesRegex(TypeError, "protocol_hash"):
+                AblationQualificationAuthority(
+                    **{**common, "protocol_hash": _HostileStr(FINGERPRINT_A)}
+                )
+            with self.assertRaisesRegex(ValueError, "source_revision"):
+                AblationQualificationAuthority(
+                    **{**common, "source_revision": _HostileStr("9" * 40)}
+                )
+            with self.assertRaisesRegex(ValueError, "granted_permissions"):
+                AblationQualificationAuthority(
+                    **{
+                        **common,
+                        "granted_permissions": {_HostileStr("RESEARCH")},
+                    }
+                )
+            with self.assertRaisesRegex(ValueError, "task"):
+                AblationQualificationAuthority(
+                    **{**common, "task": _HostileStr("ablation")}
+                )
+            with self.assertRaisesRegex(ValueError, "instrument_family"):
+                AblationQualificationAuthority(
+                    **{**common, "instrument_family": _HostileStr("EQUITY")}
+                )
+
+    def test_registered_population_rejects_polymorphic_revision_and_units(self):
+        with self.assertRaisesRegex(ValueError, "source_revision"):
+            RegisteredAblationPopulation(
+                protocol_digest=FINGERPRINT_A,
+                population_digest=FINGERPRINT_B,
+                stopping_rule_digest=FINGERPRINT_C,
+                source_revision=_HostileStr("9" * 40),
+                registered_at_utc=CUT - timedelta(days=1),
+                evaluation_cutoff_utc=CUT,
+                population_unit_ids=("unit-a",),
+            )
+        with self.assertRaisesRegex(ValueError, "canonical non-empty strings"):
+            RegisteredAblationPopulation(
+                protocol_digest=FINGERPRINT_A,
+                population_digest=FINGERPRINT_B,
+                stopping_rule_digest=FINGERPRINT_C,
+                source_revision="9" * 40,
+                registered_at_utc=CUT - timedelta(days=1),
+                evaluation_cutoff_utc=CUT,
+                population_unit_ids=(_HostileStr("unit-a"),),
+            )
+
     def test_terminal_interlock_validates_inputs_without_resolving_authority(self):
         authority = object.__new__(AblationQualificationAuthority)
 

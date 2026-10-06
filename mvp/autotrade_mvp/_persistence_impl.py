@@ -163,8 +163,8 @@ def _projection_checkpoint_digest(
 _SEQUENCE_RE = re.compile(r"^(0|[1-9][0-9]*)$")
 
 
-def _require_canonical_json_text(value: object, *, name: str) -> str:
-    """Require exact canonical text when the bytes are part of durable JSON authority."""
+def _require_canonical_durable_text(value: object, *, name: str) -> str:
+    """Require exact canonical text before it becomes durable identity or routing."""
 
     if type(value) is not str or not value or value != value.strip():
         raise ValueError(f"{name} must be canonical non-empty text")
@@ -1202,12 +1202,12 @@ class JournalStore:
         if type(envelope) is not dict:
             raise TypeError("event envelope must be an exact dict")
         envelope = _detach_json_value(envelope)
-        event_id = _require_canonical_json_text(envelope.get("event_id"), name="event_id")
-        event_type = _require_canonical_json_text(envelope.get("event_type"), name="event_type")
-        aggregate_type = _require_canonical_json_text(
+        event_id = _require_canonical_durable_text(envelope.get("event_id"), name="event_id")
+        event_type = _require_canonical_durable_text(envelope.get("event_type"), name="event_type")
+        aggregate_type = _require_canonical_durable_text(
             envelope.get("aggregate_type"), name="aggregate_type"
         )
-        aggregate_id = _require_canonical_json_text(
+        aggregate_id = _require_canonical_durable_text(
             envelope.get("aggregate_id"), name="aggregate_id"
         )
         try:
@@ -1229,11 +1229,13 @@ class JournalStore:
         payload_json = canonical_json(payload)
         envelope_json = canonical_json(envelope)
         envelope_hash = _event_envelope_digest(envelope_json)
-        committed_at = _require_canonical_json_text(
+        committed_at = _require_canonical_durable_text(
             envelope.get("committed_at"), name="committed_at"
         )
         if outbox_topic is not None:
-            outbox_topic = self._require_text(outbox_topic, "outbox_topic")
+            outbox_topic = _require_canonical_durable_text(
+                outbox_topic, name="outbox_topic"
+            )
         if (
             expected_journal_sequence is not None
             and (
@@ -2530,19 +2532,19 @@ class JournalStore:
             if type(envelope) is not dict:
                 raise TypeError("Each event envelope must be an exact dict")
             envelope = _detach_json_value(envelope)
-            event_id = _require_canonical_json_text(
+            event_id = _require_canonical_durable_text(
                 envelope.get("event_id"), name="event_id"
             )
             if event_id in seen_event_ids:
                 raise ValueError("event_id is duplicated within the transaction")
             seen_event_ids.add(event_id)
-            event_type = _require_canonical_json_text(
+            event_type = _require_canonical_durable_text(
                 envelope.get("event_type"), name="event_type"
             )
-            aggregate_type = _require_canonical_json_text(
+            aggregate_type = _require_canonical_durable_text(
                 envelope.get("aggregate_type"), name="aggregate_type"
             )
-            aggregate_id = _require_canonical_json_text(
+            aggregate_id = _require_canonical_durable_text(
                 envelope.get("aggregate_id"), name="aggregate_id"
             )
             try:
@@ -2564,11 +2566,13 @@ class JournalStore:
             )
             if supplied_hash != expected_payload_hash:
                 raise ValueError("payload_hash does not match payload")
-            committed_at = _require_canonical_json_text(
+            committed_at = _require_canonical_durable_text(
                 envelope.get("committed_at"), name="committed_at"
             )
             if outbox_topic is not None:
-                self._require_text(outbox_topic, "outbox_topic")
+                outbox_topic = _require_canonical_durable_text(
+                    outbox_topic, name="outbox_topic"
+                )
             envelope_json = canonical_json(envelope)
             prepared.append(
                 {

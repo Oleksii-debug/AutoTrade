@@ -969,7 +969,9 @@ def _repair_interrupted_replay(
         try:
             for line in evidence_path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
-                    continue
+                    raise ValueError(
+                        "Corrupt learning evidence before replay repair"
+                    )
                 recorded = _strict_json_loads(line)
                 evidence_id = (
                     recorded.get("evidence_id")

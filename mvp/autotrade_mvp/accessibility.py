@@ -57,6 +57,17 @@ def _replay_verification_text(value: Any) -> str:
     return "unavailable"
 
 
+def accessible_status_state(status: Any) -> str:
+    """Return the exact operator state, failing closed to corrupt."""
+
+    if type(status) is not dict:
+        return "corrupt"
+    state = status.get("status", "corrupt")
+    if type(state) is not str or state not in STATE_TEXT:
+        return "corrupt"
+    return state
+
+
 def _reservation_lines(status: dict[str, Any]) -> list[str]:
     reservations = status.get("active_reservations", [])
     if type(reservations) is not list:
@@ -108,15 +119,9 @@ def format_accessible_status(
 ) -> str:
     """Render a stable, copyable, screen-reader-friendly status summary."""
 
+    state = accessible_status_state(status)
     if type(status) is not dict:
         status = {}
-
-    state_value = status.get("status", "corrupt")
-    state = (
-        state_value
-        if type(state_value) is str and state_value in STATE_TEXT
-        else "corrupt"
-    )
     lines = [
         "AutoTrade status",
         "Mode: simulation only",

@@ -347,14 +347,20 @@ class BybitMarginMarketParserTests(unittest.TestCase):
                 _risk_response(_risk_row_json(symbol="ETHUSDT"))
             )
 
-    def test_risk_limit_rate_rejects_json_string_substitution(self):
+    def test_risk_limit_rate_accepts_documented_decimal_text_representation(self):
+        row = _risk_row_json(maintenance='"0.5"', initial='"1"')
+        page = parse_bybit_margin_risk_limits(_risk_response(row))
+        self.assertEqual(page.tiers[0].maintenance_margin, Decimal("0.5"))
+        self.assertEqual(page.tiers[0].initial_margin, Decimal("1"))
+
+    def test_risk_limit_rate_rejects_non_numeric_json_scalar(self):
         row = _risk_row_json().replace(
             '"maintenanceMargin":0.5',
-            '"maintenanceMargin":"0.5"',
+            '"maintenanceMargin":true',
         )
         with self.assertRaisesRegex(
             BybitMarginMarketError,
-            "exact provider JSON number",
+            "decimal text or JSON number",
         ):
             parse_bybit_margin_risk_limits(_risk_response(row))
 

@@ -2416,6 +2416,8 @@ class GuardedDispatcher:
         critical_helper_names = (
             "_canonical_journal_authority_snapshot",
             "_journal_store_call",
+            "_detach_submission_json",
+            "_validated_authority_result",
             "submission_attempt_aggregate_id",
             "_identity_digest",
             "_event_id",

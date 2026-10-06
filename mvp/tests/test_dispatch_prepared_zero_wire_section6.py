@@ -51,6 +51,74 @@ class PreparedZeroWireSection6Tests(unittest.TestCase):
             ["SubmissionPrepared"],
         )
 
+    def test_prepared_lease_requires_exact_builtin_integer(self):
+        class HostileLease(int):
+            callbacks = 0
+
+            def __lt__(self, other):
+                type(self).callbacks += 1
+                raise AssertionError("hostile lease comparison executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(
+                ValueError,
+                "prepared_lease_seconds must be a positive exact integer",
+            ):
+                GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="section6-account",
+                    owner_token="owner-a",
+                    prepared_lease_seconds=HostileLease(1),
+                )
+        self.assertEqual(HostileLease.callbacks, 0)
+
+    def test_prepared_lease_exact_microsecond_boundary(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="section6-account",
+                owner_token="owner-a",
+                prepared_lease_seconds=60,
+            )
+            self._leave_prepared(dispatcher)
+
+            before = dispatcher.dispatch(
+                attempt_id="section6-attempt",
+                intent_id="section6-intent",
+                intent_hash="section6-intent-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T10:00:59.999999Z",
+                authority_check=self.authority,
+                transport_send=lambda *_args: self.fail(
+                    "pre-expiry recovery reached provider transport"
+                ),
+            )
+            self.assertEqual(before.status, "IN_PROGRESS")
+            self.assertEqual(before.reason, "prepared_owner_lease_active")
+
+            at_boundary = dispatcher.dispatch(
+                attempt_id="section6-attempt",
+                intent_id="section6-intent",
+                intent_hash="section6-intent-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T10:01:00Z",
+                authority_check=self.authority,
+                transport_send=lambda *_args: self.fail(
+                    "expiry-boundary recovery reached provider transport"
+                ),
+            )
+            self.assertEqual(at_boundary.status, "BLOCKED")
+            self.assertEqual(
+                at_boundary.reason,
+                "prepared_owner_lease_expired_before_send",
+            )
+
     def test_active_prepared_lease_remains_in_progress_and_zero_wire(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

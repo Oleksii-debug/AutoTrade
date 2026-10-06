@@ -66,6 +66,16 @@ class _ExplosiveAdmissionDict(dict):
         raise AssertionError("financial admission invoked polymorphic mapping")
 
 
+class _ExplosiveReservationBook(DurableReservationBook):
+    calls = 0
+
+    def __getattribute__(self, name):
+        if name == "store":
+            type(self).calls += 1
+            raise AssertionError("financial admission read subclass store descriptor")
+        return super().__getattribute__(name)
+
+
 def _policy():
     return AuthorityPolicy.create(
         policy_id="availability-policy",
@@ -356,6 +366,26 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                         reservations.total_reserved("CASH:USD"),
                         Decimal("0"),
                     )
+
+    def test_financial_admission_rejects_reservation_book_subclass_before_store_access(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            hostile_book = object.__new__(_ExplosiveReservationBook)
+            _ExplosiveReservationBook.calls = 0
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "reservation_book must be exact DurableReservationBook",
+            ):
+                _admit(
+                    authority,
+                    hostile_book,
+                    checkpoint,
+                )
+            self.assertEqual(_ExplosiveReservationBook.calls, 0)
 
     def test_financial_admission_rejects_polymorphic_availability_mapping_before_callbacks(self):
         with TemporaryDirectory() as directory:

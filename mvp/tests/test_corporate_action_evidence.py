@@ -278,6 +278,371 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 permission_scope="ORDER.READ",
             )
 
+    def test_provider_observation_instance_scope_shadow_is_rejected_before_dispatch(self):
+        source = sealed_dividend()
+        calls = []
+
+        def forged_scope(**_kwargs):
+            calls.append("called")
+            raise AssertionError("shadowed source require_scope must not execute")
+
+        object.__setattr__(source, "require_scope", forged_scope)
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "observation callback must not be shadowed",
+        ):
+            resolve(source)
+        self.assertEqual(calls, [])
+
+    def test_query_binding_instance_scope_shadow_is_rejected_before_dispatch(self):
+        source = sealed_dividend()
+        calls = []
+
+        def forged_scope(**_kwargs):
+            calls.append("called")
+            raise AssertionError("shadowed binding require_scope must not execute")
+
+        object.__setattr__(source.query_binding, "require_scope", forged_scope)
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "binding callback must not be shadowed",
+        ):
+            resolve(source)
+        self.assertEqual(calls, [])
+
+    def test_mutated_provider_payload_fails_before_hostile_mapping_dispatch(self):
+        source = sealed_dividend()
+
+        class HostilePayload(dict):
+            calls = 0
+
+            def _explode(self):
+                type(self).calls += 1
+                raise AssertionError("mutated payload must not be inspected")
+
+            def __iter__(self):
+                self._explode()
+
+            def items(self):
+                self._explode()
+
+            def get(self, *_args, **_kwargs):
+                self._explode()
+
+            def __getitem__(self, _key):
+                self._explode()
+
+        hostile = HostilePayload()
+        object.__setattr__(source, "payload", hostile)
+
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "provider observation authority mismatch",
+        ):
+            resolve(source)
+        self.assertEqual(HostilePayload.calls, 0)
+
+    def test_mutated_query_binding_fails_before_polymorphic_text_dispatch(self):
+        source = sealed_dividend()
+
+        class HostileText(str):
+            calls = 0
+
+            def strip(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("mutated query text must not dispatch")
+
+            def upper(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("mutated query text must not dispatch")
+
+        object.__setattr__(
+            source.query_binding,
+            "endpoint",
+            HostileText(ENDPOINT),
+        )
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "provider observation authority mismatch",
+        ):
+            resolve(source)
+        self.assertEqual(HostileText.calls, 0)
+
+    def test_late_resolver_authority_globals_do_not_rewrite_resolution(self):
+        source = sealed_dividend()
+        baseline = resolve(source)
+        calls = []
+        originals = {
+            "text": corporate_action_evidence_module._text,
+            "environments": corporate_action_evidence_module._ENVIRONMENTS,
+            "utc_text": corporate_action_evidence_module._utc_text,
+            "payload_digest": corporate_action_evidence_module.payload_digest,
+            "parser_id": corporate_action_evidence_module._CORPORATE_ACTION_PARSER_ID,
+            "parser_version": corporate_action_evidence_module._CORPORATE_ACTION_PARSER_VERSION,
+            "parser_digest": corporate_action_evidence_module._CORPORATE_ACTION_PARSER_CONTRACT_DIGEST,
+            "source_type": corporate_action_evidence_module.ProviderResponseObservation,
+            "surface": corporate_action_evidence_module.Surface,
+        }
+
+        def decoy(name):
+            def fail(*_args, **_kwargs):
+                calls.append(name)
+                raise AssertionError(f"late {name} decoy must not execute")
+            return fail
+
+        class DecoySource:
+            pass
+
+        class DecoySurface:
+            ACTIVITIES = object()
+
+        corporate_action_evidence_module._text = decoy("text")
+        corporate_action_evidence_module._ENVIRONMENTS = frozenset({"BROKEN"})
+        corporate_action_evidence_module._utc_text = decoy("utc_text")
+        corporate_action_evidence_module.payload_digest = decoy("payload_digest")
+        corporate_action_evidence_module._CORPORATE_ACTION_PARSER_ID = "forged-parser"
+        corporate_action_evidence_module._CORPORATE_ACTION_PARSER_VERSION = "999.0.0"
+        corporate_action_evidence_module._CORPORATE_ACTION_PARSER_CONTRACT_DIGEST = (
+            "sha256:" + "f" * 64
+        )
+        corporate_action_evidence_module.ProviderResponseObservation = DecoySource
+        corporate_action_evidence_module.Surface = DecoySurface
+        try:
+            accepted = resolve(source)
+        finally:
+            corporate_action_evidence_module._text = originals["text"]
+            corporate_action_evidence_module._ENVIRONMENTS = originals["environments"]
+            corporate_action_evidence_module._utc_text = originals["utc_text"]
+            corporate_action_evidence_module.payload_digest = originals["payload_digest"]
+            corporate_action_evidence_module._CORPORATE_ACTION_PARSER_ID = originals[
+                "parser_id"
+            ]
+            corporate_action_evidence_module._CORPORATE_ACTION_PARSER_VERSION = originals[
+                "parser_version"
+            ]
+            corporate_action_evidence_module._CORPORATE_ACTION_PARSER_CONTRACT_DIGEST = (
+                originals["parser_digest"]
+            )
+            corporate_action_evidence_module.ProviderResponseObservation = originals[
+                "source_type"
+            ]
+            corporate_action_evidence_module.Surface = originals["surface"]
+
+        self.assertEqual(calls, [])
+        self.assertEqual(accepted, baseline)
+        self.assertEqual(accepted.provenance_digest, baseline.provenance_digest)
+        self.assertEqual(accepted.event.source_revision, baseline.event.source_revision)
+
+    def test_late_parser_helper_globals_do_not_rewrite_provider_fact(self):
+        source = sealed_dividend()
+        baseline = resolve(source)
+        calls = []
+        originals = {
+            "datetime": corporate_action_evidence_module.datetime,
+            "timezone": corporate_action_evidence_module.timezone,
+            "mapping": corporate_action_evidence_module.Mapping,
+            "decimal": corporate_action_evidence_module.Decimal,
+            "mapping_proxy": corporate_action_evidence_module.MappingProxyType,
+            "reserved": corporate_action_evidence_module._CORPORATE_ACTION_RESERVED_FIELDS,
+            "kinds": corporate_action_evidence_module._KINDS,
+            "digest": corporate_action_evidence_module._DIGEST,
+        }
+
+        class DecoyDateTime:
+            @classmethod
+            def fromisoformat(cls, _value):
+                calls.append("datetime")
+                raise AssertionError("late datetime decoy must not execute")
+
+        class DecoyTimezone:
+            utc = object()
+
+        class DecoyDecimal:
+            pass
+
+        class DecoyDigest:
+            def fullmatch(self, _value):
+                calls.append("digest")
+                raise AssertionError("late digest decoy must not execute")
+
+        def decoy_mapping_proxy(_value):
+            calls.append("mapping_proxy")
+            raise AssertionError("late MappingProxyType decoy must not execute")
+
+        corporate_action_evidence_module.datetime = DecoyDateTime
+        corporate_action_evidence_module.timezone = DecoyTimezone
+        corporate_action_evidence_module.Mapping = object()
+        corporate_action_evidence_module.Decimal = DecoyDecimal
+        corporate_action_evidence_module.MappingProxyType = decoy_mapping_proxy
+        corporate_action_evidence_module._CORPORATE_ACTION_RESERVED_FIELDS = frozenset()
+        corporate_action_evidence_module._KINDS = frozenset()
+        corporate_action_evidence_module._DIGEST = DecoyDigest()
+        try:
+            accepted = resolve(source)
+        finally:
+            corporate_action_evidence_module.datetime = originals["datetime"]
+            corporate_action_evidence_module.timezone = originals["timezone"]
+            corporate_action_evidence_module.Mapping = originals["mapping"]
+            corporate_action_evidence_module.Decimal = originals["decimal"]
+            corporate_action_evidence_module.MappingProxyType = originals[
+                "mapping_proxy"
+            ]
+            corporate_action_evidence_module._CORPORATE_ACTION_RESERVED_FIELDS = originals[
+                "reserved"
+            ]
+            corporate_action_evidence_module._KINDS = originals["kinds"]
+            corporate_action_evidence_module._DIGEST = originals["digest"]
+
+        self.assertEqual(calls, [])
+        self.assertEqual(accepted, baseline)
+        self.assertEqual(accepted.event.payload["per_share"], "1.25")
+        self.assertEqual(
+            accepted.event.effective_at,
+            READ_NOW + timedelta(seconds=1),
+        )
+
+    def test_late_module_global_provider_projection_decoys_do_not_run(self):
+        source = sealed_dividend()
+        calls = []
+        original_projection = (
+            corporate_action_evidence_module.provider_response_observation_projection
+        )
+        original_scope = (
+            corporate_action_evidence_module.provider_response_observation_require_scope
+        )
+
+        def forged_projection(_source):
+            calls.append("projection")
+            raise AssertionError("late projection decoy must not execute")
+
+        def forged_scope(_source, **_kwargs):
+            calls.append("scope")
+            raise AssertionError("late scope decoy must not execute")
+
+        corporate_action_evidence_module.provider_response_observation_projection = (
+            forged_projection
+        )
+        corporate_action_evidence_module.provider_response_observation_require_scope = (
+            forged_scope
+        )
+        try:
+            accepted = resolve(source)
+        finally:
+            corporate_action_evidence_module.provider_response_observation_projection = (
+                original_projection
+            )
+            corporate_action_evidence_module.provider_response_observation_require_scope = (
+                original_scope
+            )
+
+        self.assertEqual(calls, [])
+        self.assertEqual(accepted.evidence_ref, source.evidence_ref)
+
+    def test_late_module_global_instrument_registry_cannot_replace_canonical_registry(self):
+        source = sealed_dividend()
+        calls = []
+        instrument = canonical_instrument()
+        original = corporate_action_evidence_module.InstrumentRegistry
+
+        class DecoyRegistry:
+            @staticmethod
+            def exact(_registry, _version_ref):
+                calls.append("exact")
+                return instrument
+
+            @staticmethod
+            def at(_registry, _instrument_id, _instant):
+                calls.append("at")
+                return instrument
+
+        corporate_action_evidence_module.InstrumentRegistry = DecoyRegistry
+        try:
+            with self.assertRaisesRegex(TypeError, "exact InstrumentRegistry"):
+                resolve(
+                    source,
+                    instrument_registry=DecoyRegistry(),
+                )
+        finally:
+            corporate_action_evidence_module.InstrumentRegistry = original
+        self.assertEqual(calls, [])
+
+    def test_late_module_global_event_and_action_decoys_do_not_mint_authority(self):
+        source = sealed_dividend()
+        calls = []
+        original_event = corporate_action_evidence_module.CorporateEvent
+        original_action = corporate_action_evidence_module.AuthoritativeCorporateAction
+
+        class DecoyEvent:
+            @classmethod
+            def create(cls, **_kwargs):
+                calls.append("event")
+                raise AssertionError("late CorporateEvent decoy must not execute")
+
+        class DecoyAction:
+            def __init__(self, **_kwargs):
+                calls.append("action")
+                raise AssertionError(
+                    "late AuthoritativeCorporateAction decoy must not execute"
+                )
+
+        corporate_action_evidence_module.CorporateEvent = DecoyEvent
+        corporate_action_evidence_module.AuthoritativeCorporateAction = DecoyAction
+        try:
+            accepted = resolve(source)
+        finally:
+            corporate_action_evidence_module.CorporateEvent = original_event
+            corporate_action_evidence_module.AuthoritativeCorporateAction = original_action
+
+        self.assertEqual(calls, [])
+        self.assertIs(type(accepted), AuthoritativeCorporateAction)
+        self.assertIs(type(accepted.event), CorporateEvent)
+
+    def test_late_module_global_parser_dependencies_do_not_rewrite_provider_fact(self):
+        source = sealed_dividend()
+        calls = []
+        originals = {
+            "parser": corporate_action_evidence_module._canonical_observation_from_sealed_response,
+            "observation": corporate_action_evidence_module.CorporateActionObservation,
+            "instant": corporate_action_evidence_module._provider_instant,
+            "exact_payload": corporate_action_evidence_module._exact_payload,
+            "utc": corporate_action_evidence_module._utc,
+        }
+
+        def decoy(name):
+            def fail(*_args, **_kwargs):
+                calls.append(name)
+                raise AssertionError(f"late {name} decoy must not execute")
+            return fail
+
+        class DecoyObservation:
+            def __init__(self, **_kwargs):
+                calls.append("observation")
+                raise AssertionError("late observation decoy must not execute")
+
+        corporate_action_evidence_module._canonical_observation_from_sealed_response = decoy(
+            "parser"
+        )
+        corporate_action_evidence_module.CorporateActionObservation = DecoyObservation
+        corporate_action_evidence_module._provider_instant = decoy("instant")
+        corporate_action_evidence_module._exact_payload = decoy("exact_payload")
+        corporate_action_evidence_module._utc = decoy("utc")
+        try:
+            accepted = resolve(source)
+        finally:
+            corporate_action_evidence_module._canonical_observation_from_sealed_response = (
+                originals["parser"]
+            )
+            corporate_action_evidence_module.CorporateActionObservation = originals[
+                "observation"
+            ]
+            corporate_action_evidence_module._provider_instant = originals["instant"]
+            corporate_action_evidence_module._exact_payload = originals["exact_payload"]
+            corporate_action_evidence_module._utc = originals["utc"]
+
+        self.assertEqual(calls, [])
+        self.assertEqual(accepted.event.payload["per_share"], "1.25")
+        self.assertEqual(accepted.event.effective_at, READ_NOW + timedelta(seconds=1))
+
     def test_instrument_registry_subclass_is_rejected_before_registry_dispatch(self):
         class ForgedRegistry(InstrumentRegistry):
             def exact(self, _version_ref):

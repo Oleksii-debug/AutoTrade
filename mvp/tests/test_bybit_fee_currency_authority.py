@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 import unittest
@@ -335,6 +336,16 @@ class BybitFeeCurrencyAuthorityTests(unittest.TestCase):
                 fee_currency_authorities=[authority],
             )
 
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "ambiguous for instrument",
+        ):
+            parse_executions(
+                observation,
+                instrument_versions={"ETHPERP": INSTRUMENT_REF},
+                fee_currency_authorities=(authority, authority),
+            )
+
         object.__setattr__(authority, "fee_currency", "USDC")
         with self.assertRaisesRegex(
             ProviderCoreError,
@@ -344,6 +355,63 @@ class BybitFeeCurrencyAuthorityTests(unittest.TestCase):
                 observation,
                 instrument_versions={"ETHPERP": INSTRUMENT_REF},
                 fee_currency_authorities=(authority,),
+            )
+
+    def test_rule_interval_cannot_cross_instrument_version_boundary(self):
+        version_one = linear_instrument()
+        version_two = replace(
+            version_one,
+            version=2,
+            effective_from=datetime(2026, 10, 3, tzinfo=timezone.utc),
+            metadata_evidence=(
+                {
+                    "artifact_id": "88888888-8888-4888-8888-888888888888",
+                    "sha256": "sha256:" + "8" * 64,
+                    "observed_at": "2026-10-02T12:00:00Z",
+                    "source_uri": (
+                        "https://bybit-exchange.github.io/docs/v5/market/instrument"
+                    ),
+                },
+            ),
+        )
+        registry = InstrumentRegistry(versions=(version_one, version_two))
+        capability = read_capability(
+            instrument_version=INSTRUMENT_REF,
+            provider_environment="TESTNET",
+            at=NOW,
+        )
+        claim_key, claim_digest = bybit_execution_fee_currency_semantic_claim(
+            provider_environment="TESTNET",
+            product_family="LINEAR_DERIVATIVES",
+            category="linear",
+            instrument=version_one,
+            fee_currency="USDT",
+            rule_id="BYBIT_EXECUTION_FEE_CURRENCY",
+            rule_version="2026-10",
+            rule_valid_from=RULE_FROM,
+            rule_valid_until=RULE_UNTIL,
+        )
+        qualification, _receipt, _protocol = accepted_spot_q(
+            ordinal=94,
+            product_family="LINEAR_DERIVATIVES",
+            extra_route_semantics={claim_key: claim_digest},
+        )
+        with self.assertRaisesRegex(
+            BybitFeeCurrencyAuthorityError,
+            "crosses an InstrumentVersion boundary",
+        ):
+            issue_bybit_execution_fee_currency_authority(
+                qualification=qualification,
+                capability=capability,
+                instrument_registry=registry,
+                venue_id="BYBIT",
+                provider_symbol="ETHPERP",
+                fee_currency="USDT",
+                rule_id="BYBIT_EXECUTION_FEE_CURRENCY",
+                rule_version="2026-10",
+                rule_valid_from=RULE_FROM,
+                rule_valid_until=RULE_UNTIL,
+                at=NOW,
             )
 
     def test_mutated_q_chronology_or_campaign_evidence_cannot_issue_authority(self):

@@ -745,6 +745,122 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             before_lifecycle,
         )
 
+    def test_simulation_resolver_cannot_retarget_lifecycle_aggregate_id(self):
+        reference = self.evidence(
+            external_event_id="resolver-aggregate-retarget-life",
+        )
+        holder = {}
+
+        def retarget_aggregate_then_resolve(evidence_ref):
+            holder["authority"].aggregate_id = "forged-lifecycle-aggregate"
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=retarget_aggregate_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        holder["authority"] = authority
+        before_economic = tuple(self.book.transactions)
+        original_aggregate_id = authority.aggregate_id
+        try:
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "option lifecycle authority changed during evidence resolution",
+            ):
+                authority.apply(reference)
+        finally:
+            authority.aggregate_id = original_aggregate_id
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", original_aggregate_id),
+            [],
+        )
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", "forged-lifecycle-aggregate"),
+            [],
+        )
+
+    def test_simulation_resolver_cannot_shadow_lifecycle_event_reader(self):
+        reference = self.evidence(
+            external_event_id="resolver-events-shadow-life",
+        )
+        holder = {}
+
+        def shadow_events_then_resolve(evidence_ref):
+            holder["authority"]._events = lambda: []
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=shadow_events_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        holder["authority"] = authority
+        before_economic = tuple(self.book.transactions)
+        try:
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "option lifecycle authority changed during evidence resolution",
+            ):
+                authority.apply(reference)
+        finally:
+            authority.__dict__.pop("_events", None)
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", authority.aggregate_id),
+            [],
+        )
+
+    def test_simulation_resolver_cannot_rebind_lifecycle_guard_method(self):
+        reference = self.evidence(
+            external_event_id="resolver-guard-rebind-life",
+        )
+        original_guard = DurableOptionLifecycleAuthority._require_canonical_authorities
+
+        def rebind_guard_then_resolve(evidence_ref):
+            DurableOptionLifecycleAuthority._require_canonical_authorities = (
+                lambda _self: None
+            )
+            return self._evidence[evidence_ref]
+
+        authority = DurableOptionLifecycleAuthority(
+            self.store,
+            registry=self.registry,
+            economic_book=self.book,
+            evidence_resolver=rebind_guard_then_resolve,
+            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+            permission_scope=LIFECYCLE_SCOPE,
+        )
+        before_economic = tuple(self.book.transactions)
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", authority.aggregate_id)
+        )
+        try:
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "option lifecycle authority changed during evidence resolution",
+            ):
+                authority.apply(reference)
+        finally:
+            DurableOptionLifecycleAuthority._require_canonical_authorities = (
+                original_guard
+            )
+
+        self.assertEqual(tuple(self.book.transactions), before_economic)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            before_lifecycle,
+        )
+
     def test_simulation_resolver_cannot_rebind_instrument_registry_authority(self):
         reference = self.evidence(
             external_event_id="resolver-registry-method-rebind-life",

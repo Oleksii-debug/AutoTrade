@@ -3,6 +3,7 @@ from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from mvp.autotrade_mvp.capabilities import (
@@ -19,6 +20,7 @@ from mvp.autotrade_mvp.dispatch import (
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
+    ProviderSubmissionObservation,
     Surface,
     observe_authenticated_json_response,
     observe_submission_json_response,
@@ -586,6 +588,51 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 source_uri="https://api.kraken.com/0/private/AddOrder",
                 observation={"error": [], "result": {"txid": ["forged"]}},
             )
+
+    def test_submission_consumer_rejects_subclass_before_virtual_callback(self):
+        attempt, prepared, _observation = self._durable_submission_observation(
+            {"error": [], "result": {"txid": ["OABC-D123-E456"]}},
+            intent_id="kraken-spot-hostile-observation",
+        )
+
+        class HostileObservation(ProviderSubmissionObservation):
+            def __getattribute__(self, _name):
+                raise AssertionError(
+                    "virtual callback executed before authority verification"
+                )
+
+        forged = object.__new__(HostileObservation)
+        with self.assertRaisesRegex(
+            TypeError,
+            "durable ProviderSubmissionObservation",
+        ):
+            parse_spot_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                source_uri="https://api.kraken.com/0/private/AddOrder",
+                observation=forged,
+            )
+
+    def test_submission_consumer_does_not_call_rebindable_require_scope(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {"error": [], "result": {"txid": ["OABC-D123-E456"]}},
+            intent_id="kraken-spot-no-virtual-scope",
+        )
+        with patch.object(
+            ProviderSubmissionObservation,
+            "require_scope",
+            side_effect=AssertionError(
+                "rebindable require_scope callback must not execute"
+            ),
+        ):
+            result = parse_spot_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                source_uri="https://api.kraken.com/0/private/AddOrder",
+                observation=observation,
+            )
+        self.assertEqual(result["outcome"], "ACKNOWLEDGED")
+        self.assertEqual(result["provider_order_id"], "OABC-D123-E456")
 
     def test_empty_txid_fails_closed(self):
         with self.assertRaisesRegex(KrakenSpotAdapterError, "transaction id"):

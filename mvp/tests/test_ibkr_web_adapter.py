@@ -491,6 +491,58 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 maximum_session_age_seconds=30,
             )
 
+    def test_order_preparation_reseals_mutated_intent_numeric_state(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        object.__setattr__(intent, "quantity", _HostileDecimal("1"))
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "bounded exact decimal",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-mutated-intent-quantity",
+                capability=capability(),
+                session=ready_session(),
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+
+    def test_order_preparation_reseals_mutated_contract_identity(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        _HostileInt.comparison_called = False
+        object.__setattr__(intent.contract, "conid", _HostileInt(265598))
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "positive exact integer",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-mutated-contract",
+                capability=capability(),
+                session=ready_session(),
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+        self.assertFalse(_HostileInt.comparison_called)
+
     def test_order_intent_rejects_contract_subclass_before_polymorphic_state(self):
         class ExecutableContract(IbkrContractIdentity):
             pass

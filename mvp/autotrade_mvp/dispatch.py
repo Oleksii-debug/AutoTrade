@@ -2489,6 +2489,13 @@ class GuardedDispatcher:
         ):
             if type(value) is not str or not value.strip():
                 raise ValueError(f"{name} is required")
+        # Stable client-order identity already treats surrounding whitespace as
+        # non-semantic.  Freeze the same canonical text into the durable
+        # attempt so restart/provider-observation authority cannot disagree
+        # with the identity that actually crossed the send boundary.
+        attempt_id = attempt_id.strip()
+        intent_id = intent_id.strip()
+        provider = provider.strip()
         if type(request) is not dict:
             raise TypeError("request must be an exact dict")
         _instant(now)

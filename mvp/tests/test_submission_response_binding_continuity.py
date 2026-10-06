@@ -5,6 +5,8 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.dispatch import (
+    ExactJsonTransportResponse,
+    GuardedDispatcher,
     _envelope,
     load_submission_response_binding,
     submission_attempt_aggregate_id,
@@ -103,6 +105,55 @@ class SubmissionResponseBindingContinuityTests(unittest.TestCase):
             account_id=self.ACCOUNT_ID,
             attempt_id=self.ATTEMPT_ID,
         )
+
+    def test_canonical_dispatch_sequence_loads_without_false_rejection(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(directory + "/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment=self.ENVIRONMENT,
+                account_id=self.ACCOUNT_ID,
+                owner_token="owner",
+            )
+            raw = b'{"ok":true}'
+
+            def send(_client_order_id, _request, final_guard):
+                final_guard()
+                return ExactJsonTransportResponse(raw, http_status=200)
+
+            outcome = dispatcher.dispatch(
+                attempt_id=self.ATTEMPT_ID,
+                intent_id="intent-canonical",
+                intent_hash="intent-hash-canonical",
+                provider="BYBIT",
+                request={"symbol": "BTCUSDT", "side": "BUY", "quantity": "1"},
+                now="2026-10-06T00:30:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=send,
+                submission_scope={},
+            )
+            self.assertEqual(outcome.status, "SENT")
+
+            binding = self._load(store)
+            self.assertEqual(binding.attempt_id, self.ATTEMPT_ID)
+            self.assertEqual(binding.environment, self.ENVIRONMENT)
+            self.assertEqual(binding.account_id, self.ACCOUNT_ID)
+            self.assertEqual(binding.client_order_id, outcome.client_order_id)
+            self.assertEqual(binding.provider, "BYBIT")
+            self.assertEqual(binding.response_bytes, raw)
+            self.assertEqual(binding.terminal_state, "SENT")
+
+    def test_selector_normalization_preserves_canonical_scope(self):
+        with TemporaryDirectory() as directory:
+            store = self._build_store(directory)
+            binding = load_submission_response_binding(
+                store,
+                environment=" simulation ",
+                account_id=" acct ",
+                attempt_id=self.ATTEMPT_ID,
+            )
+            self.assertEqual(binding.environment, self.ENVIRONMENT)
+            self.assertEqual(binding.account_id, self.ACCOUNT_ID)
 
     def test_valid_hash_consistent_sequence_loads_one_exact_identity(self):
         with TemporaryDirectory() as directory:

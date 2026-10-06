@@ -107,10 +107,14 @@ def _canonical_query_values(
         raise ProviderCoreError("query must be a mapping")
     normalized: dict[str, str] = {}
     for raw_key, raw_value in values.items():
-        key = _text(raw_key, "query key")
+        if type(raw_key) is not str or not raw_key or raw_key != raw_key.strip():
+            raise ProviderCoreError(
+                "authenticated-read query keys must be canonical strings"
+            )
+        key = raw_key
         if key in normalized:
             raise ProviderCoreError("query keys must be unique after normalization")
-        if not isinstance(raw_value, str) or raw_value != raw_value.strip():
+        if type(raw_value) is not str or raw_value != raw_value.strip():
             raise ProviderCoreError(
                 "authenticated-read query values must be canonical strings"
             )
@@ -338,7 +342,11 @@ def prepare_authenticated_read_query(
     if not isinstance(capability, CapabilitySnapshot):
         raise TypeError("capability must be CapabilitySnapshot")
     point = _utc(at, "at")
-    scope = _text(permission_scope, "permission_scope")
+    if type(permission_scope) is not str:
+        raise ProviderCoreError("permission_scope must be a canonical string")
+    scope = permission_scope.strip()
+    if not scope:
+        raise ProviderCoreError("permission_scope is required")
     if (
         capability.status != "VERIFIED"
         or not (capability.observed_at <= point < capability.expires_at)
@@ -350,7 +358,11 @@ def prepare_authenticated_read_query(
     provider = capability.provider_id.upper()
     if provider not in PROVIDERS:
         raise ProviderCoreError("unknown provider")
-    normalized_endpoint = _text(endpoint, "endpoint")
+    if type(endpoint) is not str:
+        raise ProviderCoreError("authenticated-read endpoint must be a canonical string")
+    normalized_endpoint = endpoint.strip()
+    if not normalized_endpoint:
+        raise ProviderCoreError("authenticated-read endpoint is required")
     if not normalized_endpoint.startswith("/") or "://" in normalized_endpoint:
         raise ProviderCoreError(
             "authenticated-read endpoint must be a canonical provider-relative path"

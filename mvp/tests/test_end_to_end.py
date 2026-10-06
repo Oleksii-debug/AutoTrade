@@ -1499,6 +1499,49 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertFalse((root / "learning-evidence.jsonl").exists())
             self.assertEqual(list(root.glob("journal.sqlite3*")), [])
 
+    def test_replay_accepts_each_canonical_risk_rejection_reason(self):
+        cases = (
+            (
+                "max_notional",
+                {"max_notional": "10"},
+                ([100, 101, 102, 103],),
+            ),
+            (
+                "insufficient_cash",
+                {"initial_cash": "50"},
+                ([100, 101, 102, 103],),
+            ),
+            (
+                "max_position",
+                {"max_abs_position": "1"},
+                (
+                    [100, 101, 102, 103],
+                    [101, 102, 103, 104],
+                ),
+            ),
+        )
+        for expected_reason, kwargs, episodes in cases:
+            with self.subTest(expected_reason=expected_reason):
+                with TemporaryDirectory() as directory:
+                    results = run_multi_episode(episodes, directory, **kwargs)
+                    self.assertEqual(results[-1].status, "risk_rejected")
+                    checkpoint = json.loads(
+                        (Path(directory) / "checkpoint.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    latest_id = max(
+                        checkpoint["evidence_ids"],
+                        key=lambda evidence_id: checkpoint["evidence_records"][
+                            evidence_id
+                        ]["episode_sequence"],
+                    )
+                    self.assertEqual(
+                        checkpoint["evidence_records"][latest_id]["risk_outcome"],
+                        expected_reason,
+                    )
+                    self.assertTrue(verify_replay(directory))
+
     def test_replay_reexecutes_risk_gate_for_rejected_episode(self):
         with TemporaryDirectory() as directory:
             result = run_vertical_slice(

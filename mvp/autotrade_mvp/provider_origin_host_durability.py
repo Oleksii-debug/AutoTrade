@@ -10,7 +10,6 @@ implementation seams accept injected verified results only for deterministic tes
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 
@@ -40,6 +39,7 @@ from .provider_origin import (
     _PROVIDER_ORIGIN_KIND,
     _append_origin_event,
     _load_origin_events,
+    _parse_utc_text,
     _query_snapshot,
     _require_origin_event,
     _require_snapshot,
@@ -189,7 +189,13 @@ def _commit_host_prepared_impl(
     _load=_load_origin_events,
     _append=_append_origin_event,
     _snapshot=_query_snapshot,
+    _parse_journal_utc=_parse_utc_text,
+    _journal_time=_journal_utc_from_host,
     _event_builder=ProviderOriginJournal._event,
+    _verified_type=VerifiedHostPreparedAttestation,
+    _pins_type=HostProviderOriginPins,
+    _existing_prepared=_require_existing_prepared,
+    _receipt_builder=_prepared_receipt,
 ) -> HostPreparedDurabilityReceipt:
     try:
         verified = verify_prepared(
@@ -203,11 +209,11 @@ def _commit_host_prepared_impl(
         raise ProviderOriginHostDurabilityError(
             "Host Prepared authority is not verified"
         ) from error
-    if type(verified) is not VerifiedHostPreparedAttestation:
+    if type(verified) is not _verified_type:
         raise ProviderOriginHostDurabilityError(
             "Host Prepared verifier returned non-canonical result"
         )
-    if type(pins) is not HostProviderOriginPins:
+    if type(pins) is not _pins_type:
         raise TypeError("pins must be exact HostProviderOriginPins")
 
     attempt = verified.attempt
@@ -228,9 +234,24 @@ def _commit_host_prepared_impl(
             "canonical provider-origin journal is unavailable"
         ) from error
 
-    committed_at, committed_at_host = _journal_utc_from_host(
+    committed_at, committed_at_host = _journal_time(
         attempt.prepared_at_utc
     )
+    try:
+        if _parse_journal_utc(
+            committed_at,
+            name="Host Prepared durability committed_at",
+        ) < _parse_journal_utc(
+            snapshot["prepared_at"],
+            name="canonical query prepared_at",
+        ):
+            raise ProviderOriginHostDurabilityError(
+                "Host Prepared attempt predates canonical query preparation"
+            )
+    except ProviderOriginError as error:
+        raise ProviderOriginHostDurabilityError(
+            "Host Prepared/query chronology is invalid"
+        ) from error
     if not events:
         event = _event_builder(
             event_id=attempt.read_attempt_id + ":prepared",
@@ -257,7 +278,7 @@ def _commit_host_prepared_impl(
         raise ProviderOriginHostDurabilityError(
             "Host Prepared durability requires exactly one Prepared row"
         )
-    _require_existing_prepared(
+    _existing_prepared(
         events[0],
         verified=verified,
         query_binding=query_binding,
@@ -268,7 +289,7 @@ def _commit_host_prepared_impl(
         raise ProviderOriginHostDurabilityError(
             "canonical Prepared committed_at is unavailable"
         )
-    actual_python, actual_host = _journal_utc_from_host(
+    actual_python, actual_host = _journal_time(
         committed_at_host
     )
     if event_time != actual_python:
@@ -276,7 +297,7 @@ def _commit_host_prepared_impl(
         raise ProviderOriginHostDurabilityError(
             "existing provider-origin Prepared time conflicts with signed Host attempt"
         )
-    return _prepared_receipt(
+    return _receipt_builder(
         verified,
         journal_identity=journal_identity,
         event=events[0],
@@ -389,6 +410,12 @@ def _commit_host_observed_impl(
     _load=_load_origin_events,
     _append=_append_origin_event,
     _event_builder=ProviderOriginJournal._event,
+    _journal_time=_journal_utc_from_host,
+    _existing_prepared=_require_existing_prepared,
+    _event_check=_require_origin_event,
+    _observed_receipt_builder=_observed_receipt,
+    _verified_type=VerifiedHostPreparedAttestation,
+    _receipt_type=HostAuthenticatedReadReceipt,
 ) -> HostObservedDurabilityReceipt:
     if type(response_bytes) is not bytes or not response_bytes:
         raise ProviderOriginHostDurabilityError(
@@ -420,7 +447,11 @@ def _commit_host_observed_impl(
         raise ProviderOriginHostDurabilityError(
             "Host response receipt is not cryptographically verified"
         ) from error
-    if type(provider_receipt) is not HostAuthenticatedReadReceipt:
+    if type(verified) is not _verified_type:
+        raise ProviderOriginHostDurabilityError(
+            "Host Prepared verifier returned non-canonical result"
+        )
+    if type(provider_receipt) is not _receipt_type:
         raise ProviderOriginHostDurabilityError(
             "Host response verifier returned non-canonical receipt"
         )
@@ -440,13 +471,13 @@ def _commit_host_observed_impl(
             "Host Observed durability requires Prepared with at most one Observed row"
         )
     prepared_event = events[0]
-    _require_existing_prepared(
+    _existing_prepared(
         prepared_event,
         verified=verified,
         query_binding=query_binding,
         pins=pins,
     )
-    observed_python, observed_host = _journal_utc_from_host(
+    observed_python, observed_host = _journal_time(
         provider_receipt.observed_at_utc
     )
     response_sha = "sha256:" + sha256(response_bytes).hexdigest()
@@ -488,7 +519,7 @@ def _commit_host_observed_impl(
         )
     observed_event = events[1]
     try:
-        payload = _require_origin_event(
+        payload = _event_check(
             observed_event,
             attempt_id=verified.attempt.read_attempt_id,
             event_type=_OBSERVED_EVENT,
@@ -514,7 +545,7 @@ def _commit_host_observed_impl(
         raise ProviderOriginHostDurabilityError(
             "existing provider-origin Observed row conflicts with signed Host response"
         )
-    return _observed_receipt(
+    return _observed_receipt_builder(
         verified,
         provider_receipt,
         prepared_receipt,

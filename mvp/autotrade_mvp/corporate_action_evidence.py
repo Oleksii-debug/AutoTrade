@@ -92,7 +92,12 @@ class CorporateActionEvidenceError(ValueError):
 
 
 def _text(value: object, name: str) -> str:
-    if not isinstance(value, str) or not value.strip() or value != value.strip():
+    if type(value) is not str:
+        raise CorporateActionEvidenceError(
+            f"{name} must be canonical exact text"
+        )
+    stripped = str.strip(value)
+    if not stripped or value != stripped:
         raise CorporateActionEvidenceError(
             f"{name} must be canonical non-empty text"
         )
@@ -391,6 +396,18 @@ def resolve_authoritative_corporate_action(
     comes from the canonical immutable registry at the economic effective cut.
     """
 
+    expected_environment_value = str.upper(
+        _text(expected_environment, "expected_environment")
+    )
+    if expected_environment_value not in _ENVIRONMENTS:
+        raise CorporateActionEvidenceError(
+            "expected_environment must be canonical"
+        )
+    if expected_environment_value in {"PAPER", "LIVE"}:
+        raise CorporateActionEvidenceError(
+            "PAPER/LIVE corporate actions require durable provider-origin authority"
+        )
+
     reference = _text(evidence_ref, "evidence_ref")
     if not callable(evidence_resolver):
         raise TypeError("evidence_resolver must be callable")
@@ -404,21 +421,10 @@ def resolve_authoritative_corporate_action(
         raise TypeError(
             "caller-supplied instrument_resolver is not financial authority"
         )
-    expected_provider = _text(
-        expected_provider_id, "expected_provider_id"
-    ).upper()
+    expected_provider = str.upper(
+        _text(expected_provider_id, "expected_provider_id")
+    )
     expected_account = _text(expected_account_id, "expected_account_id")
-    expected_environment_value = _text(
-        expected_environment, "expected_environment"
-    ).upper()
-    if expected_environment_value not in _ENVIRONMENTS:
-        raise CorporateActionEvidenceError(
-            "expected_environment must be canonical"
-        )
-    if expected_environment_value in {"PAPER", "LIVE"}:
-        raise CorporateActionEvidenceError(
-            "PAPER/LIVE corporate actions require durable provider-origin authority"
-        )
     if not isinstance(allowed_endpoints, frozenset) or not allowed_endpoints:
         raise TypeError("allowed_endpoints must be a non-empty frozenset")
     endpoints = frozenset(

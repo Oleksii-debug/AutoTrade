@@ -120,6 +120,67 @@ class SettlementBookTests(unittest.TestCase):
                 evidence_refs=("provider:rule",),
             )
 
+    def test_recovery_containers_reject_polymorphic_mappings_before_callbacks(self):
+        class HostileDict(dict):
+            calls = 0
+
+            def _explode(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("settlement recovery invoked polymorphic mapping")
+
+            items = _explode
+            __iter__ = _explode
+            __len__ = _explode
+            __bool__ = _explode
+
+        for target in ("book_cash", "book_evidence", "checkpoint_cash", "checkpoint_evidence"):
+            with self.subTest(target=target):
+                HostileDict.calls = 0
+                hostile = HostileDict({"USD": "100"})
+                if target == "book_cash":
+                    with self.assertRaisesRegex(TypeError, "exact dict"):
+                        SettlementBook(settled_cash=hostile)
+                elif target == "book_evidence":
+                    with self.assertRaisesRegex(TypeError, "exact dict"):
+                        SettlementBook(settled_obligation_evidence=hostile)
+                elif target == "checkpoint_cash":
+                    with self.assertRaisesRegex(TypeError, "exact dict"):
+                        SettlementCheckpoint.create(
+                            checkpoint_id="hostile-checkpoint",
+                            settled_cash=hostile,
+                            settled_obligation_evidence={},
+                        )
+                else:
+                    with self.assertRaisesRegex(TypeError, "exact dict"):
+                        SettlementCheckpoint.create(
+                            checkpoint_id="hostile-checkpoint",
+                            settled_cash={},
+                            settled_obligation_evidence=hostile,
+                        )
+                self.assertEqual(HostileDict.calls, 0)
+
+    def test_settle_due_rejects_polymorphic_evidence_mapping_before_callbacks(self):
+        class HostileDict(dict):
+            calls = 0
+
+            def _explode(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("settle_due invoked polymorphic mapping")
+
+            items = _explode
+            __iter__ = _explode
+            __len__ = _explode
+            __bool__ = _explode
+
+        book = SettlementBook()
+        HostileDict.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact dict"):
+            book.settle_due(
+                as_of=date(2026, 9, 25),
+                settlement_evidence=HostileDict({}),
+            )
+        self.assertEqual(HostileDict.calls, 0)
+
     def test_obligation_constructor_canonicalizes_financial_fields(self):
         obligation = SettlementObligation(
             " obligation-1 ",

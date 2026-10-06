@@ -270,6 +270,12 @@ class SettlementCheckpoint:
         settled_cash: Mapping[str, Decimal | str | int],
         settled_obligation_evidence: Mapping[str, SettlementEvidence],
     ) -> "SettlementCheckpoint":
+        if type(settled_cash) is not dict:
+            raise TypeError("checkpoint settled_cash must use an exact dict")
+        if type(settled_obligation_evidence) is not dict:
+            raise TypeError(
+                "checkpoint settlement evidence must use an exact dict"
+            )
         cash: dict[str, Decimal] = {}
         for raw_currency, raw_amount in settled_cash.items():
             currency = _text(raw_currency, name="checkpoint currency").upper()
@@ -282,8 +288,10 @@ class SettlementCheckpoint:
         evidence: dict[str, SettlementEvidence] = {}
         for raw_id, record in settled_obligation_evidence.items():
             obligation_id = _text(raw_id, name="checkpoint obligation_id")
-            if not isinstance(record, SettlementEvidence):
-                raise TypeError("checkpoint settlement evidence must be SettlementEvidence")
+            if type(record) is not SettlementEvidence:
+                raise TypeError(
+                    "checkpoint settlement evidence must be exact SettlementEvidence"
+                )
             if record.obligation_id != obligation_id:
                 raise SettlementConflict(
                     "checkpoint evidence key does not match evidence obligation_id"
@@ -531,6 +539,13 @@ class SettlementBook:
         obligations: Iterable[SettlementObligation] = (),
         settled_obligation_evidence: Mapping[str, SettlementEvidence] | None = None,
     ) -> None:
+        if settled_cash is not None and type(settled_cash) is not dict:
+            raise TypeError("settled_cash must use an exact dict")
+        if (
+            settled_obligation_evidence is not None
+            and type(settled_obligation_evidence) is not dict
+        ):
+            raise TypeError("settled obligation evidence must use an exact dict")
         self._settled_cash: dict[str, Decimal] = {}
         for currency, amount in (settled_cash or {}).items():
             unit = _text(currency, name="currency").upper()
@@ -547,8 +562,10 @@ class SettlementBook:
             self.add(obligation)
         for obligation_id, record in (settled_obligation_evidence or {}).items():
             key = _text(obligation_id, name="settled_obligation_id")
-            if not isinstance(record, SettlementEvidence):
-                raise TypeError("settled obligation evidence must be SettlementEvidence")
+            if type(record) is not SettlementEvidence:
+                raise TypeError(
+                    "settled obligation evidence must be exact SettlementEvidence"
+                )
             if record.obligation_id != key:
                 raise SettlementConflict(
                     "settlement evidence key does not match evidence obligation_id"
@@ -604,8 +621,13 @@ class SettlementBook:
         applied twice after restart.
         """
 
-        if not isinstance(checkpoint, SettlementCheckpoint):
-            raise TypeError("checkpoint must be SettlementCheckpoint")
+        if type(checkpoint) is not SettlementCheckpoint:
+            raise TypeError("checkpoint must be exact SettlementCheckpoint")
+        if (
+            settled_obligation_evidence is not None
+            and type(settled_obligation_evidence) is not dict
+        ):
+            raise TypeError("retained settlement evidence must use an exact dict")
 
         obligations_tuple = tuple(obligations)
         validation = cls(
@@ -616,8 +638,10 @@ class SettlementBook:
         normalized: dict[str, SettlementEvidence] = {}
         for raw_id, record in (settled_obligation_evidence or {}).items():
             obligation_id = _text(raw_id, name="settled_obligation_id")
-            if not isinstance(record, SettlementEvidence):
-                raise TypeError("settled obligation evidence must be SettlementEvidence")
+            if type(record) is not SettlementEvidence:
+                raise TypeError(
+                    "settled obligation evidence must be exact SettlementEvidence"
+                )
             if record.obligation_id != obligation_id:
                 raise SettlementConflict(
                     "settlement evidence key does not match evidence obligation_id"
@@ -663,8 +687,8 @@ class SettlementBook:
         return book
 
     def add(self, obligation: SettlementObligation) -> bool:
-        if not isinstance(obligation, SettlementObligation):
-            raise TypeError("obligation must be SettlementObligation")
+        if type(obligation) is not SettlementObligation:
+            raise TypeError("obligation must be exact SettlementObligation")
         existing = self._obligations.get(obligation.obligation_id)
         if existing is not None:
             if existing != obligation:
@@ -695,8 +719,10 @@ class SettlementBook:
         key = _text(obligation_id, name="obligation_id")
         if type(as_of) is not date:
             raise TypeError("as_of must be a date value")
-        if not isinstance(settlement_evidence, SettlementEvidence):
-            raise TypeError("settlement_evidence must be SettlementEvidence")
+        if type(settlement_evidence) is not SettlementEvidence:
+            raise TypeError(
+                "settlement_evidence must be exact SettlementEvidence"
+            )
         if settlement_evidence.obligation_id != key:
             raise SettlementConflict(
                 "settlement evidence obligation_id does not match requested obligation"
@@ -739,13 +765,15 @@ class SettlementBook:
 
         if type(as_of) is not date:
             raise TypeError("as_of must be a date value")
-        if not isinstance(settlement_evidence, Mapping):
-            raise TypeError("settlement_evidence must be a mapping")
+        if type(settlement_evidence) is not dict:
+            raise TypeError("settlement_evidence must use an exact dict")
         normalized_evidence: dict[str, SettlementEvidence] = {}
         for raw_id, record in settlement_evidence.items():
             obligation_id = _text(raw_id, name="settlement_evidence obligation_id")
-            if not isinstance(record, SettlementEvidence):
-                raise TypeError("settlement evidence values must be SettlementEvidence")
+            if type(record) is not SettlementEvidence:
+                raise TypeError(
+                    "settlement evidence values must be exact SettlementEvidence"
+                )
             if record.obligation_id != obligation_id:
                 raise SettlementConflict(
                     "settlement evidence key does not match evidence obligation_id"

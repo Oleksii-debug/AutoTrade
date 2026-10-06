@@ -459,6 +459,77 @@ class ProviderSelectionTests(unittest.TestCase):
 
             self.assertIs(route.candidate, selected_candidate)
 
+    def test_selected_route_rejects_post_selection_capability_mutation(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            result = select_provider(
+                request(),
+                [candidate()],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            route = result.selected
+            self.assertIsNotNone(route)
+            selected_capability = route.capability
+            original_account_id = selected_capability.account_id
+
+            object.__setattr__(
+                selected_capability,
+                "account_id",
+                "retargeted-account",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    (ProviderSelectionError, PermissionError),
+                    "selected provider route authority changed",
+                ):
+                    _ = route.capability
+            finally:
+                object.__setattr__(
+                    selected_capability,
+                    "account_id",
+                    original_account_id,
+                )
+
+            self.assertIs(route.capability, selected_capability)
+
+    def test_selected_route_rejects_post_selection_qualification_scope_mutation(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            result = select_provider(
+                request(),
+                [candidate()],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            route = result.selected
+            self.assertIsNotNone(route)
+            selected_qualification = route.qualification
+            selected_scope = selected_qualification.scope
+            original_product_family = selected_scope.product_family
+
+            object.__setattr__(
+                selected_scope,
+                "product_family",
+                "OPTIONS",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    (ProviderSelectionError, PermissionError),
+                    "selected provider route authority changed",
+                ):
+                    _ = route.qualification
+            finally:
+                object.__setattr__(
+                    selected_scope,
+                    "product_family",
+                    original_product_family,
+                )
+
+            self.assertIs(route.qualification, selected_qualification)
+
     def test_testnet_authority_does_not_admit_demo_route(self):
         with TemporaryDirectory() as directory:
             capabilities, qualifications, _record = self.authorities(directory)

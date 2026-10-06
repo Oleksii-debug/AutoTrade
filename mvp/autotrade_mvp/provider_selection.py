@@ -27,7 +27,10 @@ from .provider_domain import ProviderDomainError, ProviderFinancialScope
 from .provider_qualification_authority import (
     AcceptedProviderQualification,
     ProviderQualificationError,
+    ProviderQualificationScope,
 )
+from .provider_qualification_identity import ProviderQualificationIdentity
+from .qualification_attestation import EvidenceArtifactRef
 from .provider_qualification_current_scope import (
     ProviderQualificationCurrentScope,
     ProviderQualificationCurrentScopeError,
@@ -273,6 +276,15 @@ def _install_selected_route_authority() -> tuple[
     """
 
     route_ref = weakref_ref
+    capability_type = CapabilitySnapshot
+    qualification_type = AcceptedProviderQualification
+    qualification_scope_type = ProviderQualificationScope
+    qualification_identity_type = ProviderQualificationIdentity
+    financial_scope_type = ProviderFinancialScope
+    evidence_ref_type = EvidenceArtifactRef
+    mapping_proxy_type = MappingProxyType
+    datetime_type = datetime
+    timezone_type = timezone
     bindings: dict[
         int,
         tuple[
@@ -280,7 +292,9 @@ def _install_selected_route_authority() -> tuple[
             ProviderCandidate,
             tuple[str, ...],
             CapabilitySnapshot,
+            tuple[object, ...],
             AcceptedProviderQualification,
+            tuple[object, ...],
             int,
         ],
     ] = {}
@@ -329,6 +343,235 @@ def _install_selected_route_authority() -> tuple[
             authority_changed()
         return current
 
+    def _string_tuple_state(value: object) -> tuple[str, ...]:
+        if type(value) is not tuple or any(type(item) is not str for item in value):
+            authority_changed()
+        return value
+
+    def _string_frozenset_state(value: object) -> tuple[str, ...]:
+        if type(value) is not frozenset or any(type(item) is not str for item in value):
+            authority_changed()
+        return tuple(sorted(value))
+
+    def _financial_scope_state(value: object) -> tuple[str, str, str, str]:
+        if type(value) is not financial_scope_type:
+            authority_changed()
+        state = tuple(
+            object.__getattribute__(value, name)
+            for name in (
+                "provider_id",
+                "runtime_environment",
+                "provider_environment",
+                "entity_policy_id",
+            )
+        )
+        if any(type(item) is not str for item in state):
+            authority_changed()
+        return state
+
+    def _capability_state(value: object) -> tuple[object, ...]:
+        if type(value) is not capability_type:
+            authority_changed()
+        text_fields = tuple(
+            object.__getattribute__(value, name)
+            for name in (
+                "snapshot_id",
+                "provider_id",
+                "account_id",
+                "entity_id",
+                "environment",
+                "provider_environment",
+                "instrument_version",
+                "position_mode",
+                "rate_limit_policy_id",
+                "status",
+            )
+        )
+        if any(type(item) is not str for item in text_fields):
+            authority_changed()
+        observed_at = object.__getattribute__(value, "observed_at")
+        expires_at = object.__getattribute__(value, "expires_at")
+        for instant in (observed_at, expires_at):
+            if (
+                type(instant) is not datetime_type
+                or type(object.__getattribute__(instant, "tzinfo")) is not timezone_type
+            ):
+                authority_changed()
+        set_state = tuple(
+            _string_frozenset_state(object.__getattribute__(value, name))
+            for name in (
+                "supported_order_types",
+                "time_in_force",
+                "permission_scopes",
+                "native_protection",
+                "data_entitlements",
+                "sources",
+            )
+        )
+        evidence = object.__getattribute__(value, "evidence")
+        if type(evidence) is not tuple:
+            authority_changed()
+        evidence_state = []
+        for item in evidence:
+            if type(item) is not mapping_proxy_type:
+                authority_changed()
+            pairs = tuple(item.items())
+            if any(type(key) is not str or type(raw) is not str for key, raw in pairs):
+                authority_changed()
+            evidence_state.append(tuple(sorted(pairs)))
+        can_admit = object.__getattribute__(value, "_can_admit")
+        if type(can_admit) is not bool:
+            authority_changed()
+        return (
+            text_fields,
+            observed_at,
+            expires_at,
+            set_state,
+            tuple(evidence_state),
+            can_admit,
+        )
+
+    def _qualification_scope_state(value: object) -> tuple[object, ...]:
+        if type(value) is not qualification_scope_type:
+            authority_changed()
+        campaign_version = object.__getattribute__(value, "campaign_version")
+        text_fields = tuple(
+            object.__getattribute__(value, name)
+            for name in (
+                "product_family",
+                "adapter_source_git_sha",
+                "packaged_artifact_digest",
+                "campaign_id",
+                "protocol_id",
+                "protocol_version",
+            )
+        )
+        if type(campaign_version) is not int or any(
+            type(item) is not str for item in text_fields
+        ):
+            authority_changed()
+        return (
+            _financial_scope_state(object.__getattribute__(value, "provider_scope")),
+            text_fields,
+            campaign_version,
+        )
+
+    def _qualification_identity_state(value: object) -> tuple[object, ...]:
+        if type(value) is not qualification_identity_type:
+            authority_changed()
+        campaign_version = object.__getattribute__(value, "campaign_version")
+        packaged_artifact_id = object.__getattribute__(value, "packaged_artifact_id")
+        if type(campaign_version) is not int or (
+            packaged_artifact_id is not None
+            and type(packaged_artifact_id) is not str
+        ):
+            authority_changed()
+        text_fields = tuple(
+            object.__getattribute__(value, name)
+            for name in (
+                "product_family",
+                "adapter_source_git_sha",
+                "packaged_artifact_digest",
+                "campaign_id",
+                "protocol_id",
+                "protocol_version",
+                "required_case_policy_digest",
+                "result_set_digest",
+                "route_semantics_digest",
+                "documentation_revision_digest",
+                "evidence_set_digest",
+                "chronology_digest",
+                "lineage_digest",
+                "acceptance_metadata_digest",
+                "attestation_digest",
+                "trust_policy_digest",
+                "issuer_identity_digest",
+                "verifier_identity_digest",
+            )
+        )
+        if any(type(item) is not str for item in text_fields):
+            authority_changed()
+        return (
+            _financial_scope_state(object.__getattribute__(value, "provider_scope")),
+            text_fields,
+            packaged_artifact_id,
+            campaign_version,
+        )
+
+    def _evidence_ref_state(value: object) -> tuple[str, str, str, str, str]:
+        if type(value) is not evidence_ref_type:
+            authority_changed()
+        state = tuple(
+            object.__getattribute__(value, name)
+            for name in (
+                "artifact_id",
+                "sha256",
+                "media_type",
+                "evidence_kind",
+                "source_sha",
+            )
+        )
+        if any(type(item) is not str for item in state):
+            authority_changed()
+        return state
+
+    def _qualification_state(value: object) -> tuple[object, ...]:
+        if type(value) is not qualification_type:
+            authority_changed()
+        required_cases = _string_tuple_state(
+            object.__getattribute__(value, "required_cases")
+        )
+        unsupported_features = _string_tuple_state(
+            object.__getattribute__(value, "unsupported_features")
+        )
+        documentation_revisions = _string_tuple_state(
+            object.__getattribute__(value, "documentation_revisions")
+        )
+        raw_refs = object.__getattribute__(value, "raw_evidence_refs")
+        if type(raw_refs) is not tuple:
+            authority_changed()
+        raw_ref_state = tuple(_evidence_ref_state(item) for item in raw_refs)
+        optional_fields = tuple(
+            object.__getattribute__(value, name)
+            for name in ("supersedes_qualification_id", "release_artifact_id")
+        )
+        if any(item is not None and type(item) is not str for item in optional_fields):
+            authority_changed()
+        text_fields = tuple(
+            object.__getattribute__(value, name)
+            for name in (
+                "qualification_id",
+                "route_semantics_json",
+                "completed_at",
+                "valid_until",
+                "attestation_id",
+                "attestation_digest",
+                "policy_id",
+                "policy_version",
+                "trust_root_id",
+                "producer_id",
+                "verifier_id",
+                "signed_at",
+            )
+        )
+        if any(type(item) is not str for item in text_fields):
+            authority_changed()
+        return (
+            _qualification_identity_state(
+                object.__getattribute__(value, "identity")
+            ),
+            _qualification_scope_state(object.__getattribute__(value, "scope")),
+            text_fields,
+            required_cases,
+            unsupported_features,
+            documentation_revisions,
+            _evidence_ref_state(
+                object.__getattribute__(value, "campaign_artifact_ref")
+            ),
+            raw_ref_state,
+            optional_fields,
+        )
+
     @dataclass(frozen=True, slots=True, init=False, weakref_slot=True)
     class SelectedProviderRoute:
         """Selection-issued binding of static route composition to exact C/Q."""
@@ -363,7 +606,9 @@ def _install_selected_route_authority() -> tuple[
                     candidate,
                     candidate_state,
                     capability,
+                    capability_state,
                     qualification,
+                    qualification_state,
                     decision_cut,
                 ) = binding
                 if bound_ref() is not self:
@@ -382,7 +627,9 @@ def _install_selected_route_authority() -> tuple[
                     current_candidate is not candidate
                     or candidate_snapshot(current_candidate) != candidate_state
                     or current_capability is not capability
+                    or _capability_state(current_capability) != capability_state
                     or current_qualification is not qualification
+                    or _qualification_state(current_qualification) != qualification_state
                     or type(current_cut) is not int
                     or current_cut != decision_cut
                 ):
@@ -429,6 +676,8 @@ def _install_selected_route_authority() -> tuple[
             bindings.pop(key, None)
 
         candidate_state = candidate_snapshot(candidate)
+        capability_state = _capability_state(capability)
+        qualification_state = _qualification_state(qualification)
         route = object.__new__(SelectedProviderRoute)
         object.__setattr__(route, "candidate", candidate)
         object.__setattr__(route, "capability", capability)
@@ -443,7 +692,9 @@ def _install_selected_route_authority() -> tuple[
             candidate,
             candidate_state,
             capability,
+            capability_state,
             qualification,
+            qualification_state,
             decision_journal_sequence_cut,
         )
         return route

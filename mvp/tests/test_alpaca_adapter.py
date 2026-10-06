@@ -36,6 +36,7 @@ from mvp.autotrade_mvp.dispatch import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
+    ProviderSubmissionObservation,
     Surface,
     observe_authenticated_json_response,
     observe_submission_json_response,
@@ -729,6 +730,50 @@ class AlpacaAdapterTests(unittest.TestCase):
                     "client_order_id": client_id,
                 },
             )
+
+    def test_submission_observation_subclass_is_rejected_without_virtual_access(self):
+        calls = 0
+
+        class TrapObservation(ProviderSubmissionObservation):
+            def __getattribute__(self, name):
+                nonlocal calls
+                calls += 1
+                raise AssertionError(f"virtual observation access executed: {name}")
+
+        client_id = stable_client_order_id(
+            "ALPACA",
+            "alpaca-subclass",
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        prepared = prepare_order_request(
+            intent,
+            client_order_id=client_id,
+            account_id="paper-account",
+            environment="PAPER",
+            capability=capability(),
+            at=NOW,
+        )
+        forged = object.__new__(TrapObservation)
+        with self.assertRaisesRegex(
+            TypeError,
+            "ProviderSubmissionObservation",
+        ):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=prepared,
+                observation=forged,
+            )
+        self.assertEqual(calls, 0)
 
     def test_trade_activity_requires_order_and_fee_evidence(self):
         order_id = str(uuid4())

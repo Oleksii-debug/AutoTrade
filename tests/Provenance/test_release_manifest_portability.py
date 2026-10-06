@@ -5,10 +5,12 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from tools.build_provenance_manifest import (
     OUTPUT,
     ROOT,
+    ci_action_dependencies,
     dependency_advisory_evidence_document,
     git_blob_sha,
     python_runtime_dependencies,
@@ -100,6 +102,46 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
             git_blob_sha(ROOT / "pyproject.toml"),
         )
 
+    def test_manifest_records_immutable_ci_action_dependencies(self):
+        document = json.loads(rendered_manifest())
+        self.assertEqual(
+            document["ci_action_dependencies"],
+            ci_action_dependencies(),
+        )
+        self.assertGreater(len(document["ci_action_dependencies"]), 0)
+        for dependency in document["ci_action_dependencies"]:
+            self.assertRegex(dependency["revision"], r"^(?:[0-9a-f]{40}|sha256:[0-9a-f]{64})$")
+            self.assertGreater(len(dependency["workflow_blob_shas"]), 0)
+            for binding in dependency["workflow_blob_shas"]:
+                self.assertEqual(
+                    binding["blob_sha"],
+                    git_blob_sha(ROOT / binding["path"]),
+                )
+
+    def test_ci_action_dependency_rejects_mutable_action_tag(self):
+        original_glob = Path.glob
+        original_read_text = Path.read_text
+        with TemporaryDirectory() as directory:
+            workflow = Path(directory) / "mutable.yml"
+            workflow.write_text(
+                "steps:\n  - uses: actions/checkout@v4\n",
+                encoding="utf-8",
+            )
+
+            def glob(candidate: Path, pattern: str):
+                if candidate == ROOT / ".github" / "workflows":
+                    return iter([workflow])
+                return original_glob(candidate, pattern)
+
+            def read_text(candidate: Path, *args, **kwargs):
+                if candidate == workflow:
+                    return "steps:\n  - uses: actions/checkout@v4\n"
+                return original_read_text(candidate, *args, **kwargs)
+
+            with patch.object(Path, "glob", glob), patch.object(Path, "read_text", read_text):
+                with self.assertRaisesRegex(ValueError, "CI action is not immutable"):
+                    ci_action_dependencies()
+
     def test_manifest_binds_research_dependency_entrypoint(self):
         document = json.loads(rendered_manifest())
         self.assertEqual(
@@ -133,6 +175,18 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
                     "source": "repository-root",
                 }
             ],
+            "ci_action_dependencies": [
+                {
+                    "name": "actions/checkout",
+                    "revision": "c" * 40,
+                    "workflow_blob_shas": [
+                        {
+                            "path": ".github/workflows/example.yml",
+                            "blob_sha": "d" * 40,
+                        }
+                    ],
+                }
+            ],
             "dotnet_package_dependencies": [
                 {"name": "Example.Package", "version": "1.2.3"}
             ],
@@ -159,6 +213,7 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
             "review_policy_evidence": policy,
             "advisory_source_evidence": [source],
             "reviewed_components": [
+                "ci-action:actions/checkout@" + "c" * 40,
                 "nuget:Example.Package@1.2.3",
                 "python:attrs==26.1.0",
                 "python-runtime:autotrade-exact-numeric==0.0.1",

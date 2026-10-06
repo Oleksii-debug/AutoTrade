@@ -285,7 +285,9 @@ class JournalBackedHostCommandStore:
             )
         actor = self._required_text(command, "actor")
         session = self._required_text(command, "session")
-        account_id = self._required_text(command, "account_id")
+        account_id = command.get("account_id")
+        if type(account_id) is not str or not account_id:
+            raise ValueError("account_id must be a non-empty string")
         environment = self._required_text(command, "environment")
         if not is_valid_common_scalar("Environment", environment):
             raise ValueError("environment must be a canonical Environment")

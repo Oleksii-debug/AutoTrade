@@ -608,6 +608,104 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                 raw_evidence_refs=(duplicate, duplicate),
             )
 
+    def test_signed_summary_cannot_pass_without_raw_semantic_verification(self):
+        decision = qualify(
+            policy=policy(),
+            evidence=complete_evidence(),
+            trusted=True,
+            raw_semantics_trusted=False,
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.INCONCLUSIVE)
+        self.assertTrue(
+            any(
+                ":raw_evidence_semantics_unverified:" in blocker
+                for blocker in decision.blockers
+            )
+        )
+        self.assertFalse(decision.authorizes_trading)
+
+    def test_missing_required_raw_role_blocks_terminal_recovery(self):
+        items = complete_evidence()
+        target = items[0]
+        remaining = tuple(
+            ref
+            for ref in target.raw_evidence_refs
+            if ref.role is not RecoveryRawEvidenceRole.JOURNAL_INTEGRITY
+        )
+        items[0] = evidence(
+            target.scenario,
+            raw_evidence_refs=remaining,
+        )
+        decision = qualify(
+            policy=policy(),
+            evidence=items,
+            trusted=True,
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.INCONCLUSIVE)
+        self.assertIn(
+            f"{target.scenario.value.lower()}:raw_evidence_missing:journal_integrity",
+            decision.blockers,
+        )
+
+    def test_missing_raw_artifact_blocks_terminal_recovery(self):
+        items = complete_evidence()
+        target_ref = items[0].raw_evidence_refs[0]
+        decision = qualify(
+            policy=policy(),
+            evidence=items,
+            trusted=True,
+            omit_raw_ids={target_ref.artifact_ref.artifact_id},
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.INCONCLUSIVE)
+        self.assertIn(
+            (
+                f"{items[0].scenario.value.lower()}:"
+                f"raw_evidence_integrity_unverified:{target_ref.role.value.lower()}"
+            ),
+            decision.blockers,
+        )
+
+    def test_raw_evidence_source_alias_is_hard_failure(self):
+        items = complete_evidence()
+        target = items[0]
+        replaced = tuple(
+            (
+                raw_ref(
+                    target.scenario,
+                    ref.role,
+                    source_sha="b" * 40,
+                )
+                if ref.role is RecoveryRawEvidenceRole.JOURNAL_INTEGRITY
+                else ref
+            )
+            for ref in target.raw_evidence_refs
+        )
+        items[0] = evidence(
+            target.scenario,
+            raw_evidence_refs=replaced,
+        )
+        decision = qualify(
+            policy=policy(),
+            evidence=items,
+            trusted=True,
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.FAIL)
+        self.assertIn(
+            f"{target.scenario.value.lower()}:raw_evidence_source_mismatch",
+            decision.blockers,
+        )
+
+    def test_raw_evidence_roles_are_unique_per_scenario(self):
+        duplicate = raw_ref(
+            RecoveryScenario.POWER_LOSS,
+            RecoveryRawEvidenceRole.JOURNAL_INTEGRITY,
+        )
+        with self.assertRaisesRegex(ValueError, "unique roles"):
+            evidence(
+                RecoveryScenario.POWER_LOSS,
+                raw_evidence_refs=(duplicate, duplicate),
+            )
+
     def test_noncanonical_receipt_bytes_cannot_self_authenticate_summary_facts(self):
         forged = b'{"forged":"summary"}'
         target = evidence(

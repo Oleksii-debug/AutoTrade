@@ -1772,6 +1772,38 @@ class QualificationAttestationTests(unittest.TestCase):
         self.assertEqual(accepted.trust_root_id, expected_root_id)
 
 
+    def test_verified_snapshot_freezes_exact_attestation_bytes_before_evidence_callback(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        receipt = SignedQualificationAttestation(original, sign(original))
+        expected_json = original.canonical_bytes().decode("utf-8")
+        expected_digest = original.content_digest
+        original_resolve = qualification_attestation_module._resolve_evidence
+        original_canonical_bytes = QualificationAttestation.canonical_bytes
+
+        def mutate_serializer_after_evidence_read(read_snapshot, ref):
+            original_resolve(read_snapshot, ref)
+            QualificationAttestation.canonical_bytes = (
+                lambda _self: b'{"forged":"post-verification"}'
+            )
+
+        try:
+            with TemporaryDirectory() as directory:
+                store = ArtifactStore(directory)
+                publish(store)
+                with patch.object(
+                    qualification_attestation_module,
+                    "_resolve_evidence",
+                    side_effect=mutate_serializer_after_evidence_read,
+                ):
+                    accepted = verify(receipt, store, policy(trust_root))
+        finally:
+            QualificationAttestation.canonical_bytes = original_canonical_bytes
+
+        self.assertEqual(accepted.attestation_json, expected_json)
+        self.assertEqual(accepted.attestation_digest, expected_digest)
+
+
 
 
 if __name__ == "__main__":

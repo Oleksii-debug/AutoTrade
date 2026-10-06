@@ -508,6 +508,83 @@ def _uuid_text(value: object, *, name: str) -> str:
     return text
 
 
+def _prepared_submission_projection(
+    prepared_request: AlpacaPreparedRequest,
+    *,
+    _prepared_type=AlpacaPreparedRequest,
+    _canonical_type=type,
+    _canonical_str=str,
+    _canonical_tuple=tuple,
+    _object_getattribute=object.__getattribute__,
+    _mapping_proxy_type=MappingProxyType,
+) -> Mapping[str, object]:
+    """Read one exact prepared order without executing virtual attributes."""
+
+    if _canonical_type(prepared_request) is not _prepared_type:
+        raise TypeError(
+            "prepared_request must be exact AlpacaPreparedRequest"
+        )
+    body = _object_getattribute(prepared_request, "body")
+    if _canonical_type(body) is not _mapping_proxy_type:
+        raise AlpacaAdapterError(
+            "Alpaca prepared request body authority changed"
+        )
+    client_order_id = body.get("client_order_id")
+    endpoint = _object_getattribute(prepared_request, "endpoint")
+    account_id = _object_getattribute(prepared_request, "account_id")
+    environment = _object_getattribute(prepared_request, "environment")
+    capability_snapshot_ids = _object_getattribute(
+        prepared_request,
+        "capability_snapshot_ids",
+    )
+    instrument_versions = _object_getattribute(
+        prepared_request,
+        "instrument_versions",
+    )
+    body_sha256 = _object_getattribute(prepared_request, "body_sha256")
+    if any(
+        _canonical_type(value) is not _canonical_str
+        for value in (
+            endpoint,
+            account_id,
+            environment,
+            body_sha256,
+            client_order_id,
+        )
+    ):
+        raise AlpacaAdapterError(
+            "Alpaca prepared request authority changed"
+        )
+    if (
+        _canonical_type(capability_snapshot_ids) is not _canonical_tuple
+        or not capability_snapshot_ids
+        or any(
+            _canonical_type(value) is not _canonical_str
+            for value in capability_snapshot_ids
+        )
+        or _canonical_type(instrument_versions) is not _canonical_tuple
+        or not instrument_versions
+        or any(
+            _canonical_type(value) is not _canonical_str
+            for value in instrument_versions
+        )
+    ):
+        raise AlpacaAdapterError(
+            "Alpaca prepared request authority changed"
+        )
+    return _mapping_proxy_type(
+        {
+            "endpoint": endpoint,
+            "account_id": account_id,
+            "environment": environment,
+            "capability_snapshot_ids": capability_snapshot_ids,
+            "instrument_versions": instrument_versions,
+            "body_sha256": body_sha256,
+            "client_order_id": client_order_id,
+        }
+    )
+
+
 def _submission_projection(
     observation: ProviderSubmissionObservation,
     *,
@@ -526,31 +603,30 @@ def _submission_projection(
         raise TypeError(
             "observation must be durable ProviderSubmissionObservation"
         )
-    if type(prepared_request) is not AlpacaPreparedRequest:
-        raise TypeError("prepared_request must be exact AlpacaPreparedRequest")
+    prepared = _prepared_submission_projection(prepared_request)
     cid = validate_client_order_id(
         _text(
-            prepared_request.body.get("client_order_id"),
+            prepared["client_order_id"],
             name="prepared_request.client_order_id",
         )
     )
     projected = _projection(observation)
     expected = (
         ("provider_id", "ALPACA", "provider"),
-        ("endpoint", prepared_request.endpoint, "endpoint"),
-        ("request_sha256", prepared_request.body_sha256, "request digest"),
+        ("endpoint", prepared["endpoint"], "endpoint"),
+        ("request_sha256", prepared["body_sha256"], "request digest"),
         (
             "capability_snapshot_ids",
-            prepared_request.capability_snapshot_ids,
+            prepared["capability_snapshot_ids"],
             "capability",
         ),
         (
             "instrument_versions",
-            prepared_request.instrument_versions,
+            prepared["instrument_versions"],
             "instrument",
         ),
-        ("account_id", prepared_request.account_id, "account"),
-        ("environment", prepared_request.environment, "environment"),
+        ("account_id", prepared["account_id"], "account"),
+        ("environment", prepared["environment"], "environment"),
         ("client_order_id", cid, "client-order"),
     )
     for key, expected_value, label in expected:
@@ -566,7 +642,8 @@ def _response_evidence(
     *,
     prepared_request: AlpacaPreparedRequest,
 ) -> dict[str, str]:
-    env = prepared_request.environment
+    prepared = _prepared_submission_projection(prepared_request)
+    env = prepared["environment"]
     if env == "PAPER":
         host = "paper-api.alpaca.markets"
     elif env == "LIVE":
@@ -603,11 +680,10 @@ def parse_submission_response(
     """
 
     aid = _uuid_text(attempt_id, name="attempt_id")
-    if type(prepared_request) is not AlpacaPreparedRequest:
-        raise TypeError("prepared_request must be exact AlpacaPreparedRequest")
+    prepared = _prepared_submission_projection(prepared_request)
     cid = validate_client_order_id(
         _text(
-            prepared_request.body.get("client_order_id"),
+            prepared["client_order_id"],
             name="prepared_request.client_order_id",
         )
     )

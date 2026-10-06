@@ -550,7 +550,7 @@ def evaluate_perpetual_margin(
         raise PerpetualMarginError("instrument_version must match margin evidence")
     if capability.identity != evidence.capability_identity:
         raise PerpetualMarginError(
-            "provider/account/entity/environment/instrument capability scope mismatch"
+            "provider/account/entity/environment/provider_environment/instrument capability scope mismatch"
         )
     if capability.snapshot_id != evidence.capability_snapshot_id:
         raise PerpetualMarginError("capability snapshot does not match margin evidence")

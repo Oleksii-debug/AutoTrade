@@ -491,6 +491,32 @@ class PerpetualMarginTests(unittest.TestCase):
                 ),
             )
 
+    def test_provider_environment_is_immutable_artifact_scope(self):
+        trusted = evidence(
+            provider_id="BYBIT",
+            provider_environment="TESTNET",
+        )
+        relabelled = evidence(
+            provider_id="BYBIT",
+            provider_environment="DEMO",
+        )
+        demo_capability = capability(
+            provider_id="BYBIT",
+            provider_environment="DEMO",
+        )
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+            with self.assertRaisesRegex(
+                PerpetualMarginError,
+                "scope metadata mismatch",
+            ):
+                evaluate(
+                    capability=demo_capability,
+                    evidence=relabelled,
+                    artifact_store=store,
+                )
+
     def test_bybit_margin_evidence_requires_explicit_provider_environment(self):
         with self.assertRaisesRegex(
             PerpetualMarginError,

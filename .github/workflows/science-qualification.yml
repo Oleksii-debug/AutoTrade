@@ -42,7 +42,7 @@ jobs:
           ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12.10"
       - name: Run scientific qualification tests
         run: python -m unittest discover -s tests/Science -p "test_science_qualification.py" -v
       - name: Write exact-head science evidence

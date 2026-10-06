@@ -124,6 +124,7 @@ class ScientificFinancialCutTests(unittest.TestCase):
             account_id="test-account",
             environment="PAPER",
             reconciliation_event_id="checkpoint-1",
+            reconciliation_journal_sequence=2,
             journal_sequence=3,
             journal_population_digest=_SHA,
             reconciliation_checkpoint_digest=_SHA,
@@ -143,7 +144,23 @@ class ScientificFinancialCutTests(unittest.TestCase):
                 account_id="test-account",
                 environment="PAPER",
                 reconciliation_event_id="checkpoint-1",
+                reconciliation_journal_sequence=1,
                 journal_sequence=True,
+                journal_population_digest=_SHA,
+                reconciliation_checkpoint_digest=_SHA,
+            )
+
+    def test_reconciliation_sequence_cannot_be_forged_past_financial_cut(self):
+        with self.assertRaisesRegex(ValueError, "cannot exceed"):
+            ScientificFinancialCut(
+                scientific_protocol_id="protocol-1",
+                gate_profile_digest=_SHA,
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                reconciliation_event_id="checkpoint-1",
+                reconciliation_journal_sequence=4,
+                journal_sequence=3,
                 journal_population_digest=_SHA,
                 reconciliation_checkpoint_digest=_SHA,
             )
@@ -173,6 +190,10 @@ class ScientificFinancialCutTests(unittest.TestCase):
                 first.journal_sequence,
                 first_checkpoint["journal_sequence"],
             )
+            self.assertEqual(
+                first.reconciliation_journal_sequence,
+                first_checkpoint["journal_sequence"],
+            )
             self.assertTrue(first.journal_population_digest.startswith("sha256:"))
             self.assertTrue(
                 first.reconciliation_checkpoint_digest.startswith("sha256:")
@@ -199,6 +220,10 @@ class ScientificFinancialCutTests(unittest.TestCase):
                 reconciliation_event_id=second_checkpoint["event_id"],
             )
             self.assertGreater(second.journal_sequence, first.journal_sequence)
+            self.assertEqual(
+                second.reconciliation_journal_sequence,
+                second_checkpoint["journal_sequence"],
+            )
             self.assertNotEqual(
                 second.journal_population_digest,
                 first.journal_population_digest,

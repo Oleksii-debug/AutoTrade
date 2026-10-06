@@ -659,6 +659,66 @@ class QualificationAttestation:
         return "sha256:" + sha256(self.canonical_bytes()).hexdigest()
 
 
+def _qualification_attestation_bytes_exact(
+    attestation: QualificationAttestation,
+) -> bytes:
+    """Serialize one exact detached attestation without executable class methods."""
+
+    if type(attestation) is not QualificationAttestation:
+        raise TypeError(
+            "attestation must be the exact canonical QualificationAttestation"
+        )
+    if (
+        type(attestation.requirement_ids) is not tuple
+        or not all(type(item) is str for item in attestation.requirement_ids)
+        or type(attestation.evidence_refs) is not tuple
+        or not all(
+            type(item) is EvidenceArtifactRef
+            for item in attestation.evidence_refs
+        )
+        or type(attestation.unresolved_limits) is not tuple
+        or not all(type(item) is str for item in attestation.unresolved_limits)
+    ):
+        raise TypeError(
+            "attestation graph must use exact canonical tuple/ref types"
+        )
+    payload = {
+        "attestation_id": attestation.attestation_id,
+        "completed_at": attestation.completed_at,
+        "domain": attestation.domain,
+        "evidence_refs": [
+            {
+                "artifact_id": item.artifact_id,
+                "evidence_kind": item.evidence_kind,
+                "media_type": item.media_type,
+                "sha256": item.sha256,
+                "source_sha": item.source_sha,
+            }
+            for item in attestation.evidence_refs
+        ],
+        "gate": attestation.gate,
+        "harness_version": attestation.harness_version,
+        "package_id": attestation.package_id,
+        "producer_id": attestation.producer_id,
+        "protocol_id": attestation.protocol_id,
+        "protocol_version": attestation.protocol_version,
+        "release_artifact_id": attestation.release_artifact_id,
+        "release_artifact_sha256": attestation.release_artifact_sha256,
+        "requirement_ids": list(attestation.requirement_ids),
+        "result": attestation.result,
+        "runner_id": attestation.runner_id,
+        "schema_version": attestation.schema_version,
+        "signed_at": attestation.signed_at,
+        "source_sha": attestation.source_sha,
+        "started_at": attestation.started_at,
+        "trust_root_id": attestation.trust_root_id,
+        "unresolved_limits": list(attestation.unresolved_limits),
+        "verification_method": attestation.verification_method,
+        "verifier_id": attestation.verifier_id,
+    }
+    return _canonical_json(payload)
+
+
 @dataclass(frozen=True)
 class SignedQualificationAttestation:
     attestation: QualificationAttestation
@@ -1359,6 +1419,11 @@ def verify_qualification_attestation(
         schema_version=str(attestation_input.schema_version),
         verification_method=str(attestation_input.verification_method),
     )
+    verified_attestation_bytes = _qualification_attestation_bytes_exact(attestation)
+    verified_attestation_digest = (
+        "sha256:" + sha256(verified_attestation_bytes).hexdigest()
+    )
+    verified_attestation_json = verified_attestation_bytes.decode("utf-8")
     if attestation.source_sha != expected_source_sha:
         raise QualificationTrustError(
             "attestation source SHA does not match candidate"
@@ -1444,7 +1509,7 @@ def verify_qualification_attestation(
         )
 
     _verify_rsa_pkcs1v15_sha256(
-        payload=attestation.canonical_bytes(),
+        payload=verified_attestation_bytes,
         signature=signature,
         root=root,
     )
@@ -1455,7 +1520,7 @@ def verify_qualification_attestation(
     # caller-owned attestation graph as a source of signed semantics.
     return AcceptedQualificationAttestation(
         attestation_id=str(attestation.attestation_id),
-        attestation_digest=str(attestation.content_digest),
+        attestation_digest=verified_attestation_digest,
         policy_id=verified_policy_id,
         policy_version=verified_policy_version,
         trust_root_id=verified_root_id,
@@ -1497,7 +1562,7 @@ def verify_qualification_attestation(
         signed_at=str(attestation.signed_at),
         unresolved_limits=tuple(str(item) for item in attestation.unresolved_limits),
         verification_method=str(attestation.verification_method),
-        attestation_json=attestation.canonical_bytes().decode("utf-8"),
+        attestation_json=verified_attestation_json,
         signature_b64=signature_b64,
     )
 

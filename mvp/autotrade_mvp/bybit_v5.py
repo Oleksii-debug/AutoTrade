@@ -1185,7 +1185,7 @@ def parse_executions(
 
 
 BYBIT_OPTION_DELIVERY_PARSER_IDENTITY = "BYBIT_OPTION_DELIVERY_V5_JSON_V1"
-BYBIT_OPTION_DELIVERY_PARSER_VERSION = "1.1.0"
+BYBIT_OPTION_DELIVERY_PARSER_VERSION = "1.2.0"
 BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST = (
     "sha256:"
     + sha256(
@@ -1226,6 +1226,9 @@ BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST = (
                     "optional": ["entryPrice"],
                 },
                 "cursor_rule": "OPAQUE_CANONICAL_PROVIDER_TEXT",
+                "instrument_binding": (
+                    "CANONICAL_INSTRUMENT_REGISTRY_EXACT_VERSION_PROVIDER_SYMBOL"
+                ),
                 "economic_numbers": "BOUNDED_CANONICAL_DECIMAL_TEXT",
                 "lifecycle_classification": "NONE",
             },

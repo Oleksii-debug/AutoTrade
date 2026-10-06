@@ -857,9 +857,12 @@ class BybitV5AdapterTests(unittest.TestCase):
             "financial route submission scope is incomplete",
         ):
             observe_submission_json_response(
-                prepared,
-                rebound,
+                response_binding=rebound,
                 provider_id="BYBIT",
+                endpoint=prepared.endpoint,
+                prepared_request_sha256=prepared.body_sha256,
+                capability_snapshot_ids=prepared.capability_snapshot_ids,
+                instrument_versions=prepared.instrument_versions,
             )
 
     def test_submission_observation_rejects_unknown_scope_axis(self):
@@ -881,9 +884,12 @@ class BybitV5AdapterTests(unittest.TestCase):
             "unknown authority axes",
         ):
             observe_submission_json_response(
-                prepared,
-                rebound,
+                response_binding=rebound,
                 provider_id="BYBIT",
+                endpoint=prepared.endpoint,
+                prepared_request_sha256=prepared.body_sha256,
+                capability_snapshot_ids=prepared.capability_snapshot_ids,
+                instrument_versions=prepared.instrument_versions,
             )
 
     def test_submission_observation_rejects_route_capability_retarget(self):

@@ -9,10 +9,13 @@ import unittest
 
 from control.tools.reconvergence_integrity import (
     Change,
+    PROTECTED_MUTATION_ROOTS,
     PROTECTED_SENTINELS,
+    TRUSTED_SCOPE_APPROVAL_MARKER,
     assess_git_revisions,
     assess_reconvergence,
     parse_name_status,
+    parse_trusted_scope_approval,
 )
 
 
@@ -159,13 +162,20 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     parse_name_status([record])
 
-    def test_assessment_rejects_synthetic_unsupported_change(self):
-        with self.assertRaises(ValueError):
-            assess_reconvergence(
-                base_paths=["README.md"],
-                changes=[Change(status="Z", path="README.md")],
-                protected_sentinels=frozenset(),
-            )
+    def test_assessment_rejects_synthetic_unsupported_or_malformed_change(self):
+        for change in (
+            Change(status="Z", path="README.md"),
+            Change(status="M100", path="README.md"),
+            Change(status="R101", previous_path="README.md", path="README2.md"),
+            Change(status="R1", previous_path="README.md", path="README2.md"),
+        ):
+            with self.subTest(change=change):
+                with self.assertRaises(ValueError):
+                    assess_reconvergence(
+                        base_paths=["README.md"],
+                        changes=[change],
+                        protected_sentinels=frozenset(),
+                    )
 
     def test_assessment_rejects_synthetic_missing_or_spurious_previous_path(self):
         cases = (
@@ -249,8 +259,8 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             "every checked-in workflow authority must be a protected sentinel",
         )
 
-    def test_protected_sentinel_modification_fails_closed_by_default(self):
-        sentinel = "control/INDEX.json"
+    def test_executable_trust_root_modification_fails_closed_by_default(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
         result = assess_reconvergence(
             base_paths=[sentinel, "README.md"],
             changes=[Change(status="M", path=sentinel)],
@@ -261,6 +271,33 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             result.protected_violations,
             (f"{sentinel} (modification)",),
         )
+
+    def test_non_executable_protected_metadata_content_remains_mutable(self):
+        sentinel = "control/INDEX.json"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="M", path=sentinel)],
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.protected_violations, ())
+
+    def test_only_two_executable_roots_accept_special_modification_authority(self):
+        self.assertEqual(
+            PROTECTED_MUTATION_ROOTS,
+            frozenset(
+                {
+                    ".github/workflows/reconvergence-integrity.yml",
+                    "control/tools/reconvergence_integrity.py",
+                }
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "executable trust roots"):
+            assess_reconvergence(
+                base_paths=["control/INDEX.json"],
+                changes=[Change(status="M", path="control/INDEX.json")],
+                authorized_protected_sentinel_paths=("control/INDEX.json",),
+            )
 
     def test_trusted_protected_sentinel_modification_requires_exact_path_authorization(self):
         sentinel = "control/tools/reconvergence_integrity.py"
@@ -503,7 +540,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Reconvergence tree guard passed.", result.stdout)
 
-    def test_module_entrypoint_uses_exact_trusted_path_environment(self):
+    def test_module_entrypoint_uses_exact_external_trust_root_approval(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "control" / "tools"
@@ -532,10 +569,6 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             git("commit", "-am", "child")
             head_sha = git("rev-parse", "HEAD")
 
-            env = os.environ.copy()
-            env["AUTOTRADE_TRUSTED_PROTECTED_SENTINEL_PATHS"] = (
-                "control/tools/reconvergence_integrity.py"
-            )
             result = subprocess.run(
                 [
                     sys.executable,
@@ -547,9 +580,10 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                     head_sha,
                     "--cwd",
                     str(root),
+                    "--trusted-root-approval",
+                    "control/tools/reconvergence_integrity.py",
                 ],
                 cwd=Path.cwd(),
-                env=env,
                 check=False,
                 text=True,
                 stdout=subprocess.PIPE,
@@ -608,30 +642,53 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("head is not descended from exact base revision", result.stdout)
 
-    def test_canonical_workflow_authorizes_protected_sentinel_changes_only_for_repo_owner(self):
+    def test_owner_comment_approval_is_exact_head_bound_and_malformed_current_record_fails(self):
+        head = "a" * 40
+        body = "\n".join(
+            (
+                TRUSTED_SCOPE_APPROVAL_MARKER,
+                f"head: {head}",
+                "path: control/tools/reconvergence_integrity.py",
+            )
+        )
+        self.assertEqual(
+            parse_trusted_scope_approval(body, expected_head_sha=head),
+            ("control/tools/reconvergence_integrity.py",),
+        )
+        self.assertIsNone(
+            parse_trusted_scope_approval(
+                body,
+                expected_head_sha="b" * 40,
+            )
+        )
+        with self.assertRaises(ValueError):
+            parse_trusted_scope_approval(
+                "\n".join(
+                    (
+                        TRUSTED_SCOPE_APPROVAL_MARKER,
+                        f"head: {head}",
+                        "path: ../escape.py",
+                    )
+                ),
+                expected_head_sha=head,
+            )
+
+    def test_canonical_workflow_resolves_owner_comment_authority_not_pr_authorship(self):
         workflow = Path(
             ".github/workflows/reconvergence-integrity.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn("github.repository_owner", workflow)
-        self.assertIn("github.event.pull_request.user.login", workflow)
-        self.assertIn(
-            "AUTOTRADE_TRUSTED_PROTECTED_SENTINEL_PATHS",
-            workflow,
-        )
-        self.assertIn(
-            ".github/workflows/reconvergence-integrity.yml",
-            workflow,
-        )
-        self.assertIn(
-            "control/tools/reconvergence_integrity.py",
-            workflow,
-        )
-        self.assertIn(
-            'if [ "$AUTHOR_LOGIN" = "$REPOSITORY_OWNER" ]; then',
-            workflow,
-        )
+        self.assertIn("issues: read", workflow)
+        self.assertIn("author_association", workflow)
+        self.assertIn('\"OWNER\"', workflow)
+        self.assertIn("parse_trusted_scope_approval", workflow)
+        self.assertIn("--trusted-root-approval", workflow)
+        self.assertIn("HEAD_SHA:", workflow)
+        self.assertIn("Reverify external exact-head trust-root approvals", workflow)
         self.assertIn('EVENT_BASE_SHA', workflow)
         self.assertIn('target_tip="$(git ls-remote origin', workflow)
+        self.assertNotIn("AUTHOR_LOGIN", workflow)
+        self.assertNotIn("github.repository_owner", workflow)
+        self.assertNotIn("github.event.pull_request.user.login", workflow)
         self.assertNotIn("github.event.pull_request.body", workflow)
         self.assertNotIn("github.event.pull_request.title", workflow)
 

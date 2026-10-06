@@ -71,6 +71,18 @@ def top(**overrides):
 
 
 class ExecutionRealismTests(unittest.TestCase):
+    def test_already_triggered_is_reserved_for_stop_limit_orders(self):
+        for order_type, kwargs in (
+            ("MARKET", {}),
+            ("LIMIT", {"limit_price": "102"}),
+        ):
+            with self.subTest(order_type=order_type):
+                with self.assertRaisesRegex(
+                    ExecutionRealismError,
+                    "only valid for STOP_LIMIT",
+                ):
+                    order(order_type=order_type, already_triggered=True, **kwargs)
+
     def test_execution_scalar_ingress_rejects_hostile_subclasses_without_callbacks(self):
         class HostileDecimal(Decimal):
             finite_calls = 0

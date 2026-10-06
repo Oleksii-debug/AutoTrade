@@ -353,6 +353,10 @@ class SimulatedOrder:
             raise ExecutionRealismError("unsupported order_type")
         if type(self.already_triggered) is not bool:
             raise TypeError("already_triggered must be boolean")
+        if self.already_triggered and order_type != "STOP_LIMIT":
+            raise ExecutionRealismError(
+                "already_triggered is only valid for STOP_LIMIT orders"
+            )
         quantity = _positive(self.quantity, name="quantity")
         lot_size = _positive(self.lot_size, name="lot_size")
         try:
@@ -415,6 +419,10 @@ class SimulatedOrder:
             raise ExecutionRealismError("unsupported order_type")
         if type(already_triggered) is not bool:
             raise TypeError("already_triggered must be boolean")
+        if already_triggered and normalized_type != "STOP_LIMIT":
+            raise ExecutionRealismError(
+                "already_triggered is only valid for STOP_LIMIT orders"
+            )
         limit = (
             _positive(limit_price, name="limit_price")
             if limit_price is not None

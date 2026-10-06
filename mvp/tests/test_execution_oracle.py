@@ -421,6 +421,36 @@ class ExecutionOracleTests(unittest.TestCase):
         self.assertTrue(result.triggered)
         assert_conservative_execution(order=o, observation=q, model=m, result=result)
 
+    def test_oracle_rejects_forged_stop_trigger_without_price_evidence(self):
+        o = order(
+            order_type="STOP_LIMIT",
+            limit_price="102",
+            stop_price="105",
+        )
+        q = observation(ask="101")
+        m = model()
+        result = simulate_execution(o, q, m)
+        self.assertFalse(result.triggered)
+        forged = replace(result, triggered=True)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "independently observed stop evidence",
+        ):
+            assert_conservative_execution(order=o, observation=q, model=m, result=forged)
+
+    def test_oracle_accepts_observed_stop_trigger_without_same_observation_fill(self):
+        o = order(
+            order_type="STOP_LIMIT",
+            limit_price="102",
+            stop_price="100",
+        )
+        q = observation(ask="101")
+        m = model()
+        result = simulate_execution(o, q, m)
+        self.assertTrue(result.triggered)
+        self.assertEqual(result.filled_quantity, Decimal("0"))
+        assert_conservative_execution(order=o, observation=q, model=m, result=result)
+
     def test_oracle_rejects_status_quantity_contradictions(self):
         o, q, m = order(), observation(), model()
         full = simulate_execution(o, q, m)

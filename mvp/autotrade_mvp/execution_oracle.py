@@ -167,6 +167,33 @@ def _oracle_limit_touched(
     )
 
 
+def _oracle_stop_touched(
+    *,
+    order: SimulatedOrder,
+    observation: LiquidityObservation,
+    model: ExecutionModel,
+) -> bool:
+    """Independently prove a STOP_LIMIT trigger from the frozen observation."""
+
+    if order.stop_price is None:
+        raise ExecutionOracleError("stop-limit execution lacks stop price")
+    if model.data_fidelity == "BAR":
+        if observation.bar_low is None or observation.bar_high is None:
+            raise ExecutionOracleError("BAR stop trigger lacks price bounds")
+        return (
+            observation.bar_high >= order.stop_price
+            if order.side == "BUY"
+            else observation.bar_low <= order.stop_price
+        )
+    if observation.bid is None or observation.ask is None:
+        raise ExecutionOracleError("stop trigger lacks bid/ask evidence")
+    return (
+        observation.ask >= order.stop_price
+        if order.side == "BUY"
+        else observation.bid <= order.stop_price
+    )
+
+
 def _round_down(quantity: Decimal, lot_size: Decimal) -> Decimal:
     try:
         return round_fraction_to_quantum(
@@ -319,6 +346,20 @@ def assert_conservative_execution(
         raise ExecutionOracleError(
             "filled quantity exceeds independently qualified participation capacity"
         )
+
+    if result.triggered and not order.already_triggered:
+        if order.order_type != "STOP_LIMIT":
+            raise ExecutionOracleError(
+                "non-stop order cannot mint triggered state"
+            )
+        if independent_capacity <= zero or not _oracle_stop_touched(
+            order=order,
+            observation=observation,
+            model=model,
+        ):
+            raise ExecutionOracleError(
+                "triggered state lacks independently observed stop evidence"
+            )
 
     if result.filled_quantity > zero:
         expected_fill_status = (

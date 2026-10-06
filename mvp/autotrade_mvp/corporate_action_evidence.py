@@ -1173,7 +1173,7 @@ class DurableCorporateActionEvidenceStore:
 
     def _validated_store(self):
         store, identity, _, _, _, _ = (
-            DurableCorporateActionEvidenceStore._composition(self)
+            type(self)._composition(self)
         )
         return store, identity
 
@@ -1185,11 +1185,11 @@ class DurableCorporateActionEvidenceStore:
             account_id,
             environment,
             aggregate_id,
-        ) = DurableCorporateActionEvidenceStore._composition(self)
+        ) = type(self)._composition(self)
         with journal_store_authority_scope(store, identity):
             events = JournalStore.load_events(
                 store,
-                self._AGGREGATE_TYPE,
+                type(self)._AGGREGATE_TYPE,
                 aggregate_id,
             )
         expected_version = 1
@@ -1199,7 +1199,7 @@ class DurableCorporateActionEvidenceStore:
                     "corporate-action evidence versions are not contiguous"
                 )
             expected_version += 1
-            if event.get("event_type") != self._EVENT_TYPE:
+            if event.get("event_type") != type(self)._EVENT_TYPE:
                 raise CorporateActionEvidenceConflict(
                     "corporate-action evidence journal contains unsupported event"
                 )
@@ -1229,7 +1229,7 @@ class DurableCorporateActionEvidenceStore:
 
     def _command_id(self, external_event_id: str) -> str:
         _, _, provider_id, account_id, environment, _ = (
-            DurableCorporateActionEvidenceStore._composition(self)
+            type(self)._composition(self)
         )
         return str(
             uuid5(
@@ -1247,7 +1247,7 @@ class DurableCorporateActionEvidenceStore:
 
     def _idempotency_key(self, external_event_id: str) -> str:
         _, _, provider_id, account_id, environment, _ = (
-            DurableCorporateActionEvidenceStore._composition(self)
+            type(self)._composition(self)
         )
         return (
             "corporate-action-evidence:"
@@ -1268,7 +1268,7 @@ class DurableCorporateActionEvidenceStore:
         """Prepare source evidence for a shared JournalStore transaction."""
 
         _, _, provider_id, account_id, environment, aggregate_id = (
-            DurableCorporateActionEvidenceStore._composition(self)
+            type(self)._composition(self)
         )
         if (
             accepted.provider_id != provider_id
@@ -1279,11 +1279,11 @@ class DurableCorporateActionEvidenceStore:
                 "accepted corporate action does not match durable scope"
             )
 
-        events = DurableCorporateActionEvidenceStore._events(self)
+        events = type(self)._events(self)
         same_identity = [
             event
             for event in events
-            if DurableCorporateActionEvidenceStore._payload(event).get("external_event_id")
+            if type(self)._payload(event).get("external_event_id")
             == accepted.external_event_id
         ]
         if same_identity:
@@ -1291,7 +1291,7 @@ class DurableCorporateActionEvidenceStore:
                 raise CorporateActionEvidenceConflict(
                     "external corporate-action identity appears more than once"
                 )
-            saved = DurableCorporateActionEvidenceStore._payload(same_identity[0])
+            saved = type(self)._payload(same_identity[0])
             if (
                 saved.get("provenance_digest") != accepted.provenance_digest
                 or saved.get("evidence_ref") != accepted.evidence_ref
@@ -1325,8 +1325,8 @@ class DurableCorporateActionEvidenceStore:
                 envelope=None,
                 request=request,
                 result=result,
-                command_id=DurableCorporateActionEvidenceStore._command_id(self, accepted.external_event_id),
-                idempotency_key=DurableCorporateActionEvidenceStore._idempotency_key(self, accepted.external_event_id),
+                command_id=type(self)._command_id(self, accepted.external_event_id),
+                idempotency_key=type(self)._idempotency_key(self, accepted.external_event_id),
                 already_committed=True,
             )
 
@@ -1339,18 +1339,18 @@ class DurableCorporateActionEvidenceStore:
             prior = [
                 event
                 for event in events
-                if DurableCorporateActionEvidenceStore._payload(event).get("external_event_id")
+                if type(self)._payload(event).get("external_event_id")
                 == accepted.corrects_external_event_id
             ]
             if len(prior) != 1:
                 raise CorporateActionEvidenceConflict(
                     "corporate-action correction target must identify one retained event"
                 )
-            prior_payload = DurableCorporateActionEvidenceStore._payload(prior[0])
+            prior_payload = type(self)._payload(prior[0])
             already_corrected = [
                 event
                 for event in events
-                if DurableCorporateActionEvidenceStore._payload(event).get("corrects_external_event_id")
+                if type(self)._payload(event).get("corrects_external_event_id")
                 == accepted.corrects_external_event_id
             ]
             if already_corrected:
@@ -1419,8 +1419,8 @@ class DurableCorporateActionEvidenceStore:
         }
         envelope = {
             "event_id": event_id,
-            "event_type": self._EVENT_TYPE,
-            "aggregate_type": self._AGGREGATE_TYPE,
+            "event_type": type(self)._EVENT_TYPE,
+            "aggregate_type": type(self)._AGGREGATE_TYPE,
             "aggregate_id": aggregate_id,
             "aggregate_version": str(next_version),
             "committed_at": accepted.observed_at,
@@ -1447,15 +1447,15 @@ class DurableCorporateActionEvidenceStore:
             envelope=envelope,
             request=request,
             result=result,
-            command_id=DurableCorporateActionEvidenceStore._command_id(self, accepted.external_event_id),
-            idempotency_key=DurableCorporateActionEvidenceStore._idempotency_key(self, accepted.external_event_id),
+            command_id=type(self)._command_id(self, accepted.external_event_id),
+            idempotency_key=type(self)._idempotency_key(self, accepted.external_event_id),
         )
 
     def record(
         self,
         accepted: AuthoritativeCorporateAction,
     ) -> DurableCorporateActionEvidenceResult:
-        plan = DurableCorporateActionEvidenceStore.prepare_record_mutation(
+        plan = type(self).prepare_record_mutation(
             self,
             accepted,
         )
@@ -1473,13 +1473,13 @@ class DurableCorporateActionEvidenceStore:
                 "fresh corporate-action evidence plan lacks durable envelope"
             )
         store, identity, _, _, environment, _ = (
-            DurableCorporateActionEvidenceStore._composition(self)
+            type(self)._composition(self)
         )
         with journal_store_authority_scope(store, identity):
             _, inserted, _ = JournalStore.commit_command(
                 store,
                 command_id=plan.command_id,
-                actor=self._ACTOR,
+                actor=type(self)._ACTOR,
                 environment=environment,
                 idempotency_key=plan.idempotency_key,
                 request=plan.request,

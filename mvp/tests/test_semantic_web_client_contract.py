@@ -338,6 +338,26 @@ class SemanticWebClientContractTests(unittest.TestCase):
         poll = js[js.index("async function pollEvents()"):js.index("function newCommandPayload")]
         self.assertIn('"event:" + cursor.toString()', poll)
 
+    def test_snapshot_jobs_reject_non_object_entries_before_render(self):
+        js = APP.read_text(encoding="utf-8")
+        parser = js[
+            js.index("function parseCanonicalSnapshot"):
+            js.index("function parseCommandResult")
+        ]
+        self.assertIn("!Array.isArray(snapshot.jobs)", parser)
+        self.assertIn(
+            'snapshot.jobs.some((item) =>',
+            parser,
+        )
+        self.assertIn(
+            '!item || typeof item !== "object" || Array.isArray(item)',
+            parser,
+        )
+        self.assertIn(
+            'throw new Error("jobs must be an array of objects")',
+            parser,
+        )
+
     def test_snapshot_counters_cannot_silently_regress(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("const parsed = parseCanonicalSnapshot(snapshot)", js)

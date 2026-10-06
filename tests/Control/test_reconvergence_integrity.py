@@ -223,6 +223,91 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             ("control/qualification.json (type change)",),
         )
 
+    def test_protected_sentinel_content_change_requires_exact_path_authority(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        base = [sentinel, "README.md"]
+
+        no_scope = assess_reconvergence(
+            base_paths=base,
+            changes=[Change(status="M", path=sentinel)],
+        )
+        self.assertFalse(no_scope.allowed)
+        self.assertEqual(
+            no_scope.protected_violations,
+            (f"{sentinel} (modified without exact-path authorization)",),
+        )
+
+        directory_scope = assess_reconvergence(
+            base_paths=base,
+            changes=[Change(status="M", path=sentinel)],
+            allowed_scopes=("control/tools",),
+        )
+        self.assertFalse(directory_scope.allowed)
+        self.assertEqual(directory_scope.scope_violations, ())
+        self.assertEqual(
+            directory_scope.protected_violations,
+            (f"{sentinel} (modified without exact-path authorization)",),
+        )
+
+        exact_scope = assess_reconvergence(
+            base_paths=base,
+            changes=[Change(status="M", path=sentinel)],
+            allowed_scopes=(sentinel,),
+        )
+        self.assertTrue(exact_scope.allowed)
+        self.assertEqual(exact_scope.protected_violations, ())
+        self.assertEqual(exact_scope.scope_violations, ())
+
+    def test_workflow_trust_root_content_change_is_blocked_without_scope(self):
+        sentinel = ".github/workflows/reconvergence-integrity.yml"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="M", path=sentinel)],
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn(
+            f"{sentinel} (modified without exact-path authorization)",
+            result.protected_violations,
+        )
+
+    def test_parser_rejects_unsupported_status_and_noncanonical_paths(self):
+        for record in (
+            "X\tREADME.md",
+            "U\tREADME.md",
+            "M\t../outside.py",
+            "M\t./relative.py",
+            "M\tdir//file.py",
+        ):
+            with self.subTest(record=record), self.assertRaises(ValueError):
+                parse_name_status([record])
+
+    def test_assessment_revalidates_synthetic_change_records(self):
+        with self.assertRaises(ValueError):
+            assess_reconvergence(
+                base_paths=["README.md"],
+                changes=[Change(status="X", path="README.md")],
+                protected_sentinels=frozenset(),
+            )
+        with self.assertRaises(ValueError):
+            assess_reconvergence(
+                base_paths=["README.md"],
+                changes=[Change(status="M", path="../README.md")],
+                protected_sentinels=frozenset(),
+            )
+        with self.assertRaises(ValueError):
+            assess_reconvergence(
+                base_paths=["README.md"],
+                changes=[
+                    Change(
+                        status="M",
+                        path="README.md",
+                        previous_path="other.md",
+                    )
+                ],
+                protected_sentinels=frozenset(),
+            )
+
     def test_declared_scope_rejects_small_unrelated_blob_change(self):
         result = assess_reconvergence(
             base_paths=[

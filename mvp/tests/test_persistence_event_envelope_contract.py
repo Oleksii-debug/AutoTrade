@@ -118,6 +118,52 @@ class CanonicalEventEnvelopeAdmissionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "EvidenceRef artifact_id"):
                 JournalStore(f"{directory}/journal.sqlite3").append_event(envelope)
 
+    def test_evidence_ref_rejects_noncanonical_uri_lexical_forms(self):
+        invalid = (
+            "https://exa mple.test/evidence",
+            "https://example.test/%ZZ",
+            "scheme:\\ncontrol",
+        )
+        for source_uri in invalid:
+            with self.subTest(source_uri=source_uri), TemporaryDirectory() as directory:
+                envelope = canonical_event()
+                envelope["evidence_refs"] = [
+                    {
+                        "artifact_id": "33333333-3333-4333-8333-333333333333",
+                        "sha256": "sha256:" + "0" * 64,
+                        "observed_at": "2026-10-06T13:30:00Z",
+                        "source_uri": source_uri,
+                    }
+                ]
+                with self.assertRaisesRegex(ValueError, "absolute URI"):
+                    JournalStore(f"{directory}/journal.sqlite3").append_event(envelope)
+
+    def test_evidence_ref_accepts_rfc3986_absolute_uri_forms(self):
+        valid = (
+            "https://example.test/evidence%20bundle?q=1#cut",
+            "urn:isbn:0451450523",
+            "file:///C:/Program%20Files/AutoTrade/evidence.json",
+        )
+        for source_uri in valid:
+            with self.subTest(source_uri=source_uri), TemporaryDirectory() as directory:
+                envelope = canonical_event()
+                envelope["event_id"] = {
+                    "https://example.test/evidence%20bundle?q=1#cut": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+                    "urn:isbn:0451450523": "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+                    "file:///C:/Program%20Files/AutoTrade/evidence.json": "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC",
+                }[source_uri]
+                envelope["evidence_refs"] = [
+                    {
+                        "artifact_id": "33333333-3333-4333-8333-333333333333",
+                        "sha256": "sha256:" + "0" * 64,
+                        "observed_at": "2026-10-06T13:30:00Z",
+                        "source_uri": source_uri,
+                    }
+                ]
+                self.assertTrue(
+                    JournalStore(f"{directory}/journal.sqlite3").append_event(envelope).inserted
+                )
+
     def test_claimed_event_envelope_rejects_malformed_evidence_ref(self):
         with TemporaryDirectory() as directory:
             envelope = canonical_event()

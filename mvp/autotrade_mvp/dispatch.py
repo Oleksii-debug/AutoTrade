@@ -552,6 +552,12 @@ def load_submission_response_binding(
     """Load exact provider response provenance from the canonical submission journal."""
 
     _canonical_journal_authority_snapshot(store)
+    if (
+        type(environment) is not str
+        or type(account_id) is not str
+        or type(attempt_id) is not str
+    ):
+        raise ValueError("durable submission selectors must be exact text")
     aggregate_id = submission_attempt_aggregate_id(
         environment=environment,
         account_id=account_id,

@@ -31,6 +31,10 @@ from .provider_host_attestation import (
     verify_host_observed_attestation,
     verify_host_prepared_attestation,
 )
+from .provider_origin_journal_identity import (
+    ProviderOriginJournalIdentityError,
+    canonical_provider_origin_journal_identity as _canonical_journal_identity,
+)
 from .provider_origin import (
     ProviderOriginError,
     _OBSERVED_EVENT,
@@ -48,10 +52,6 @@ from .provider_transport import (
     AuthenticatedReadEndpointRule,
     ProviderTransportScopeError,
     _bybit_authenticated_read_rule,
-)
-from .store_identity import (
-    JournalStoreIdentity,
-    require_exact_journal_store_identity,
 )
 
 
@@ -88,62 +88,21 @@ class HostProviderOriginPins:
             raise TypeError("credential_generation must be an exact positive integer")
 
 
-_JOURNAL_IDENTITY_SCHEMA = "autotrade-provider-origin-journal-identity:v1"
 _ENDPOINT_RULE_SCHEMA = "autotrade-authenticated-read-endpoint-rule:v1"
-
-
-def _journal_identity_material(identity: JournalStoreIdentity) -> dict[str, object]:
-    state = vars(
-        require_exact_journal_store_identity(
-            identity,
-            subject="provider-origin Host bridge journal identity",
-        )
-    )
-    source = state["identity_source"]
-    if source == "windows_by_handle":
-        return {
-            "schema": _JOURNAL_IDENTITY_SCHEMA,
-            "identity_source": source,
-            "windows_volume_serial": state["windows_volume_serial"],
-            "windows_file_index_high": state["windows_file_index_high"],
-            "windows_file_index_low": state["windows_file_index_low"],
-        }
-    if source == "posix_stat":
-        return {
-            "schema": _JOURNAL_IDENTITY_SCHEMA,
-            "identity_source": source,
-            "canonical_path": state["canonical_path"],
-            "filesystem_device": state["filesystem_device"],
-            "filesystem_inode": state["filesystem_inode"],
-        }
-    raise ProviderOriginHostBridgeError(
-        "provider-origin journal identity source is unsupported"
-    )
 
 
 def canonical_provider_origin_journal_identity(
     store: JournalStore,
-    _require_store=require_exact_journal_store_authority,
-    _material=_journal_identity_material,
-    _digest=payload_digest,
+    _canonical=_canonical_journal_identity,
 ) -> str:
-    """Content-address the exact selected physical journal generation."""
+    """Expose the shared canonical JournalStore identity through bridge API."""
 
     try:
-        identity = _require_store(
-            store,
-            subject="provider-origin Host bridge JournalStore",
-        )
-        digest = _digest(_material(identity))
-    except (TypeError, RuntimeError, ValueError) as error:
+        return _canonical(store)
+    except ProviderOriginJournalIdentityError as error:
         raise ProviderOriginHostBridgeError(
             "canonical provider-origin JournalStore authority is unavailable"
         ) from error
-    if type(digest) is not str or not digest.startswith("sha256:") or len(digest) != 71:
-        raise ProviderOriginHostBridgeError(
-            "canonical provider-origin journal identity is invalid"
-        )
-    return digest
 
 
 def canonical_bybit_authenticated_read_rule_identity(

@@ -232,15 +232,21 @@ def capture_current_scientific_financial_cut(
             store,
             target_sequence=frozen_sequence,
         )
-        latest = load_latest_reconciliation_checkpoint_for_scope(
-            store,
-            provider_id=provider,
-            account_id=account,
-            environment=env,
-        )
+        latest = None
+        latest_error: Exception | None = None
+        try:
+            latest = load_latest_reconciliation_checkpoint_for_scope(
+                store,
+                provider_id=provider,
+                account_id=account,
+                environment=env,
+            )
+        except (TypeError, ValueError) as error:
+            latest_error = error
+
         checkpoint = None
         checkpoint_error: Exception | None = None
-        if latest is not None:
+        if latest_error is None and latest is not None:
             try:
                 checkpoint = require_current_reconciliation_checkpoint(
                     store,
@@ -260,6 +266,10 @@ def capture_current_scientific_financial_cut(
         raise FinancialCutConflict(
             "financial journal changed while the scientific financial cut was captured"
         )
+    if latest_error is not None:
+        raise FinancialCutConflict(
+            "reconciliation checkpoint history is not authoritative for the requested scope"
+        ) from latest_error
     if latest is None:
         raise FinancialCutUnavailable(
             "current reconciliation checkpoint is unavailable"

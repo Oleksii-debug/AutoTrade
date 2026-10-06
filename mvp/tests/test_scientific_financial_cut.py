@@ -408,5 +408,47 @@ class ScientificFinancialCutTests(unittest.TestCase):
             self.assertNotEqual(second.cut_digest, first.cut_digest)
 
 
+    def test_corrupt_checkpoint_history_is_conflict_after_stable_recheck(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.db")
+
+            with patch.object(
+                cut_module,
+                "load_latest_reconciliation_checkpoint_for_scope",
+                side_effect=ValueError("corrupt reconciliation chronology"),
+            ):
+                with self.assertRaisesRegex(
+                    FinancialCutConflict,
+                    "history is not authoritative",
+                ):
+                    _capture(store)
+
+    def test_corrupt_checkpoint_race_prioritizes_changed_financial_cut(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.db")
+
+            def append_then_fail(*args, **kwargs):
+                record_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id="science-cut-corrupt-race",
+                    result=_reconciliation(),
+                    observed_at="2026-09-24T19:00:00Z",
+                    host_id="test-host",
+                    owner_epoch="epoch-1",
+                )
+                raise ValueError("corrupt reconciliation chronology")
+
+            with patch.object(
+                cut_module,
+                "load_latest_reconciliation_checkpoint_for_scope",
+                new=append_then_fail,
+            ):
+                with self.assertRaisesRegex(
+                    FinancialCutConflict,
+                    "financial journal changed",
+                ):
+                    _capture(store)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -289,7 +289,11 @@ class ReleaseScopeMappingTests(unittest.TestCase):
 
     def test_locked_package_license_mismatch_fails(self):
         document, raw = _sbom()
-        document["packages"][0]["licenseConcluded"] = "MIT"
+        webview = next(
+            item for item in document["packages"]
+            if item["name"] == "Microsoft.Web.WebView2"
+        )
+        webview["licenseConcluded"] = "MIT"
         raw = (
             json.dumps(document, sort_keys=True, separators=(",", ":"))
             + "\n"
@@ -315,10 +319,19 @@ class ReleaseScopeMappingTests(unittest.TestCase):
 
     def test_external_sbom_package_without_purl_fails(self):
         document, raw = _sbom()
-        package = dict(document["packages"][0])
+        package = dict(next(
+            item for item in document["packages"]
+            if item["name"] == "Microsoft.Web.WebView2"
+        ))
         package.pop("externalRefs")
         document = dict(document)
-        document["packages"] = [package]
+        document["packages"] = [
+            next(
+                item for item in document["packages"]
+                if item["name"] == "AutoTrade"
+            ),
+            package,
+        ]
         raw = (
             json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
         ).encode("utf-8")

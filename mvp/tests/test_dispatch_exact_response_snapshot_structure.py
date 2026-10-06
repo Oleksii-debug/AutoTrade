@@ -73,6 +73,7 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
                     "snapshot-defaults-retarget",
                     transport,
                 )
+                self.assertIs(snapshot.__defaults__, original_defaults)
             finally:
                 snapshot.__defaults__ = original_defaults
 
@@ -136,6 +137,7 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
                     "snapshot-code-retarget",
                     transport,
                 )
+                self.assertIs(snapshot.__code__, original_code)
             finally:
                 snapshot.__code__ = original_code
 
@@ -189,6 +191,7 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
                     "snapshot-decoder-json-retarget",
                     transport,
                 )
+                self.assertIs(dispatch_module.json, original_json)
             finally:
                 dispatch_module.json = original_json
 
@@ -239,6 +242,7 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
                     "snapshot-json-loads-retarget",
                     transport,
                 )
+                self.assertIs(json_module.loads, original_loads)
             finally:
                 json_module.loads = original_loads
 
@@ -290,6 +294,7 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
                     "snapshot-depth-guard-retarget",
                     transport,
                 )
+                self.assertIs(depth_guard.__code__, original_code)
             finally:
                 depth_guard.__code__ = original_code
 

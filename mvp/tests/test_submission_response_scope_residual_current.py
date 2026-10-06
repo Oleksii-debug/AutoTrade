@@ -116,6 +116,98 @@ class ResponseScopeResidualCurrentTests(unittest.TestCase):
             self.assertEqual(binding.account_id, self.ACCOUNT_ID)
             self.assertEqual(binding.client_order_id, self.CLIENT_ORDER_ID)
 
+    def test_response_binding_constructor_rejects_string_subclasses_before_methods(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        class HostileText(str):
+            callbacks = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("hostile strip executed")
+
+            def upper(self):
+                type(self).callbacks += 1
+                raise AssertionError("hostile upper executed")
+
+            def encode(self, *args, **kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("hostile encode executed")
+
+        scope = {}
+        response = b"{}"
+        kwargs = dict(
+            attempt_id="attempt-constructor-ingress",
+            aggregate_id="aggregate-constructor-ingress",
+            provider="BYBIT",
+            request_hash="sha256:" + "1" * 64,
+            client_order_id="client-constructor-ingress",
+            environment="SIMULATION",
+            account_id="acct-constructor-ingress",
+            prepared_at="2026-10-06T00:41:00Z",
+            sent_at="2026-10-06T00:42:00Z",
+            submission_scope=scope,
+            submission_scope_hash="sha256:"
+            + __import__("hashlib").sha256(
+                canonical_json(scope).encode("utf-8")
+            ).hexdigest(),
+            response_bytes=response,
+            response_sha256="sha256:"
+            + __import__("hashlib").sha256(response).hexdigest(),
+            response_encoding="utf-8-json",
+            terminal_state="SENT",
+            _factory_token=dispatch_module._SUBMISSION_RESPONSE_BINDING_TOKEN,
+        )
+
+        for field in ("environment", "prepared_at", "sent_at", "request_hash"):
+            HostileText.callbacks = 0
+            forged = dict(kwargs, **{field: HostileText(kwargs[field])})
+            with self.subTest(field=field):
+                with self.assertRaises((TypeError, ValueError)):
+                    SubmissionResponseBinding(**forged)
+                self.assertEqual(HostileText.callbacks, 0)
+
+    def test_response_binding_constructor_rejects_hostile_scope_before_mapping_callbacks(self):
+        from mvp.autotrade_mvp import dispatch as dispatch_module
+
+        class HostileDict(dict):
+            callbacks = 0
+
+            def items(self):
+                type(self).callbacks += 1
+                raise AssertionError("hostile items executed")
+
+            def copy(self):
+                type(self).callbacks += 1
+                raise AssertionError("hostile copy executed")
+
+        scope = HostileDict()
+        response = b"{}"
+        scope_hash = "sha256:" + __import__("hashlib").sha256(
+            b"{}"
+        ).hexdigest()
+        with self.assertRaises(TypeError):
+            SubmissionResponseBinding(
+                attempt_id="attempt-hostile-scope",
+                aggregate_id="aggregate-hostile-scope",
+                provider="BYBIT",
+                request_hash="sha256:" + "1" * 64,
+                client_order_id="client-hostile-scope",
+                environment="SIMULATION",
+                account_id="acct-hostile-scope",
+                prepared_at="2026-10-06T00:41:00Z",
+                sent_at="2026-10-06T00:42:00Z",
+                submission_scope=scope,
+                submission_scope_hash=scope_hash,
+                response_bytes=response,
+                response_sha256="sha256:"
+                + __import__("hashlib").sha256(response).hexdigest(),
+                response_encoding="utf-8-json",
+                terminal_state="SENT",
+                _factory_token=dispatch_module._SUBMISSION_RESPONSE_BINDING_TOKEN,
+            )
+        self.assertEqual(HostileDict.callbacks, 0)
+
     def test_provider_must_be_exact_text_not_string_coerced(self):
         with TemporaryDirectory() as directory:
             store = self._store(

@@ -533,6 +533,18 @@ def observe_authenticated_json_response(
 
 
 
+def _freeze_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _freeze_json(nested) for key, nested in value.items()}
+        )
+    if isinstance(value, tuple):
+        return tuple(_freeze_json(item) for item in value)
+    if isinstance(value, list):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
 def _thaw_json(value: object) -> object:
     if isinstance(value, Mapping):
         return {str(key): _thaw_json(nested) for key, nested in value.items()}

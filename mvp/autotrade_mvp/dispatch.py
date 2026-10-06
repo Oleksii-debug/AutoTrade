@@ -568,12 +568,53 @@ def load_submission_response_binding(
             "durable exact response requires Prepared -> Sending -> Sent/Unknown"
         )
     prepared, sending, sent = events
+    canonical_environment = environment.strip().upper()
+    canonical_account_id = account_id.strip()
+
+    for expected_version, event in enumerate(events, start=1):
+        if (
+            type(event) is not dict
+            or event.get("aggregate_type") != "submission_attempt"
+            or event.get("aggregate_id") != aggregate_id
+            or type(event.get("aggregate_version")) is not int
+            or event.get("aggregate_version") != expected_version
+            or event.get("environment") != canonical_environment
+        ):
+            raise ValueError("durable submission event chronology is invalid")
+
     payload = prepared.get("payload")
+    sending_payload = sending.get("payload")
+    sent_payload = sent.get("payload")
     if not isinstance(payload, dict):
         raise ValueError("durable SubmissionPrepared payload is invalid")
-    sent_payload = sent.get("payload")
+    if not isinstance(sending_payload, dict):
+        raise ValueError("durable SubmissionSending payload is invalid")
     if not isinstance(sent_payload, dict):
         raise ValueError("durable terminal submission payload is invalid")
+
+    prepared_attempt_id = payload.get("attempt_id")
+    prepared_environment = payload.get("environment")
+    prepared_account_id = payload.get("account_id")
+    provider = payload.get("provider")
+    request_hash = payload.get("request_hash")
+    client_order_id = payload.get("client_order_id")
+    if (
+        type(prepared_attempt_id) is not str
+        or prepared_attempt_id != attempt_id
+        or prepared_environment != canonical_environment
+        or prepared_account_id != canonical_account_id
+        or type(provider) is not str
+        or not provider.strip()
+        or type(request_hash) is not str
+        or type(client_order_id) is not str
+        or not client_order_id.strip()
+    ):
+        raise ValueError("durable SubmissionPrepared identity is invalid")
+    if (
+        sending_payload.get("client_order_id") != client_order_id
+        or sent_payload.get("client_order_id") != client_order_id
+    ):
+        raise ValueError("durable submission client-order identity changed")
     response_text = sent_payload.get("response_text")
     response_sha256 = sent_payload.get("response_sha256")
     response_encoding = sent_payload.get("response_encoding")
@@ -672,16 +713,14 @@ def load_submission_response_binding(
     sent_at = sent.get("observed_at")
     if not isinstance(prepared_at, str) or not isinstance(sent_at, str):
         raise ValueError("durable submission timestamps are unavailable")
-    if sending.get("aggregate_id") != aggregate_id or sent.get("aggregate_id") != aggregate_id:
-        raise ValueError("durable submission aggregate identity mismatch")
     return SubmissionResponseBinding(
-        attempt_id=attempt_id,
+        attempt_id=prepared_attempt_id,
         aggregate_id=aggregate_id,
-        provider=str(payload.get("provider", "")),
-        request_hash=str(payload.get("request_hash", "")),
-        client_order_id=str(payload.get("client_order_id", "")),
-        environment=str(payload.get("environment", "")),
-        account_id=str(payload.get("account_id", "")),
+        provider=provider,
+        request_hash=request_hash,
+        client_order_id=client_order_id,
+        environment=prepared_environment,
+        account_id=prepared_account_id,
         prepared_at=prepared_at,
         sent_at=sent_at,
         submission_scope=scope,

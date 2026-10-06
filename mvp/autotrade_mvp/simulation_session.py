@@ -234,6 +234,8 @@ def _now(value: str | None) -> str:
 
 
 def _prices(values: list[str]) -> list[Decimal]:
+    if type(values) is not list:
+        raise TypeError("prices must be an exact built-in list")
     if not values:
         raise ValueError("at least one simulated price is required")
     parsed = []
@@ -957,8 +959,10 @@ def run_canonical_simulation(
     now: str | None = None, fault_after_send: bool = False,
 ) -> dict[str, object]:
     """Run one BUY/HOLD episode; a restarted ambiguous send is never retried."""
-    if not isinstance(episode_id, str) or not episode_id.strip():
-        raise ValueError("episode_id is required")
+    if type(episode_id) is not str:
+        raise TypeError("episode_id must be exact canonical text")
+    if not episode_id or episode_id != episode_id.strip():
+        raise ValueError("episode_id must be canonical nonempty text")
     if type(fault_after_send) is not bool:
         raise TypeError("fault_after_send must be boolean")
     if now is not None:

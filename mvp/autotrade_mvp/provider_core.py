@@ -103,8 +103,8 @@ def _canonical_query_values(
 ) -> Mapping[str, str]:
     if values is None:
         return MappingProxyType({})
-    if not isinstance(values, Mapping):
-        raise ProviderCoreError("query must be a mapping")
+    if type(values) not in {dict, MappingProxyType}:
+        raise ProviderCoreError("query must be an exact inert mapping")
     normalized: dict[str, str] = {}
     for raw_key, raw_value in values.items():
         if type(raw_key) is not str or not raw_key or raw_key != raw_key.strip():

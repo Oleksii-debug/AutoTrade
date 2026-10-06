@@ -180,6 +180,34 @@ class AlpacaAdapterTests(unittest.TestCase):
             )
         self.assertEqual(callbacks, [])
 
+    def test_preparation_rejects_rebound_digest_authority_before_callback(self):
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        with patch(
+            "mvp.autotrade_mvp.alpaca.sha256",
+            side_effect=AssertionError("rebound digest callback executed"),
+        ) as rebound:
+            with self.assertRaisesRegex(
+                AlpacaAdapterError,
+                "prepared request authority changed",
+            ):
+                prepare_order_request(
+                    intent,
+                    client_order_id="alpaca-rebound-digest",
+                    account_id="paper-account",
+                    environment="PAPER",
+                    capability=capability(),
+                    at=NOW,
+                )
+        rebound.assert_not_called()
+
     def test_direct_prepared_request_cannot_bypass_scope_or_provenance(self):
         with self.assertRaisesRegex(
             AlpacaAdapterError,

@@ -409,6 +409,16 @@ def _install_alpaca_prepared_request_authority(builder):
     object_getattribute = canonical_object.__getattribute__
     attribute_error_type = AttributeError
     mapping_proxy_type = MappingProxyType
+    canonical_isinstance = isinstance
+    mapping_type = Mapping
+    canonical_dict = dict
+    canonical_len = len
+    canonical_set = set
+    canonical_json_module = json
+    canonical_json_dumps = json.dumps
+    canonical_sha256 = sha256
+    value_error_type = ValueError
+    factory_token = _ALPACA_PREPARED_REQUEST_FACTORY_TOKEN
 
     bindings: dict[int, tuple[object, tuple[object, ...]]] = {}
 
@@ -452,6 +462,16 @@ def _install_alpaca_prepared_request_authority(builder):
             or ALPACA_DOCS is not canonical_docs
             or AlpacaAdapterError is not error_type
             or TypeError is not type_error
+            or ValueError is not value_error_type
+            or isinstance is not canonical_isinstance
+            or Mapping is not mapping_type
+            or dict is not canonical_dict
+            or len is not canonical_len
+            or set is not canonical_set
+            or json is not canonical_json_module
+            or json.dumps is not canonical_json_dumps
+            or sha256 is not canonical_sha256
+            or _ALPACA_PREPARED_REQUEST_FACTORY_TOKEN is not factory_token
             or type is not canonical_type
             or id is not canonical_id
             or tuple is not canonical_tuple

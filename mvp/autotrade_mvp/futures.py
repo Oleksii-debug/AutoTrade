@@ -267,6 +267,79 @@ class FuturesContract:
         return contract
 
 
+def _futures_contract_authority_snapshot(
+    contract: FuturesContract,
+) -> tuple[object, ...]:
+    """Freeze exact contract scalars without dispatching caller-controlled equality."""
+
+    if type(contract) is not FuturesContract:
+        raise FuturesError("exact FuturesContract authority is required")
+    get = object.__getattribute__
+    instrument = get(contract, "instrument")
+    payoff = get(contract, "payoff")
+    multiplier = get(contract, "multiplier")
+    quote_currency = get(contract, "quote_currency")
+    settlement_currency = get(contract, "settlement_currency")
+    last_trade_at = get(contract, "last_trade_at")
+    delivery_cutoff = get(contract, "delivery_cutoff")
+    expiry = get(contract, "expiry")
+    settlement_method = get(contract, "settlement_method")
+    price_base_currency = get(contract, "price_base_currency")
+    canonical_instrument = get(contract, "canonical_instrument")
+
+    if (
+        type(instrument) is not str
+        or type(payoff) is not str
+        or payoff not in {"LINEAR", "INVERSE"}
+        or type(multiplier) is not Decimal
+        or type(quote_currency) is not str
+        or type(settlement_currency) is not str
+        or type(last_trade_at) is not datetime
+        or type(delivery_cutoff) is not datetime
+        or type(expiry) is not datetime
+        or type(settlement_method) is not str
+        or settlement_method not in {"CASH", "PHYSICAL"}
+        or (price_base_currency is not None and type(price_base_currency) is not str)
+        or type(canonical_instrument) is not InstrumentVersion
+    ):
+        raise FuturesError("futures contract scalar authority must use exact canonical types")
+
+    return (
+        instrument,
+        payoff,
+        multiplier,
+        quote_currency,
+        settlement_currency,
+        last_trade_at,
+        delivery_cutoff,
+        expiry,
+        settlement_method,
+        price_base_currency,
+    )
+
+
+def _revalidated_futures_contract(
+    contract: FuturesContract,
+) -> tuple[FuturesContract, InstrumentVersion]:
+    """Reconstruct one inert canonical contract and compare only exact scalars."""
+
+    original = _futures_contract_authority_snapshot(contract)
+    version = object.__getattribute__(contract, "canonical_instrument")
+    try:
+        detached_version = _detached_instrument_version(version)
+        detached = FuturesContract.from_instrument_version(detached_version)
+        canonical = _futures_contract_authority_snapshot(detached)
+    except (TypeError, ValueError) as error:
+        raise FuturesError(
+            "futures contract conflicts with canonical InstrumentVersion"
+        ) from error
+    if original != canonical:
+        raise FuturesError(
+            "futures contract conflicts with canonical InstrumentVersion"
+        )
+    return detached, detached_version
+
+
 def _install_futures_contract_settlement_authority():
     """Bind terminal settlement economics outside caller-writable object state."""
 
@@ -871,16 +944,15 @@ def replay_inverse_variation_margin(
 
 def inverse_settlement_convention(contract: FuturesContract) -> SettlementConvention:
     """Resolve terminal cash policy only from the exact canonical instrument version."""
-    if type(contract) is not FuturesContract or contract.payoff != "INVERSE":
+    if type(contract) is not FuturesContract:
         raise FuturesError("inverse settlement requires an exact INVERSE futures contract")
-    if type(contract.canonical_instrument) is not InstrumentVersion:
-        raise FuturesError("inverse settlement requires canonical InstrumentVersion authority")
     try:
-        version = _detached_instrument_version(contract.canonical_instrument)
-        canonical = FuturesContract.from_instrument_version(version)
+        canonical, version = _revalidated_futures_contract(contract)
     except (TypeError, ValueError) as error:
         raise FuturesError("inverse settlement convention is invalid") from error
-    if canonical != contract or type(version.settlement_convention) is not SettlementConvention:
+    if object.__getattribute__(canonical, "payoff") != "INVERSE":
+        raise FuturesError("inverse settlement requires an exact INVERSE futures contract")
+    if type(version.settlement_convention) is not SettlementConvention:
         raise FuturesError("inverse settlement contract conflicts with canonical convention")
     return _resolve_futures_contract_settlement_authority(
         contract,

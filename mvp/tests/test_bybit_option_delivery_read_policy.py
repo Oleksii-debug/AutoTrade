@@ -27,6 +27,10 @@ _ARTIFACT_IDS = {
     "INSTRUMENT": "84444444-4444-4444-8444-444444444444",
 }
 
+class _StringSubclass(str):
+    pass
+
+
 
 def option_delivery_capability():
     observed = NOW - timedelta(minutes=2)
@@ -132,6 +136,7 @@ class BybitOptionDeliveryReadPolicyTests(unittest.TestCase):
             ({"symbol": "BTC-29DEC22-16000-P"}, "requires category=option"),
             ({"category": "linear"}, "requires category=option"),
             ({"category": "OPTION"}, "requires category=option"),
+            ({"category": _StringSubclass("option")}, "requires category=option"),
         )
         for query, message in cases:
             with self.subTest(query=query):

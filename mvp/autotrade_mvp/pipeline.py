@@ -210,6 +210,30 @@ def _atomic_json(path: Path, payload: object) -> None:
     os.replace(temporary, path)
 
 
+def _create_json_once(path: Path, payload: object) -> bool:
+    """Create one durable identity file without replacing a concurrent winner."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode(
+        "utf-8"
+    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        return False
+    try:
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        # A partial create is evidence of an interrupted issuance. Keep it
+        # fail-closed for the next reader rather than replacing it implicitly.
+        raise
+    return True
+
+
 def _run_configuration(
     *,
     symbol: str,
@@ -274,7 +298,7 @@ def _require_run_configuration(
                 "Legacy durable run state lacks configuration identity; "
                 "explicit migration or a new state directory is required"
             )
-        _atomic_json(
+        issued = _create_json_once(
             path,
             {
                 "schema_version": _schema_version,
@@ -282,7 +306,8 @@ def _require_run_configuration(
                 "configuration": expected,
             },
         )
-        return expected_digest
+        if issued:
+            return expected_digest
 
     try:
         envelope = json.loads(path.read_text(encoding="utf-8"))

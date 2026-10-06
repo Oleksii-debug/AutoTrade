@@ -11,6 +11,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5, uuid4
+from weakref import ref as weakref_ref
 
 from autotrade_numeric.exact_decimal import (
     ExactDecimalError,
@@ -179,6 +180,10 @@ class SubmissionResponseBinding:
     submission_scope_hash: str
     response_bytes: bytes
     response_sha256: str
+    response_encoding: str = "utf-8-json"
+    terminal_state: str = "SENT"
+    ambiguity_reason: str | None = None
+    retry_disposition: str | None = None
     http_status: int | None = None
     _factory_token: object = field(default=None, repr=False, compare=False)
 
@@ -192,9 +197,10 @@ class SubmissionResponseBinding:
             (self.aggregate_id, "aggregate_id"),
             (self.provider, "provider"),
             (self.client_order_id, "client_order_id"),
+            (self.environment, "environment"),
             (self.account_id, "account_id"),
         ):
-            if not isinstance(value, str) or not value.strip():
+            if type(value) is not str or not value.strip():
                 raise ValueError(f"{name} is required")
         if re.fullmatch(r"sha256:[0-9a-f]{64}", self.request_hash) is None:
             raise ValueError("request_hash must be a canonical SHA-256 digest")
@@ -211,7 +217,31 @@ class SubmissionResponseBinding:
             != self.response_sha256
         ):
             raise ValueError("durable provider response digest mismatch")
+        if type(self.response_encoding) is not str or self.response_encoding != "utf-8-json":
+            raise ValueError("durable provider response encoding is invalid")
         _decode_exact_json_bytes(self.response_bytes)
+        if (
+            type(self.terminal_state) is not str
+            or self.terminal_state not in {"SENT", "UNKNOWN"}
+        ):
+            raise ValueError("terminal_state must be SENT or UNKNOWN")
+        if self.terminal_state == "UNKNOWN":
+            if (
+                type(self.ambiguity_reason) is not str
+                or not self.ambiguity_reason
+                or self.ambiguity_reason != self.ambiguity_reason.strip()
+            ):
+                raise ValueError(
+                    "UNKNOWN durable response requires a canonical ambiguity_reason"
+                )
+            if self.retry_disposition != "RECONCILE_FIRST":
+                raise ValueError(
+                    "UNKNOWN durable response must remain RECONCILE_FIRST"
+                )
+        elif self.ambiguity_reason is not None or self.retry_disposition is not None:
+            raise ValueError(
+                "SENT durable response cannot carry UNKNOWN retry semantics"
+            )
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -501,9 +531,228 @@ def load_submission_response_binding(
         submission_scope_hash=scope_hash,
         response_bytes=response_bytes,
         response_sha256=response_sha256,
+        response_encoding="utf-8-json",
+        terminal_state=("SENT" if sent.get("event_type") == "SubmissionSent" else "UNKNOWN"),
+        ambiguity_reason=(
+            sent_payload.get("reason")
+            if sent.get("event_type") == "SubmissionUnknown"
+            else None
+        ),
+        retry_disposition=(
+            sent_payload.get("retry_disposition")
+            if sent.get("event_type") == "SubmissionUnknown"
+            else None
+        ),
         http_status=http_status,
         _factory_token=_SUBMISSION_RESPONSE_BINDING_TOKEN,
     )
+
+
+def _install_submission_response_binding_authority(loader):
+    """Retain durable response-binding issuance authority outside caller state."""
+
+    binding_type = SubmissionResponseBinding
+    binding_token = _SUBMISSION_RESPONSE_BINDING_TOKEN
+    error_type = ValueError
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_enumerate = enumerate
+    canonical_str = str
+    canonical_int = int
+    canonical_bytes = bytes
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    mapping_proxy_type = MappingProxyType
+    canonical_weakref_ref = weakref_ref
+    canonical_loader = loader
+    loader_code = loader.__code__
+    canonical_journal_snapshot = _canonical_journal_authority_snapshot
+    journal_snapshot_code = canonical_journal_snapshot.__code__
+    canonical_attempt_id = submission_attempt_aggregate_id
+    attempt_id_code = canonical_attempt_id.__code__
+    canonical_decode = _decode_exact_json_bytes
+    decode_code = canonical_decode.__code__
+    canonical_freeze = _freeze_json
+    freeze_code = canonical_freeze.__code__
+    canonical_instant = _instant
+    instant_code = canonical_instant.__code__
+    canonical_json_function = canonical_json
+    canonical_sha256 = sha256
+    canonical_json_module = json
+    canonical_re_module = re
+    canonical_journal_type = JournalStore
+
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
+    field_names = (
+        "attempt_id",
+        "aggregate_id",
+        "provider",
+        "request_hash",
+        "client_order_id",
+        "environment",
+        "account_id",
+        "prepared_at",
+        "sent_at",
+        "submission_scope",
+        "submission_scope_hash",
+        "response_bytes",
+        "response_sha256",
+        "response_encoding",
+        "terminal_state",
+        "ambiguity_reason",
+        "retry_disposition",
+        "http_status",
+        "_factory_token",
+    )
+
+    def authority_changed():
+        raise error_type("submission response binding authority is unavailable")
+
+    def implementation_changed():
+        if (
+            SubmissionResponseBinding is not binding_type
+            or _SUBMISSION_RESPONSE_BINDING_TOKEN is not binding_token
+            or ValueError is not error_type
+            or type is not canonical_type
+            or id is not canonical_id
+            or tuple is not canonical_tuple
+            or enumerate is not canonical_enumerate
+            or str is not canonical_str
+            or int is not canonical_int
+            or bytes is not canonical_bytes
+            or object is not canonical_object
+            or MappingProxyType is not mapping_proxy_type
+            or weakref_ref is not canonical_weakref_ref
+            or JournalStore is not canonical_journal_type
+            or json is not canonical_json_module
+            or re is not canonical_re_module
+            or sha256 is not canonical_sha256
+            or canonical_json is not canonical_json_function
+            or _canonical_journal_authority_snapshot is not canonical_journal_snapshot
+            or canonical_journal_snapshot.__code__ is not journal_snapshot_code
+            or submission_attempt_aggregate_id is not canonical_attempt_id
+            or canonical_attempt_id.__code__ is not attempt_id_code
+            or _decode_exact_json_bytes is not canonical_decode
+            or canonical_decode.__code__ is not decode_code
+            or _freeze_json is not canonical_freeze
+            or canonical_freeze.__code__ is not freeze_code
+            or _instant is not canonical_instant
+            or canonical_instant.__code__ is not instant_code
+            or canonical_loader.__code__ is not loader_code
+        ):
+            authority_changed()
+
+    def raw_snapshot(value):
+        return canonical_tuple(
+            object_getattribute(value, name)
+            for name in field_names
+        )
+
+    def prune():
+        for object_id, (value_ref, _snapshot) in canonical_tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def register(value):
+        implementation_changed()
+        if canonical_type(value) is not binding_type:
+            authority_changed()
+        current = raw_snapshot(value)
+        if current[-1] is not binding_token:
+            authority_changed()
+        if canonical_type(current[9]) is not mapping_proxy_type:
+            authority_changed()
+        if canonical_type(current[11]) is not canonical_bytes:
+            authority_changed()
+        prune()
+        object_id = canonical_id(value)
+        previous = states.get(object_id)
+        if previous is not None and previous[0]() is not None:
+            authority_changed()
+        states[object_id] = (canonical_weakref_ref(value), current)
+
+    def require_canonical_submission_response_binding(value):
+        implementation_changed()
+        if canonical_type(value) is not binding_type:
+            authority_changed()
+        prune()
+        state = states.get(canonical_id(value))
+        if state is None or state[0]() is not value:
+            authority_changed()
+        expected = state[1]
+        current = raw_snapshot(value)
+
+        for index in (0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 13, 14):
+            if canonical_type(current[index]) is not canonical_str:
+                authority_changed()
+            if current[index] != expected[index]:
+                authority_changed()
+
+        if canonical_type(current[9]) is not mapping_proxy_type or current[9] is not expected[9]:
+            authority_changed()
+        if canonical_type(current[11]) is not canonical_bytes or current[11] is not expected[11]:
+            authority_changed()
+
+        for index in (15, 16):
+            if current[index] is None:
+                if expected[index] is not None:
+                    authority_changed()
+            elif canonical_type(current[index]) is not canonical_str or current[index] != expected[index]:
+                authority_changed()
+
+        if current[17] is None:
+            if expected[17] is not None:
+                authority_changed()
+        elif canonical_type(current[17]) is not canonical_int or current[17] != expected[17]:
+            authority_changed()
+
+        if current[18] is not binding_token:
+            authority_changed()
+        return expected
+
+    def submission_response_binding_projection(value):
+        current = require_canonical_submission_response_binding(value)
+        return mapping_proxy_type(
+            {
+                name: current[index]
+                for index, name in canonical_enumerate(field_names[:-1])
+            }
+        )
+
+    def registered_loader(
+        store: JournalStore,
+        *,
+        environment: str,
+        account_id: str,
+        attempt_id: str,
+    ) -> SubmissionResponseBinding:
+        implementation_changed()
+        value = canonical_loader(
+            store,
+            environment=environment,
+            account_id=account_id,
+            attempt_id=attempt_id,
+        )
+        implementation_changed()
+        register(value)
+        return value
+
+    return (
+        registered_loader,
+        require_canonical_submission_response_binding,
+        submission_response_binding_projection,
+    )
+
+
+(
+    load_submission_response_binding,
+    require_canonical_submission_response_binding,
+    submission_response_binding_projection,
+) = _install_submission_response_binding_authority(
+    load_submission_response_binding
+)
+del _install_submission_response_binding_authority
 
 
 def stable_client_order_id(

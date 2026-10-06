@@ -68,6 +68,22 @@ class CallbackString(str):
         raise AssertionError("caller string code must not execute")
 
 
+class CallbackRegistry(InstrumentRegistry):
+    calls = 0
+
+    def resolve(self, *args, **kwargs):
+        type(self).calls += 1
+        raise AssertionError("caller registry code must not execute")
+
+
+class CallbackTimedelta(timedelta):
+    calls = 0
+
+    def __le__(self, other):
+        type(self).calls += 1
+        raise AssertionError("caller timedelta code must not execute")
+
+
 def at(month=9, day=24, hour=16, minute=0, second=0):
     return datetime(2026, month, day, hour, minute, second, tzinfo=timezone.utc)
 
@@ -178,6 +194,28 @@ def begin_provider_policy(
 
 
 class MarketNormalizationTests(unittest.TestCase):
+    def test_normalizer_rejects_registry_subclass_before_use(self):
+        CallbackRegistry.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact InstrumentRegistry"):
+            MarketNormalizer(CallbackRegistry())
+        self.assertEqual(CallbackRegistry.calls, 0)
+
+    def test_normalizer_rejects_timedelta_subclass_without_comparison(self):
+        CallbackTimedelta.calls = 0
+        with self.assertRaisesRegex(MarketDataError, "exact positive timedelta"):
+            MarketNormalizer(
+                registry(),
+                max_available_age=CallbackTimedelta(seconds=5),
+            )
+        self.assertEqual(CallbackTimedelta.calls, 0)
+
+        with self.assertRaisesRegex(MarketDataError, "exact positive timedelta"):
+            MarketNormalizer(
+                registry(),
+                max_book_age=CallbackTimedelta(seconds=5),
+            )
+        self.assertEqual(CallbackTimedelta.calls, 0)
+
     def test_admission_rejects_custom_timezone_without_callbacks(self):
         hostile = CallbackTimezone()
         source = datetime(2026, 9, 24, 16, tzinfo=hostile)

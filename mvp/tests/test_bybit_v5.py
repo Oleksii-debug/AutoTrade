@@ -971,7 +971,19 @@ class BybitV5AdapterTests(unittest.TestCase):
             "isinstance",
             "bool",
             "int",
+            "float",
             "str",
+            "Decimal",
+            "format",
+            "Mapping",
+            "json",
+            "sha256",
+            "TypeError",
+            "ValueError",
+            "InvalidOperation",
+            "CapabilityError",
+            "_decimal",
+            "_CLIENT_ID",
             "dict",
             "len",
             "object",
@@ -1012,6 +1024,112 @@ class BybitV5AdapterTests(unittest.TestCase):
                             order_type="MARKET",
                             quantity="0.01",
                             client_order_id=f"shadow-{name.lower()}",
+                            time_in_force="IOC",
+                        )
+                self.assertEqual(callbacks, [])
+
+    def test_preparation_rejects_executable_scalar_inputs_before_callback(self):
+        capability = submission_write_capability()
+        callbacks = []
+
+        class HostileStr(str):
+            def strip(self):
+                callbacks.append("strip")
+                raise AssertionError("hostile str callback executed")
+
+            def upper(self):
+                callbacks.append("upper")
+                raise AssertionError("hostile str callback executed")
+
+        base = {
+            "capability": capability,
+            "at": READ_AT,
+            "provider_environment": "MAINNET",
+            "product_family": "SPOT",
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "order_type": "MARKET",
+            "quantity": "0.01",
+            "client_order_id": "scalar-ingress",
+            "time_in_force": "IOC",
+        }
+        for name in (
+            "provider_environment",
+            "product_family",
+            "symbol",
+            "side",
+            "order_type",
+            "client_order_id",
+            "time_in_force",
+        ):
+            with self.subTest(name=name):
+                arguments = dict(base)
+                arguments[name] = HostileStr(arguments[name])
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    f"{name} must be exact str",
+                ):
+                    prepare_order_submission(**arguments)
+                self.assertEqual(callbacks, [])
+
+        class HostileNumber:
+            def __str__(self):
+                callbacks.append("__str__")
+                raise AssertionError("hostile number callback executed")
+
+        for name in ("quantity", "price"):
+            with self.subTest(name=name):
+                arguments = dict(base)
+                if name == "price":
+                    arguments["order_type"] = "LIMIT"
+                    arguments["time_in_force"] = "GTC"
+                arguments[name] = HostileNumber()
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    f"{name} must be exact str, Decimal or int",
+                ):
+                    prepare_order_submission(**arguments)
+                self.assertEqual(callbacks, [])
+
+        with self.assertRaisesRegex(ProviderCoreError, "reduce_only must be exact bool"):
+            prepare_order_submission(**base, reduce_only=1)
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "position_side must be exact str or None",
+        ):
+            prepare_order_submission(**base, position_side=HostileStr("NET"))
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "position_idx must be exact int or None",
+        ):
+            prepare_order_submission(**base, position_idx=True)
+        self.assertEqual(callbacks, [])
+
+    def test_prepared_issuer_rejects_json_helper_rebinding_before_callback(self):
+        capability = submission_write_capability()
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            raise AssertionError("rebound json helper executed")
+
+        for name in ("dumps", "loads"):
+            with self.subTest(name=name):
+                with patch.object(bybit_v5_module.json, name, forged):
+                    with self.assertRaisesRegex(
+                        ProviderCoreError,
+                        "prepared submission authority changed",
+                    ):
+                        prepare_order_submission(
+                            capability=capability,
+                            at=READ_AT,
+                            provider_environment="MAINNET",
+                            product_family="SPOT",
+                            symbol="BTCUSDT",
+                            side="BUY",
+                            order_type="MARKET",
+                            quantity="0.01",
+                            client_order_id=f"json-{name}-rebound",
                             time_in_force="IOC",
                         )
                 self.assertEqual(callbacks, [])

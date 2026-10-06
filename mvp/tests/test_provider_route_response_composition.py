@@ -189,8 +189,12 @@ class ProviderRouteResponseCompositionTests(unittest.TestCase):
             )
             self.assertEqual(outcome.status, "SENT")
 
+            # Re-open the durable journal before normalization: provider
+            # response authority must survive process/repository object restart
+            # without any transport replay.
+            reopened = JournalStore(journal.path)
             binding = load_submission_response_binding(
-                journal,
+                reopened,
                 environment="PAPER",
                 account_id="paper-account",
                 attempt_id=attempt_id,

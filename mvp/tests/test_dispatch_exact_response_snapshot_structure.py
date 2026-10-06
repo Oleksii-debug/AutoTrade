@@ -600,6 +600,243 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
             )
             self.assertNotIn("response_text", events[-1]["payload"])
 
+    def test_transport_cannot_replace_json_decoder_decode_defaults_after_send(self):
+        class TrapWhitespace:
+            calls = 0
+
+            def __call__(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("forged JSONDecoder whitespace callback executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            decode = dispatch_module.json.JSONDecoder.__dict__["decode"]
+            original_defaults = decode.__defaults__
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                decode.__defaults__ = (TrapWhitespace(),)
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "snapshot-json-decoder-defaults-retarget",
+                    transport,
+                )
+                self.assertIs(decode.__defaults__, original_defaults)
+                self.assertEqual(TrapWhitespace.calls, 0)
+            finally:
+                decode.__defaults__ = original_defaults
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            self.assertEqual(TrapWhitespace.calls, 0)
+            events = self._events(
+                path,
+                dispatcher,
+                "snapshot-json-decoder-defaults-retarget",
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:ValueError",
+            )
+            self.assertNotIn("response_text", events[-1]["payload"])
+
+    def test_transport_cannot_mutate_json_decoder_init_kwdefaults_after_send(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            decoder_init = dispatch_module.json.JSONDecoder.__dict__["__init__"]
+            original_kwdefaults = decoder_init.__kwdefaults__
+            baseline_kwdefaults = dict(original_kwdefaults)
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                decoder_init.__kwdefaults__["strict"] = False
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "snapshot-json-decoder-init-kwdefaults-retarget",
+                    transport,
+                )
+                self.assertEqual(
+                    decoder_init.__kwdefaults__,
+                    baseline_kwdefaults,
+                )
+            finally:
+                decoder_init.__kwdefaults__ = original_kwdefaults
+                original_kwdefaults.clear()
+                original_kwdefaults.update(baseline_kwdefaults)
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            events = self._events(
+                path,
+                dispatcher,
+                "snapshot-json-decoder-init-kwdefaults-retarget",
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:ValueError",
+            )
+            self.assertNotIn("response_text", events[-1]["payload"])
+
+    def test_transport_cannot_rebind_json_object_parser_after_send(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            decoder_init = dispatch_module.json.JSONDecoder.__dict__["__init__"]
+            decoder_globals = decoder_init.__globals__
+            original_object_parser = decoder_globals["JSONObject"]
+
+            def forged_object_parser(*_args, **_kwargs):
+                raise AssertionError("forged JSONObject executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                decoder_globals["JSONObject"] = forged_object_parser
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "snapshot-json-object-parser-rebind",
+                    transport,
+                )
+                self.assertIs(
+                    decoder_globals["JSONObject"],
+                    original_object_parser,
+                )
+            finally:
+                decoder_globals["JSONObject"] = original_object_parser
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            events = self._events(
+                path,
+                dispatcher,
+                "snapshot-json-object-parser-rebind",
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:ValueError",
+            )
+            self.assertNotIn("response_text", events[-1]["payload"])
+
+    def test_transport_cannot_replace_json_object_parser_code_after_send(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            decoder_init = dispatch_module.json.JSONDecoder.__dict__["__init__"]
+            object_parser = decoder_init.__globals__["JSONObject"]
+            original_code = object_parser.__code__
+
+            def forged_object_parser(
+                s_and_end,
+                strict,
+                scan_once,
+                object_hook,
+                object_pairs_hook,
+                memo=None,
+                _w=None,
+                _ws=None,
+            ):
+                raise AssertionError("forged JSONObject code executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                object_parser.__code__ = forged_object_parser.__code__
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "snapshot-json-object-parser-code",
+                    transport,
+                )
+                self.assertIs(object_parser.__code__, original_code)
+            finally:
+                object_parser.__code__ = original_code
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            events = self._events(
+                path,
+                dispatcher,
+                "snapshot-json-object-parser-code",
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:ValueError",
+            )
+            self.assertNotIn("response_text", events[-1]["payload"])
+
+    def test_transport_cannot_rebind_json_scanner_factory_after_send(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            decoder_init = dispatch_module.json.JSONDecoder.__dict__["__init__"]
+            scanner_module = decoder_init.__globals__["scanner"]
+            original_make_scanner = scanner_module.make_scanner
+
+            def forged_make_scanner(_decoder):
+                raise AssertionError("forged scanner factory executed")
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                scanner_module.make_scanner = forged_make_scanner
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "snapshot-json-scanner-factory-rebind",
+                    transport,
+                )
+                self.assertIs(
+                    scanner_module.make_scanner,
+                    original_make_scanner,
+                )
+            finally:
+                scanner_module.make_scanner = original_make_scanner
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            events = self._events(
+                path,
+                dispatcher,
+                "snapshot-json-scanner-factory-rebind",
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:ValueError",
+            )
+            self.assertNotIn("response_text", events[-1]["payload"])
+
     def test_transport_cannot_replace_depth_guard_code_after_send(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

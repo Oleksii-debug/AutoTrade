@@ -1005,7 +1005,7 @@ class TradingWireResponse:
             _require_canonical_response_resource_authority()
             _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES(
                 self.body,
-                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                max_bytes=_CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES,
                 allow_empty=True,
             )
         except (TypeError, ValueError) as error:
@@ -1061,8 +1061,9 @@ class UrllibJsonWireClient:
         return budget
 
     def _bounded_body(self, raw: bytes, *, max_bytes: int) -> bytes:
+        _require_canonical_response_resource_authority()
         try:
-            return require_provider_response_bytes(
+            return _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES(
                 raw,
                 max_bytes=max_bytes,
                 allow_empty=True,

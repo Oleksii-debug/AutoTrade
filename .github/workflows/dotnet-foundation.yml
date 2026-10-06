@@ -19,10 +19,12 @@ on:
       - "src/**/*.xaml"
       - "tests/Desktop.Client/**"
       - "tests/Provenance/test_dotnet_package_rights.py"
+      - "tests/Provenance/test_dotnet_lock_content.py"
       - "contracts/**"
       - "provenance/dotnet-package-rights.json"
       - "provenance/licenses/**"
       - "tools/dotnet_package_rights.py"
+      - "tools/dotnet_lock.py"
       - ".github/workflows/dotnet-foundation.yml"
   pull_request:
     paths:
@@ -40,10 +42,12 @@ on:
       - "src/**/*.xaml"
       - "tests/Desktop.Client/**"
       - "tests/Provenance/test_dotnet_package_rights.py"
+      - "tests/Provenance/test_dotnet_lock_content.py"
       - "contracts/**"
       - "provenance/dotnet-package-rights.json"
       - "provenance/licenses/**"
       - "tools/dotnet_package_rights.py"
+      - "tools/dotnet_lock.py"
       - ".github/workflows/dotnet-foundation.yml"
 
 concurrency:

@@ -17,6 +17,7 @@ import json
 from types import MappingProxyType
 from typing import Iterable, Literal, Mapping
 import re
+from weakref import ref as weakref_ref
 import weakref
 
 from autotrade_numeric.exact_decimal import (
@@ -561,8 +562,8 @@ class ProviderSubmissionObservation:
             raise ProviderCoreError(
                 "provider submission observations must come from durable exact response binding"
             )
-        if not isinstance(self.response_binding, SubmissionResponseBinding):
-            raise TypeError("response_binding must be SubmissionResponseBinding")
+        if type(self.response_binding) is not SubmissionResponseBinding:
+            raise TypeError("response_binding must be exact SubmissionResponseBinding")
         endpoint = _text(self.endpoint, "endpoint")
         if not endpoint.startswith("/") or "://" in endpoint:
             raise ProviderCoreError(
@@ -633,28 +634,272 @@ class ProviderSubmissionObservation:
         environment: str | None = None,
         client_order_id: str | None = None,
     ) -> None:
-        if _text(provider_id, "provider_id").upper() != self.provider_id:
+        # Compatibility surface only. Financial consumers must use the
+        # closure-owned verifier/projection below before any property/method
+        # dispatch on an observation supplied by a caller.
+        require_canonical_submission_observation(self)
+        projection = submission_observation_projection(self)
+        if _text(provider_id, "provider_id").upper() != projection["provider_id"]:
             raise ProviderCoreError("provider-write provenance provider mismatch")
-        if _text(endpoint, "endpoint") != self.endpoint:
+        if _text(endpoint, "endpoint") != projection["endpoint"]:
             raise ProviderCoreError("provider-write provenance endpoint mismatch")
-        if prepared_request_sha256 != self.request_sha256:
+        if prepared_request_sha256 != projection["request_sha256"]:
             raise ProviderCoreError("provider-write provenance request digest mismatch")
-        if tuple(capability_snapshot_ids) != self.capability_snapshot_ids:
+        if tuple(capability_snapshot_ids) != projection["capability_snapshot_ids"]:
             raise ProviderCoreError("provider-write provenance capability mismatch")
-        if tuple(instrument_versions) != self.instrument_versions:
+        if tuple(instrument_versions) != projection["instrument_versions"]:
             raise ProviderCoreError("provider-write provenance instrument mismatch")
-        if account_id is not None and _text(account_id, "account_id") != self.account_id:
+        if account_id is not None and _text(account_id, "account_id") != projection["account_id"]:
             raise ProviderCoreError("provider-write provenance account mismatch")
         if (
             environment is not None
-            and _text(environment, "environment").upper() != self.environment
+            and _text(environment, "environment").upper() != projection["environment"]
         ):
             raise ProviderCoreError("provider-write provenance environment mismatch")
         if (
             client_order_id is not None
-            and _text(client_order_id, "client_order_id") != self.client_order_id
+            and _text(client_order_id, "client_order_id") != projection["client_order_id"]
         ):
             raise ProviderCoreError("provider-write provenance client-order mismatch")
+
+
+def observe_submission_json_response(
+    *,
+    response_binding: SubmissionResponseBinding,
+    provider_id: str,
+    endpoint: str,
+    prepared_request_sha256: str,
+    capability_snapshot_ids: tuple[str, ...],
+    instrument_versions: tuple[str, ...],
+) -> ProviderSubmissionObservation:
+    """Project one exact durable write response into provider-neutral evidence."""
+
+    binding = submission_response_binding_projection(response_binding)
+    provider = _text(provider_id, "provider_id").upper()
+    if provider not in PROVIDERS:
+        raise ProviderCoreError("unknown provider")
+    if binding["provider"].upper() != provider:
+        raise ProviderCoreError("durable submission provider mismatch")
+    normalized_endpoint = _text(endpoint, "endpoint")
+    if not normalized_endpoint.startswith("/") or "://" in normalized_endpoint:
+        raise ProviderCoreError(
+            "submission endpoint must be a canonical provider-relative path"
+        )
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", prepared_request_sha256) is None:
+        raise ProviderCoreError(
+            "prepared_request_sha256 must be a canonical SHA-256 digest"
+        )
+    if binding["request_hash"] != prepared_request_sha256:
+        raise ProviderCoreError("durable submission request digest mismatch")
+    capabilities = tuple(
+        _text(value, "capability_snapshot_id")
+        for value in capability_snapshot_ids
+    )
+    instruments = tuple(
+        _text(value, "instrument_version")
+        for value in instrument_versions
+    )
+    if not capabilities or len(set(capabilities)) != len(capabilities):
+        raise ProviderCoreError(
+            "capability_snapshot_ids must be non-empty and unique"
+        )
+    if not instruments or len(set(instruments)) != len(instruments):
+        raise ProviderCoreError("instrument_versions must be non-empty and unique")
+
+    expected_scope = {
+        "endpoint": normalized_endpoint,
+        "prepared_request_sha256": prepared_request_sha256,
+        "capability_snapshot_ids": list(capabilities),
+        "instrument_versions": list(instruments),
+    }
+    actual_scope = _thaw_json(binding["submission_scope"])
+    if actual_scope != expected_scope:
+        raise ProviderCoreError(
+            "durable submission scope does not match prepared provider request"
+        )
+
+    identity_material = json.dumps(
+        {
+            "aggregate_id": binding["aggregate_id"],
+            "provider_id": provider,
+            "request_sha256": binding["request_hash"],
+            "submission_scope_hash": binding["submission_scope_hash"],
+            "response_sha256": binding["response_sha256"],
+            "sent_at": binding["sent_at"],
+            "endpoint": normalized_endpoint,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    evidence_ref = (
+        "provider-write:sha256:" + sha256(identity_material).hexdigest()
+    )
+    return ProviderSubmissionObservation(
+        response_binding=response_binding,
+        endpoint=normalized_endpoint,
+        capability_snapshot_ids=capabilities,
+        instrument_versions=instruments,
+        evidence_ref=evidence_ref,
+        # Never consume SubmissionResponseBinding.payload here: dispatch's
+        # transport-only JSON preview is not the exact numeric authority.
+        # Reparse the SHA-bound durable bytes through the neutral bounded
+        # numeric callbacks before constructing an authenticated observation.
+        payload=_decode_exact_json(binding["response_bytes"]),
+        _observation_token=_SUBMISSION_OBSERVED_RESPONSE_TOKEN,
+    )
+
+
+def _install_submission_observation_authority(factory):
+    """Keep write-response observation issuance outside caller-mutable state."""
+
+    observation_type = ProviderSubmissionObservation
+    observation_token = _SUBMISSION_OBSERVED_RESPONSE_TOKEN
+    canonical_factory = factory
+    factory_code = factory.__code__
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_dict = dict
+    canonical_str = str
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    canonical_frozenset = frozenset
+    canonical_weakref_ref = weakref_ref
+    mapping_proxy_type = MappingProxyType
+    canonical_binding_projection = submission_response_binding_projection
+    canonical_binding_require = require_canonical_submission_response_binding
+    error_type = ProviderCoreError
+
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
+    field_names = (
+        "response_binding",
+        "endpoint",
+        "capability_snapshot_ids",
+        "instrument_versions",
+        "evidence_ref",
+        "payload",
+    )
+    expected_instance_fields = canonical_frozenset(field_names)
+
+    def authority_changed() -> None:
+        raise error_type("provider submission observation authority is unavailable")
+
+    def implementation_changed() -> None:
+        if (
+            ProviderSubmissionObservation is not observation_type
+            or _SUBMISSION_OBSERVED_RESPONSE_TOKEN is not observation_token
+            or observe_submission_json_response is not registered_factory
+            or getattr(canonical_factory, "__code__", None) is not factory_code
+            or submission_response_binding_projection is not canonical_binding_projection
+            or require_canonical_submission_response_binding is not canonical_binding_require
+            or MappingProxyType is not mapping_proxy_type
+            or weakref_ref is not canonical_weakref_ref
+        ):
+            authority_changed()
+
+    def raw_snapshot(value):
+        try:
+            state = object_getattribute(value, "__dict__")
+        except (AttributeError, TypeError):
+            authority_changed()
+        if canonical_type(state) is not canonical_dict:
+            authority_changed()
+        if canonical_frozenset(state) != expected_instance_fields:
+            authority_changed()
+        return canonical_tuple(
+            object_getattribute(value, name)
+            for name in field_names
+        )
+
+    def prune() -> None:
+        for object_id, (value_ref, _snapshot) in canonical_tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def register(value) -> None:
+        if canonical_type(value) is not observation_type:
+            authority_changed()
+        snapshot = raw_snapshot(value)
+        canonical_binding_require(snapshot[0])
+        if canonical_type(snapshot[1]) is not canonical_str:
+            authority_changed()
+        if canonical_type(snapshot[2]) is not canonical_tuple:
+            authority_changed()
+        if canonical_type(snapshot[3]) is not canonical_tuple:
+            authority_changed()
+        if canonical_type(snapshot[4]) is not canonical_str:
+            authority_changed()
+        prune()
+        object_id = canonical_id(value)
+        prior = states.get(object_id)
+        if prior is not None and prior[0]() is not None:
+            authority_changed()
+        states[object_id] = (canonical_weakref_ref(value), snapshot)
+
+    def require_canonical_submission_observation(value):
+        implementation_changed()
+        if canonical_type(value) is not observation_type:
+            authority_changed()
+        prune()
+        state = states.get(canonical_id(value))
+        if state is None or state[0]() is not value:
+            authority_changed()
+        expected = state[1]
+        current = raw_snapshot(value)
+        if current[0] is not expected[0] or current[5] is not expected[5]:
+            authority_changed()
+        for index in (1, 2, 3, 4):
+            if current[index] != expected[index]:
+                authority_changed()
+        canonical_binding_require(current[0])
+        return value
+
+    def submission_observation_projection(value):
+        require_canonical_submission_observation(value)
+        current = raw_snapshot(value)
+        binding = canonical_binding_projection(current[0])
+        return mapping_proxy_type(
+            {
+                "attempt_id": binding["attempt_id"],
+                "aggregate_id": binding["aggregate_id"],
+                "provider_id": binding["provider"].upper(),
+                "account_id": binding["account_id"],
+                "environment": binding["environment"],
+                "client_order_id": binding["client_order_id"],
+                "request_sha256": binding["request_hash"],
+                "response_sha256": binding["response_sha256"],
+                "observed_at": binding["sent_at"],
+                "submission_scope_hash": binding["submission_scope_hash"],
+                "endpoint": current[1],
+                "capability_snapshot_ids": current[2],
+                "instrument_versions": current[3],
+                "evidence_ref": current[4],
+                "payload": current[5],
+            }
+        )
+
+    def registered_factory(**kwargs):
+        implementation_changed()
+        value = canonical_factory(**kwargs)
+        implementation_changed()
+        register(value)
+        return value
+
+    return (
+        registered_factory,
+        require_canonical_submission_observation,
+        submission_observation_projection,
+    )
+
+
+(
+    observe_submission_json_response,
+    require_canonical_submission_observation,
+    submission_observation_projection,
+) = _install_submission_observation_authority(observe_submission_json_response)
+del _install_submission_observation_authority
 
 
 @dataclass(frozen=True)

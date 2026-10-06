@@ -2349,73 +2349,313 @@ class GuardedDispatcher:
             self.owner_epoch,
             self.prepared_lease_seconds,
         )
-        # These module-level helpers are part of the irreversible send-state
-        # authority even though GuardedDispatcher methods are class-sealed.
-        # Python function bodies resolve them dynamically from module globals,
-        # so an external callback could otherwise rebind them after
-        # SubmissionSending and redirect terminal journal reads/writes.
-        dispatch_module_globals = globals()
-        dispatch_module_get = dispatch_module_globals.get
-        dispatch_module_set = dispatch_module_globals.__setitem__
-        dispatch_module_authority = (
-            (
-                "_canonical_journal_authority_snapshot",
-                _canonical_journal_authority_snapshot,
-            ),
-            ("_journal_store_call", _journal_store_call),
-            ("_envelope", _envelope),
-            ("_detach_submission_json", _detach_submission_json),
-            ("submission_attempt_aggregate_id", submission_attempt_aggregate_id),
-            ("_event_id", _event_id),
-            ("_identity_digest", _identity_digest),
-            ("_instant", _instant),
-            ("payload_digest", payload_digest),
-            ("canonical_json", canonical_json),
-            (
-                "_canonical_submission_event_instant",
-                _canonical_submission_event_instant,
-            ),
-            (
-                "_exact_response_terminal_semantics_are_canonical",
-                _exact_response_terminal_semantics_are_canonical,
-            ),
-            ("_has_exact_response_markers", _has_exact_response_markers),
-            ("uuid5", uuid5),
-            ("NAMESPACE_URL", NAMESPACE_URL),
-            ("sha256", sha256),
+        dispatch_authority_changed_error = _DispatchAuthorityChanged
+        dispatch_blocked_error = DispatchBlocked
+        dispatch_exception_error = Exception
+        dispatch_value_error = ValueError
+        dispatch_type_error = TypeError
+        dispatch_runtime_error = RuntimeError
+        # External callbacks run inside dispatch.  Capture the exact module,
+        # builtin, class and helper execution surface before the first callback;
+        # later validation must not itself dispatch through caller-rebound
+        # globals.
+        authority_type = type
+        authority_id = id
+        authority_tuple = tuple
+        authority_frozenset = frozenset
+        authority_dict = dict
+        authority_set = set
+        authority_len = len
+        authority_any = any
+        authority_all = all
+        authority_vars = vars
+        authority_getattr = getattr
+        authority_setattr = setattr
+        authority_delattr = delattr
+        authority_globals = globals
+        authority_staticmethod = staticmethod
+        authority_classmethod = classmethod
+        dispatch_module_globals = authority_globals()
+
+        critical_builtin_names = (
+            "type",
+            "id",
+            "tuple",
+            "frozenset",
+            "dict",
+            "set",
+            "len",
+            "any",
+            "all",
+            "vars",
+            "getattr",
+            "setattr",
+            "delattr",
+            "isinstance",
+            "str",
+            "int",
+            "bool",
+            "max",
+            "range",
+            "enumerate",
+            "Exception",
+            "ValueError",
+            "TypeError",
+            "RuntimeError",
+            "PermissionError",
         )
-        dispatcher_class_surfaces = tuple(
-            (base, tuple(base.__dict__.items()))
-            for base in type(self).__mro__
+        dispatch_builtin_overrides = authority_tuple(
+            (
+                name,
+                name in dispatch_module_globals,
+                authority_dict.get(dispatch_module_globals, name),
+            )
+            for name in critical_builtin_names
+        )
+
+        critical_helper_names = (
+            "_canonical_journal_authority_snapshot",
+            "_journal_store_call",
+            "submission_attempt_aggregate_id",
+            "_identity_digest",
+            "_event_id",
+            "_envelope",
+            "_canonical_submission_event_instant",
+            "_prepared_lease_state",
+            "_exact_response_terminal_semantics_are_canonical",
+            "_has_exact_response_markers",
+            "_decode_exact_json_bytes",
+            "_instant",
+            "canonical_json",
+            "payload_digest",
+            "sha256",
+            "uuid5",
+            "NAMESPACE_URL",
+            "datetime",
+            "timezone",
+            "timedelta",
+            "ExactJsonTransportResponse",
+            "_snapshot_exact_transport_response",
+            "_require_canonical_exact_transport_response",
+            "require_provider_response_bytes",
+            "HARD_MAX_PROVIDER_RESPONSE_BYTES",
+            "require_provider_json_depth",
+            "parse_bounded_json_number_token",
+            "parse_bounded_json_integer_token",
+            "ExactDecimalError",
+            "json",
+            "DispatchBlocked",
+            "_DispatchAuthorityChanged",
+            "DispatchOutcome",
+        )
+        helper_authority = []
+        for helper_name in critical_helper_names:
+            helper = authority_dict.get(dispatch_module_globals, helper_name)
+            helper_kwdefaults = authority_getattr(
+                helper, "__kwdefaults__", None
+            )
+            helper_authority.append(
+                (
+                    helper_name,
+                    helper,
+                    authority_getattr(helper, "__code__", None),
+                    authority_getattr(helper, "__defaults__", None),
+                    helper_kwdefaults,
+                    (
+                        authority_dict(helper_kwdefaults)
+                        if authority_type(helper_kwdefaults) is authority_dict
+                        else None
+                    ),
+                    (
+                        authority_tuple(
+                            (authority_id(key), authority_id(value))
+                            for key, value in authority_dict.items(
+                                helper_kwdefaults
+                            )
+                        )
+                        if authority_type(helper_kwdefaults) is authority_dict
+                        else None
+                    ),
+                )
+            )
+        dispatch_module_helper_authority = authority_tuple(helper_authority)
+
+        dispatcher_class_surfaces = authority_tuple(
+            (base, authority_tuple(base.__dict__.items()))
+            for base in authority_type(self).__mro__
             if base is not object
         )
-        dispatcher_class_owned_names = frozenset(
+        dispatcher_class_owned_names = authority_frozenset(
             name
             for base, members in dispatcher_class_surfaces
             for name, _member in members
         )
-        initial_instance_state = vars(self)
-        initial_instance_class_shadow = tuple(
+        dispatcher_callable_authority = []
+        for _base, members in dispatcher_class_surfaces:
+            for _name, member in members:
+                target = (
+                    member.__func__
+                    if authority_type(member)
+                    in (authority_staticmethod, authority_classmethod)
+                    else member
+                )
+                code = authority_getattr(target, "__code__", None)
+                if code is None:
+                    continue
+                kwdefaults = authority_getattr(target, "__kwdefaults__", None)
+                dispatcher_callable_authority.append(
+                    (
+                        target,
+                        code,
+                        authority_getattr(target, "__defaults__", None),
+                        kwdefaults,
+                        (
+                            authority_dict(kwdefaults)
+                            if authority_type(kwdefaults) is authority_dict
+                            else None
+                        ),
+                        (
+                            authority_tuple(
+                                (authority_id(key), authority_id(value))
+                                for key, value in authority_dict.items(
+                                    kwdefaults
+                                )
+                            )
+                            if authority_type(kwdefaults) is authority_dict
+                            else None
+                        ),
+                    )
+                )
+        dispatcher_callable_authority = authority_tuple(
+            dispatcher_callable_authority
+        )
+
+        initial_instance_state = authority_vars(self)
+        initial_instance_class_shadow = authority_tuple(
             (name, initial_instance_state[name])
             for name in dispatcher_class_owned_names
             if name in initial_instance_state
         )
 
-        def restore_dispatcher_class_surface() -> None:
+        def restore_function_authority(
+            target,
+            expected_code,
+            expected_defaults,
+            expected_kwdefaults,
+            expected_kwdefaults_copy,
+            expected_kwdefaults_fingerprint,
+        ) -> bool:
+            changed = False
+            if (
+                expected_code is not None
+                and authority_getattr(target, "__code__", None)
+                is not expected_code
+            ):
+                authority_setattr(target, "__code__", expected_code)
+                changed = True
+            if (
+                authority_getattr(target, "__defaults__", None)
+                is not expected_defaults
+            ):
+                authority_setattr(target, "__defaults__", expected_defaults)
+                changed = True
+            if (
+                authority_getattr(target, "__kwdefaults__", None)
+                is not expected_kwdefaults
+            ):
+                authority_setattr(
+                    target,
+                    "__kwdefaults__",
+                    expected_kwdefaults,
+                )
+                changed = True
+            if (
+                expected_kwdefaults_fingerprint is not None
+                and authority_type(expected_kwdefaults) is authority_dict
+            ):
+                current_fingerprint = authority_tuple(
+                    (authority_id(key), authority_id(value))
+                    for key, value in authority_dict.items(
+                        expected_kwdefaults
+                    )
+                )
+                if current_fingerprint != expected_kwdefaults_fingerprint:
+                    authority_dict.clear(expected_kwdefaults)
+                    authority_dict.update(
+                        expected_kwdefaults,
+                        expected_kwdefaults_copy,
+                    )
+                    changed = True
+            return changed
+
+        def restore_dispatch_module_authority() -> bool:
+            changed = False
+            for (
+                name,
+                expected,
+                code,
+                defaults,
+                kwdefaults,
+                kwdefaults_copy,
+                kwdefaults_fingerprint,
+            ) in dispatch_module_helper_authority:
+                if authority_dict.get(dispatch_module_globals, name) is not expected:
+                    authority_dict.__setitem__(
+                        dispatch_module_globals,
+                        name,
+                        expected,
+                    )
+                    changed = True
+                if restore_function_authority(
+                    expected,
+                    code,
+                    defaults,
+                    kwdefaults,
+                    kwdefaults_copy,
+                    kwdefaults_fingerprint,
+                ):
+                    changed = True
+            for name, was_present, expected in dispatch_builtin_overrides:
+                is_present = name in dispatch_module_globals
+                if was_present:
+                    if (
+                        not is_present
+                        or authority_dict.get(dispatch_module_globals, name)
+                        is not expected
+                    ):
+                        authority_dict.__setitem__(
+                            dispatch_module_globals,
+                            name,
+                            expected,
+                        )
+                        changed = True
+                elif is_present:
+                    authority_dict.pop(dispatch_module_globals, name, None)
+                    changed = True
+            return changed
+
+        def restore_dispatcher_class_surface() -> bool:
+            changed = False
             # A callback may mutate GuardedDispatcher after the send barrier.
             # Restore the exact per-call class surface before any reconciliation
             # read/write can dispatch through self._events/self._append again.
             for base, members in dispatcher_class_surfaces:
-                expected_members = dict(members)
-                current_names = set(base.__dict__)
-                for name in current_names - set(expected_members):
-                    delattr(base, name)
+                expected_members = authority_dict(members)
+                current_names = authority_set(base.__dict__)
+                for name in current_names - authority_set(expected_members):
+                    authority_delattr(base, name)
+                    changed = True
                 for name, member in members:
                     if (
                         name not in base.__dict__
                         or base.__dict__[name] is not member
                     ):
-                        setattr(base, name, member)
+                        authority_setattr(base, name, member)
+                        changed = True
+            for callable_authority in dispatcher_callable_authority:
+                if restore_function_authority(*callable_authority):
+                    changed = True
+            return changed
 
         def require_dispatch_call_authority() -> None:
             (
@@ -2446,16 +2686,16 @@ class GuardedDispatcher:
                 owner_epoch,
                 prepared_lease_seconds,
             )
-            current_instance_state = vars(self)
-            expected_shadow = dict(initial_instance_class_shadow)
+            current_instance_state = authority_vars(self)
+            expected_shadow = authority_dict(initial_instance_class_shadow)
             current_shadow_names = {
                 name
                 for name in dispatcher_class_owned_names
                 if name in current_instance_state
             }
             shadow_is_unchanged = (
-                current_shadow_names == set(expected_shadow)
-                and all(
+                current_shadow_names == authority_set(expected_shadow)
+                and authority_all(
                     current_instance_state[name] is member
                     for name, member in initial_instance_class_shadow
                 )
@@ -2463,19 +2703,99 @@ class GuardedDispatcher:
             class_surface_is_unchanged = True
             for base, members in dispatcher_class_surfaces:
                 current_members = base.__dict__
-                if len(current_members) != len(members):
+                if authority_len(current_members) != authority_len(members):
                     class_surface_is_unchanged = False
                     break
-                if any(
-                    name not in current_members or current_members[name] is not member
+                if authority_any(
+                    name not in current_members
+                    or current_members[name] is not member
                     for name, member in members
                 ):
                     class_surface_is_unchanged = False
                     break
-            module_surface_is_unchanged = all(
-                dispatch_module_get(name) is member
-                for name, member in dispatch_module_authority
+
+            callable_surface_is_unchanged = authority_all(
+                (
+                    authority_getattr(target, "__code__", None)
+                    is expected_code
+                    and authority_getattr(target, "__defaults__", None)
+                    is expected_defaults
+                    and authority_getattr(target, "__kwdefaults__", None)
+                    is expected_kwdefaults
+                    and (
+                        expected_kwdefaults_fingerprint is None
+                        or (
+                            authority_type(expected_kwdefaults)
+                            is authority_dict
+                            and authority_tuple(
+                                (authority_id(key), authority_id(value))
+                                for key, value in authority_dict.items(
+                                    expected_kwdefaults
+                                )
+                            )
+                            == expected_kwdefaults_fingerprint
+                        )
+                    )
+                )
+                for (
+                    target,
+                    expected_code,
+                    expected_defaults,
+                    expected_kwdefaults,
+                    _expected_kwdefaults_copy,
+                    expected_kwdefaults_fingerprint,
+                ) in dispatcher_callable_authority
             )
+
+            module_surface_is_unchanged = authority_all(
+                (
+                    authority_dict.get(dispatch_module_globals, name)
+                    is expected
+                    and (
+                        code is None
+                        or authority_getattr(expected, "__code__", None)
+                        is code
+                    )
+                    and authority_getattr(expected, "__defaults__", None)
+                    is defaults
+                    and authority_getattr(expected, "__kwdefaults__", None)
+                    is kwdefaults
+                    and (
+                        kwdefaults_fingerprint is None
+                        or (
+                            authority_type(kwdefaults) is authority_dict
+                            and authority_tuple(
+                                (authority_id(key), authority_id(value))
+                                for key, value in authority_dict.items(
+                                    kwdefaults
+                                )
+                            )
+                            == kwdefaults_fingerprint
+                        )
+                    )
+                )
+                for (
+                    name,
+                    expected,
+                    code,
+                    defaults,
+                    kwdefaults,
+                    _kwdefaults_copy,
+                    kwdefaults_fingerprint,
+                ) in dispatch_module_helper_authority
+            )
+            builtin_surface_is_unchanged = authority_all(
+                (
+                    (name in dispatch_module_globals) == was_present
+                    and (
+                        not was_present
+                        or authority_dict.get(dispatch_module_globals, name)
+                        is expected
+                    )
+                )
+                for name, was_present, expected in dispatch_builtin_overrides
+            )
+
             if (
                 self.store is authority_store
                 and self._journal_store_path is authority_path
@@ -2483,27 +2803,25 @@ class GuardedDispatcher:
                 and self._dispatch_authority_state is authority_state
                 and shadow_is_unchanged
                 and class_surface_is_unchanged
+                and callable_surface_is_unchanged
                 and module_surface_is_unchanged
-                and type(self.environment) is str
-                and type(self.account_id) is str
-                and type(self.scope_key) is str
-                and type(self.owner_token) is str
-                and type(self.owner_epoch) is int
-                and type(self.prepared_lease_seconds) is int
+                and builtin_surface_is_unchanged
+                and authority_type(self.environment) is str
+                and authority_type(self.account_id) is str
+                and authority_type(self.scope_key) is str
+                and authority_type(self.owner_token) is str
+                and authority_type(self.owner_epoch) is int
+                and authority_type(self.prepared_lease_seconds) is int
                 and current == expected
             ):
                 return
 
             # Restore the exact invocation-selected authority before propagating
             # the failure. Error handling must not continue through a store,
-            # scope, instance shadow or rebound class method that an external
-            # callback retargeted.
-            if not class_surface_is_unchanged:
-                restore_dispatcher_class_surface()
-            if not module_surface_is_unchanged:
-                for name, member in dispatch_module_authority:
-                    if dispatch_module_get(name) is not member:
-                        dispatch_module_set(name, member)
+            # scope, helper, builtin, instance shadow or rebound class method
+            # that an external callback retargeted.
+            restore_dispatch_module_authority()
+            restore_dispatcher_class_surface()
             self.store = authority_store
             self._journal_store_path = authority_path
             self._journal_store_identity = authority_identity
@@ -2521,7 +2839,7 @@ class GuardedDispatcher:
                 self.owner_epoch,
                 self.prepared_lease_seconds,
             ) = expected
-            raise _DispatchAuthorityChanged(
+            raise dispatch_authority_changed_error(
                 "dispatcher authority changed during dispatch"
             )
 
@@ -2532,7 +2850,7 @@ class GuardedDispatcher:
             (provider, "provider"),
         ):
             if type(value) is not str or not value.strip():
-                raise ValueError(f"{name} is required")
+                raise dispatch_value_error(f"{name} is required")
         # Stable client-order identity already treats surrounding whitespace as
         # non-semantic.  Freeze the same canonical text into the durable
         # attempt so restart/provider-observation authority cannot disagree
@@ -2541,7 +2859,7 @@ class GuardedDispatcher:
         intent_id = intent_id.strip()
         provider = provider.strip()
         if type(request) is not dict:
-            raise TypeError("request must be an exact dict")
+            raise dispatch_type_error("request must be an exact dict")
         _instant(now)
         request_dict = _detach_submission_json(request)
         request_canonical = canonical_json(request_dict)
@@ -2551,7 +2869,7 @@ class GuardedDispatcher:
             scope_dict: dict[str, Any] = {}
         else:
             if type(submission_scope) is not dict:
-                raise TypeError("submission_scope must be an exact dict")
+                raise dispatch_type_error("submission_scope must be an exact dict")
             scope_dict = _detach_submission_json(submission_scope)
         scope_canonical = canonical_json(scope_dict)
         submission_scope_hash = (
@@ -2592,7 +2910,7 @@ class GuardedDispatcher:
                 prepared.get(key) != value
                 for key, value in expected_prepared.items()
             ):
-                raise ValueError("attempt_id conflicts with existing submission content")
+                raise dispatch_value_error("attempt_id conflicts with existing submission content")
             return self._recover_existing(
                 attempt_id=attempt_id,
                 client_order_id=client_order_id,
@@ -2632,7 +2950,7 @@ class GuardedDispatcher:
 
         try:
             authority_result = authority_check(intent_hash, now)
-        except Exception as error:
+        except dispatch_exception_error as error:
             require_dispatch_call_authority()
             reason = f"authority_check_failed_before_send:{type(error).__name__}"
             self._append(
@@ -2681,7 +2999,7 @@ class GuardedDispatcher:
         def final_guard() -> None:
             nonlocal guard_called, barrier_passed, barrier_now
             if guard_called:
-                raise RuntimeError("final send guard may be consumed only once")
+                raise dispatch_runtime_error("final send guard may be consumed only once")
             guard_called = True
             require_dispatch_call_authority()
             # request_frozen is a recursively immutable canonical JSON snapshot.
@@ -2691,7 +3009,7 @@ class GuardedDispatcher:
                 try:
                     barrier_now = final_barrier_clock()
                     parsed_barrier_now = _instant(barrier_now)
-                except Exception as error:
+                except dispatch_exception_error as error:
                     require_dispatch_call_authority()
                     barrier_now = now
                     reason = (
@@ -2708,7 +3026,7 @@ class GuardedDispatcher:
                         },
                         now=barrier_now,
                     )
-                    raise DispatchBlocked(reason) from error
+                    raise dispatch_blocked_error(reason) from error
                 require_dispatch_call_authority()
                 if parsed_barrier_now < _instant(now):
                     barrier_now = now
@@ -2722,7 +3040,7 @@ class GuardedDispatcher:
                         },
                         now=barrier_now,
                     )
-                    raise DispatchBlocked("final_barrier_clock_moved_backwards")
+                    raise dispatch_blocked_error("final_barrier_clock_moved_backwards")
             if self.environment in {"PAPER", "LIVE"} and sender_check is None:
                 barrier_reason = "sender_fence_required"
                 self._append(
@@ -2737,14 +3055,14 @@ class GuardedDispatcher:
                     },
                     now=barrier_now,
                 )
-                raise DispatchBlocked(barrier_reason)
+                raise dispatch_blocked_error(barrier_reason)
             if sender_check is not None:
                 try:
                     sender_check(self.owner_token, self.owner_epoch)
                     require_dispatch_call_authority()
-                except _DispatchAuthorityChanged:
+                except dispatch_authority_changed_error:
                     raise
-                except Exception as error:
+                except dispatch_exception_error as error:
                     require_dispatch_call_authority()
                     barrier_reason = f"sender_fence_rejected:{type(error).__name__}"
                     self._append(
@@ -2759,12 +3077,12 @@ class GuardedDispatcher:
                         },
                         now=barrier_now,
                     )
-                    raise DispatchBlocked(barrier_reason) from error
+                    raise dispatch_blocked_error(barrier_reason) from error
             try:
                 authority_result = authority_check(intent_hash, barrier_now)
-            except _DispatchAuthorityChanged:
+            except dispatch_authority_changed_error:
                 raise
-            except Exception as error:
+            except dispatch_exception_error as error:
                 require_dispatch_call_authority()
                 barrier_reason = (
                     "authority_check_failed_at_final_barrier:"
@@ -2777,7 +3095,7 @@ class GuardedDispatcher:
                     payload={"client_order_id": client_order_id, "reason": barrier_reason},
                     now=barrier_now,
                 )
-                raise DispatchBlocked(barrier_reason) from error
+                raise dispatch_blocked_error(barrier_reason) from error
             require_dispatch_call_authority()
             allowed_now, barrier_reason = _validated_authority_result(authority_result)
             if not allowed_now:
@@ -2788,7 +3106,7 @@ class GuardedDispatcher:
                     payload={"client_order_id": client_order_id, "reason": barrier_reason},
                     now=barrier_now,
                 )
-                raise DispatchBlocked(barrier_reason)
+                raise dispatch_blocked_error(barrier_reason)
             durable_before_send = self._events(attempt_id)
             if (
                 not durable_before_send
@@ -2800,7 +3118,7 @@ class GuardedDispatcher:
                     expected_prepared=prepared_payload,
                 )
             ):
-                raise DispatchBlocked(
+                raise dispatch_blocked_error(
                     "submission_changed_during_final_send_validation"
                 )
             durable_prepared_payload = durable_before_send[0].get("payload")
@@ -2808,7 +3126,7 @@ class GuardedDispatcher:
                 type(durable_prepared_payload) is not dict
                 or type(durable_prepared_payload.get("prepared_at")) is not str
             ):
-                raise DispatchBlocked("submission_prepared_chronology_invalid")
+                raise dispatch_blocked_error("submission_prepared_chronology_invalid")
             lease_state = _prepared_lease_state(
                 prepared_at=durable_prepared_payload["prepared_at"],
                 now=barrier_now,
@@ -2833,11 +3151,11 @@ class GuardedDispatcher:
                         },
                         now=barrier_now if lease_state == "EXPIRED" else now,
                     )
-                except ValueError:
+                except dispatch_value_error:
                     # Another owner may have won the same version-2 race. The
                     # outer DispatchBlocked handler re-reads that durable truth.
                     pass
-                raise DispatchBlocked(barrier_reason)
+                raise dispatch_blocked_error(barrier_reason)
             try:
                 self._append(
                     attempt_id=attempt_id,
@@ -2851,7 +3169,7 @@ class GuardedDispatcher:
                     },
                     now=barrier_now,
                 )
-            except ValueError as error:
+            except dispatch_value_error as error:
                 # A concurrent recovery may have terminalized the Prepared
                 # attempt as zero-wire BLOCKED after its lease expired. Never
                 # let a stale final_guard cross that durable fence.
@@ -2868,7 +3186,7 @@ class GuardedDispatcher:
                         },
                         now=barrier_now,
                     )
-                raise DispatchBlocked(
+                raise dispatch_blocked_error(
                     "submission_changed_during_final_send_validation"
                 ) from error
             barrier_passed = True
@@ -3758,11 +4076,11 @@ class GuardedDispatcher:
                 restore_postsend_builtin_globals()
             try:
                 require_dispatch_call_authority()
-            except _DispatchAuthorityChanged:
+            except dispatch_authority_changed_error:
                 if barrier_passed:
                     return authority_change_after_send_outcome()
                 raise
-        except _DispatchAuthorityChanged:
+        except dispatch_authority_changed_error:
             # The authority helper restores the invocation-selected cut before
             # raising. Once Sending is durable, preserve worst-case exposure as
             # UNKNOWN on that original journal rather than leaking a retryable
@@ -3770,10 +4088,10 @@ class GuardedDispatcher:
             if barrier_passed:
                 return authority_change_after_send_outcome()
             raise
-        except DispatchBlocked as error:
+        except dispatch_blocked_error as error:
             try:
                 require_dispatch_call_authority()
-            except _DispatchAuthorityChanged:
+            except dispatch_authority_changed_error:
                 if barrier_passed:
                     return authority_change_after_send_outcome()
                 raise
@@ -3799,10 +4117,10 @@ class GuardedDispatcher:
                         expected_prepared=expected_prepared,
                     )
             return DispatchOutcome("BLOCKED", client_order_id, None, str(error))
-        except Exception as error:
+        except dispatch_exception_error as error:
             try:
                 require_dispatch_call_authority()
-            except _DispatchAuthorityChanged:
+            except dispatch_authority_changed_error:
                 if barrier_passed:
                     return authority_change_after_send_outcome()
                 raise
@@ -3839,7 +4157,7 @@ class GuardedDispatcher:
                         },
                         now=barrier_now,
                     )
-                except ValueError:
+                except dispatch_value_error:
                     current = self._events(attempt_id)
                     return self._terminal_outcome_from_existing_history(
                         events=current,
@@ -3988,7 +4306,7 @@ class GuardedDispatcher:
                 ExactJsonTransportResponse is not exact_response_type
                 or _snapshot_exact_transport_response is not exact_response_snapshot
             ):
-                raise ValueError(
+                raise dispatch_value_error(
                     "exact transport response authority changed after send"
                 )
             if response_type_builtin(response) is exact_response_type:
@@ -4029,7 +4347,7 @@ class GuardedDispatcher:
             elif response_isinstance_builtin(response, exact_response_type):
                 # Caller-polymorphic post-SEND response getters are not evidence.
                 # A durable UNKNOWN retains the no-blind-retry property.
-                raise TypeError("exact provider response subtype is forbidden")
+                raise dispatch_type_error("exact provider response subtype is forbidden")
             else:
                 # Legacy provider wrappers may still return decoded JSON rather
                 # than ExactJsonTransportResponse. Detach that graph before
@@ -4052,7 +4370,7 @@ class GuardedDispatcher:
                 payload=sent_payload,
                 now=barrier_now,
             )
-        except Exception as persistence_error:
+        except dispatch_exception_error as persistence_error:
             # The outbound request has already crossed the final barrier.
             # Never make this state safe to retry merely because the provider
             # response could not be journaled.
@@ -4070,7 +4388,7 @@ class GuardedDispatcher:
                     },
                     now=barrier_now,
                 )
-            except Exception:
+            except dispatch_exception_error:
                 current = self._events(attempt_id)
                 if current and current[-1]["event_type"] in {
                     "SubmissionSent",

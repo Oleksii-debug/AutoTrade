@@ -964,6 +964,11 @@ class _TrapMapping(dict):
         raise AssertionError("caller mapping iteration executed")
 
 
+class _TrapList(list):
+    def __iter__(self):
+        raise AssertionError("caller list iteration executed")
+
+
 class _TrapTzInfo(tzinfo):
     def utcoffset(self, dt):
         raise AssertionError("caller tzinfo method executed")
@@ -1029,15 +1034,11 @@ class InstrumentIngressAuthorityTests(unittest.TestCase):
             )
 
     def test_metadata_container_subclass_is_rejected_before_iteration(self):
-        class TrapList(list):
-            def __iter__(self):
-                raise AssertionError("caller list iteration executed")
-
         with self.assertRaisesRegex(
             InstrumentRegistryError,
             "metadata_evidence must be an exact built-in array",
         ):
-            spot(metadata_evidence=TrapList())
+            spot(metadata_evidence=_TrapList())
 
     def test_funding_mapping_subclass_is_rejected_before_mapping_callbacks(self):
         hostile = _TrapMapping({"interval": "8h", "source": "provider"})
@@ -1068,6 +1069,37 @@ class InstrumentIngressAuthorityTests(unittest.TestCase):
                 settlement_method="CASH",
                 funding_schedule=hostile,
                 margin_model_id="perp-margin-v1",
+            )
+
+
+    def test_calendar_container_subclass_is_rejected_before_iteration(self):
+        with self.assertRaisesRegex(
+            InstrumentRegistryError,
+            "sessions must be an exact built-in array",
+        ):
+            TradingCalendar(
+                calendar_id="HOSTILE",
+                timezone_id="UTC",
+                sessions=_TrapList(),
+                transitions=(),
+                continuous=False,
+            )
+
+    def test_calendar_entries_must_be_exact_authority_types(self):
+        class DerivedSession(WeeklySession):
+            pass
+
+        with self.assertRaisesRegex(
+            InstrumentRegistryError,
+            "sessions entries must be exact WeeklySession",
+        ):
+            TradingCalendar(
+                calendar_id="DERIVED",
+                timezone_id="UTC",
+                sessions=(DerivedSession(0, 0, 1),),
+                transitions=(
+                    OffsetTransition(datetime(1970, 1, 1, tzinfo=timezone.utc), 0),
+                ),
             )
 
 

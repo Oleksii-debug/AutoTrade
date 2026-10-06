@@ -216,6 +216,33 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
         self.assertEqual(observation.payload["retCode"], 0)
         self.assertEqual(len(wire.requests), 1)
 
+    def test_read_capability_expiry_during_quota_wait_blocks_secret_and_wire(self):
+        capability, binding = self.binding()
+        events = []
+        wire = RecordingWire(events)
+        now = [READ_AT]
+
+        def quota(*_args):
+            events.append("quota")
+            now[0] = READ_AT + timedelta(hours=2)
+
+        transport, resolver, _registry = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=wire,
+            quota_gate=quota,
+            clock_utc=lambda: now[0],
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "current capability",
+        ):
+            transport(binding)
+
+        self.assertEqual(events, ["quota", "capability"])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+
     def test_read_capability_expiry_after_secret_resolution_blocks_wire_send(self):
         capability, binding = self.binding()
         events = []
@@ -629,6 +656,37 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                 self.assertEqual(events, [])
                 self.assertEqual(resolver.calls, [])
                 self.assertEqual(wire.requests, [])
+
+    def test_write_capability_expiry_during_quota_wait_blocks_secret_guard_and_wire(self):
+        capability, request = prepared()
+        events = []
+        wire = BybitWriteRecordingWire(events)
+        now = [READ_AT]
+
+        def quota(*_args):
+            events.append("quota")
+            now[0] = READ_AT + timedelta(minutes=10)
+
+        transport, resolver = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=wire,
+            quota_gate=quota,
+            clock_utc=lambda: now[0],
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "current capability",
+        ):
+            transport(
+                "bybit-order-1",
+                guarded_order_projection(request),
+                lambda: events.append("guard"),
+            )
+
+        self.assertEqual(events, ["quota", "capability"])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
 
     def test_expired_write_capability_blocks_before_secret_or_send(self):
         capability, request = prepared()

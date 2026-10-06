@@ -481,6 +481,43 @@ class MarketNormalizationTests(unittest.TestCase):
 
         self.assertEqual(CallbackDict.calls, 0)
 
+    def test_normalize_rejects_tampered_frozen_snapshot_state_without_callbacks(self):
+        CallbackList.calls = 0
+        normalizer = MarketNormalizer(registry())
+
+        payload_update = raw(
+            "TRADE",
+            {"price": "100.01", "quantity": "1", "side": "buy"},
+        )
+        object.__setattr__(
+            payload_update.payload,
+            "_items",
+            CallbackList([("price", "100.02")]),
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "frozen mapping state is invalid",
+        ):
+            normalizer.normalize(payload_update)
+
+        evidence_update = raw(
+            "TRADE",
+            {"price": "100.01", "quantity": "1", "side": "buy"},
+            sequence=3,
+        )
+        object.__setattr__(
+            evidence_update.raw_evidence_ref,
+            "_items",
+            CallbackList([("artifact_id", EVIDENCE["artifact_id"])]),
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "raw_evidence_ref: payload frozen mapping state is invalid",
+        ):
+            normalizer.normalize(evidence_update)
+
+        self.assertEqual(CallbackList.calls, 0)
+
     def test_normalizer_rejects_registry_subclass_before_use(self):
         CallbackRegistry.calls = 0
         with self.assertRaisesRegex(TypeError, "exact InstrumentRegistry"):

@@ -79,7 +79,7 @@ _PROVIDER_SCOPE_PAYLOAD = ProviderFinancialScope.payload
 _CANONICAL_JSON = canonical_json
 _SHA256 = sha256
 _JSON_LOADS = json.loads
-_JSON_DECODE_ERROR = _JSON_DECODE_ERROR
+_JSON_DECODE_ERROR = json.JSONDecodeError
 
 
 class ProviderAccountAbsenceSemanticsError(ValueError):
@@ -237,7 +237,7 @@ def _canonical_route_semantics(qualification: object) -> tuple[dict[str, str], s
     if (
         type(decoded) is not dict
         or any(type(key) is not str or type(value) is not str for key, value in decoded.items())
-        or canonical_json(decoded) != raw
+        or _CANONICAL_JSON(decoded) != raw
     ):
         raise ProviderAccountAbsenceSemanticsError(
             "provider Q route semantics are non-canonical"

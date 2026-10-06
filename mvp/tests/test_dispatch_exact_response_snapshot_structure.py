@@ -600,6 +600,99 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
             )
             self.assertNotIn("response_text", events[-1]["payload"])
 
+    def test_transport_cannot_replace_json_decoder_decode_defaults_after_send(self):
+        class TrapWhitespace:
+            calls = 0
+
+            def __call__(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("forged JSONDecoder whitespace callback executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            decode = dispatch_module.json.JSONDecoder.__dict__["decode"]
+            original_defaults = decode.__defaults__
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                decode.__defaults__ = (TrapWhitespace(),)
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "snapshot-json-decoder-defaults-retarget",
+                    transport,
+                )
+                self.assertIs(decode.__defaults__, original_defaults)
+                self.assertEqual(TrapWhitespace.calls, 0)
+            finally:
+                decode.__defaults__ = original_defaults
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            self.assertEqual(TrapWhitespace.calls, 0)
+            events = self._events(
+                path,
+                dispatcher,
+                "snapshot-json-decoder-defaults-retarget",
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:ValueError",
+            )
+            self.assertNotIn("response_text", events[-1]["payload"])
+
+    def test_transport_cannot_mutate_json_decoder_init_kwdefaults_after_send(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            decoder_init = dispatch_module.json.JSONDecoder.__dict__["__init__"]
+            original_kwdefaults = decoder_init.__kwdefaults__
+            baseline_kwdefaults = dict(original_kwdefaults)
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                decoder_init.__kwdefaults__["strict"] = False
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "snapshot-json-decoder-init-kwdefaults-retarget",
+                    transport,
+                )
+                self.assertEqual(
+                    decoder_init.__kwdefaults__,
+                    baseline_kwdefaults,
+                )
+            finally:
+                decoder_init.__kwdefaults__ = original_kwdefaults
+                original_kwdefaults.clear()
+                original_kwdefaults.update(baseline_kwdefaults)
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            events = self._events(
+                path,
+                dispatcher,
+                "snapshot-json-decoder-init-kwdefaults-retarget",
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:ValueError",
+            )
+            self.assertNotIn("response_text", events[-1]["payload"])
+
     def test_transport_cannot_rebind_json_object_parser_after_send(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

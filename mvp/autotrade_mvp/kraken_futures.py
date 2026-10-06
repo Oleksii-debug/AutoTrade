@@ -609,6 +609,7 @@ def _install_kraken_futures_prepared_request_authority(builder):
     base_urls = KRAKEN_FUTURES_BASE_URLS
     endpoints = KRAKEN_FUTURES_ENDPOINTS
     error_type = ProviderCoreError
+    type_error = TypeError
     canonical_type = type
     canonical_id = id
     canonical_tuple = tuple
@@ -657,6 +658,7 @@ def _install_kraken_futures_prepared_request_authority(builder):
             or KRAKEN_FUTURES_BASE_URLS is not base_urls
             or KRAKEN_FUTURES_ENDPOINTS is not endpoints
             or ProviderCoreError is not error_type
+            or TypeError is not type_error
             or datetime is not datetime_type
             or timezone is not timezone_type
             or type is not canonical_type
@@ -693,7 +695,7 @@ def _install_kraken_futures_prepared_request_authority(builder):
     def require_canonical_kraken_futures_prepared_request(value):
         implementation_changed()
         if canonical_type(value) is not prepared_type:
-            authority_changed()
+            raise type_error("prepared_request must be exact KrakenFuturesPreparedRequest")
         binding = bindings.get(canonical_id(value))
         if binding is None:
             authority_changed()

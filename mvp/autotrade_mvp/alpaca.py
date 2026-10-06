@@ -392,6 +392,7 @@ def _install_alpaca_prepared_request_authority(builder):
     canonical_decimal_text_code = canonical_decimal_text.__code__
     canonical_docs = ALPACA_DOCS
     error_type = AlpacaAdapterError
+    type_error = TypeError
     canonical_type = type
     canonical_id = id
     canonical_tuple = tuple
@@ -436,6 +437,7 @@ def _install_alpaca_prepared_request_authority(builder):
             is not canonical_decimal_text_code
             or ALPACA_DOCS is not canonical_docs
             or AlpacaAdapterError is not error_type
+            or TypeError is not type_error
             or type is not canonical_type
             or id is not canonical_id
             or tuple is not canonical_tuple
@@ -480,7 +482,7 @@ def _install_alpaca_prepared_request_authority(builder):
     def require_canonical_alpaca_prepared_request(value):
         implementation_changed()
         if canonical_type(value) is not prepared_type:
-            authority_changed()
+            raise type_error("prepared_request must be exact AlpacaPreparedRequest")
         binding = bindings.get(canonical_id(value))
         if binding is None:
             authority_changed()

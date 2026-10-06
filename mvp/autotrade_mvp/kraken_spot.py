@@ -645,6 +645,7 @@ def _install_kraken_spot_prepared_request_authority(builder):
     canonical_decimal_text_code = canonical_decimal_text.__code__
     canonical_docs = KRAKEN_SPOT_DOCS
     error_type = KrakenSpotAdapterError
+    type_error = TypeError
     canonical_type = type
     canonical_id = id
     canonical_tuple = tuple
@@ -692,6 +693,7 @@ def _install_kraken_spot_prepared_request_authority(builder):
             is not canonical_decimal_text_code
             or KRAKEN_SPOT_DOCS is not canonical_docs
             or KrakenSpotAdapterError is not error_type
+            or TypeError is not type_error
             or type is not canonical_type
             or id is not canonical_id
             or tuple is not canonical_tuple
@@ -735,7 +737,7 @@ def _install_kraken_spot_prepared_request_authority(builder):
     def require_canonical_kraken_spot_prepared_request(value):
         implementation_changed()
         if canonical_type(value) is not prepared_type:
-            authority_changed()
+            raise type_error("prepared_request must be exact KrakenSpotPreparedRequest")
         binding = bindings.get(canonical_id(value))
         if binding is None:
             authority_changed()

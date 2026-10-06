@@ -146,6 +146,35 @@ async function exercisePortfolioTableTools(page) {
   assert.match(copiedPortfolio, /895\.696/);
   await page.keyboard.press("Shift+Tab");
   assert.equal(await page.evaluate(() => document.activeElement.id), "portfolio-filter");
+
+  await page.evaluate(() => {
+    const filter = document.querySelector("#portfolio-filter");
+    const composingEscape = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+      isComposing: true
+    });
+    filter.dispatchEvent(composingEscape);
+  });
+  assert.equal(
+    await page.locator("#portfolio-filter").inputValue(),
+    "895.696",
+    "Escape during IME composition must not clear the filter");
+
+  await page.evaluate(() => {
+    const filter = document.querySelector("#portfolio-filter");
+    for (const modifier of ["altKey", "ctrlKey", "metaKey", "shiftKey"]) {
+      const init = {key: "Escape", bubbles: true, cancelable: true};
+      init[modifier] = true;
+      filter.dispatchEvent(new KeyboardEvent("keydown", init));
+    }
+  });
+  assert.equal(
+    await page.locator("#portfolio-filter").inputValue(),
+    "895.696",
+    "modified Escape shortcuts must not clear the filter");
+
   await page.keyboard.press("Escape");
   await page.waitForFunction(() => {
     const filter = document.querySelector("#portfolio-filter");

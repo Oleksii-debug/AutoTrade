@@ -6,6 +6,7 @@ import sqlite3
 import unittest
 import weakref
 
+import mvp.autotrade_mvp.durable_order_projection as durable_order_projection_module
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from mvp.autotrade_mvp.dispatch import (
@@ -838,6 +839,43 @@ class DurableOrderProjectionTests(unittest.TestCase):
                     provider_order_id="provider-1",
                     committed_at=T1,
                 )
+
+    def test_provider_evidence_gate_ignores_module_str_rebinding(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store, environment="PAPER")
+            book.create_order(
+                event_key="create-paper-hostile-str",
+                client_order_id="paper-hostile-str",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+
+            sentinel = object()
+            prior = durable_order_projection_module.__dict__.get("str", sentinel)
+            durable_order_projection_module.str = lambda _value: "UNKNOWN"
+            try:
+                with self.assertRaisesRegex(
+                    OrderProjectionConflict,
+                    "requires sealed provider-origin authority",
+                ):
+                    book.acknowledge(
+                        event_key="accepted-under-hostile-str",
+                        client_order_id="paper-hostile-str",
+                        status="ACCEPTED",
+                        committed_at=T1,
+                    )
+            finally:
+                if prior is sentinel:
+                    durable_order_projection_module.__dict__.pop("str", None)
+                else:
+                    durable_order_projection_module.str = prior
+
+            snapshot = book.order("paper-hostile-str").snapshot()
+            self.assertEqual(snapshot.state, "PENDING")
+            self.assertIsNone(snapshot.provider_order_id)
 
     def test_paper_unknown_cannot_bind_provider_order_id_without_origin(self):
         with TemporaryDirectory() as directory:

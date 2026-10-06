@@ -599,10 +599,18 @@ class DurableOrderBookProjection:
         request: Mapping[str, object],
     ) -> bool:
         if operation == "ACKNOWLEDGE":
-            status = str(request.get("status", "")).upper()
+            # Callers reach this gate only through canonical request builders or
+            # durable JSON replay, so status must already be exact inert text.
+            # Do not pass it through the mutable module-global `str`: rebinding
+            # that builtin could otherwise misclassify ACCEPTED as local UNKNOWN
+            # before the canonical order projection applies the real request.
+            status = request.get("status")
             return (
-                status in {"ACKNOWLEDGED", "ACCEPTED", "REJECTED"}
-                or request.get("provider_order_id") is not None
+                type(status) is str
+                and (
+                    status in {"ACKNOWLEDGED", "ACCEPTED", "REJECTED"}
+                    or request.get("provider_order_id") is not None
+                )
             )
         return operation in _PROVIDER_EVIDENCE_OPERATIONS
 

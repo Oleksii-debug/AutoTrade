@@ -1345,6 +1345,7 @@ class ReconciliationResult:
     borrow_differences: Mapping[str, Decimal] | None = None
     settlement_differences: Mapping[str, Decimal] | None = None
     settlement_activity_complete: bool = True
+    settlement_reconciliation_performed: bool = False
     unexpected_provider_fills: tuple[ProviderFillEvidence, ...] = ()
 
     @property
@@ -2515,6 +2516,7 @@ def reconcile_account(
         settlement_activity_complete=(
             True if not settlement_requested else bool(settlement_activity_complete)
         ),
+        settlement_reconciliation_performed=settlement_requested,
         unexpected_provider_fills=tuple(
             provider_by_id[execution_id] for execution_id in unexpected
         ),

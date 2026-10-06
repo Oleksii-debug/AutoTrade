@@ -202,6 +202,62 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertTrue(verify_replay(directory))
 
 
+    def test_resume_rejects_foreign_journal_before_repairing_latest_evidence(self):
+        with TemporaryDirectory() as directory:
+            run_multi_episode(
+                [[100, 101, 102, 103], [100, 100, 100]],
+                directory,
+            )
+            root = Path(directory)
+            evidence_path = root / "learning-evidence.jsonl"
+            rows = evidence_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(rows), 2)
+            evidence_path.write_text(rows[0] + "\n", encoding="utf-8")
+
+            store = JournalStore(root / "journal.sqlite3")
+            payload = {"kind": "foreign-before-repair"}
+            store.append_event(
+                {
+                    "event_id": "foreign-before-replay-repair",
+                    "event_type": "ForeignEvent",
+                    "aggregate_type": "foreign",
+                    "aggregate_id": "noise",
+                    "aggregate_version": "1",
+                    "committed_at": "2026-10-06T00:00:00Z",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                }
+            )
+
+            checkpoint_before = (root / "checkpoint.json").read_bytes()
+            evidence_before = evidence_path.read_bytes()
+            journal_before = (root / "journal.sqlite3").read_bytes()
+            intents_before = {
+                path.name: path.read_bytes()
+                for path in (root / "order-intents").glob("*.json")
+            }
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Unexpected durable journal state before replay repair",
+            ):
+                run_vertical_slice(
+                    [103, 102, 101, 100],
+                    directory,
+                )
+
+            self.assertEqual((root / "checkpoint.json").read_bytes(), checkpoint_before)
+            self.assertEqual(evidence_path.read_bytes(), evidence_before)
+            self.assertEqual((root / "journal.sqlite3").read_bytes(), journal_before)
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in (root / "order-intents").glob("*.json")
+                },
+                intents_before,
+            )
+
+
     def test_resume_rejects_historical_evidence_gap_before_new_financial_work(self):
         with TemporaryDirectory() as directory:
             run_multi_episode(

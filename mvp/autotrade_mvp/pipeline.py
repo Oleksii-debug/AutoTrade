@@ -604,7 +604,23 @@ def _repair_interrupted_replay(
     journal_ids: set[str] = set()
     if journal_path.is_file():
         store = JournalStore(journal_path)
-        for event in store.load_events("simulation_portfolio", symbol):
+        replay_events = store.load_events("simulation_portfolio", symbol)
+        existing_event_count = len(replay_events)
+        expected_existing_counts = {
+            "events": existing_event_count,
+            "outbox": existing_event_count,
+            "command_dedupe": 0,
+            "projection_checkpoints": 0,
+            "global_projection_checkpoints": 0,
+        }
+        if (
+            store.whole_store_state_counts() != expected_existing_counts
+            or store.current_journal_sequence() != existing_event_count
+        ):
+            raise ValueError(
+                "Unexpected durable journal state before replay repair"
+            )
+        for event in replay_events:
             if type(event) is not dict:
                 raise ValueError("Corrupt simulation journal replay event")
             payload = event.get("payload")

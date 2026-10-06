@@ -294,6 +294,62 @@ class DispatchReconciliationAttemptIdentityTests(unittest.TestCase):
                     aggregate_ids={"caller-alias": aggregate_id},
                 )
 
+    def test_recovery_rejects_hash_valid_impossible_terminal_history(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            aggregate_id = "legacy-impossible-terminal-history"
+            prepared = {
+                "intent_id": "legacy-intent",
+                "provider": "TEST_PROVIDER",
+                "account_id": "acct",
+                "environment": "SIMULATION",
+                "client_order_id": "legacy-client",
+                "prepared_at": "2026-10-06T14:00:00Z",
+            }
+            sent = {
+                "client_order_id": "legacy-client",
+                "response": {"accepted": True},
+            }
+            unknown = {
+                "client_order_id": "legacy-client",
+                "reason": "forged-after-terminal-sent",
+            }
+            for version, event_type, payload in (
+                (1, "SubmissionPrepared", prepared),
+                (2, "SubmissionSent", sent),
+                (3, "SubmissionUnknown", unknown),
+            ):
+                store.append_event(
+                    {
+                        "event_id": f"impossible-{version}",
+                        "event_type": event_type,
+                        "schema_version": "1.0.0",
+                        "aggregate_type": "submission_attempt",
+                        "aggregate_id": aggregate_id,
+                        "aggregate_version": str(version),
+                        "host_id": "local-mvp",
+                        "owner_epoch": "1",
+                        "environment": "SIMULATION",
+                        "occurred_at": "2026-10-06T14:00:00Z",
+                        "observed_at": "2026-10-06T14:00:00Z",
+                        "committed_at": "2026-10-06T14:00:00Z",
+                        "correlation_id": "impossible-correlation",
+                        "causation_id": None,
+                        "payload": payload,
+                        "payload_hash": payload_digest(payload),
+                        "evidence_refs": [],
+                    }
+                )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "invalid causal shape",
+            ):
+                unknown_submissions_from_dispatch(
+                    store,
+                    attempt_ids=(aggregate_id,),
+                )
+
     def test_journal_store_subclass_cannot_supply_reconciliation_truth(self):
         class ForgedStore(JournalStore):
             def load_events(self, _aggregate_type, _aggregate_id):

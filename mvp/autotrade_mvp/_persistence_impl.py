@@ -163,6 +163,14 @@ def _projection_checkpoint_digest(
 _SEQUENCE_RE = re.compile(r"^(0|[1-9][0-9]*)$")
 
 
+def _require_canonical_json_text(value: object, *, name: str) -> str:
+    """Require exact canonical text when the bytes are part of durable JSON authority."""
+
+    if type(value) is not str or not value or value != value.strip():
+        raise ValueError(f"{name} must be canonical non-empty text")
+    return value
+
+
 def _sequence(value: object, *, name: str, positive: bool = False) -> int:
     """Validate canonical Sequence text before integer persistence/arithmetic."""
 
@@ -1194,10 +1202,14 @@ class JournalStore:
         if type(envelope) is not dict:
             raise TypeError("event envelope must be an exact dict")
         envelope = _detach_json_value(envelope)
-        event_id = self._require_text(envelope.get("event_id"), "event_id")
-        event_type = self._require_text(envelope.get("event_type"), "event_type")
-        aggregate_type = self._require_text(envelope.get("aggregate_type"), "aggregate_type")
-        aggregate_id = self._require_text(envelope.get("aggregate_id"), "aggregate_id")
+        event_id = _require_canonical_json_text(envelope.get("event_id"), name="event_id")
+        event_type = _require_canonical_json_text(envelope.get("event_type"), name="event_type")
+        aggregate_type = _require_canonical_json_text(
+            envelope.get("aggregate_type"), name="aggregate_type"
+        )
+        aggregate_id = _require_canonical_json_text(
+            envelope.get("aggregate_id"), name="aggregate_id"
+        )
         try:
             raw_aggregate_version = envelope["aggregate_version"]
         except KeyError as error:
@@ -1217,7 +1229,9 @@ class JournalStore:
         payload_json = canonical_json(payload)
         envelope_json = canonical_json(envelope)
         envelope_hash = _event_envelope_digest(envelope_json)
-        committed_at = self._require_text(envelope.get("committed_at"), "committed_at")
+        committed_at = _require_canonical_json_text(
+            envelope.get("committed_at"), name="committed_at"
+        )
         if outbox_topic is not None:
             outbox_topic = self._require_text(outbox_topic, "outbox_topic")
         if (
@@ -2516,13 +2530,21 @@ class JournalStore:
             if type(envelope) is not dict:
                 raise TypeError("Each event envelope must be an exact dict")
             envelope = _detach_json_value(envelope)
-            event_id = self._require_text(envelope.get("event_id"), "event_id")
+            event_id = _require_canonical_json_text(
+                envelope.get("event_id"), name="event_id"
+            )
             if event_id in seen_event_ids:
                 raise ValueError("event_id is duplicated within the transaction")
             seen_event_ids.add(event_id)
-            event_type = self._require_text(envelope.get("event_type"), "event_type")
-            aggregate_type = self._require_text(envelope.get("aggregate_type"), "aggregate_type")
-            aggregate_id = self._require_text(envelope.get("aggregate_id"), "aggregate_id")
+            event_type = _require_canonical_json_text(
+                envelope.get("event_type"), name="event_type"
+            )
+            aggregate_type = _require_canonical_json_text(
+                envelope.get("aggregate_type"), name="aggregate_type"
+            )
+            aggregate_id = _require_canonical_json_text(
+                envelope.get("aggregate_id"), name="aggregate_id"
+            )
             try:
                 raw_aggregate_version = envelope["aggregate_version"]
             except KeyError as error:
@@ -2542,7 +2564,9 @@ class JournalStore:
             )
             if supplied_hash != expected_payload_hash:
                 raise ValueError("payload_hash does not match payload")
-            committed_at = self._require_text(envelope.get("committed_at"), "committed_at")
+            committed_at = _require_canonical_json_text(
+            envelope.get("committed_at"), name="committed_at"
+        )
             if outbox_topic is not None:
                 self._require_text(outbox_topic, "outbox_topic")
             envelope_json = canonical_json(envelope)

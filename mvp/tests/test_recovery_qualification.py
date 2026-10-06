@@ -24,7 +24,9 @@ from mvp.autotrade_mvp.recovery_qualification import (
     RecoveryScenario,
     RecoveryScenarioEvidence,
     qualify_recovery_release,
+    recovery_evidence_receipt_bytes,
     recovery_evidence_receipt_metadata,
+    recovery_policy_subject_requirement,
 )
 from mvp.tests.test_qualification_attestation import (
     attestation,
@@ -101,18 +103,14 @@ def evidence(
     receipt_bytes = (
         "autotrade-recovery-evidence:" + scenario.value
     ).encode("utf-8")
-    receipt_hash = (
-        evidence_artifact_sha256
-        or "sha256:" + sha256(receipt_bytes).hexdigest()
-    )
-    return RecoveryScenarioEvidence(
+    values = dict(
         scenario=scenario,
         status=status,
         source_sha=source_sha,
         release_artifact_id=artifact_id,
         release_artifact_sha256=artifact,
         evidence_artifact_id=receipt_id,
-        evidence_artifact_sha256=receipt_hash,
+        evidence_artifact_sha256="sha256:" + ("0" * 64),
         evidence_refs=(f"artifact://recovery/{scenario.value.lower()}",),
         evidence_schema_version=evidence_schema_version,
         protocol_id=protocol_id,
@@ -133,6 +131,16 @@ def evidence(
         open_risk_present=open_risk_present,
         protection_state=protection_state,
     )
+    provisional = RecoveryScenarioEvidence(**values)
+    receipt_hash = (
+        evidence_artifact_sha256
+        or "sha256:" + sha256(
+            recovery_evidence_receipt_bytes(provisional)
+        ).hexdigest()
+    )
+    return RecoveryScenarioEvidence(
+        **{**values, "evidence_artifact_sha256": receipt_hash}
+    )
 
 
 def complete_evidence():
@@ -140,7 +148,7 @@ def complete_evidence():
 
 
 def _receipt_bytes(item):
-    return ("autotrade-recovery-evidence:" + item.scenario.value).encode("utf-8")
+    return recovery_evidence_receipt_bytes(item)
 
 
 def qualify(
@@ -153,6 +161,10 @@ def qualify(
     trusted=False,
     omit_attestation_scenarios=(),
     canonical_error=None,
+    omit_policy_requirement=False,
+    attested_policy=None,
+    attestation_evidence_kind="RECOVERY_SCENARIO_EVIDENCE",
+    receipt_bytes_overrides=None,
 ):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
@@ -168,12 +180,16 @@ def qualify(
                     "source_sha": policy.source_sha,
                 },
             )
+        receipt_bytes_overrides = receipt_bytes_overrides or {}
         for item in evidence:
             if item.evidence_artifact_id in omit_evidence_ids:
                 continue
             store.publish_bytes(
                 artifact_id=item.evidence_artifact_id,
-                data=_receipt_bytes(item),
+                data=receipt_bytes_overrides.get(
+                    item.evidence_artifact_id,
+                    _receipt_bytes(item),
+                ),
                 media_type="application/vnd.autotrade.recovery-evidence",
                 rights={"storage": True, "export": False},
                 source_refs=[f"git:{item.source_sha}"],
@@ -193,12 +209,19 @@ def qualify(
                     artifact_id=item.evidence_artifact_id,
                     sha256=item.evidence_artifact_sha256,
                     media_type="application/vnd.autotrade.recovery-evidence",
-                    evidence_kind="RECOVERY_SCENARIO_EVIDENCE",
+                    evidence_kind=attestation_evidence_kind,
                     source_sha=item.source_sha,
                 )
                 for item in evidence
                 if item.scenario not in set(omit_attestation_scenarios)
             )
+            policy_requirements = ["recovery-release-qualification"]
+            if not omit_policy_requirement:
+                policy_requirements.append(
+                    recovery_policy_subject_requirement(
+                        policy if attested_policy is None else attested_policy
+                    )
+                )
             signed = attestation(
                 trust_root,
                 source_sha=policy.source_sha,
@@ -207,7 +230,7 @@ def qualify(
                 package_id="WP-59",
                 protocol_id=policy.protocol_id,
                 protocol_version=policy.evidence_schema_version,
-                requirement_ids=("recovery-release-qualification",),
+                requirement_ids=tuple(policy_requirements),
                 evidence_refs=attested_refs,
                 release_artifact_id=policy.release_artifact_id,
                 release_artifact_sha256=policy.release_artifact_sha256,
@@ -230,6 +253,8 @@ def qualify(
                 requirement_id="recovery-release-qualification",
                 release_artifact_id=policy.release_artifact_id,
                 release_artifact_sha256=policy.release_artifact_sha256,
+                requirement_ids=tuple(policy_requirements),
+                evidence_refs=attested_refs,
             )
             verifier_kwargs = (
                 {"return_value": accepted}

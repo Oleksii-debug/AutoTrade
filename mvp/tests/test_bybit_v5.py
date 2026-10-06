@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import json
@@ -29,7 +30,7 @@ from mvp.autotrade_mvp.dispatch import (
     load_submission_response_binding,
     stable_client_order_id,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
     ProviderSubmissionObservation,
@@ -578,6 +579,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         http_status=200,
         intent_id="bybit-write-intent",
         attempt_id=None,
+        return_binding=False,
     ):
         runtime_environment = (
             "LIVE" if provider_environment == "MAINNET" else "PAPER"
@@ -692,6 +694,8 @@ class BybitV5AdapterTests(unittest.TestCase):
                 account_id=account_id,
                 attempt_id=attempt,
             )
+            if return_binding:
+                return prepared, binding
             observation = observe_submission_json_response(
                 response_binding=binding,
                 provider_id="BYBIT",
@@ -830,10 +834,11 @@ class BybitV5AdapterTests(unittest.TestCase):
             )
 
     def test_submission_observation_rejects_partial_financial_route_scope(self):
-        prepared, response_binding = self._durable_write_response_binding(
+        prepared, response_binding = self._durable_write_observation(
             {"retCode": 0, "retMsg": "OK", "result": {}},
             provider_environment="TESTNET",
             intent_id="bybit-partial-route-scope",
+            return_binding=True,
         )
         partial_scope = dict(response_binding.submission_scope)
         partial_scope.pop("provider_route_protocol_version")
@@ -853,10 +858,11 @@ class BybitV5AdapterTests(unittest.TestCase):
             )
 
     def test_submission_observation_rejects_unknown_scope_axis(self):
-        prepared, response_binding = self._durable_write_response_binding(
+        prepared, response_binding = self._durable_write_observation(
             {"retCode": 0, "retMsg": "OK", "result": {}},
             provider_environment="TESTNET",
             intent_id="bybit-unknown-scope-axis",
+            return_binding=True,
         )
         expanded_scope = dict(response_binding.submission_scope)
         expanded_scope["caller_extension"] = "forged"

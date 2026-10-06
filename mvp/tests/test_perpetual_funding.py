@@ -3,6 +3,7 @@ from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
 import unittest
+import weakref
 
 from mvp.autotrade_mvp.accounting import book_equity_fill
 from mvp.autotrade_mvp.capabilities import (
@@ -282,6 +283,16 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
             permission_scope="ORDER.READ",
         )
         return authority, book
+
+    def test_funding_authority_binding_exposes_no_erasable_weakref_callback(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, _ = self.authority(store, [sealed_funding()])
+            references = weakref.getweakrefs(authority)
+            self.assertTrue(references)
+            self.assertTrue(
+                all(reference.__callback__ is None for reference in references)
+            )
 
     def test_paper_and_live_funding_reject_content_evidence_before_resolver_callback(self):
         evidence = sealed_funding()

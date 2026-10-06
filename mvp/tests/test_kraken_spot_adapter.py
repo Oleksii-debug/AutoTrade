@@ -685,6 +685,51 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                         )
                 rebound.assert_not_called()
 
+    def test_submission_consumer_rejects_rebound_transitive_authorities(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {"error": [], "result": {"txid": ["kraken-spot-transitive-authority-rebound"]}},
+            intent_id="kraken-spot-transitive-authority-rebound",
+        )
+        with patch(
+            "mvp.autotrade_mvp.kraken_spot.uuid5",
+            side_effect=AssertionError("rebound uuid5 executed"),
+        ) as rebound_uuid5:
+            with self.assertRaisesRegex(
+                KrakenSpotAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_spot_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    source_uri="https://api.kraken.com/0/private/AddOrder",
+                    observation=observation,
+                )
+        rebound_uuid5.assert_not_called()
+
+        with patch("mvp.autotrade_mvp.kraken_spot._FREE_CLIENT_ID", object()):
+            with self.assertRaisesRegex(
+                KrakenSpotAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_spot_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    source_uri="https://api.kraken.com/0/private/AddOrder",
+                    observation=observation,
+                )
+
+        with patch("mvp.autotrade_mvp.kraken_spot.NAMESPACE_URL", object()):
+            with self.assertRaisesRegex(
+                KrakenSpotAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_spot_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    source_uri="https://api.kraken.com/0/private/AddOrder",
+                    observation=observation,
+                )
+
     def test_submission_consumer_rejects_prepared_subclass_before_virtual_callback(self):
         callbacks = []
 

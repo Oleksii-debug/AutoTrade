@@ -14,7 +14,13 @@ from uuid import NAMESPACE_URL, uuid5
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .dispatch import submission_attempt_aggregate_id
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .reconciliation import (
     ReconciliationResult,
     UnknownSubmission,
@@ -1174,8 +1180,10 @@ def unknown_submissions_from_dispatch(
     used by a scoped dispatcher, without duplicating dispatch identity logic.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
+    store_identity = require_exact_journal_store_authority(
+        store,
+        subject="dispatch reconciliation store",
+    )
     normalized = tuple(_text(value, name="attempt_id") for value in attempt_ids)
     if len(normalized) != len(set(normalized)):
         raise ValueError("attempt_ids must be unique")
@@ -1215,7 +1223,12 @@ def unknown_submissions_from_dispatch(
     recovered: list[UnknownSubmission] = []
     for attempt_id in normalized:
         aggregate_id = durable_ids.get(attempt_id, attempt_id)
-        events = store.load_events("submission_attempt", aggregate_id)
+        with journal_store_authority_scope(store, store_identity):
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                aggregate_id,
+            )
         if not events:
             raise KeyError(f"Unknown submission attempt: {attempt_id}")
         first = events[0]
@@ -1226,6 +1239,30 @@ def unknown_submissions_from_dispatch(
         payload = first["payload"]
         if not isinstance(payload, Mapping):
             raise ValueError("SubmissionPrepared payload must be an object")
+
+        # Current dispatchers durably seal the logical attempt identity inside
+        # SubmissionPrepared.  An explicit aggregate-id lookup is only a
+        # locator; it must never let caller input relabel another financial
+        # attempt.  Historical rows that predate durable attempt_id remain
+        # readable through their original aggregate identity, but cannot be
+        # remapped to a different logical attempt without authoritative
+        # identity evidence.
+        if "attempt_id" in payload:
+            durable_attempt_id = _text(
+                payload.get("attempt_id"),
+                name="SubmissionPrepared.attempt_id",
+            )
+            if durable_attempt_id != attempt_id:
+                raise ValueError(
+                    "SubmissionPrepared durable attempt_id does not match "
+                    "requested attempt identity"
+                )
+        elif aggregate_ids is not None and aggregate_id != attempt_id:
+            raise ValueError(
+                "legacy SubmissionPrepared without durable attempt_id "
+                "cannot be remapped"
+            )
+
         provider_id = _text(
             payload.get("provider"), name="provider"
         ).upper()

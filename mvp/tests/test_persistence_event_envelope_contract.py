@@ -178,6 +178,34 @@ class CanonicalEventEnvelopeAdmissionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unsupported fields"):
                 JournalStore(f"{directory}/journal.sqlite3").append_event(envelope)
 
+    def test_claimed_event_envelope_rejects_null_for_nonnullable_optional_fields(self):
+        for field in (
+            "provider_id",
+            "account_id",
+            "provider_event_id",
+            "source_resolution",
+        ):
+            with self.subTest(field=field), TemporaryDirectory() as directory:
+                envelope = canonical_event()
+                envelope[field] = None
+                with self.assertRaisesRegex(ValueError, field):
+                    JournalStore(f"{directory}/journal.sqlite3").append_event(envelope)
+
+    def test_evidence_ref_rejects_null_for_nonnullable_optional_fields(self):
+        for field in ("source_uri", "rights_id"):
+            with self.subTest(field=field), TemporaryDirectory() as directory:
+                envelope = canonical_event()
+                envelope["evidence_refs"] = [
+                    {
+                        "artifact_id": "33333333-3333-4333-8333-333333333333",
+                        "sha256": "sha256:" + "0" * 64,
+                        "observed_at": "2026-10-06T13:30:00Z",
+                        field: None,
+                    }
+                ]
+                with self.assertRaisesRegex(ValueError, field):
+                    JournalStore(f"{directory}/journal.sqlite3").append_event(envelope)
+
     def test_claimed_event_envelope_is_schema_revalidated_on_read(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

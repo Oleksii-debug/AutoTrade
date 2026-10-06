@@ -269,12 +269,12 @@ def _validate_evidence_ref(value: object) -> None:
     if not is_valid_common_scalar("Digest", value.get("sha256")):
         raise ValueError("EvidenceRef sha256 must be a canonical Digest")
     _require_utc_instant(value.get("observed_at"), name="EvidenceRef observed_at")
-    source_uri = value.get("source_uri")
-    if source_uri is not None:
-        _require_absolute_uri(source_uri, name="EvidenceRef source_uri")
-    rights_id = value.get("rights_id")
-    if rights_id is not None and (type(rights_id) is not str or not rights_id):
-        raise ValueError("EvidenceRef rights_id must be non-empty text")
+    if "source_uri" in value:
+        _require_absolute_uri(value["source_uri"], name="EvidenceRef source_uri")
+    if "rights_id" in value:
+        rights_id = value["rights_id"]
+        if type(rights_id) is not str or not rights_id:
+            raise ValueError("EvidenceRef rights_id must be non-empty text")
 
 
 def _validate_canonical_event_envelope_if_claimed(
@@ -355,9 +355,10 @@ def _validate_canonical_event_envelope_if_claimed(
         "provider_event_id",
         "source_resolution",
     ):
-        value = envelope.get(field)
-        if value is not None and (type(value) is not str or not value):
-            raise ValueError(f"EventEnvelope {field} must be non-empty text")
+        if field in envelope:
+            value = envelope[field]
+            if type(value) is not str or not value:
+                raise ValueError(f"EventEnvelope {field} must be non-empty text")
     if "provider_sequence" in envelope and not is_valid_common_scalar(
         "Sequence", envelope.get("provider_sequence")
     ):

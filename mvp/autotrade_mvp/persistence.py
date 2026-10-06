@@ -117,16 +117,16 @@ class JournalStore(_JournalStoreImpl):
             raise TypeError("envelope must be an exact object")
         envelope = _impl._detach_json_value(envelope)
 
-        event_id = _impl._require_canonical_json_text(
+        event_id = _impl._require_canonical_durable_text(
             envelope.get("event_id"), name="event_id"
         )
-        event_type = _impl._require_canonical_json_text(
+        event_type = _impl._require_canonical_durable_text(
             envelope.get("event_type"), name="event_type"
         )
-        aggregate_type = _impl._require_canonical_json_text(
+        aggregate_type = _impl._require_canonical_durable_text(
             envelope.get("aggregate_type"), name="aggregate_type"
         )
-        aggregate_id = _impl._require_canonical_json_text(
+        aggregate_id = _impl._require_canonical_durable_text(
             envelope.get("aggregate_id"), name="aggregate_id"
         )
         try:
@@ -150,7 +150,7 @@ class JournalStore(_JournalStoreImpl):
             raise ValueError("payload_hash does not match payload")
         envelope_json = _impl.canonical_json(envelope)
         envelope_hash = _impl._event_envelope_digest(envelope_json)
-        committed_at = _impl._require_canonical_json_text(
+        committed_at = _impl._require_canonical_durable_text(
             envelope.get("committed_at"), name="committed_at"
         )
 

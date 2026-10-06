@@ -54,6 +54,31 @@ def assert_conservative_execution(
         raise TypeError("result must be SimulatedExecution")
     if observation.instrument_version != order.instrument_version:
         raise ExecutionOracleError("instrument identity mismatch")
+    if order.order_type == "MARKET":
+        if (
+            model.price_grid is None
+            or model.price_quantum is None
+            or model.price_projection_policy_id is None
+            or model.price_projection_policy_version is None
+            or model.price_grid_instrument_version is None
+        ):
+            raise ExecutionOracleError(
+                "MARKET execution requires complete authoritative price-grid evidence"
+            )
+        try:
+            model.price_grid.validate()
+        except (ExecutionRealismError, TypeError) as error:
+            raise ExecutionOracleError(
+                "MARKET price grid authority is invalid"
+            ) from error
+        if (
+            model.price_grid.instrument_version != order.instrument_version
+            or model.price_grid.instrument_version != model.price_grid_instrument_version
+            or model.price_grid.price_quantum != model.price_quantum
+            or model.price_grid.projection_policy_id != model.price_projection_policy_id
+            or model.price_grid.projection_policy_version != model.price_projection_policy_version
+        ):
+            raise ExecutionOracleError("MARKET model/grid authority mismatch")
     if result.model_fingerprint != model.fingerprint:
         raise ExecutionOracleError("result model fingerprint mismatch")
     if result.data_fidelity != model.data_fidelity or result.scenario != model.scenario:

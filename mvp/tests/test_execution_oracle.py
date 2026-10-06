@@ -157,6 +157,22 @@ class ExecutionOracleTests(unittest.TestCase):
                 result=forged,
             )
 
+    def test_oracle_rejects_relabelled_model_policy(self):
+        o, q, m = order(), observation(), model()
+        result = simulate_execution(o, q, m)
+        object.__setattr__(m, "price_projection_policy_version", 2)
+        forged = replace(result, model_fingerprint=m.fingerprint)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "MARKET model/grid authority mismatch",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=forged,
+            )
+
     def test_oracle_rejects_market_result_without_complete_price_projection_evidence(self):
         o, q, m = order(), observation(), model()
         result = simulate_execution(o, q, m)

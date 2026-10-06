@@ -208,10 +208,43 @@ class ExecutionRealismTests(unittest.TestCase):
         ):
             simulate_execution(order(), top(), model(price_quantum=None, price_grid=None))
 
-    def test_market_projection_policy_identity_changes_model_fingerprint(self):
-        one = model(price_projection_policy_version=1)
-        two = model(price_projection_policy_version=2, price_grid=price_grid(projection_policy_version=2))
-        self.assertNotEqual(one.fingerprint, two.fingerprint)
+    def test_market_projection_policy_identity_is_fixed(self):
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "unsupported MARKET price projection policy identity",
+        ):
+            price_grid(projection_policy_version=2)
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "unsupported MARKET price projection policy identity",
+        ):
+            model(price_projection_policy_id="FAVORABLE_PRICE_GRID")
+
+    def test_model_fingerprint_binds_price_grid_provenance(self):
+        baseline = model()
+        changed_instrument = InstrumentVersion(
+            **{
+                **instrument().__dict__,
+                "metadata_evidence": (
+                    {
+                        "artifact_id": "44444444-4444-4444-8444-444444444444",
+                        "sha256": "sha256:" + "c" * 64,
+                        "observed_at": "2026-09-24T09:00:00Z",
+                    },
+                ),
+            }
+        )
+        changed = model(price_grid=price_grid(instrument_value=changed_instrument))
+        self.assertNotEqual(baseline.fingerprint, changed.fingerprint)
+
+    def test_market_runtime_rejects_relabelled_model_policy(self):
+        changed = model()
+        object.__setattr__(changed, "price_projection_policy_version", 2)
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "MARKET model/grid authority mismatch",
+        ):
+            simulate_execution(order(), top(), changed)
 
     def test_market_projection_requires_all_policy_evidence_fields(self):
         for override in (

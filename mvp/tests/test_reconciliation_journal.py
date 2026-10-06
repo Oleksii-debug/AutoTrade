@@ -618,6 +618,39 @@ class ReconciliationJournalTests(unittest.TestCase):
                 [],
             )
 
+    def test_checkpoint_round_trip_distinguishes_unrequested_settlement(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="settlement-not-requested",
+                result=reconciliation(),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            self.assertFalse(
+                checkpoint["payload"]["settlement_reconciliation_performed"]
+            )
+            self.assertTrue(checkpoint["payload"]["settlement_activity_complete"])
+            self.assertEqual(checkpoint["payload"]["settlement_differences"], {})
+
+            reopened = JournalStore(path)
+            recovered = load_latest_reconciliation_checkpoint(
+                reopened,
+                reconciliation_id="settlement-not-requested",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            )
+            self.assertIsNotNone(recovered)
+            self.assertFalse(
+                recovered["payload"]["settlement_reconciliation_performed"]
+            )
+            self.assertTrue(recovered["payload"]["settlement_activity_complete"])
+            self.assertEqual(recovered["payload"]["settlement_differences"], {})
+
     def test_checkpoint_round_trip_retains_clean_settlement_authority(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
@@ -640,6 +673,9 @@ class ReconciliationJournalTests(unittest.TestCase):
                 host_id="test-host",
                 owner_epoch="epoch-1",
             )
+            self.assertTrue(
+                checkpoint["payload"]["settlement_reconciliation_performed"]
+            )
             self.assertTrue(checkpoint["payload"]["settlement_activity_complete"])
             self.assertEqual(checkpoint["payload"]["settlement_differences"], {})
 
@@ -652,6 +688,9 @@ class ReconciliationJournalTests(unittest.TestCase):
                 environment="PAPER",
             )
             self.assertIsNotNone(recovered)
+            self.assertTrue(
+                recovered["payload"]["settlement_reconciliation_performed"]
+            )
             self.assertTrue(recovered["payload"]["settlement_activity_complete"])
             self.assertEqual(recovered["payload"]["settlement_differences"], {})
 
@@ -682,6 +721,9 @@ class ReconciliationJournalTests(unittest.TestCase):
                 owner_epoch="epoch-1",
             )
             self.assertFalse(checkpoint["payload"]["complete"])
+            self.assertTrue(
+                checkpoint["payload"]["settlement_reconciliation_performed"]
+            )
             self.assertFalse(checkpoint["payload"]["settlement_activity_complete"])
             self.assertEqual(checkpoint["payload"]["settlement_differences"], {})
             self.assertIn("ACCOUNT", checkpoint["payload"]["blocking_resources"])
@@ -696,6 +738,9 @@ class ReconciliationJournalTests(unittest.TestCase):
             )
             self.assertIsNotNone(recovered)
             self.assertFalse(recovered["payload"]["complete"])
+            self.assertTrue(
+                recovered["payload"]["settlement_reconciliation_performed"]
+            )
             self.assertFalse(recovered["payload"]["settlement_activity_complete"])
             self.assertEqual(recovered["payload"]["settlement_differences"], {})
             self.assertIn("ACCOUNT", recovered["payload"]["blocking_resources"])
@@ -725,6 +770,9 @@ class ReconciliationJournalTests(unittest.TestCase):
                 host_id="test-host",
                 owner_epoch="epoch-1",
             )
+            self.assertTrue(
+                checkpoint["payload"]["settlement_reconciliation_performed"]
+            )
             self.assertEqual(
                 checkpoint["payload"]["settlement_differences"],
                 {"SETTLED:USD": "-1"},
@@ -742,6 +790,9 @@ class ReconciliationJournalTests(unittest.TestCase):
             self.assertIsNotNone(recovered)
             self.assertFalse(recovered["payload"]["complete"])
             self.assertTrue(recovered["payload"]["settlement_activity_complete"])
+            self.assertTrue(
+                recovered["payload"]["settlement_reconciliation_performed"]
+            )
             self.assertEqual(
                 recovered["payload"]["settlement_differences"],
                 {"SETTLED:USD": "-1"},

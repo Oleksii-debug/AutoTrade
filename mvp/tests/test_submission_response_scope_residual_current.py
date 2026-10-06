@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.dispatch import (
+    SubmissionResponseBinding,
     _envelope,
     load_submission_response_binding,
     submission_attempt_aggregate_id,

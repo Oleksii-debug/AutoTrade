@@ -464,6 +464,52 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         self.assertIs(type(accepted), AuthoritativeCorporateAction)
         self.assertIs(type(accepted.event), CorporateEvent)
 
+    def test_late_module_global_parser_dependencies_do_not_rewrite_provider_fact(self):
+        source = sealed_dividend()
+        calls = []
+        originals = {
+            "parser": corporate_action_evidence_module._canonical_observation_from_sealed_response,
+            "observation": corporate_action_evidence_module.CorporateActionObservation,
+            "instant": corporate_action_evidence_module._provider_instant,
+            "exact_payload": corporate_action_evidence_module._exact_payload,
+            "utc": corporate_action_evidence_module._utc,
+        }
+
+        def decoy(name):
+            def fail(*_args, **_kwargs):
+                calls.append(name)
+                raise AssertionError(f"late {name} decoy must not execute")
+            return fail
+
+        class DecoyObservation:
+            def __init__(self, **_kwargs):
+                calls.append("observation")
+                raise AssertionError("late observation decoy must not execute")
+
+        corporate_action_evidence_module._canonical_observation_from_sealed_response = decoy(
+            "parser"
+        )
+        corporate_action_evidence_module.CorporateActionObservation = DecoyObservation
+        corporate_action_evidence_module._provider_instant = decoy("instant")
+        corporate_action_evidence_module._exact_payload = decoy("exact_payload")
+        corporate_action_evidence_module._utc = decoy("utc")
+        try:
+            accepted = resolve(source)
+        finally:
+            corporate_action_evidence_module._canonical_observation_from_sealed_response = (
+                originals["parser"]
+            )
+            corporate_action_evidence_module.CorporateActionObservation = originals[
+                "observation"
+            ]
+            corporate_action_evidence_module._provider_instant = originals["instant"]
+            corporate_action_evidence_module._exact_payload = originals["exact_payload"]
+            corporate_action_evidence_module._utc = originals["utc"]
+
+        self.assertEqual(calls, [])
+        self.assertEqual(accepted.event.payload["per_share"], "1.25")
+        self.assertEqual(accepted.event.effective_at, READ_NOW + timedelta(seconds=1))
+
     def test_instrument_registry_subclass_is_rejected_before_registry_dispatch(self):
         class ForgedRegistry(InstrumentRegistry):
             def exact(self, _version_ref):

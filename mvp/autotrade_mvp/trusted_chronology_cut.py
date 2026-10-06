@@ -28,9 +28,23 @@ def _require_post_verification_currentness(
 ) -> None:
     """Re-read mutable durable/runtime fences after signed-evidence callbacks."""
 
+    store = kwargs["store"]
+    selected_identity = _impl._selected_store_identity(store)
+    if (
+        _impl.journal_store_identity_digest(selected_identity)
+        != durable.store_identity_digest
+    ):
+        raise PermissionError(
+            "trusted chronology JournalStore identity changed during verification"
+        )
+
     recovery = kwargs["recovery"]
     if type(recovery) is not RecoveryController:
         raise TypeError("recovery must be exact RecoveryController")
+    if recovery.durable_owner_store_identity != selected_identity:
+        raise PermissionError(
+            "trusted chronology recovery JournalStore changed during verification"
+        )
     if recovery.clock_trusted is not True:
         raise PermissionError("trusted chronology clock health is no longer trusted")
     if recovery.clock_incident_generation != durable.clock_incident_generation:
@@ -58,13 +72,13 @@ def _require_post_verification_currentness(
 
     if type(runtime) is not _impl.ProductionHostRuntime:
         raise TypeError("RELEASE_RUNTIME requires exact ProductionHostRuntime")
-    store = kwargs["store"]
-    selected_identity = _impl._selected_store_identity(store)
+    runtime_store = kwargs["store"]
+    runtime_selected_identity = _impl._selected_store_identity(runtime_store)
     runtime_identity = _impl.require_exact_journal_store_authority(
         runtime.journal,
         subject="trusted chronology production runtime JournalStore",
     )
-    if runtime_identity != selected_identity:
+    if runtime_identity != runtime_selected_identity:
         raise PermissionError(
             "production runtime does not share trusted chronology JournalStore"
         )

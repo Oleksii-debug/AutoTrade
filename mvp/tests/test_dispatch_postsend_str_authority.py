@@ -137,5 +137,94 @@ class PostsendStrAuthorityTests(unittest.TestCase):
             )
 
 
+    def test_exact_response_restores_postsend_int_shadow(self):
+        callbacks = 0
+
+        def hostile_int(*_args):
+            nonlocal callbacks
+            callbacks += 1
+            raise AssertionError("rebound int executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original = getattr(dispatch_module, "int", None)
+            had_global = "int" in vars(dispatch_module)
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                dispatch_module.int = hostile_int
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-int-exact-a1",
+                    transport=transport,
+                )
+            finally:
+                if had_global:
+                    dispatch_module.int = original
+                else:
+                    vars(dispatch_module).pop("int", None)
+
+            self.assertEqual(callbacks, 0)
+            self.assertEqual(result.status, "SENT")
+            self.assertEqual(result.reason, "sent_confirmed")
+            events = self._events(
+                path,
+                dispatcher,
+                "postsend-int-exact-a1",
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
+            )
+
+    def test_transport_exception_uses_pretransport_exception_class(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            original = getattr(dispatch_module, "Exception", None)
+            had_global = "Exception" in vars(dispatch_module)
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                dispatch_module.Exception = object
+                raise RuntimeError("provider result lost after send")
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    attempt_id="postsend-exception-class-a1",
+                    transport=transport,
+                )
+            finally:
+                if had_global:
+                    dispatch_module.Exception = original
+                else:
+                    vars(dispatch_module).pop("Exception", None)
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "transport_result_ambiguous")
+            events = self._events(
+                path,
+                dispatcher,
+                "postsend-exception-class-a1",
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "transport_exception_after_send_barrier:RuntimeError",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -956,6 +956,112 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(callbacks, [])
 
 
+    def test_opaque_binding_rejects_missing_reconciliation_markers(self):
+        raw = b"opaque-upstream-response"
+        response_hash = (
+            "sha256:" + __import__("hashlib").sha256(raw).hexdigest()
+        )
+        scope = {"endpoint": "/orders"}
+        scope_hash = (
+            "sha256:"
+            + __import__("hashlib").sha256(
+                dispatch_module.canonical_json(scope).encode("utf-8")
+            ).hexdigest()
+        )
+        cases = (
+            (
+                "missing-retry-disposition",
+                "SubmissionUnknown",
+                {
+                    "client_order_id": "client-opaque",
+                    "response_text": raw.hex(),
+                    "response_sha256": response_hash,
+                    "response_encoding": "hex",
+                    "http_status": 503,
+                    "reason": "provider_http_5xx_execution_unknown",
+                },
+            ),
+            (
+                "missing-reason",
+                "SubmissionUnknown",
+                {
+                    "client_order_id": "client-opaque",
+                    "response_text": raw.hex(),
+                    "response_sha256": response_hash,
+                    "response_encoding": "hex",
+                    "http_status": 503,
+                    "retry_disposition": "RECONCILE_FIRST",
+                },
+            ),
+            (
+                "sent-not-unknown",
+                "SubmissionSent",
+                {
+                    "client_order_id": "client-opaque",
+                    "response_text": raw.hex(),
+                    "response_sha256": response_hash,
+                    "response_encoding": "hex",
+                    "http_status": 503,
+                    "reason": "provider_http_5xx_execution_unknown",
+                    "retry_disposition": "RECONCILE_FIRST",
+                },
+            ),
+        )
+        for suffix, terminal_type, terminal_payload in cases:
+            with self.subTest(suffix=suffix), TemporaryDirectory() as directory:
+                store = self.store(directory)
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+                attempt_id = "opaque-marker-" + suffix
+                now = "2026-09-24T18:00:00Z"
+                dispatcher._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionPrepared",
+                    version=1,
+                    payload={
+                        "provider": "provider",
+                        "request_hash": "sha256:" + "1" * 64,
+                        "client_order_id": "client-opaque",
+                        "environment": "SIMULATION",
+                        "account_id": "acct",
+                        "prepared_at": now,
+                        "submission_scope": scope,
+                        "submission_scope_hash": scope_hash,
+                    },
+                    now=now,
+                )
+                dispatcher._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionSending",
+                    version=2,
+                    payload={
+                        "client_order_id": "client-opaque",
+                        "reason": "final_send_barrier_passed",
+                    },
+                    now=now,
+                )
+                dispatcher._append(
+                    attempt_id=attempt_id,
+                    event_type=terminal_type,
+                    version=3,
+                    payload=terminal_payload,
+                    now=now,
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "exact provider response bytes are unavailable",
+                ):
+                    load_submission_response_binding(
+                        store,
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id=attempt_id,
+                    )
+
     def test_mapping_response_cannot_mint_exact_durable_response_provenance(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)

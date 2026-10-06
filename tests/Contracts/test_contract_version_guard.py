@@ -11,7 +11,7 @@ def write_tree(root: Path, version="1.0.0", schemas=None, defs=None):
     schemas = ["a.schema.json"] if schemas is None else schemas
     defs = {"A": {"type": "string"}} if defs is None else defs
     base_uri = f"https://schemas.autotrade.local/{version}/"
-    (root / "contracts" / "jsonschema").mkdir(parents=True)
+    (root / "contracts" / "jsonschema").mkdir(parents=True, exist_ok=True)
     (root / "contracts" / "manifest.json").write_text(
         json.dumps({
             "contract_version": version,
@@ -26,6 +26,59 @@ def write_tree(root: Path, version="1.0.0", schemas=None, defs=None):
             encoding="utf-8",
         )
 
+
+
+def write_semantic_validator(
+    root: Path,
+    *,
+    validator_id: str = "dataset-authority-v1",
+    expected: str = "valid",
+):
+    manifest_path = root / "contracts" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    version = manifest["contract_version"]
+
+    schema_path = root / "contracts" / "jsonschema" / "a.schema.json"
+    schema_payload = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema_payload["$defs"]["A"]["x-autotrade-semantic-validator"] = validator_id
+    schema_path.write_text(json.dumps(schema_payload), encoding="utf-8")
+
+    corpus = root / "contracts" / "fixtures" / "semantic.corpus.json"
+    corpus.parent.mkdir(parents=True, exist_ok=True)
+    corpus.write_text(
+        json.dumps({
+            "contract_version": version,
+            "validator_id": validator_id,
+            "cases": [
+                {
+                    "id": "shared-case",
+                    "expected": expected,
+                }
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    bindings = {
+        "python": "contracts/bindings/python/a.py",
+        "csharp": "src/AutoTrade.Contracts/A.cs",
+        "typescript": "contracts/bindings/typescript/a.js",
+    }
+    for relative in bindings.values():
+        binding = root / relative
+        binding.parent.mkdir(parents=True, exist_ok=True)
+        binding.write_text("binding\n", encoding="utf-8")
+
+    manifest["semantic_validators"] = [
+        {
+            "id": validator_id,
+            "schema": "a.schema.json",
+            "definition": "A",
+            "corpus": "contracts/fixtures/semantic.corpus.json",
+            "bindings": bindings,
+        }
+    ]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
 def write_openapi(
     root: Path,
@@ -117,6 +170,109 @@ class ContractVersionGuardTests(unittest.TestCase):
             write_tree(Path(right), defs={"A": {"type": "number"}})
             errors = evaluate(Path(left), Path(right))
             self.assertTrue(any("without increasing" in item for item in errors))
+
+    def test_tightening_existing_array_cardinality_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            base_defs = {
+                "DatasetManifest": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["source_evidence"],
+                    "properties": {
+                        "source_evidence": {"type": "array", "items": {"type": "object"}},
+                    },
+                }
+            }
+            current_defs = json.loads(json.dumps(base_defs))
+            current_defs["DatasetManifest"]["properties"]["source_evidence"]["minItems"] = 1
+            write_tree(Path(left), version="5.0.0", defs=base_defs)
+            write_tree(Path(right), version="5.1.0", defs=current_defs)
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(
+                any(
+                    "breaking contract change requires a new major version" in item
+                    and "DatasetManifest" in item
+                    for item in errors
+                )
+            )
+
+            write_tree(Path(right), version="6.0.0", defs=current_defs)
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_semantic_validator_requires_all_language_bindings(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left), version="6.0.0")
+            write_semantic_validator(Path(left))
+            write_tree(Path(right), version="7.0.0")
+            write_semantic_validator(Path(right))
+
+            manifest_path = Path(right) / "contracts" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            del manifest["semantic_validators"][0]["bindings"]["typescript"]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "must declare python/csharp/typescript bindings",
+            ):
+                evaluate(Path(left), Path(right))
+
+    def test_semantic_validator_missing_binding_fails_closed(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left), version="6.0.0")
+            write_semantic_validator(Path(left))
+            write_tree(Path(right), version="7.0.0")
+            write_semantic_validator(Path(right))
+            missing = (
+                Path(right)
+                / "contracts"
+                / "bindings"
+                / "typescript"
+                / "a.js"
+            )
+            missing.unlink()
+
+            with self.assertRaisesRegex(ValueError, "typescript binding does not exist"):
+                evaluate(Path(left), Path(right))
+
+    def test_semantic_validator_corpus_change_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left), version="6.0.0")
+            write_semantic_validator(Path(left), expected="valid")
+            write_tree(Path(right), version="6.1.0")
+            write_semantic_validator(Path(right), expected="invalid")
+
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(
+                any(
+                    "breaking contract change requires a new major version" in item
+                    and "changed semantic validators: dataset-authority-v1" in item
+                    for item in errors
+                )
+            )
+
+            write_tree(Path(right), version="7.0.0")
+            write_semantic_validator(Path(right), expected="invalid")
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_adding_semantic_validator_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left), version="6.0.0")
+            write_tree(Path(right), version="6.1.0")
+            write_semantic_validator(Path(right))
+
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(
+                any(
+                    "breaking contract change requires a new major version" in item
+                    and "changed semantic validators: dataset-authority-v1" in item
+                    for item in errors
+                )
+            )
+
+            write_tree(Path(right), version="7.0.0")
+            write_semantic_validator(Path(right))
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
 
     def test_decimal_envelope_member_change_requires_major_increment(self):
         with TemporaryDirectory() as left, TemporaryDirectory() as right:

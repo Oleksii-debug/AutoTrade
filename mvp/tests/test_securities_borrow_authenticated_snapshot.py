@@ -4,6 +4,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import mvp.autotrade_mvp.securities_borrow as securities_borrow_module
+
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.securities_borrow import (
     BorrowAvailabilityEvidence,
@@ -36,6 +38,7 @@ def availability() -> BorrowAvailabilityEvidence:
         locate_id="locate-authenticated-snapshot",
         provider_revision="availability-snapshot-r1",
         capacity_quantity="100",
+        quantity_unit="share",
         hard_to_borrow=False,
         observed_at="2026-10-03T17:00:30Z",
         effective_at="2026-10-03T17:00:00Z",
@@ -55,6 +58,7 @@ def recall() -> BorrowRecallEvidence:
         instrument_version=1,
         provider_revision="recall-snapshot-r1",
         quantity="3",
+        quantity_unit="share",
         observed_at="2026-10-03T17:00:30Z",
         effective_at="2026-10-03T17:00:00Z",
         deadline="2026-10-03T18:00:00Z",
@@ -73,6 +77,7 @@ def resolution() -> BorrowRecallResolutionEvidence:
         instrument_version=1,
         provider_revision="resolution-snapshot-r1",
         resolved_quantity="1",
+        quantity_unit="share",
         observed_at="2026-10-03T17:10:30Z",
         effective_at="2026-10-03T17:10:00Z",
         evidence_ref="provider:resolution-snapshot-r1",
@@ -152,6 +157,195 @@ class SecuritiesBorrowAuthenticatedSnapshotTests(unittest.TestCase):
 
             self.assertEqual(malicious.override_calls, 0)
 
+    def test_verifier_ignores_late_module_global_retargets(self):
+        with TemporaryDirectory() as directory:
+            artifacts = ArtifactStore(directory)
+            bound = bind_provider_evidence(artifacts, recall())
+
+            with (
+                patch.object(
+                    securities_borrow_module,
+                    "provider_borrow_evidence_receipt",
+                    side_effect=AssertionError(
+                        "late receipt helper must not reinterpret provider evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "provider_borrow_evidence_metadata",
+                    side_effect=AssertionError(
+                        "late metadata helper must not reinterpret provider evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_immutable_evidence_ref",
+                    side_effect=AssertionError(
+                        "late reference helper must not retarget artifact authority"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "strict_json_loads",
+                    side_effect=AssertionError(
+                        "late JSON parser must not reinterpret authenticated bytes"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "canonical_json",
+                    side_effect=AssertionError(
+                        "late canonical renderer must not redefine authenticated bytes"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "ArtifactStore",
+                    new=object,
+                ),
+                patch.object(
+                    BorrowRecallEvidence,
+                    "payload",
+                    side_effect=AssertionError(
+                        "late evidence method replacement must not reinterpret economics"
+                    ),
+                ),
+            ):
+                reference = verify_provider_borrow_evidence(bound, artifacts)
+
+            self.assertEqual(reference, bound.evidence_ref)
+
+    def test_verifier_ignores_late_revalidation_helper_retargets(self):
+        with TemporaryDirectory() as directory:
+            artifacts = ArtifactStore(directory)
+            bound = bind_provider_evidence(artifacts, recall())
+
+            with (
+                patch.object(
+                    securities_borrow_module,
+                    "_text",
+                    side_effect=AssertionError(
+                        "late text helper must not reinterpret authenticated evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_environment",
+                    side_effect=AssertionError(
+                        "late environment helper must not reinterpret authenticated evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_provider_environment",
+                    side_effect=AssertionError(
+                        "late provider-domain helper must not reinterpret authenticated evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_instrument_id",
+                    side_effect=AssertionError(
+                        "late instrument helper must not reinterpret authenticated evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_version",
+                    side_effect=AssertionError(
+                        "late version helper must not reinterpret authenticated evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_decimal",
+                    side_effect=AssertionError(
+                        "late decimal helper must not reinterpret authenticated evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_instant",
+                    side_effect=AssertionError(
+                        "late instant helper must not reinterpret authenticated evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_dt",
+                    side_effect=AssertionError(
+                        "late chronology helper must not reinterpret authenticated evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_provider_environment_payload",
+                    side_effect=AssertionError(
+                        "late provider-domain renderer must not rewrite authenticated bytes"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_decimal_text",
+                    side_effect=AssertionError(
+                        "late decimal renderer must not rewrite authenticated bytes"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "normalize_provider_environment",
+                    side_effect=AssertionError(
+                        "late provider-domain normalizer must not execute"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "parse_bounded_exact_decimal",
+                    side_effect=AssertionError(
+                        "late exact-decimal parser must not execute"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "canonical_decimal_text",
+                    side_effect=AssertionError(
+                        "late exact-decimal renderer must not execute"
+                    ),
+                ),
+                patch.object(securities_borrow_module, "datetime", new=object),
+                patch.object(securities_borrow_module, "timezone", new=object),
+                patch.object(securities_borrow_module, "Decimal", new=object),
+                patch.object(securities_borrow_module, "UUID", new=object),
+            ):
+                reference = verify_provider_borrow_evidence(bound, artifacts)
+
+            self.assertEqual(reference, bound.evidence_ref)
+
+    def test_verifier_fails_closed_before_retargeted_post_init_dispatch(self):
+        with TemporaryDirectory() as directory:
+            artifacts = ArtifactStore(directory)
+            bound = bind_provider_evidence(artifacts, recall())
+            calls = []
+
+            def forged_post_init(_self):
+                calls.append("called")
+                raise AssertionError(
+                    "retargeted evidence post-init must not execute"
+                )
+
+            with patch.object(
+                BorrowRecallEvidence,
+                "__post_init__",
+                new=forged_post_init,
+            ):
+                with self.assertRaisesRegex(
+                    BorrowEvidenceError,
+                    "implementation changed after verifier binding",
+                ):
+                    verify_provider_borrow_evidence(bound, artifacts)
+
+            self.assertEqual(calls, [])
+
     def test_malformed_snapshot_representation_fails_closed(self):
         with TemporaryDirectory() as directory:
             artifacts = ArtifactStore(directory)
@@ -214,6 +408,7 @@ class SecuritiesBorrowAuthenticatedSnapshotTests(unittest.TestCase):
                 environment=ENVIRONMENT,
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
+                quantity_unit="share",
                 evidence_artifact_store=artifacts,
             )
 
@@ -253,6 +448,7 @@ class SecuritiesBorrowAuthenticatedSnapshotTests(unittest.TestCase):
                 environment=ENVIRONMENT,
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
+                quantity_unit="share",
                 evidence_artifact_store=artifacts,
             )
             self.assertEqual(projection.record_recall(bound), bound.quantity)
@@ -269,6 +465,7 @@ class SecuritiesBorrowAuthenticatedSnapshotTests(unittest.TestCase):
                     environment=ENVIRONMENT,
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
+                    quantity_unit="share",
                     evidence_artifact_store=malicious,
                 )
 

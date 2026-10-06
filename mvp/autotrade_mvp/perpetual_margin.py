@@ -17,7 +17,7 @@ import json
 from typing import Literal, Sequence
 from uuid import UUID
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 from .capabilities import CapabilitySnapshot
 from .exact_decimal import (
@@ -31,6 +31,13 @@ from .exact_decimal import (
     exact_subtract,
     parse_bounded_exact_decimal,
 )
+from .provider_domain import ProviderDomainError, normalize_provider_environment
+
+
+# Freeze the canonical storage reader when this financial module is imported.
+# Later class-level monkey-patching must not be able to replace the reader used
+# at the immutable margin-evidence authority boundary.
+_READ_AUTHENTICATED_ARTIFACT_SNAPSHOT = ArtifactStore.read_authenticated_snapshot
 
 
 class PerpetualMarginError(ValueError):
@@ -82,9 +89,14 @@ def _instant(value: str, *, name: str) -> datetime:
 def _artifact_id(value: object, *, name: str) -> str:
     text = _text(value, name=name)
     try:
-        return str(UUID(text))
+        canonical = str(UUID(text))
     except (ValueError, TypeError, AttributeError) as error:
         raise PerpetualMarginError(f"{name} must be an artifact UUID") from error
+    if canonical != text:
+        raise PerpetualMarginError(
+            f"{name} must be a canonical lowercase artifact UUID"
+        )
+    return text
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -113,29 +125,39 @@ def _verify_immutable_artifact(
     expected_payload: object,
     expected_metadata: dict[str, object],
 ) -> None:
-    if not isinstance(store, ArtifactStore):
+    if type(store) is not ArtifactStore:
         raise PerpetualMarginError(
             "canonical ArtifactStore is required for immutable margin evidence"
         )
     try:
-        manifest = store.load_manifest(artifact_id)
-        payload = store.read_bytes(artifact_id)
-    except Exception as error:
+        manifest, payload = _READ_AUTHENTICATED_ARTIFACT_SNAPSHOT(
+            store,
+            artifact_id,
+        )
+    except (
+        ArtifactIntegrityError,
+        FileNotFoundError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as error:
         raise PerpetualMarginError(
             "immutable margin evidence artifact is missing or corrupt"
         ) from error
-    if type(manifest) is not dict or not isinstance(payload, bytes):
+    if type(manifest) is not dict or type(payload) is not bytes:
         raise PerpetualMarginError(
             "immutable margin evidence artifact has unsupported representation"
         )
-    if manifest.get("artifact_id") != artifact_id:
+    manifest_artifact_id = manifest.get("artifact_id")
+    if type(manifest_artifact_id) is not str or manifest_artifact_id != artifact_id:
         raise PerpetualMarginError("margin evidence artifact identity mismatch")
     actual_digest = "sha256:" + sha256(payload).hexdigest()
-    if manifest.get("sha256") != actual_digest:
+    manifest_digest = manifest.get("sha256")
+    if type(manifest_digest) is not str or manifest_digest != actual_digest:
         raise PerpetualMarginError("margin evidence artifact digest mismatch")
     manifest_hash = manifest.get("manifest_hash")
     if (
-        not isinstance(manifest_hash, str)
+        type(manifest_hash) is not str
         or len(manifest_hash) != 71
         or not manifest_hash.startswith("sha256:")
         or any(ch not in "0123456789abcdef" for ch in manifest_hash[7:])
@@ -144,7 +166,7 @@ def _verify_immutable_artifact(
             "margin evidence artifact manifest integrity binding is required"
         )
     rights = manifest.get("rights")
-    if not isinstance(rights, dict) or rights.get("storage") is not True:
+    if type(rights) is not dict or rights.get("storage") is not True:
         raise PerpetualMarginError(
             "margin evidence artifact must preserve storage provenance"
         )
@@ -232,6 +254,7 @@ class PerpetualMarginEvidence:
     collateral_fx_observed_at: str
     margin_tiers_observed_at: str
     margin_tiers: tuple[MarginTier, ...]
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -270,6 +293,19 @@ class PerpetualMarginEvidence:
             self,
             "environment",
             _text(self.environment, name="environment").upper(),
+        )
+        try:
+            provider_environment = normalize_provider_environment(
+                provider_id=self.provider_id,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise PerpetualMarginError(str(error)) from error
+        object.__setattr__(
+            self,
+            "provider_environment",
+            provider_environment,
         )
         object.__setattr__(
             self,
@@ -320,12 +356,13 @@ class PerpetualMarginEvidence:
         object.__setattr__(self, "margin_tiers", tiers)
 
     @property
-    def capability_identity(self) -> tuple[str, str, str, str, str]:
+    def capability_identity(self) -> tuple[str, str, str, str, str, str]:
         return (
             self.provider_id,
             self.account_id,
             self.entity_id,
             self.environment,
+            self.provider_environment,
             self.instrument_version,
         )
 
@@ -375,6 +412,7 @@ class PerpetualMarginEvidence:
             "account_id": self.account_id,
             "entity_id": self.entity_id,
             "environment": self.environment,
+            "provider_environment": self.provider_environment,
             "instrument_version": self.instrument_version,
             "capability_snapshot_id": self.capability_snapshot_id,
             "position_mode": self.position_mode,
@@ -525,7 +563,7 @@ def evaluate_perpetual_margin(
         raise PerpetualMarginError("instrument_version must match margin evidence")
     if capability.identity != evidence.capability_identity:
         raise PerpetualMarginError(
-            "provider/account/entity/environment/instrument capability scope mismatch"
+            "provider/account/entity/environment/provider_environment/instrument capability scope mismatch"
         )
     if capability.snapshot_id != evidence.capability_snapshot_id:
         raise PerpetualMarginError("capability snapshot does not match margin evidence")
@@ -541,20 +579,24 @@ def evaluate_perpetual_margin(
         raise PerpetualMarginError("risk tier revision does not match margin evidence")
     if capability.status != "VERIFIED":
         raise PerpetualMarginError("verified capability snapshot is required")
+    if capability.environment in {"PAPER", "LIVE"}:
+        raise PerpetualMarginError(
+            "PAPER/LIVE perpetual margin requires canonical provider-origin evidence"
+        )
+
+    if (
+        type(maximum_evidence_age_seconds) is not int
+        or maximum_evidence_age_seconds < 0
+    ):
+        raise PerpetualMarginError(
+            "maximum_evidence_age_seconds must be a non-negative integer"
+        )
 
     PerpetualMarginEvidence.verify_immutable_artifacts(evidence, artifact_store)
 
     now = _instant(evaluated_at, name="evaluated_at")
     if not (capability.observed_at <= now < capability.expires_at):
         raise PerpetualMarginError("capability snapshot is stale at evaluation time")
-    if (
-        isinstance(maximum_evidence_age_seconds, bool)
-        or not isinstance(maximum_evidence_age_seconds, int)
-        or maximum_evidence_age_seconds < 0
-    ):
-        raise PerpetualMarginError(
-            "maximum_evidence_age_seconds must be a non-negative integer"
-        )
 
     signed_notional = _decimal(
         signed_notional_settlement,

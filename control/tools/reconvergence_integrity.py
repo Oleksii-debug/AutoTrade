@@ -17,10 +17,13 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import subprocess
 from typing import Iterable, Sequence
 
 from control.tools.registry_state import _normalized_scopes, path_covers
+
+SUPPORTED_CHANGE_KINDS = frozenset({"A", "C", "D", "M", "R", "T"})
 
 PROTECTED_SENTINELS = frozenset(
     {
@@ -29,6 +32,8 @@ PROTECTED_SENTINELS = frozenset(
         ".github/workflows/control-plane.yml",
         ".github/workflows/dotnet-foundation.yml",
         ".github/workflows/futures-qualification.yml",
+        ".github/workflows/provider-free-product.yml",
+        ".github/workflows/recovery-qualification.yml",
         ".github/workflows/lean-adoption.yml",
         ".github/workflows/reconvergence-integrity.yml",
         ".github/workflows/research-primitives.yml",
@@ -48,6 +53,16 @@ PROTECTED_SENTINELS = frozenset(
         "tools/verify.py",
     }
 )
+
+PROTECTED_MUTATION_ROOTS = frozenset(
+    {
+        ".github/workflows/reconvergence-integrity.yml",
+        "control/tools/reconvergence_integrity.py",
+    }
+)
+
+TRUSTED_SCOPE_APPROVAL_MARKER = "AUTOTRADE_RECONVERGENCE_SCOPE_V1"
+_SHA40 = re.compile(r"^[0-9a-f]{40}$")
 
 
 @dataclass(frozen=True)
@@ -70,6 +85,64 @@ class IntegrityAssessment:
     reasons: tuple[str, ...]
 
 
+def _require_repo_relative_path(value: str, *, name: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or any(ord(character) in {0, 10, 13, 92} for character in value)
+        or value.startswith("/")
+        or value.endswith("/")
+        or "//" in value
+        or any(part in {"", ".", ".."} for part in value.split("/"))
+    ):
+        raise ValueError(f"{name} is malformed")
+    return value
+
+
+def parse_trusted_scope_approval(
+    body: object,
+    *,
+    expected_head_sha: str,
+) -> tuple[str, ...] | None:
+    """Parse one external OWNER-issued exact-head trust-root approval.
+
+    Unmarked comments and records for another well-formed head are unrelated.
+    A record targeting the current head is authority-bearing input and therefore
+    fails closed when malformed or when it repeats paths.
+    """
+
+    if type(body) is not str:
+        return None
+    lines = body.splitlines()
+    if not lines or lines[0] != TRUSTED_SCOPE_APPROVAL_MARKER:
+        return None
+    if type(expected_head_sha) is not str or not _SHA40.fullmatch(expected_head_sha):
+        raise ValueError("expected approval head must be a lowercase 40-hex SHA")
+    if len(lines) < 2 or not lines[1].startswith("head: "):
+        raise ValueError("trusted scope approval requires one exact head line")
+    approved_head = lines[1].removeprefix("head: ")
+    if not _SHA40.fullmatch(approved_head):
+        raise ValueError("trusted scope approval head must be a lowercase 40-hex SHA")
+    if approved_head != expected_head_sha:
+        return None
+    if len(lines) < 3:
+        raise ValueError("trusted scope approval must contain at least one exact path")
+
+    paths: list[str] = []
+    for line in lines[2:]:
+        if not line.startswith("path: "):
+            raise ValueError("trusted scope approval permits only path lines after head")
+        paths.append(
+            _require_repo_relative_path(
+                line.removeprefix("path: "),
+                name="approved scope path",
+            )
+        )
+    if len(set(paths)) != len(paths):
+        raise ValueError("trusted scope approval must not repeat paths")
+    return tuple(paths)
+
+
 def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
     changes: list[Change] = []
     for raw in lines:
@@ -79,17 +152,58 @@ def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
         parts = line.split("\t")
         status = parts[0]
         kind = status[:1]
+        if kind not in SUPPORTED_CHANGE_KINDS:
+            raise ValueError(f"Unsupported Git name-status record: {line!r}")
+        if not status:
+            raise ValueError(f"Malformed Git name-status record: {line!r}")
+        if kind in {"R", "C"}:
+            score = status[1:]
+            if (
+                len(score) != 3
+                or not score.isdigit()
+                or int(score) > 100
+            ):
+                raise ValueError(f"Malformed rename/copy status: {line!r}")
+        elif len(status) != 1:
+            raise ValueError(f"Malformed Git name-status record: {line!r}")
         if kind in {"R", "C"}:
             if len(parts) != 3:
                 raise ValueError(f"Malformed rename/copy record: {line!r}")
-            changes.append(
-                Change(status=status, previous_path=parts[1], path=parts[2])
+            previous_path = _require_repo_relative_path(
+                parts[1],
+                name="previous path",
             )
+            path = _require_repo_relative_path(parts[2], name="path")
+            changes.append(Change(status=status, previous_path=previous_path, path=path))
         else:
             if len(parts) != 2:
                 raise ValueError(f"Malformed name-status record: {line!r}")
-            changes.append(Change(status=status, path=parts[1]))
+            path = _require_repo_relative_path(parts[1], name="path")
+            changes.append(Change(status=status, path=path))
     return tuple(changes)
+
+
+def _normalized_exact_paths(paths: Sequence[str] | None) -> frozenset[str]:
+    if paths is None:
+        return frozenset()
+    normalized: set[str] = set()
+    for value in paths:
+        if (
+            type(value) is not str
+            or not value
+            or any(ord(character) < 32 or ord(character) in {92, 127} for character in value)
+            or value.startswith("/")
+            or value.endswith("/")
+            or "//" in value
+            or "*" in value
+            or "?" in value
+        ):
+            raise ValueError("exact protected path authorization is malformed")
+        parts = value.split("/")
+        if any(part in {"", ".", ".."} for part in parts):
+            raise ValueError("exact protected path authorization is malformed")
+        normalized.add(value)
+    return frozenset(normalized)
 
 
 def assess_reconvergence(
@@ -101,13 +215,56 @@ def assess_reconvergence(
     protected_sentinels: frozenset[str] = PROTECTED_SENTINELS,
     base_is_ancestor: bool = True,
     allowed_scopes: Sequence[str] | None = None,
+    authorized_protected_sentinel_paths: Sequence[str] | None = None,
 ) -> IntegrityAssessment:
     if max_deletions < 1:
         raise ValueError("max_deletions must be positive")
     if not (0 < max_deleted_fraction <= 1):
         raise ValueError("max_deleted_fraction must be in (0, 1]")
+    for change in changes:
+        if type(change) is not Change:
+            raise TypeError("changes must contain exact Change values")
+        if type(change.status) is not str or not change.status:
+            raise ValueError("Git change status is malformed")
+        kind = change.status[:1]
+        if kind not in SUPPORTED_CHANGE_KINDS:
+            raise ValueError("unsupported Git change status")
+        if kind in {"R", "C"}:
+            score = change.status[1:]
+            if (
+                len(score) != 3
+                or not score.isdigit()
+                or int(score) > 100
+            ):
+                raise ValueError("rename/copy Git change status is malformed")
+            if change.previous_path is None:
+                raise ValueError("rename/copy change requires previous path")
+            _require_repo_relative_path(change.previous_path, name="previous path")
+        else:
+            if len(change.status) != 1:
+                raise ValueError("Git change status is malformed")
+            if change.previous_path is not None:
+                raise ValueError("non-rename/copy change must not have previous path")
+        _require_repo_relative_path(change.path, name="changed path")
 
-    normalized_base = tuple(dict.fromkeys(base_paths))
+    authorized_protected_paths = _normalized_exact_paths(
+        authorized_protected_sentinel_paths
+    )
+    if not authorized_protected_paths.issubset(PROTECTED_MUTATION_ROOTS):
+        raise ValueError(
+            "trust-root authorization must name only canonical executable trust roots"
+        )
+    if not authorized_protected_paths.issubset(protected_sentinels):
+        raise ValueError(
+            "trust-root authorization must name active protected sentinels"
+        )
+
+    normalized_base = tuple(
+        dict.fromkeys(
+            _require_repo_relative_path(path, name="base tree path")
+            for path in base_paths
+        )
+    )
     base_count = len(normalized_base)
     if base_count == 0:
         raise ValueError("base tree must contain at least one tracked path")
@@ -121,7 +278,10 @@ def assess_reconvergence(
         kind = change.status[:1]
         if (
             kind == "R"
-            and change.previous_path in protected_sentinels
+            and (
+                change.previous_path in protected_sentinels
+                or change.path in protected_sentinels
+            )
             and change.path != change.previous_path
         ):
             protected_damage.add(
@@ -129,6 +289,15 @@ def assess_reconvergence(
             )
         if kind == "T" and change.path in protected_sentinels:
             protected_damage.add(f"{change.path} (type change)")
+        if (
+            kind == "M"
+            and change.path in PROTECTED_MUTATION_ROOTS
+            and change.path in protected_sentinels
+        ):
+            if change.path not in authorized_protected_paths:
+                protected_damage.add(f"{change.path} (modification)")
+        if kind in {"A", "C"} and change.path in protected_sentinels:
+            protected_damage.add(f"{change.path} (addition/copy)")
     protected_violations = tuple(sorted(protected_damage))
 
     normalized_scopes: tuple[str, ...] | None = None
@@ -235,6 +404,7 @@ def assess_git_revisions(
     max_deletions: int = 50,
     max_deleted_fraction: float = 0.35,
     allowed_scopes: Sequence[str] | None = None,
+    authorized_protected_sentinel_paths: Sequence[str] | None = None,
     cwd: str | Path | None = None,
 ) -> IntegrityAssessment:
     """Assess revisions inside one explicit Git repository/worktree.
@@ -263,6 +433,7 @@ def assess_git_revisions(
         max_deleted_fraction=max_deleted_fraction,
         base_is_ancestor=base_is_ancestor,
         allowed_scopes=allowed_scopes,
+        authorized_protected_sentinel_paths=authorized_protected_sentinel_paths,
     )
 
 
@@ -284,8 +455,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             "PR-authored metadata. When omitted, scope enforcement is disabled."
         ),
     )
+    parser.add_argument(
+        "--trusted-root-approval",
+        action="append",
+        default=None,
+        help=(
+            "Externally approved exact executable trust-root path. This channel is "
+            "separate from ordinary mutation scope and must be resolved by trusted "
+            "base code from an exact-head OWNER approval record."
+        ),
+    )
+    parser.add_argument(
+        "--cwd",
+        default=None,
+        help="Explicit Git repository/worktree for the public assessment entrypoint.",
+    )
     args = parser.parse_args(argv)
     allowed_scopes = args.allowed_scope
+    authorized_protected_sentinel_paths = tuple(
+        dict.fromkeys(args.trusted_root_approval or ())
+    )
 
     assessment = assess_git_revisions(
         args.base,
@@ -293,6 +482,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_deletions=args.max_deletions,
         max_deleted_fraction=args.max_deleted_fraction,
         allowed_scopes=allowed_scopes,
+        authorized_protected_sentinel_paths=authorized_protected_sentinel_paths,
+        cwd=args.cwd,
     )
     print(
         "Reconvergence tree guard: "

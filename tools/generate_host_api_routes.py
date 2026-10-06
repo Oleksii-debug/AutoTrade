@@ -44,8 +44,9 @@ def _declared_path_parameters(lines: list[str]) -> tuple[str, ...]:
 
     Route generation must not infer authority from a path template alone. Every
     placeholder must be backed by one direct OpenAPI in:path declaration with
-    the same name and required:true. References and path-level parameters are
-    deliberately unsupported here instead of being approximated.
+    the same name and required:true. Non-path parameter schemas may carry a
+    direct $ref because they grant no path-template authority; path-parameter
+    references and path-level parameters remain unsupported.
     """
 
     markers = [
@@ -110,15 +111,22 @@ def _declared_path_parameters(lines: list[str]) -> tuple[str, ...]:
                     raise ValueError(
                         "nested OpenAPI parameter content appeared outside schema"
                     )
-                schema_match = re.fullmatch(
-                    r"            ([A-Za-z_][A-Za-z0-9_]*):\s*([^\s#]+)\s*",
+                schema_ref_match = re.fullmatch(
+                    r"            \$ref:\s*(\S+)\s*",
                     line,
                 )
-                if schema_match is None:
-                    raise ValueError(
-                        "unsupported OpenAPI parameter schema field syntax"
+                if schema_ref_match is not None:
+                    key, value = "$ref", schema_ref_match.group(1)
+                else:
+                    schema_match = re.fullmatch(
+                        r"            ([A-Za-z_][A-Za-z0-9_]*):\s*([^\s#]+)\s*",
+                        line,
                     )
-                key, value = schema_match.groups()
+                    if schema_match is None:
+                        raise ValueError(
+                            "unsupported OpenAPI parameter schema field syntax"
+                        )
+                    key, value = schema_match.groups()
                 if key in schema:
                     raise ValueError(
                         f"duplicate OpenAPI parameter schema field: {key}"

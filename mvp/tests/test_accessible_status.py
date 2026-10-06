@@ -113,12 +113,46 @@ class AccessibleStatusTests(unittest.TestCase):
             },
         )
         self.assertIn("Recorded fills: Unavailable", text)
+        self.assertIn(
+            "Active reservations: unavailable; one or more reservation entries are malformed",
+            text,
+        )
+        self.assertIn("Structurally readable reservation entries: 0", text)
+        self.assertNotIn("Active reservations: 2", text)
         self.assertIn("Reservation 1: unavailable; state: ACTIVE", text)
         self.assertIn("Reservation 2: unavailable", text)
         self.assertIn("Гроші на рахунку (USD): 1000", text)
         self.assertIn("Розраховані кошти: Unavailable", text)
         self.assertIn("Нереалізований прибуток/збиток: Unavailable", text)
         self.assertIn("Economic edge: unproven", text)
+
+    def test_partial_reservation_corruption_does_not_announce_raw_list_count(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "fills": {},
+                "active_reservations": [
+                    {
+                        "remaining": {"CASH:USD": "10"},
+                        "state": "WORKING",
+                    },
+                    {"remaining": None, "state": "UNKNOWN"},
+                    "corrupt",
+                ],
+            }
+        )
+        self.assertIn(
+            "Active reservations: unavailable; one or more reservation entries are malformed",
+            text,
+        )
+        self.assertIn("Structurally readable reservation entries: 1", text)
+        self.assertNotIn("Active reservations: 3", text)
+        self.assertIn("Reserved CASH:USD: 10; state: WORKING", text)
+        self.assertIn(
+            "Action required: inspect or restore reservation state before relying on exposure status",
+            text,
+        )
 
     def test_hostile_value_objects_are_not_executed_by_accessible_status(self):
         class TrapText(str):

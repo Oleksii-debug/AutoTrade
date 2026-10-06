@@ -1811,6 +1811,47 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertIsNone(fill.position_side)
         self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
 
+    def test_execution_consumer_rejects_observation_subclass_before_virtual_callback(self):
+        canonical = bound_execution_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "list": [
+                        {
+                            "execId": "exec-hostile-observation",
+                            "orderLinkId": "",
+                            "symbol": "BTCUSDT",
+                            "side": "Buy",
+                            "execQty": "0.01",
+                            "execPrice": "65000",
+                            "execFee": "0",
+                            "feeCurrency": "USDT",
+                            "execTime": "1790280000000",
+                        }
+                    ]
+                },
+            }
+        )
+        callbacks = []
+
+        class HostileObservation(type(canonical)):
+            def __getattribute__(self, name):
+                callbacks.append(name)
+                raise AssertionError(
+                    "virtual provider-response callback executed before exact-type fence"
+                )
+
+        forged = object.__new__(HostileObservation)
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact ProviderResponseObservation",
+        ):
+            parse_executions(
+                forged,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+        self.assertEqual(callbacks, [])
+
     def test_execution_success_code_requires_exact_json_integer(self):
         row = {
             "execId": "exec-ret-code-type",

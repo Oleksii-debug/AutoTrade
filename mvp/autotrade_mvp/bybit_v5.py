@@ -1416,8 +1416,8 @@ def parse_executions(
 ) -> tuple[ProviderFillEvidence, ...]:
     """Map one authenticated, exact-byte Bybit execution read into fills."""
 
-    if not isinstance(observation, ProviderResponseObservation):
-        raise TypeError("observation must be ProviderResponseObservation")
+    if type(observation) is not ProviderResponseObservation:
+        raise TypeError("observation must be exact ProviderResponseObservation")
     observation.require_scope(
         provider_id="BYBIT",
         surface=Surface.AUTHENTICATED_READ,

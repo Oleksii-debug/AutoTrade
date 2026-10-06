@@ -49,16 +49,26 @@ def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str):
         raise ValueError(f"{name} is required")
-    return value.strip()
+    normalized = str.strip(value)
+    if not normalized:
+        raise ValueError(f"{name} is required")
+    return normalized
 
 
 def _amounts(values: Mapping[str, Decimal | str | int], *, allow_zero: bool = False) -> dict[str, Decimal]:
-    if not isinstance(values, Mapping) or not values:
+    # Reservation admission is hard financial authority. Arbitrary Mapping
+    # implementations (including MappingProxyType over an executable backing
+    # mapping) must not run callbacks while capacity is being normalized.
+    if type(values) is not dict:
+        raise TypeError("resource amounts must use an exact dict")
+    items = tuple(dict.items(values))
+    if not items:
         raise ValueError("resource amounts are required")
+
     normalized: dict[str, Decimal] = {}
-    for resource, raw in values.items():
+    for resource, raw in items:
         key = _text(resource, name="resource")
         if key in normalized:
             raise ValueError("resource names must be unique after normalization")
@@ -197,9 +207,9 @@ class ReservationBook:
                 "capital projection is unresolved and blocks new risk"
             )
         available = capital.reservation_resources()
-        if not isinstance(available, Mapping):
+        if type(available) is not dict:
             raise TypeError(
-                "capital reservation_resources() must return a mapping"
+                "capital reservation_resources() must return an exact dict"
             )
         return self.reserve(
             reservation_id=reservation_id,

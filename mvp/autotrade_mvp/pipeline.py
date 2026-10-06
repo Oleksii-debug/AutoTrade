@@ -255,16 +255,25 @@ def _stable_hash(payload: object) -> str:
     return sha256(encoded).hexdigest()
 
 
-def _fsync_directory(directory: Path) -> None:
-    """Persist a completed rename on platforms that expose directory fsync."""
+def _best_effort_fsync_directory(directory: Path) -> None:
+    """Best-effort metadata flush after rename without post-commit failure."""
 
     if os.name == "nt":
         return
-    descriptor = os.open(directory, os.O_RDONLY)
     try:
-        os.fsync(descriptor)
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            pass
     finally:
-        os.close(descriptor)
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
 
 
 def _atomic_json(path: Path, payload: object) -> None:
@@ -276,7 +285,7 @@ def _atomic_json(path: Path, payload: object) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
-    _fsync_directory(path.parent)
+    _best_effort_fsync_directory(path.parent)
 
 
 @dataclass(frozen=True)

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
+import json
+import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -90,6 +93,37 @@ class CanonicalEventEnvelopeAdmissionTests(unittest.TestCase):
             ]
             with self.assertRaisesRegex(ValueError, "unsupported fields"):
                 JournalStore(f"{directory}/journal.sqlite3").append_event(envelope)
+
+    def test_claimed_event_envelope_is_schema_revalidated_on_read(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            envelope = canonical_event()
+            store.append_event(envelope)
+
+            tampered = dict(envelope)
+            tampered["unexpected"] = "rehash-does-not-make-schema-valid"
+            raw = json.dumps(
+                tampered,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            digest = "sha256:" + sha256(raw.encode("utf-8")).hexdigest()
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE events SET envelope_json = ?, envelope_hash = ? "
+                    "WHERE event_id = ?",
+                    (raw, digest, envelope["event_id"]),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "unsupported fields"):
+                JournalStore(path).get_event(envelope["event_id"])
 
     def test_commit_command_validates_each_claimed_canonical_event_before_mutation(self):
         with TemporaryDirectory() as directory:

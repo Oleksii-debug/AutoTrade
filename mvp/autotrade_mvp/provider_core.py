@@ -819,6 +819,7 @@ def _install_provider_submission_observation_authority(binding_projection):
     canonical_id = id
     canonical_tuple = tuple
     canonical_frozenset = frozenset
+    canonical_len = len
     canonical_str = str
     canonical_int = int
     canonical_object = object
@@ -831,6 +832,14 @@ def _install_provider_submission_observation_authority(binding_projection):
     binding_projection_code = binding_projection.__code__
     canonical_decode = _decode_exact_json
     decode_code = canonical_decode.__code__
+    canonical_depth_guard = require_provider_json_depth
+    depth_guard_code = canonical_depth_guard.__code__
+    canonical_number_parser = parse_bounded_json_number_token
+    number_parser_code = canonical_number_parser.__code__
+    canonical_integer_parser = parse_bounded_json_integer_token
+    integer_parser_code = canonical_integer_parser.__code__
+    canonical_freeze_json = _freeze_json
+    freeze_json_code = canonical_freeze_json.__code__
     canonical_sha256 = sha256
     canonical_json_module = json
     canonical_json_dumps = json.dumps
@@ -864,6 +873,7 @@ def _install_provider_submission_observation_authority(binding_projection):
             or id is not canonical_id
             or tuple is not canonical_tuple
             or frozenset is not canonical_frozenset
+            or len is not canonical_len
             or str is not canonical_str
             or int is not canonical_int
             or object is not canonical_object
@@ -876,6 +886,14 @@ def _install_provider_submission_observation_authority(binding_projection):
             is not binding_projection_code
             or _decode_exact_json is not canonical_decode
             or canonical_decode.__code__ is not decode_code
+            or require_provider_json_depth is not canonical_depth_guard
+            or canonical_depth_guard.__code__ is not depth_guard_code
+            or parse_bounded_json_number_token is not canonical_number_parser
+            or canonical_number_parser.__code__ is not number_parser_code
+            or parse_bounded_json_integer_token is not canonical_integer_parser
+            or canonical_integer_parser.__code__ is not integer_parser_code
+            or _freeze_json is not canonical_freeze_json
+            or canonical_freeze_json.__code__ is not freeze_json_code
             or sha256 is not canonical_sha256
             or json is not canonical_json_module
             or json.dumps is not canonical_json_dumps
@@ -898,7 +916,7 @@ def _install_provider_submission_observation_authority(binding_projection):
             canonical_text(item, name)
             for item in value
         )
-        if len(canonical_frozenset(normalized)) != len(normalized):
+        if canonical_len(canonical_frozenset(normalized)) != canonical_len(normalized):
             raise error_type(f"{name} must be unique")
         return normalized
 

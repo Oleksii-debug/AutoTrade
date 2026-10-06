@@ -712,6 +712,33 @@ def _stored_evidence_is_verified(
     return True
 
 
+def _accepted_qualification_covers_exact_candidate(
+    accepted: AcceptedQualificationAttestation,
+    candidate: ReleaseCandidateInput,
+) -> bool:
+    expected = {
+        (
+            artifact.artifact_id,
+            artifact.artifact_sha256,
+            artifact.source_sha,
+            _RELEASE_ARTIFACT_MEDIA_TYPE,
+            _RELEASE_EVIDENCE_KIND,
+        )
+        for artifact in candidate.artifacts
+    }
+    observed = {
+        (
+            ref.artifact_id,
+            ref.sha256,
+            ref.source_sha,
+            ref.media_type,
+            ref.evidence_kind,
+        )
+        for ref in accepted.evidence_refs
+    }
+    return observed == expected and release_candidate_subject_requirement(candidate) in accepted.requirement_ids
+
+
 def _qualification_covers_exact_candidate(
     receipt: SignedQualificationAttestation,
     candidate: ReleaseCandidateInput,
@@ -823,10 +850,8 @@ def freeze_release_candidate(
         windows_package = by_role.get("WINDOWS_PACKAGE")
         if windows_package is None:
             reasons.append("independent_evidence_trust_invalid")
-        elif not _qualification_covers_exact_candidate(
-            qualification_receipt, candidate
-        ):
-            reasons.append("qualification_evidence_set_mismatch")
+        elif qualification_receipt is None or qualification_policy is None:
+            reasons.append("independent_evidence_trust_incomplete")
         else:
             try:
                 accepted = verify_qualification_attestation(
@@ -853,6 +878,10 @@ def freeze_release_candidate(
                     reasons.append(
                         f"qualification_result_not_pass:{accepted.result}"
                     )
+                elif not _accepted_qualification_covers_exact_candidate(
+                    accepted, candidate
+                ):
+                    reasons.append("qualification_evidence_set_mismatch")
 
     for artifact in candidate.artifacts:
         if artifact.source_sha != candidate.source_sha:

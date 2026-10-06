@@ -1854,7 +1854,7 @@ BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST = (
 
 
 BYBIT_OPTION_DELIVERY_PARSER_IDENTITY = "BYBIT_OPTION_DELIVERY_V5_JSON_V1"
-BYBIT_OPTION_DELIVERY_PARSER_VERSION = "1.2.0"
+BYBIT_OPTION_DELIVERY_PARSER_VERSION = "1.3.0"
 BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST = (
     "sha256:"
     + sha256(
@@ -1863,6 +1863,9 @@ BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST = (
                 "parser_identity": BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
                 "parser_version": BYBIT_OPTION_DELIVERY_PARSER_VERSION,
                 "source_type": "ProviderResponseObservation",
+                "source_authority": (
+                    "CLOSURE_OWNED_PROVIDER_RESPONSE_SCOPE_PROJECTION"
+                ),
                 "scope": {
                     "provider_id": "BYBIT",
                     "surface": "ACTIVITIES",
@@ -2045,15 +2048,15 @@ def parse_option_delivery_page(
         raise TypeError(
             "observation must be exact ProviderResponseObservation"
         )
-    observation.require_scope(
+    projection = provider_response_observation_require_scope(
+        observation,
         provider_id="BYBIT",
         surface=Surface.ACTIVITIES,
         endpoint=BYBIT_DOCUMENTED_ENDPOINTS["OPTION_DELIVERIES"],
     )
-    binding = observation.query_binding
-    query = binding.query
+    query = projection["query"]
     if (
-        binding.permission_scope != "ACCOUNT.READ"
+        projection["permission_scope"] != "ACCOUNT.READ"
         or type(query.get("category")) is not str
         or query.get("category") != "option"
     ):
@@ -2085,7 +2088,7 @@ def parse_option_delivery_page(
     try:
         instrument = InstrumentRegistry.exact(
             instrument_registry,
-            binding.instrument_version,
+            projection["instrument_version"],
         )
     except InstrumentRegistryError as error:
         raise ProviderCoreError(
@@ -2170,7 +2173,7 @@ def parse_option_delivery_page(
             name="expDate",
         )
 
-    envelope = _mapping(observation.payload, name="response")
+    envelope = _mapping(projection["payload"], name="response")
     ret_code = envelope.get("retCode")
     if type(ret_code) is not int or ret_code != 0:
         raise ProviderCoreError(
@@ -2312,23 +2315,23 @@ def parse_option_delivery_page(
     return BybitOptionDeliveryPage(
         records=tuple(records),
         next_page_cursor=next_cursor,
-        provider_id=binding.provider_id,
-        account_id=binding.account_id,
-        entity_id=binding.entity_id,
-        environment=binding.environment,
-        capability_snapshot_id=binding.capability_snapshot_id,
-        instrument_version=binding.instrument_version,
+        provider_id=projection["provider_id"],
+        account_id=projection["account_id"],
+        entity_id=projection["entity_id"],
+        environment=projection["environment"],
+        capability_snapshot_id=projection["capability_snapshot_id"],
+        instrument_version=projection["instrument_version"],
         provider_symbol=requested_symbol,
-        surface=binding.surface,
-        endpoint=binding.endpoint,
-        permission_scope=binding.permission_scope,
-        query_digest=binding.query_digest,
+        surface=projection["surface"],
+        endpoint=projection["endpoint"],
+        permission_scope=projection["permission_scope"],
+        query_digest=projection["query_digest"],
         parser_identity=BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
         parser_version=BYBIT_OPTION_DELIVERY_PARSER_VERSION,
         parser_contract_digest=BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
-        evidence_ref=observation.evidence_ref,
-        response_sha256=observation.response_sha256,
-        observed_at=observation.observed_at,
+        evidence_ref=projection["evidence_ref"],
+        response_sha256=projection["response_sha256"],
+        observed_at=projection["observed_at"],
     )
 
 

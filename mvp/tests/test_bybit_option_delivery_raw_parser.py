@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.bybit_v5 import (
     BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
@@ -200,15 +201,33 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
             BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
             "BYBIT_OPTION_DELIVERY_V5_JSON_V1",
         )
-        self.assertEqual(BYBIT_OPTION_DELIVERY_PARSER_VERSION, "1.2.0")
+        self.assertEqual(BYBIT_OPTION_DELIVERY_PARSER_VERSION, "1.3.0")
         self.assertEqual(
             BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
-            "sha256:89ec7fade832492c068d3f67e11e6a6ff77764e59950c2195c9e8848920c3e3f",
+            "sha256:5a5eb4e908ec613b7cfd8c29f4635fd26054b8d68bb31abf0c782397970ce6fb",
         )
         parsed = parse_option_delivery_page(observation(response()))
         self.assertIsInstance(parsed, BybitOptionDeliveryPage)
         self.assertEqual(len(parsed.records), 1)
         self.assertFalse(hasattr(parsed.records[0], "event_kind"))
+
+    def test_parser_uses_sealed_observation_projection(self):
+        source = observation(response())
+        callbacks = []
+
+        def forged_scope(*_args, **_kwargs):
+            callbacks.append("require_scope")
+            raise AssertionError("public scope method executed")
+
+        with patch.object(type(source), "require_scope", forged_scope), patch.object(
+            type(source.query_binding),
+            "require_scope",
+            forged_scope,
+        ):
+            parsed = parse_option_delivery_page(source)
+        self.assertEqual(callbacks, [])
+        self.assertEqual(parsed.account_id, "acct-option")
+        self.assertEqual(parsed.evidence_ref, source.evidence_ref)
 
     def test_parser_binds_provider_symbol_to_canonical_instrument_version(self):
         parsed = parse_option_delivery_page(observation(response()))

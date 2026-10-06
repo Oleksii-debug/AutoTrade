@@ -145,9 +145,7 @@ class JournalStore(_JournalStoreImpl):
 
         payload = envelope.get("payload")
         payload_json = _impl.canonical_json(payload)
-        expected_payload_hash = (
-            "sha256:" + __import__("hashlib").sha256(payload_json.encode("utf-8")).hexdigest()
-        )
+        expected_payload_hash = _impl.payload_digest(payload)
         if envelope.get("payload_hash") != expected_payload_hash:
             raise ValueError("payload_hash does not match payload")
         envelope_json = _impl.canonical_json(envelope)

@@ -8,6 +8,8 @@ import unittest
 from autotrade_runtime.artifacts import ArtifactStore
 
 from mvp.autotrade_mvp.bybit_v5 import (
+    BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST,
+    BYBIT_EXECUTION_PARSER_IDENTITY,
     BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
     BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
 )
@@ -132,6 +134,87 @@ class ProviderRouteReadTests(unittest.TestCase):
             self.assertEqual(binding.accepted_success_statuses, (200,))
             self.assertEqual(binding.parser_identity, "BYBIT_ORDER_V5_JSON_V1")
             self.assertEqual(len(binding.query_digest), 71)
+
+    def test_execution_read_requires_endpoint_specific_parser_q_claim(self):
+        rule_key, rule_digest = qualified_read_route_semantic_claim(
+            provider_id="BYBIT",
+            endpoint="/v5/execution/list",
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="ORDER.READ",
+        )
+        parser_key, parser_contract_digest = qualified_read_parser_semantic_claim(
+            provider_id="BYBIT",
+            endpoint="/v5/execution/list",
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="ORDER.READ",
+        )
+        self.assertEqual(
+            parser_contract_digest,
+            BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST,
+        )
+        self.assertTrue(parser_key.startswith("READ_PARSER:"))
+        self.assertNotEqual(parser_key, rule_key)
+
+        global_parser_only = _qualification_with_route_semantics({
+            "PARSER_IDENTITY": "BYBIT_ORDER_V5_JSON_V1",
+            rule_key: rule_digest,
+        })
+        with self.assertRaisesRegex(
+            ProviderRouteReadError,
+            "does not cover exact authenticated-read parser contract",
+        ):
+            provider_route_reads_module._qualified_read_rule(
+                qualification=global_parser_only,
+                provider_id="BYBIT",
+                endpoint="/v5/execution/list",
+                surface=Surface.AUTHENTICATED_READ,
+                permission_scope="ORDER.READ",
+            )
+
+        stale_endpoint_parser = _qualification_with_route_semantics({
+            "PARSER_IDENTITY": "BYBIT_ORDER_V5_JSON_V1",
+            parser_key: "sha256:" + "0" * 64,
+            rule_key: rule_digest,
+        })
+        with self.assertRaisesRegex(
+            ProviderRouteReadError,
+            "does not cover exact authenticated-read parser contract",
+        ):
+            provider_route_reads_module._qualified_read_rule(
+                qualification=stale_endpoint_parser,
+                provider_id="BYBIT",
+                endpoint="/v5/execution/list",
+                surface=Surface.AUTHENTICATED_READ,
+                permission_scope="ORDER.READ",
+            )
+
+        exact = _qualification_with_route_semantics({
+            "PARSER_IDENTITY": "BYBIT_ORDER_V5_JSON_V1",
+            parser_key: parser_contract_digest,
+            rule_key: rule_digest,
+        })
+        (
+            _semantics_digest,
+            returned_rule_digest,
+            qualified_rule_digest,
+            entitlement,
+            success_statuses,
+            returned_parser_identity,
+        ) = provider_route_reads_module._qualified_read_rule(
+            qualification=exact,
+            provider_id="BYBIT",
+            endpoint="/v5/execution/list",
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="ORDER.READ",
+        )
+        self.assertEqual(returned_rule_digest, rule_digest)
+        self.assertTrue(qualified_rule_digest.startswith("sha256:"))
+        self.assertEqual(entitlement, "EXECUTIONS")
+        self.assertEqual(success_statuses, (200,))
+        self.assertEqual(
+            returned_parser_identity,
+            BYBIT_EXECUTION_PARSER_IDENTITY,
+        )
 
     def test_delivery_read_requires_endpoint_specific_parser_q_claim(self):
         rule_key, rule_digest = qualified_read_route_semantic_claim(

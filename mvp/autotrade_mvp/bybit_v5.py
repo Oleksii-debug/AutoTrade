@@ -1657,6 +1657,53 @@ def parse_executions(
     return tuple(by_execution.values())
 
 
+BYBIT_EXECUTION_PARSER_IDENTITY = "BYBIT_EXECUTION_V5_JSON_V1"
+BYBIT_EXECUTION_PARSER_VERSION = "1.0.0"
+BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST = (
+    "sha256:"
+    + sha256(
+        json.dumps(
+            {
+                "parser_identity": BYBIT_EXECUTION_PARSER_IDENTITY,
+                "parser_version": BYBIT_EXECUTION_PARSER_VERSION,
+                "source_type": "ProviderResponseObservation",
+                "scope": {
+                    "provider_id": "BYBIT",
+                    "surface": "AUTHENTICATED_READ",
+                    "endpoint": "/v5/execution/list",
+                    "permission_scope": "ORDER.READ",
+                },
+                "success_rule": "EXACT_JSON_INTEGER_RET_CODE_ZERO",
+                "row_identity": {
+                    "execId": "EXACT_NONEMPTY_TEXT",
+                    "orderLinkId": "EMPTY_OR_EXACT_CANONICAL_CLIENT_ID",
+                    "symbol": "EXACT_NONEMPTY_TEXT",
+                    "side": ["Buy", "Sell"],
+                },
+                "instrument_binding": (
+                    "EXACT_DICT_SNAPSHOT_SYMBOL_TO_CANONICAL_VERSION_TEXT"
+                ),
+                "economic_fields": {
+                    "execQty": "BOUNDED_EXACT_DECIMAL_TEXT",
+                    "execPrice": "BOUNDED_EXACT_DECIMAL_TEXT",
+                    "execFee": "BOUNDED_EXACT_DECIMAL_TEXT",
+                    "execTime": "BOUNDED_INTEGER_TEXT_SUPPORTED_UTC_RANGE",
+                },
+                "fee_currency": (
+                    "EXACT_UPPERCASE_PROVIDER_TEXT_OR_EXACT_DICT_SNAPSHOT_"
+                    "FALLBACK_ONLY_WHEN_PROVIDER_FIELD_EMPTY"
+                ),
+                "extra_fees": "FAIL_CLOSED_WHEN_ECONOMICALLY_NONEMPTY",
+                "duplicate_execution_id": "IDENTICAL_OR_FAIL_CLOSED",
+                "output": "ProviderFillEvidence_WITH_EXACT_READ_EVIDENCE_REF",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+)
+
+
 BYBIT_OPTION_DELIVERY_PARSER_IDENTITY = "BYBIT_OPTION_DELIVERY_V5_JSON_V1"
 BYBIT_OPTION_DELIVERY_PARSER_VERSION = "1.2.0"
 BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST = (

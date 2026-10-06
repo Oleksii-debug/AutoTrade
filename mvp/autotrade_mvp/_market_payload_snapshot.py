@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import UserDict
 from collections.abc import Iterator, Mapping
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -80,6 +81,16 @@ def _mapping_items_without_callbacks(
             )
         return tuple(value.items())
 
+    if type(value) is UserDict:
+        data = value.data
+        if type(data) is not dict:
+            raise PayloadSnapshotError(f"{path} UserDict state is invalid")
+        if len(data) > _MAX_PAYLOAD_CONTAINER_ITEMS:
+            raise PayloadSnapshotError(
+                f"{path} exceeds the market payload container resource envelope"
+            )
+        return tuple(data.items())
+
     if type(value) is FrozenMarketPayload:
         items = value._items
         if type(items) is not tuple:
@@ -101,7 +112,7 @@ def _mapping_items_without_callbacks(
         return tuple(validated)
 
     raise PayloadSnapshotError(
-        f"{path} must use an exact dict or admitted frozen market payload"
+        f"{path} must use an exact dict/UserDict or admitted frozen market payload"
     )
 
 
@@ -119,7 +130,7 @@ def _snapshot(
         )
     budget.consume(path=path)
 
-    if type(value) is dict or type(value) is FrozenMarketPayload:
+    if type(value) in {dict, UserDict, FrozenMarketPayload}:
         identity = id(value)
         if identity in active:
             raise PayloadSnapshotError(f"{path} contains a reference cycle")
@@ -208,9 +219,9 @@ def _snapshot(
 def snapshot_market_payload(value: object) -> FrozenMarketPayload:
     """Return a recursively detached immutable snapshot of one market payload."""
 
-    if type(value) not in {dict, FrozenMarketPayload}:
+    if type(value) not in {dict, UserDict, FrozenMarketPayload}:
         raise PayloadSnapshotError(
-            "payload must use an exact dict or admitted frozen market payload"
+            "payload must use an exact dict/UserDict or admitted frozen market payload"
         )
     frozen = _snapshot(
         value,

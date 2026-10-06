@@ -1280,10 +1280,20 @@ class BybitOptionDeliveryRecord:
 
 @dataclass(frozen=True)
 class BybitOptionDeliveryPage:
-    """One exact provider page plus its continuation token and byte evidence."""
+    """One exact provider page plus immutable authenticated-read scope."""
 
     records: tuple[BybitOptionDeliveryRecord, ...]
     next_page_cursor: str
+    provider_id: str
+    account_id: str
+    entity_id: str
+    environment: str
+    capability_snapshot_id: str
+    instrument_version: str
+    surface: Surface
+    endpoint: str
+    permission_scope: str
+    query_digest: str
     evidence_ref: str
     response_sha256: str
     observed_at: str
@@ -1555,6 +1565,16 @@ def parse_option_delivery_page(
     return BybitOptionDeliveryPage(
         records=tuple(records),
         next_page_cursor=next_cursor,
+        provider_id=binding.provider_id,
+        account_id=binding.account_id,
+        entity_id=binding.entity_id,
+        environment=binding.environment,
+        capability_snapshot_id=binding.capability_snapshot_id,
+        instrument_version=binding.instrument_version,
+        surface=binding.surface,
+        endpoint=binding.endpoint,
+        permission_scope=binding.permission_scope,
+        query_digest=binding.query_digest,
         evidence_ref=observation.evidence_ref,
         response_sha256=observation.response_sha256,
         observed_at=observation.observed_at,

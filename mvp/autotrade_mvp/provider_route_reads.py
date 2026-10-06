@@ -60,8 +60,8 @@ class ProviderRouteReadError(ValueError):
 
 
 def _point(value: datetime) -> datetime:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
-        raise ProviderRouteReadError("read time must be exact timezone-aware datetime")
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise ProviderRouteReadError("read time must be an exact stdlib timezone datetime")
     return value.astimezone(timezone.utc)
 
 

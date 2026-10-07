@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -132,16 +133,24 @@ class ProducerFixture:
                 "target": str(target),
             },
         }
-        return self.memory.append_episode(
-            decision_time=decision,
-            information_cutoff=decision,
-            task=task,
-            regime=regime,
-            instrument_family="equity",
-            permission_class="research",
-            payload=payload,
-            episode_id=episode_id,
-        )[0]
+        # The fixture describes a historical replay cut. Its durable writer
+        # availability must also precede that cut; the current wall clock
+        # would correctly exclude every calibration row.
+        writer_time = DECISION + timedelta(seconds=self._episode_counter)
+        with patch(
+            "research.autotrade_research.memory.episodes._utc_now",
+            return_value=writer_time,
+        ):
+            return self.memory.append_episode(
+                decision_time=decision,
+                information_cutoff=decision,
+                task=task,
+                regime=regime,
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload,
+                episode_id=episode_id,
+            )[0]
 
     def seed_calibration(self, values=("0", "1", "2", "3")):
         for index, value in enumerate(values):

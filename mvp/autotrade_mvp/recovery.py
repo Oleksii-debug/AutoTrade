@@ -295,6 +295,28 @@ class RecoveryController:
         self._recover_scoped_submission_uncertainty_from_owner_scope()
         return self.owner
 
+    def prepare_durable_takeover(self) -> OwnerFence:
+        """Read the prior durable owner without granting its sender epoch.
+
+        A restored or restarted process must reconcile the source journal to
+        issue takeover evidence, but cannot reuse the source owner for sends.
+        The sticky takeover gate is cleared only after the independently
+        issued takeover commits the next owner epoch.
+        """
+        if self._owner_store is None:
+            raise PermissionError("Durable takeover preparation requires a journal")
+        if self.owner is not None:
+            raise RuntimeError("Host already has an owner")
+        prior = self._latest_durable_owner()
+        if prior is None:
+            raise PermissionError("No durable source owner exists for takeover")
+        self.owner = prior
+        self.provider_reconciled = False
+        self.reason_codes = {"startup_reconciliation_required", "takeover_required"}
+        self.state = HostState.RECOVERING
+        self._recover_scoped_submission_uncertainty_from_owner_scope()
+        return prior
+
     @staticmethod
     def _normalized_submission_scope(
         environment: str,
@@ -1053,6 +1075,9 @@ class RecoveryController:
             return
         if "lease_expired_no_failover" in self.reason_codes:
             self.state = HostState.DEGRADED
+            return
+        if "takeover_required" in self.reason_codes:
+            self.state = HostState.RECOVERING
             return
         if self.provider_reconciled and "startup_reconciliation_required" not in self.reason_codes:
             self.state = HostState.READY

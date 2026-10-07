@@ -498,6 +498,7 @@ def _bind_controller_owner(
     controller.owner = owner
     if recovering:
         controller.provider_reconciled = False
+        controller.reason_codes.discard("takeover_required")
         controller.reason_codes.discard(
             "lease_expired_no_failover"
         )

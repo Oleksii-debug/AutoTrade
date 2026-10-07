@@ -62,6 +62,8 @@ def _fill():
         price="100",
         fee_currency="USD",
         trade_time="2026-10-04T00:30:30Z",
+        side="BUY",
+        evidence_refs=("provider-read:sha256:" + "1" * 64,),
     )
 
 

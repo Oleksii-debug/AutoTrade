@@ -32,8 +32,21 @@ from mvp.autotrade_mvp.reconciliation import (
     SubmissionResolution,
 )
 from mvp.autotrade_mvp.recovery import RecoveryController
+from mvp.autotrade_mvp.recovery_takeover import execute_durable_takeover
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
+from mvp.autotrade_mvp.windows_secrets import ProtectedCredentialVault
+
+
+class _TestProtector:
+    def protect(self, plaintext: bytes, *, entropy: bytes) -> bytes:
+        return sha256(entropy).digest() + plaintext[::-1]
+
+    def unprotect(self, ciphertext: bytes, *, entropy: bytes) -> bytes:
+        prefix = sha256(entropy).digest()
+        if not ciphertext.startswith(prefix):
+            raise OSError("test credential scope differs")
+        return ciphertext[len(prefix):][::-1]
 
 
 def _reseal_backup_manifest(backup: Path) -> None:
@@ -953,8 +966,25 @@ class BackupRestoreTests(unittest.TestCase):
         (state / "checkpoint.json").unlink()
         (state / "learning-evidence.jsonl").unlink()
         source_store = JournalStore(state / "journal.sqlite3")
-        source = RecoveryController(owner_store=source_store)
+        source = RecoveryController(
+            owner_store=source_store, owner_scope="PAPER:paper-account"
+        )
         source.start("source-owner")
+        self._record_durable_ready(
+            source, source_store, reconciliation_id="pre-backup-readiness"
+        )
+        vault = ProtectedCredentialVault(
+            root / "credential-vault.json", protector=_TestProtector()
+        )
+        handle = vault.register(
+            handle_id="restore-test-trade",
+            owner_identity="restore-test-operator",
+            account_id="paper-account",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="TRADE",
+            secret_value="test-only-secret",
+        )
         backup = create_backup(state, artifacts, root / "backup")
         restored = restore_backup(backup, root / "restored")
         marker = json.loads(
@@ -963,12 +993,58 @@ class BackupRestoreTests(unittest.TestCase):
             )
         )
         restored_store = JournalStore(restored / "state" / "journal.sqlite3")
-        controller = RecoveryController(owner_store=restored_store)
-        controller.start("restored-owner")
+        controller = RecoveryController(
+            owner_store=restored_store, owner_scope="PAPER:paper-account"
+        )
+        self.assertEqual(controller.prepare_durable_takeover().owner_id, "source-owner")
+        controller.record_reconciliation_checkpoint(
+            reconciliation_id="pre-backup-readiness",
+            provider_id="SIMULATED",
+            account_id="paper-account",
+            environment="PAPER",
+        )
+        self.assertEqual(controller.state.value, "RECOVERING")
+        with self.assertRaises(PermissionError):
+            controller.validate_sender("source-owner", 1)
+        execute_durable_takeover(
+            controller,
+            new_owner_id="restored-owner",
+            vault=vault,
+            handle=handle,
+            execution_identity="restore-test-operator",
+            reconciliation_id="pre-backup-readiness",
+            provider_id="SIMULATED",
+        )
         checkpoint_id = self._record_durable_ready(
             controller, restored_store, reconciliation_id="restore-readiness"
         )
         return restored, controller, marker, checkpoint_id
+
+    def _advance_restored_owner(
+        self, restored: Path, controller: RecoveryController, *, new_owner_id: str
+    ) -> None:
+        vault = ProtectedCredentialVault(
+            restored.parent / f"{new_owner_id}-credential-vault.json",
+            protector=_TestProtector(),
+        )
+        handle = vault.register(
+            handle_id=f"{new_owner_id}-trade",
+            owner_identity="restore-test-operator",
+            account_id="paper-account",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="TRADE",
+            secret_value="test-only-secret",
+        )
+        execute_durable_takeover(
+            controller,
+            new_owner_id=new_owner_id,
+            vault=vault,
+            handle=handle,
+            execution_identity="restore-test-operator",
+            reconciliation_id="restore-readiness",
+            provider_id="SIMULATED",
+        )
 
     def test_restore_completion_requires_reconciliation_and_immutable_fence(self):
         with TemporaryDirectory() as directory:
@@ -1088,10 +1164,8 @@ class BackupRestoreTests(unittest.TestCase):
                 new_owner_epoch=2,
                 fenced_at=_after_restore(marker, 1),
             )
-            controller.transfer_owner(
-                new_owner_id="replacement-owner",
-                old_sender_fenced=True,
-                reconciled=True,
+            self._advance_restored_owner(
+                restored, controller, new_owner_id="replacement-owner"
             )
             checkpoint_id = self._record_durable_ready(
                 controller,
@@ -1241,10 +1315,8 @@ class BackupRestoreTests(unittest.TestCase):
             )
             self.assertFalse(restore_requires_reconciliation(restored))
 
-            controller.transfer_owner(
-                new_owner_id="later-owner",
-                old_sender_fenced=True,
-                reconciled=True,
+            self._advance_restored_owner(
+                restored, controller, new_owner_id="later-owner"
             )
             self.assertTrue(restore_requires_reconciliation(restored))
 

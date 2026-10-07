@@ -11,8 +11,8 @@ Canonical worker-coordination override:
 - Any older fixed worker count, WIP limit, serialized lane, ownership/claim lock, exclusive integration owner, mandatory PR-order waiting rule, or CI-wait stop rule is non-binding if it conflicts with this section.
 - Claims, leases, ownership, assignments, queues, and coordinator labels are advisory coordination metadata only; they do not override the ordered Sequential closure authority below.
 - Workers may create branches, commits, pull requests, tests, fixes, integration commits, and merges when GitHub permissions allow and the change is honestly verified.
-- Dependencies constrain final integration order only. They must not stop independent implementation, testing, hardening, research, documentation, accessibility, packaging, fixtures, adapters, or other non-conflicting work.
-- Queued, pending, slow, or unavailable CI is never by itself a reason to terminate. Record the pending state and immediately continue another valuable independent task.
+- Parallel implementation, testing, hardening, research, documentation, accessibility, packaging, fixtures and adapters are allowed only when consistent with the ordered Sequential closure authority below: prioritize the earliest unfinished Section and use later work only when dependency-safe or directly supportive.
+- Queued, pending, slow, or unavailable CI is never by itself a reason to terminate. Record the pending state and continue only work permitted by the current ordered closure front.
 - A blocked primary closure front may be left only after all safe internally controllable residual work is exhausted and the blocker is durably recorded; later work must remain dependency-safe.
 - Do not idle because another PR, branch, worker, check, review, claim, or queue is active. Switch to non-conflicting work or reconcile/rebase instead of abandoning the run.
 - No repository-defined exclusive integration owner is required.
@@ -44,6 +44,7 @@ This section is the controlling coordination rule if any older repository text, 
 - A closed Section/Subsection may be reopened only for a demonstrated regression, invalidated closure evidence, changed acceptance contract, or a later integration change that demonstrably broke it. Record `REOPENED` and the exact reason before new work begins.
 - If two workers close the same scope concurrently, keep one canonical closure lineage/evidence set. Converge any unique necessary changes, then close/supersede the duplicate PR/branch/issue; delete the duplicate branch when safe. Never count one Section twice.
 - Before creating a new PR/branch for the current Section, inspect existing active lineages and reuse/repair/converge them when possible.
+- If another worker closes the current Section/Subsection while you are working, refresh the live registry immediately. Do not keep mutating already-DONE scope merely because your branch or PR is still open. Preserve and converge only genuinely unique required changes; otherwise close/supersede/retarget the duplicate lineage and move to the earliest unfinished Section.
 - External blockers do not justify false DONE. Finish all internally controllable work, record the blocker precisely, and proceed only to dependency-safe work.
 
 Chat history is not closure authority. Durable GitHub state is.

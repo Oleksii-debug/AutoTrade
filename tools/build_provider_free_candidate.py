@@ -680,9 +680,23 @@ def _require_webview2_input_identity(product_root, inputs, nuget_lock):
             'resolved': item['resolved'],
             'content_hash_sha512_base64': item['contentHash'],
         })
-    if len(lock_rows) != 1:
+    if not lock_rows:
         raise ValueError(
-            'provider-free WebView2 lock identity is not singular'
+            'provider-free WebView2 lock has no frozen identity'
+        )
+    lock_rows.sort(key=lambda item: item['target'])
+    package_identities = {
+        (
+            item['type'],
+            item['requested'],
+            item['resolved'],
+            item['content_hash_sha512_base64'],
+        )
+        for item in lock_rows
+    }
+    if len(package_identities) != 1:
+        raise ValueError(
+            'provider-free WebView2 lock identity differs across targets'
         )
 
     manifest_path = product_root / 'provenance/release-dependency-manifest.json'
@@ -697,29 +711,33 @@ def _require_webview2_input_identity(product_root, inputs, nuget_lock):
     )
     if type(dependencies) is not list:
         raise ValueError('release provenance has no .NET dependency graph')
-    manifest_rows = [
-        item
-        for item in dependencies
-        if type(item) is dict
-        and item.get('name') == 'Microsoft.Web.WebView2'
-    ]
-    if len(manifest_rows) != 1:
+    manifest_rows = sorted(
+        [
+            item
+            for item in dependencies
+            if type(item) is dict
+            and item.get('name') == 'Microsoft.Web.WebView2'
+        ],
+        key=lambda item: item.get('target', ''),
+    )
+    if len(manifest_rows) != len(lock_rows):
         raise ValueError(
-            'provider-free WebView2 release provenance is not singular'
+            'provider-free WebView2 release target coverage differs from lock'
         )
-    lock_row = lock_rows[0]
-    manifest_row = manifest_rows[0]
-    expected_manifest = {
-        'project': 'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj',
-        'target': lock_row['target'],
-        'name': 'Microsoft.Web.WebView2',
-        'type': lock_row['type'],
-        'version': version,
-        'content_hash_sha512_base64': content_hash,
-        'dependencies': [],
-        'requested': lock_row['requested'],
-    }
-    if manifest_row != expected_manifest:
+    expected_manifest_rows = [
+        {
+            'project': 'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj',
+            'target': lock_row['target'],
+            'name': 'Microsoft.Web.WebView2',
+            'type': lock_row['type'],
+            'version': version,
+            'content_hash_sha512_base64': content_hash,
+            'dependencies': [],
+            'requested': lock_row['requested'],
+        }
+        for lock_row in lock_rows
+    ]
+    if manifest_rows != expected_manifest_rows:
         raise ValueError(
             'provider-free WebView2 lock differs from release provenance'
         )

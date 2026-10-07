@@ -81,7 +81,8 @@ def _host_emergency_pause_required(store):
                 raise ValueError('Host block operation phase is invalid')
             block_phases[operation_id] = phase
 
-    if AuthorityService(store).is_new_exposure_blocked(ACCOUNT, ENVIRONMENT):
+    authority_store = JournalStore(Path(store.path))
+    if AuthorityService(authority_store).is_new_exposure_blocked(ACCOUNT, ENVIRONMENT):
         return True
     return any(phase not in _HOST_TERMINAL_PHASES for phase in block_phases.values())
 

@@ -136,7 +136,7 @@ class KrakenSpotContractTests(unittest.TestCase):
                 intent_id=intent_id,
                 intent_hash="kraken-spot-contract-intent",
                 provider="KRAKEN",
-                request=prepared_request.body,
+                request=dict(prepared_request.body),
                 now="2026-09-24T20:00:00Z",
                 authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=lambda _cid, _request, guard: (

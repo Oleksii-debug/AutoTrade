@@ -2224,6 +2224,23 @@ function renderOperation(operation) {
       }
     }
   }
+  async function pairLocalOwnerFromOneTimeFragment() {
+    const fragment = window.location.hash;
+    if (!fragment.startsWith("#pair=")) return;
+    const pairingCode = fragment.slice("#pair=".length);
+    if (!/^[A-Za-z0-9_-]{32,128}$/.test(pairingCode)) {
+      announce("Local pairing code is invalid. Commands remain unavailable.", true);
+      return;
+    }
+    // A one-time local bootstrap only; never send the bearer to a provider.
+    // Retain the fragment on failure so a reload can retry the same code.
+    await jsonFetch("api/v1/session", {
+      method: "POST",
+      body: JSON.stringify({pairing_code: pairingCode})
+    });
+    window.history.replaceState(null, "", window.location.pathname);
+  }
+
   async function start() {
     bindTableTools();
     bindAuthorityPolicyReviewInvalidation();
@@ -2235,6 +2252,7 @@ function renderOperation(operation) {
     byId("refresh-state").addEventListener("click", refreshStateFromUser);
     setCommandAvailability(false);
     try {
+      await pairLocalOwnerFromOneTimeFragment();
       await refreshSnapshot();
     } catch (error) {
       if (isSnapshotBusy(error)) {

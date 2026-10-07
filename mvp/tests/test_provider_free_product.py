@@ -374,7 +374,7 @@ def crash(*a, **kw):
     value=original(*a, **kw)
     os._exit(73)
 session.commit_order_fill_with_reservation_consumption=crash
-session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_time'],partial_fills=True)
+session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_time'],execution_profile='TWO_EQUAL_PARTIALS')
 '''
             crashed = subprocess.run([sys.executable, '-c', script, str(data / 'state')], cwd=ROOT,
                 capture_output=True, timeout=30)
@@ -792,7 +792,7 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
 
     def test_browser_keeps_retryable_pairing_fragment_until_pairing_succeeds(self):
         app = (ROOT / 'web' / 'src' / 'app.js').read_text(encoding='utf-8')
-        pairing = 'await jsonFetch(HOST_API.route("pairLocalSession"), {'
+        pairing = 'await jsonFetch("api/v1/session", {'
         scrub = 'window.history.replaceState(null, "", window.location.pathname);'
         self.assertIn(pairing, app)
         self.assertIn(scrub, app)

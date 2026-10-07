@@ -210,7 +210,7 @@ public partial class MainWindow : Window
         }
         finally
         {
-            System.Windows.Input.IInputElement? focusedElement =
+            var focusedElement =
                 System.Windows.Input.Keyboard.FocusedElement;
             if (manageRefreshButton)
             {

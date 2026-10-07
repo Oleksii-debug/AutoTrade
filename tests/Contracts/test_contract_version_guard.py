@@ -424,6 +424,21 @@ class ContractVersionGuardTests(unittest.TestCase):
             )
             self.assertEqual(evaluate(Path(left), Path(right)), [])
 
+    def test_openapi_absolute_id_and_sibling_ref_are_same_contract(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            for root in (Path(left), Path(right)):
+                write_tree(root)
+            write_openapi(
+                Path(left), "1.0.0",
+                [('/v1/state', 'get',
+                  'https://schemas.autotrade.local/1.0.0/a.schema.json#/$defs/A')],
+            )
+            write_openapi(
+                Path(right), "1.0.0",
+                [('/v1/state', 'get', '../jsonschema/a.schema.json#/$defs/A')],
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
     def test_openapi_default_security_removal_requires_major_increment(self):
         schemes = {
             "AutoTradeSession": {"type": "apiKey", "in": "header", "name": "Authorization"},

@@ -454,7 +454,8 @@ def die(*a,**kw):
     original(*a,**kw)
     os._exit(73)
 s.commit_order_fill_with_reservation_consumption=die
-s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_time'],partial_fills=True)
+s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_time'],
+                            target_quantity=p['target_quantity'],partial_fills=True)
 `, path.join(data, "state")], {cwd: ROOT, env, encoding: "utf8", timeout: 30000});
   assert.equal(crash.status, 73, crash.stderr);
   await page.goto(await start(data));

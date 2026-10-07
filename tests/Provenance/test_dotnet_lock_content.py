@@ -1074,6 +1074,21 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 [],
             )
 
+
+    def test_canonical_microsoft_dotnet_web_sdk_is_not_blocked(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'Host' / 'Host.csproj'
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                '<Project Sdk="Microsoft.NET.Sdk.Web" />',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [],
+            )
+
     def test_explicit_project_import_fails_closed(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

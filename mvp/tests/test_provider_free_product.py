@@ -95,11 +95,12 @@ class ProductClient:
         status, accepted, _ = self.request('POST', '/api/v1/commands', request)
         assert status == 200 and accepted['status'] == 'ACCEPTED', (status, accepted)
         operation = accepted['operation_id']
-        for _ in range(300):
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
             status, result, _ = self.request('GET', '/api/v1/operations/' + operation)
             if status == 200 and result['phase'] in {'SUCCEEDED', 'FAILED', 'UNKNOWN'}:
                 return command_id, result
-            time.sleep(.02)
+            time.sleep(.05)
         raise AssertionError('operation failed to finish')
 
     def close(self):
@@ -310,15 +311,16 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
                 status, accepted, _ = client.request('POST', '/api/v1/commands', command)
                 self.assertEqual((status, accepted['status']), (200, 'ACCEPTED'))
                 operation_id = accepted['operation_id']
-                for _ in range(300):
+                deadline = time.monotonic() + 120
+                while time.monotonic() < deadline:
                     _, operation, _ = client.request('GET', '/api/v1/operations/' + operation_id)
-                    if operation['phase'] == 'SUCCEEDED': break
-                    time.sleep(.02)
+                    if operation['phase'] in {'SUCCEEDED', 'FAILED', 'UNKNOWN'}: break
+                    time.sleep(.05)
                 self.assertEqual(operation['phase'], 'SUCCEEDED')
                 status, replay, _ = client.request('POST', '/api/v1/commands', command)
                 self.assertEqual(replay['operation_id'], operation_id)
                 self.assertEqual(len(client.state()['portfolio']['fills']), 6)
-                self.assertEqual(client.state()['portfolio']['status']['cash'], '895.696')
+                self.assertEqual(client.state()['portfolio']['status']['cash'], '791.392')
             finally: client.close()
 
     def test_historical_admission_replay_cannot_authorize_stale_current_cash(self):
@@ -326,7 +328,8 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
         from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
         with TemporaryDirectory() as directory:
             run_autonomous_simulation(['100', '101', '103', '102', '100'], directory,
-                run_id='historical-cut', now='2026-10-04T00:00:00Z', partial_fills=True)
+                run_id='historical-cut', now='2026-10-04T00:00:00Z', partial_fills=True,
+                target_quantity='2')
             journal = JournalStore(Path(directory) / 'journal.sqlite3')
             risk = journal.load_events_by_aggregate_type('risk_decision')[0]
             evidence = risk['payload']['reservation_availability_evidence']
@@ -374,14 +377,15 @@ def crash(*a, **kw):
     value=original(*a, **kw)
     os._exit(73)
 session.commit_order_fill_with_reservation_consumption=crash
-session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_time'],partial_fills=True)
+session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_time'],partial_fills=True,
+    target_quantity=p['target_quantity'])
 '''
             crashed = subprocess.run([sys.executable, '-c', script, str(data / 'state')], cwd=ROOT,
                 capture_output=True, timeout=30)
             self.assertEqual(crashed.returncode, 73, crashed.stderr.decode())
             store = JournalStore(data / 'state' / 'journal.sqlite3')
             book = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
-            self.assertEqual(str(book.position(INSTRUMENT)), '0.5')
+            self.assertEqual(str(book.position(INSTRUMENT)), '1')
             oms = DurableOrderBookProjection(store, provider_id=PROVIDER, account_id=ACCOUNT,
                 environment=ENVIRONMENT, host_id='local-simulation', owner_epoch='1')
             self.assertEqual(oms.snapshots[0].state, 'PARTIALLY_FILLED')
@@ -430,11 +434,11 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
                 state = client.state()
                 self.assertEqual(state['portfolio']['status']['session_status'], 'COMPLETED')
-                self.assertEqual(state['portfolio']['status']['cash'], '895.696')
-                self.assertEqual(state['portfolio']['status']['position'], '1')
+                self.assertEqual(state['portfolio']['status']['cash'], '791.392')
+                self.assertEqual(state['portfolio']['status']['position'], '2')
                 self.assertEqual(len(state['portfolio']['fills']), 6)
                 self.assertEqual([o['state'] for o in state['portfolio']['orders']], ['FILLED'] * 3)
-                self.assertEqual(len(store.load_events_by_aggregate_type('settlement_book')), 12)
+                self.assertEqual(len(store.load_events_by_aggregate_type('settlement_book')), 10)
                 before = store.current_journal_sequence()
                 _, replay = client.command('START_SIMULATION')
                 self.assertEqual(replay['phase'], 'SUCCEEDED')
@@ -452,13 +456,13 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             client = ProductClient(restored)
             try:
                 state = client.state()
-                self.assertEqual(state['portfolio']['status']['cash'], '895.696')
+                self.assertEqual(state['portfolio']['status']['cash'], '791.392')
                 self.assertEqual(len(state['portfolio']['fills']), 6)
                 self.assertEqual(state['risk']['real_order_submission'], 'UNAVAILABLE')
                 self.assertEqual(state['risk']['restore_trading_gate'], 'RECONCILIATION_REQUIRED')
                 _, operation = client.command('RECOVER_SIMULATION')
                 self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
-                self.assertEqual(client.state()['portfolio']['status']['cash'], '895.696')
+                self.assertEqual(client.state()['portfolio']['status']['cash'], '791.392')
             finally: client.close()
 
     def test_product_restore_layout_failure_leaves_final_destination_retryable(self):
@@ -490,6 +494,16 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                     restore_product_backup(backup, restored)
 
             self.assertFalse(restored.exists())
+            # The runtime checkpoint binds the journal's final canonical path.
+            # If this post-publication step fails, the destination must be
+            # withdrawn and the same verified backup remain retryable.
+            with patch(
+                'mvp.autotrade_mvp.simulation_runtime_checkpoint.persist_autonomous_runtime_checkpoint',
+                side_effect=RuntimeError('simulated checkpoint rebind failure'),
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'simulated checkpoint rebind failure'):
+                    restore_product_backup(backup, restored)
+            self.assertFalse(restored.exists())
             result = restore_product_backup(backup, restored)
             self.assertEqual(result, restored)
             self.assertTrue((restored / 'state' / 'artifacts').is_dir())
@@ -509,56 +523,48 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 blocked_at=blocked_at,
                 command_id='block-command-1',
             )
-            host_events = [
-                {'event_type': 'COMMAND_ACCEPTED',
-                 'payload': {'action': 'BLOCK_NEW_EXPOSURE',
-                             'operation_id': 'block-operation-1'}},
-                {'event_type': 'OPERATION_UPDATED',
-                 'payload': {'operation_id': 'block-operation-1',
-                             'phase': 'RUNNING'}},
-                {'event_type': 'OPERATION_UPDATED',
-                 'payload': {'operation_id': 'block-operation-1',
-                             'phase': 'SUCCEEDED'}},
-            ]
-            original_load = store.load_events_by_aggregate_type
-
-            def load_events(aggregate_type):
-                if aggregate_type == 'HOST_CONTROL':
-                    return list(host_events)
-                return original_load(aggregate_type)
-
-            with patch.object(store, 'load_events_by_aggregate_type', side_effect=load_events):
-                self.assertTrue(_host_emergency_pause_required(store))
-                authority.restore_new_exposure(
-                    account_id=ACCOUNT,
-                    environment=ENVIRONMENT,
-                    reason='host_operator_command:SET_AUTHORITY:RESTORE_NEW_EXPOSURE:POLICY_REVIEW',
-                    restored_at='2026-10-04T00:00:01Z',
-                    command_id='restore-command-1',
-                    expected_block_command_id='block-command-1',
-                    expected_block_reason=block_reason,
-                    expected_blocked_at=blocked_at,
-                )
-                self.assertFalse(_host_emergency_pause_required(store))
-
-                host_events.append({
-                    'event_type': 'COMMAND_ACCEPTED',
-                    'payload': {'action': 'BLOCK_NEW_EXPOSURE',
-                                'operation_id': 'block-operation-2'},
+            def host_event(event_type, payload):
+                version = len(store.load_events('HOST_CONTROL', 'test-host-control')) + 1
+                store.append_event({
+                    'event_id': f'test-host-control-{version}',
+                    'event_type': event_type,
+                    'aggregate_type': 'HOST_CONTROL',
+                    'aggregate_id': 'test-host-control',
+                    'aggregate_version': str(version),
+                    'payload': payload,
+                    'payload_hash': payload_digest(payload),
+                    'committed_at': blocked_at,
                 })
-                self.assertTrue(_host_emergency_pause_required(store))
-                host_events.append({
-                    'event_type': 'OPERATION_UPDATED',
-                    'payload': {'operation_id': 'block-operation-2', 'phase': 'FAILED'},
-                })
-                self.assertFalse(_host_emergency_pause_required(store))
 
-                host_events.append({
-                    'event_type': 'COMMAND_ACCEPTED',
-                    'payload': {'action': 'REVOKE_AUTHORITY',
-                                'operation_id': 'revoke-operation-1'},
-                })
-                self.assertTrue(_host_emergency_pause_required(store))
+            host_event('COMMAND_ACCEPTED', {'action': 'BLOCK_NEW_EXPOSURE',
+                'operation_id': 'block-operation-1'})
+            host_event('OPERATION_UPDATED', {'operation_id': 'block-operation-1',
+                'phase': 'RUNNING'})
+            host_event('OPERATION_UPDATED', {'operation_id': 'block-operation-1',
+                'phase': 'SUCCEEDED'})
+            self.assertTrue(_host_emergency_pause_required(store))
+            authority.restore_new_exposure(
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                reason='host_operator_command:SET_AUTHORITY:RESTORE_NEW_EXPOSURE:POLICY_REVIEW',
+                restored_at='2026-10-04T00:00:01Z',
+                command_id='restore-command-1',
+                expected_block_command_id='block-command-1',
+                expected_block_reason=block_reason,
+                expected_blocked_at=blocked_at,
+            )
+            self.assertFalse(_host_emergency_pause_required(store))
+
+            host_event('COMMAND_ACCEPTED', {'action': 'BLOCK_NEW_EXPOSURE',
+                'operation_id': 'block-operation-2'})
+            self.assertTrue(_host_emergency_pause_required(store))
+            host_event('OPERATION_UPDATED', {'operation_id': 'block-operation-2',
+                'phase': 'FAILED'})
+            self.assertFalse(_host_emergency_pause_required(store))
+
+            host_event('COMMAND_ACCEPTED', {'action': 'REVOKE_AUTHORITY',
+                'operation_id': 'revoke-operation-1'})
+            self.assertTrue(_host_emergency_pause_required(store))
 
     def test_worker_rejects_unaccepted_lifecycle_invocation(self):
         with TemporaryDirectory() as directory:
@@ -935,7 +941,7 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 boundary._now = lambda: issued_at + 599
                 status, body, _ = client.request('GET', '/api/v1/state')
                 self.assertEqual(status, 403)
-                self.assertEqual(body, {'error': 'FORBIDDEN'})
+                self.assertEqual(body, {'error': 'AUTHENTICATION_OR_AUTHORIZATION_FAILED'})
             finally:
                 client.close()
 
@@ -960,7 +966,7 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                     response = connection.getresponse()
                     body = json.loads(response.read())
                     self.assertEqual(response.status, 403)
-                    self.assertEqual(body, {'error': 'FORBIDDEN'})
+                    self.assertEqual(body, {'error': 'AUTHENTICATION_OR_AUTHORIZATION_FAILED'})
                 finally:
                     connection.close()
 

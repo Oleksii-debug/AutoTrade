@@ -18,6 +18,13 @@ import shutil
 import sqlite3
 import tempfile
 from typing import Any, Sequence
+from uuid import UUID
+
+from research.autotrade_research.artifacts.store import (
+    ArtifactStore,
+    ArtifactIntegrityError,
+    _verify_manifest_integrity,
+)
 
 from .diagnostics import build_diagnostic_snapshot
 from .persistence import JournalStore, payload_digest
@@ -787,6 +794,8 @@ def _expected_kind(path: str) -> str:
     if parts in {
         ("state", "checkpoint.json"),
         ("state", "learning-evidence.jsonl"),
+        ("state", "autonomous-runtime-checkpoint.json"),
+        ("state", ".autonomous-runtime-authority.key"),
     }:
         return "runtime-state"
     if len(parts) >= 3 and parts[:2] == ("state", "order-intents") and parts[-1].endswith(".json"):
@@ -808,6 +817,13 @@ def _expected_kind(path: str) -> str:
         and parts[3] == parts[4][:-5][:2]
     ):
         return "artifact-manifest"
+    if len(parts) == 3 and parts[:2] == ("artifacts", "manifests") and parts[2].endswith(".json"):
+        try:
+            artifact_id = str(UUID(parts[2][:-5]))
+        except (ValueError, AttributeError) as error:
+            raise BackupIntegrityError("Artifact manifest path has invalid identity") from error
+        if parts[2] == artifact_id + ".json":
+            return "artifact-manifest-v1"
     raise BackupIntegrityError(f"Backup payload path is outside the canonical inventory: {path}")
 
 
@@ -940,6 +956,11 @@ def _artifact_source_files(root: Path) -> list[tuple[Path, str]]:
         for path in sorted(manifests_root.rglob("*.json")):
             if path.is_file():
                 files.append((path, "artifact-manifest"))
+    flat_manifests_root = root / "manifests"
+    if flat_manifests_root.exists():
+        for path in sorted(flat_manifests_root.glob("*.json")):
+            if path.is_file():
+                files.append((path, "artifact-manifest-v1"))
     return files
 
 
@@ -953,6 +974,8 @@ def _mutable_backup_sources(
     for source in (
         state / "checkpoint.json",
         state / "learning-evidence.jsonl",
+        state / "autonomous-runtime-checkpoint.json",
+        state / ".autonomous-runtime-authority.key",
     ):
         if source.exists():
             sources.append((source, Path("state") / source.name, "runtime-state"))
@@ -1087,6 +1110,19 @@ def _validate_artifact_source(root: Path) -> None:
                 or object_path.stat().st_size != declared_size
             ):
                 raise BackupIntegrityError("Artifact manifest references a missing or corrupt object")
+    flat_manifests_root = root / "manifests"
+    if flat_manifests_root.exists():
+        artifact_store = ArtifactStore(root)
+        for path in sorted(flat_manifests_root.glob("*.json")):
+            if path.is_symlink() or not path.is_file():
+                raise BackupIntegrityError("Artifact manifest must be a regular file")
+            try:
+                artifact_id = str(UUID(path.stem))
+                if path.name != artifact_id + ".json":
+                    raise ValueError("artifact manifest identity is not canonical")
+                artifact_store.read_authenticated_snapshot(artifact_id)
+            except (ArtifactIntegrityError, FileNotFoundError, OSError, ValueError) as error:
+                raise BackupIntegrityError("Artifact manifest or object is invalid") from error
 
 
 def _verify_runtime_trace_consistency(state_root: Path) -> None:
@@ -1324,6 +1360,12 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
         raise BackupIntegrityError(
             "Backup runtime consistency evidence is partial"
         )
+    autonomous_checkpoint_present = "state/autonomous-runtime-checkpoint.json" in expected_paths
+    autonomous_key_present = "state/.autonomous-runtime-authority.key" in expected_paths
+    if autonomous_checkpoint_present != autonomous_key_present:
+        raise BackupIntegrityError("Backup autonomous runtime authority is partial")
+    if autonomous_key_present and (root / "state" / ".autonomous-runtime-authority.key").stat().st_size != 32:
+        raise BackupIntegrityError("Backup autonomous runtime key length is invalid")
     expected_consistency_check = (
         "DURABLE_TRACE_RECONSTRUCTION"
         if checkpoint_present
@@ -1389,6 +1431,45 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
         object_path = root / _safe_relative_path(object_relative)
         if _sha256_file(object_path) != digest or object_path.stat().st_size != declared_size:
             raise BackupIntegrityError("Backed-up artifact manifest does not match its object")
+
+    flat_manifest_entries = [
+        item for item in entries if item["kind"] == "artifact-manifest-v1"
+    ]
+    if flat_manifest_entries:
+        artifact_store = ArtifactStore(root / "artifacts")
+        for item in flat_manifest_entries:
+            path = root / _safe_relative_path(item["path"])
+            try:
+                artifact_id = str(UUID(path.stem))
+                if path.name != artifact_id + ".json":
+                    raise ValueError("artifact manifest identity is not canonical")
+                # A backup copy has a new filesystem generation by design.
+                # Verify its canonical bytes and content digest, rather than
+                # requiring the source inode's live read authority.
+                artifact_manifest = artifact_store._decode_manifest_bytes(
+                    path, path.read_bytes()
+                )
+                if artifact_manifest.get("artifact_id") != artifact_id:
+                    raise ValueError("artifact manifest identity differs")
+                _verify_manifest_integrity(artifact_manifest, required=True)
+                digest_ref = artifact_manifest.get("sha256")
+                size = artifact_manifest.get("bytes")
+                if (
+                    type(digest_ref) is not str
+                    or not digest_ref.startswith("sha256:")
+                    or not _valid_sha256_digest(digest_ref[7:])
+                    or type(size) is not int
+                    or size < 0
+                ):
+                    raise ValueError("artifact object contract is invalid")
+                digest = digest_ref[7:]
+                object_path = root / "artifacts" / "objects" / "sha256" / digest[:2] / digest
+                if object_path.relative_to(root).as_posix() not in expected_paths:
+                    raise ValueError("artifact manifest has no backed-up object")
+                if _sha256_file(object_path) != digest or object_path.stat().st_size != size:
+                    raise ValueError("artifact manifest object differs")
+            except (ArtifactIntegrityError, FileNotFoundError, OSError, ValueError, UnicodeError) as error:
+                raise BackupIntegrityError("Backed-up artifact manifest or object is invalid") from error
 
     return manifest
 

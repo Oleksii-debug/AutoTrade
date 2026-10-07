@@ -342,6 +342,82 @@ def restore_product_backup(backup_dir, data_dir):
         _fsync_directory_tree,
         restore_backup,
     )
+    from research.autotrade_research.artifacts.store import ArtifactStore
+
+    def rebind_runtime_checkpoint(state_root):
+        from .persistence import JournalStore
+        from .simulation_runtime_checkpoint import (
+            COMPLETION_RECEIPT_FIELD,
+            persist_autonomous_runtime_checkpoint,
+            preflight_autonomous_runtime_checkpoint,
+            verify_autonomous_runtime_checkpoint,
+        )
+
+        checkpoint = state_root / 'autonomous-runtime-checkpoint.json'
+        key = state_root / '.autonomous-runtime-authority.key'
+        if not checkpoint.exists() and not key.exists():
+            return
+        if not checkpoint.is_file() or not key.is_file():
+            raise BackupError('restored autonomous runtime authority is incomplete')
+        # The backup verifier authenticates both bytes. Preserve the key's
+        # private-file contract before reading it from the unpublished restore.
+        if os.name != 'nt':
+            key.chmod(0o600)
+        journal = JournalStore(state_root / 'journal.sqlite3')
+        protocol = _protocol(journal)
+        completed = [
+            {name: value for name, value in event['payload'].items()
+             if name != COMPLETION_RECEIPT_FIELD}
+            for event in journal.load_events('canonical_autonomous_simulation', protocol['run_id'])
+            if event['event_type'] == 'AutonomousEpisodeCompleted'
+        ]
+        if not completed:
+            raise BackupError('restored runtime checkpoint has no completed episode')
+        key_identity = protocol['runtime_authority_key_sha256']
+        # Authenticate the source common-cut seal before signing the copied
+        # journal's new physical identity. A malformed checkpoint cannot be
+        # laundered into a fresh authority by this restore.
+        preflight_autonomous_runtime_checkpoint(
+            state_root, protocol=protocol, authority_key_identity=key_identity,
+            completed_episodes=len(completed),
+        )
+        persist_autonomous_runtime_checkpoint(
+            state_root, journal, protocol=protocol,
+            authority_key_identity=key_identity, completed=completed,
+        )
+        verify_autonomous_runtime_checkpoint(
+            state_root, journal, protocol=protocol,
+            authority_key_identity=key_identity, completed=completed,
+        )
+
+    def rebind_artifact_generations(artifact_root, scratch_root):
+        # A verified backup copies object bytes into a new filesystem generation.
+        # Republish each immutable artifact through the canonical store so its
+        # committed manifest binds the restored object namespace. Retain the
+        # original manifests inside unpublished scratch until all succeed.
+        manifests = sorted((artifact_root / 'manifests').glob('*.json'))
+        if not manifests:
+            return
+        store = ArtifactStore(artifact_root)
+        retained = scratch_root / 'source-artifact-manifests'
+        retained.mkdir()
+        for path in manifests:
+            manifest = store._decode_manifest_bytes(path, path.read_bytes())
+            artifact_id = manifest['artifact_id']
+            digest = manifest['sha256'].removeprefix('sha256:')
+            object_path = artifact_root / 'objects' / 'sha256' / digest[:2] / digest
+            data = object_path.read_bytes()
+            if sha256(data).hexdigest() != digest or len(data) != manifest['bytes']:
+                raise BackupError('restored artifact object differs from verified backup')
+            path.replace(retained / path.name)
+            store.publish_bytes(
+                artifact_id=artifact_id,
+                data=data,
+                media_type=manifest['media_type'],
+                rights=manifest['rights'],
+                source_refs=manifest['source_refs'],
+                metadata=manifest['metadata'],
+            )
 
     destination_root = Path(data_dir)
     if destination_root.exists():
@@ -363,9 +439,21 @@ def restore_product_backup(backup_dir, data_dir):
             if artifact_destination.exists():
                 raise BackupError('restored artifact layout conflicts')
             source.rename(artifact_destination)
+            rebind_artifact_generations(artifact_destination, Path(scratch))
         _fsync_directory_tree(root)
         os.replace(root, destination_root)
-        _fsync_directory(destination_root.parent)
+        try:
+            # The journal's canonical path is part of the signed runtime cut,
+            # so bind only after the final namespace has been published.
+            rebind_runtime_checkpoint(destination_root / 'state')
+            _fsync_directory_tree(destination_root)
+            _fsync_directory(destination_root.parent)
+        except BaseException:
+            # A failed authority rebind must leave the requested destination
+            # absent so the verified backup remains exactly retryable.
+            os.replace(destination_root, root)
+            _fsync_directory(destination_root.parent)
+            raise
     return destination_root
 
 

@@ -119,6 +119,43 @@ def test_oms_class_property_spoof_does_not_hide_mismatched_account_scope():
         assert callbacks == []
 
 
+def test_proposal_class_property_spoof_cannot_fake_matching_oms_scope():
+    with TemporaryDirectory() as directory:
+        oms = DurableOrderBookProjection(
+            JournalStore(f"{directory}/journal.sqlite3"),
+            provider_id="SIMULATED",
+            account_id="acct:other",
+            environment="SIMULATION",
+            host_id="host-1",
+            owner_epoch="epoch-1",
+        )
+        proposal, evidence, resolver, policy = _passing_inputs()
+        callbacks = []
+
+        def forged_account(_self):
+            callbacks.append("account_id")
+            return "acct:other"
+
+        with patch.object(
+            type(proposal),
+            "account_id",
+            new=property(forged_account),
+            create=True,
+        ):
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="provider/account/environment scope does not match",
+            ):
+                require_correlation_safe_proposal_with_oms(
+                    proposal,
+                    evidence,
+                    resolver,
+                    policy,
+                    oms=oms,
+                )
+        assert callbacks == []
+
+
 def test_open_durable_order_blocks_otherwise_passing_correlation_admission():
     with TemporaryDirectory() as directory:
         oms = _oms(directory)

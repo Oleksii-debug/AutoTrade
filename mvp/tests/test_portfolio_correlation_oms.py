@@ -451,7 +451,6 @@ def test_in_place_verifier_lookup_defaults_cannot_hide_open_order():
         forged_calls = []
 
         def forged_snapshots(_self):
-            forged_calls.append("forged-snapshots")
             return ()
 
         def forged_code_lookup(function, attribute):

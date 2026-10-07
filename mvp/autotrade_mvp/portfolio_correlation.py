@@ -304,6 +304,8 @@ def _allocation_context(
     _allocation_type=AllocationResult,
     _target_type=AllocationTarget,
     _get=object.__getattribute__,
+    _decision_digest=_allocation_decision_digest,
+    _decision_digest_code=getattr(_allocation_decision_digest, "__code__", None),
 ):
     if type(result) is not _result_type:
         raise TypeError("result must be exact EvidenceBoundObjectiveAllocationResult")
@@ -357,7 +359,9 @@ def _allocation_context(
         or any(ch not in "0123456789abcdef" for ch in decision_digest)
     ):
         raise ValueError("allocation decision_digest must be lowercase sha256 hex")
-    expected_decision_digest = _allocation_decision_digest(
+    if getattr(_decision_digest, "__code__", None) is not _decision_digest_code:
+        raise ValueError("allocation decision digest verifier executable changed after binding")
+    expected_decision_digest = _decision_digest(
         objective,
         evidence_refs=_get(result, "evidence_refs"),
         environment=_get(result, "environment"),

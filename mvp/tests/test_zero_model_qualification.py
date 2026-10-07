@@ -26,7 +26,7 @@ class ZeroModelQualificationTests(unittest.TestCase):
         workflow = (
             ROOT / ".github" / "workflows" / "zero-model-qualification.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn("os: [ubuntu-latest, windows-latest]", workflow)
+        self.assertIn("os: [ubuntu-22.04, windows-2025]", workflow)
         self.assertIn("runs-on: ${{ matrix.os }}", workflow)
         self.assertIn(
             "zero-model-qualification-${{ runner.os }}-${{ env.EXPECTED_SOURCE_SHA }}",

@@ -324,7 +324,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             )
 
     def test_protected_structure_remains_blocked_with_exact_modification_authorization(self):
-        sentinel = "control/INDEX.json"
+        sentinel = "control/tools/reconvergence_integrity.py"
         result = assess_reconvergence(
             base_paths=[sentinel, "README.md"],
             changes=[Change(status="D", path=sentinel)],
@@ -490,7 +490,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0)
-        self.assertIn("Fail-closed guard", result.stdout)
+        self.assertIn("Fail closed on malformed reconvergence tree destruction.", result.stdout)
 
     def test_module_entrypoint_assesses_temporary_git_repository(self):
         with TemporaryDirectory() as directory:
@@ -610,12 +610,17 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             git("init")
             git("config", "user.email", "reconvergence-test@example.invalid")
             git("config", "user.name", "Reconvergence Test")
-            (root / "README.md").write_text("base\n", encoding="utf-8")
+            (root / "README.md").write_text("root\n", encoding="utf-8")
             git("add", "README.md")
-            git("commit", "-m", "base")
+            git("commit", "-m", "root")
+            common_sha = git("rev-parse", "HEAD")
+
+            git("checkout", "-b", "expected-base")
+            (root / "README.md").write_text("base\n", encoding="utf-8")
+            git("commit", "-am", "base")
             base_sha = git("rev-parse", "HEAD")
 
-            git("checkout", "-b", "stale-rebuild")
+            git("checkout", "-b", "stale-rebuild", common_sha)
             (root / "README.md").write_text("stale\n", encoding="utf-8")
             git("commit", "-am", "stale")
             head_sha = git("rev-parse", "HEAD")

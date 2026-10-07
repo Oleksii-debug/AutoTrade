@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import unittest
@@ -253,12 +254,25 @@ class LifecycleCostValuationBridgeTests(unittest.TestCase):
             LifecycleValuationProjection(
                 **{**kwargs, "lifecycle_cost_digest": "sha256:" + "A" * 64}
             )
+        rebuilt = replace(projection)
+        self.assertEqual(
+            dict(rebuilt.cost_rate_components),
+            dict(projection.cost_rate_components),
+        )
+        self.assertEqual(
+            dict(rebuilt.cost_evidence_refs),
+            dict(projection.cost_evidence_refs),
+        )
+
+        class DictSubclass(dict):
+            pass
+
         with self.assertRaisesRegex(TypeError, "cost_rate_components"):
             LifecycleValuationProjection(
                 **{
                     **kwargs,
-                    "cost_rate_components": MappingProxyType(
-                        dict(projection.cost_rate_components)
+                    "cost_rate_components": DictSubclass(
+                        projection.cost_rate_components
                     ),
                 }
             )

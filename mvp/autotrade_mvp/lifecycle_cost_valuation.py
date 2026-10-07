@@ -33,6 +33,7 @@ class LifecycleValuationProjectionError(ValueError):
 
 
 _MAPPING_POLICY_ID = "LIFECYCLE_TO_WP32_COST_BUCKETS_V1"
+_MAPPING_PROXY_TYPE = type(MappingProxyType({}))
 _BUCKET_ORDER = ("execution", "financing", "funding", "borrow", "fx")
 _KIND_TO_BUCKET = {
     "COMMISSION": "execution",
@@ -207,10 +208,14 @@ class LifecycleValuationProjection:
             raise LifecycleValuationProjectionError(
                 "cost_rate must be non-negative"
             )
-        if type(self.cost_rate_components) is not dict:
-            raise TypeError("cost_rate_components must be an exact dict")
-        if type(self.cost_evidence_refs) is not dict:
-            raise TypeError("cost_evidence_refs must be an exact dict")
+        if type(self.cost_rate_components) not in {dict, _MAPPING_PROXY_TYPE}:
+            raise TypeError(
+                "cost_rate_components must be an exact dict or canonical mapping proxy"
+            )
+        if type(self.cost_evidence_refs) not in {dict, _MAPPING_PROXY_TYPE}:
+            raise TypeError(
+                "cost_evidence_refs must be an exact dict or canonical mapping proxy"
+            )
         if tuple(self.cost_rate_components) != _BUCKET_ORDER:
             raise LifecycleValuationProjectionError(
                 "valuation projection must contain canonical cost buckets in order"

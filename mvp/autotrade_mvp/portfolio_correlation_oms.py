@@ -17,6 +17,7 @@ from __future__ import annotations
 from decimal import Decimal
 from types import MappingProxyType
 
+from .allocation import EvidenceBoundObjectiveAllocationResult
 from .durable_order_projection import (
     DurableOrderBookProjection,
     require_exact_order_projection_authority,
@@ -29,6 +30,7 @@ from .portfolio_correlation import (
 )
 
 
+_RESULT_TYPE = EvidenceBoundObjectiveAllocationResult
 _OMS_TYPE = DurableOrderBookProjection
 _SNAPSHOT_TYPE = OrderSnapshot
 _REQUIRE_OMS_AUTHORITY = require_exact_order_projection_authority
@@ -121,6 +123,7 @@ _EXACT_QUANTITY_KWDEFAULTS = MappingProxyType(
 
 def _unvalued_open_orders(
     oms: DurableOrderBookProjection,
+    expected_scope: tuple[str, str, str],
     _oms_type=_OMS_TYPE,
     _snapshot_type=_SNAPSHOT_TYPE,
     _require_oms=_REQUIRE_OMS_AUTHORITY,
@@ -182,6 +185,22 @@ def _unvalued_open_orders(
         name="canonical OMS snapshots getter",
     )
     _require_oms(oms)
+    # A valid empty OMS for the wrong provider/account/environment is not
+    # evidence that the proposal has no working or UNKNOWN orders.
+    if (
+        _type(expected_scope) is not _tuple
+        or len(expected_scope) != 3
+        or any(_type(value) is not str or not value for value in expected_scope)
+    ):
+        raise _error_type("allocation OMS scope must be an exact triple")
+    actual_scope = _tuple(
+        _get(oms, name)
+        for name in ("provider_id", "account_id", "environment")
+    )
+    if actual_scope != expected_scope:
+        raise _error_type(
+            "canonical OMS provider/account/environment does not match allocation"
+        )
     snapshots = _snapshots_getter(oms)
     if _type(snapshots) is not _tuple:
         raise _error_type("canonical OMS snapshots must be an exact tuple")
@@ -192,6 +211,12 @@ def _unvalued_open_orders(
             raise _error_type(
                 "canonical OMS snapshots must contain exact OrderSnapshot values"
             )
+        snapshot_scope = _tuple(
+            _get(snapshot, name)
+            for name in ("provider_id", "account_id", "environment")
+        )
+        if snapshot_scope != expected_scope:
+            raise _error_type("canonical OMS snapshot scope does not match allocation")
         order_id = _text(
             _get(snapshot, "client_order_id"),
             name="client_order_id",
@@ -226,6 +251,8 @@ def require_correlation_safe_proposal_with_oms(
     _base_guard=_BASE_CORRELATION_GUARD,
     _base_guard_code=_BASE_CORRELATION_GUARD_CODE,
     _get=_GET,
+    _type=type,
+    _result_type=_RESULT_TYPE,
     _error_type=CorrelationConcentrationError,
 ):
     """Require no hidden open-order exposure before the correlation gate.
@@ -260,6 +287,8 @@ def require_correlation_safe_proposal_with_oms(
         ("_base_guard", _base_guard),
         ("_base_guard_code", _base_guard_code),
         ("_get", _get),
+        ("_type", _type),
+        ("_result_type", _result_type),
         ("_error_type", _error_type),
     ):
         if effective is not _WITH_OMS_KWDEFAULTS[name]:
@@ -279,7 +308,15 @@ def require_correlation_safe_proposal_with_oms(
         if _get(function, "__code__") is not expected_code:
             raise _error_type(f"{name} executable changed after binding")
 
-    blockers = _open_orders(oms)
+    if _type(result) is not _result_type:
+        raise TypeError("result must be exact EvidenceBoundObjectiveAllocationResult")
+    allocation_scope = tuple(
+        _get(result, name)
+        for name in ("provider_id", "account_id", "environment")
+    )
+    if any(_type(value) is not str or not value for value in allocation_scope):
+        raise _error_type("allocation scope must have exact non-empty text")
+    blockers = _open_orders(oms, allocation_scope)
     if blockers:
         detail = ", ".join(
             f"{instrument}/{order_id}:{state}:open={open_quantity}"

@@ -474,3 +474,49 @@ def test_in_place_verifier_lookup_defaults_cannot_hide_open_order():
             verifier.__kwdefaults__.clear()
             verifier.__kwdefaults__.update(original_verifier_defaults)
         assert forged_calls == []
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "account_id", "environment"),
+    [
+        ("OTHER", "acct:1", "SIMULATION"),
+        ("SIMULATED", "acct:other", "SIMULATION"),
+        ("SIMULATED", "acct:1", "REPLAY"),
+    ],
+)
+def test_wrong_account_empty_oms_never_authorizes_allocation(
+    provider_id: str, account_id: str, environment: str
+):
+    """An empty OMS from another authority scope must not admit this proposal."""
+    with TemporaryDirectory() as directory:
+        unrelated_oms = DurableOrderBookProjection(
+            JournalStore(f"{directory}/journal.sqlite3"),
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            host_id="host-1",
+            owner_epoch="epoch-1",
+        )
+        proposal, evidence, resolver, policy = _passing_inputs()
+        with pytest.raises(
+            CorrelationConcentrationError,
+            match="OMS provider/account/environment does not match allocation",
+        ):
+            require_correlation_safe_proposal_with_oms(
+                proposal, evidence, resolver, policy, oms=unrelated_oms
+            )
+
+
+def test_matching_scope_oms_with_open_order_remains_inconclusive():
+    """Scope equality must never weaken the existing open exposure barrier."""
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        proposal, evidence, resolver, policy = _passing_inputs()
+        with pytest.raises(
+            CorrelationConcentrationError,
+            match="canonical OMS has unvalued open exposure",
+        ):
+            require_correlation_safe_proposal_with_oms(
+                proposal, evidence, resolver, policy, oms=oms
+            )

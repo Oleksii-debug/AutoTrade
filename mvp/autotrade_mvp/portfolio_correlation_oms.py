@@ -227,7 +227,21 @@ def _unvalued_open_orders(
         )
         state = _text(_get(snapshot, "state"), name="state")
         open_quantity = _open_quantity(_get(snapshot, "open_quantity"))
+        # OrderSnapshot.open_quantity means *unfilled remainder*, including a
+        # remainder already released by confirmed cancellation/rejection/expiry.
+        # It is not by itself working-order exposure. Never turn an unconfirmed
+        # cancel/replace/UNKNOWN into a terminal release.
         if open_quantity != 0:
+            if state in ("CANCELLED", "PARTIALLY_FILLED_CANCELLED"):
+                if _get(snapshot, "cancel_confirmed") is not True:
+                    raise _error_type("canonical OMS cancellation lacks confirmation")
+                continue
+            if state in ("EXPIRED", "PARTIALLY_FILLED_EXPIRED"):
+                if _get(snapshot, "expired") is not True:
+                    raise _error_type("canonical OMS expiry lacks confirmation")
+                continue
+            if state == "REJECTED":
+                continue
             blockers.append((order_id, instrument, state, open_quantity))
 
     return _tuple(_sorted(blockers, key=lambda item: (item[1], item[0])))

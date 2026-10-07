@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import pytest
 
+import mvp.autotrade_mvp.portfolio_correlation as correlation_module
 from mvp.autotrade_mvp.allocation import (
     AllocationResult,
     AllocationTarget,
@@ -338,6 +339,50 @@ def test_forged_allocation_status_totals_and_target_direction_fail_closed():
     )
     with pytest.raises(ValueError, match="direction disagree"):
         _assess(forged, (_e("A", "B", "-0.95"),))
+
+
+def test_require_guard_retains_bound_assessment_after_module_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal = _proposal(A="60")
+
+    monkeypatch.setattr(
+        correlation_module,
+        "assess_correlation_concentration",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(CorrelationConcentrationError, match="fail"):
+        require_correlation_safe_proposal(
+            proposal,
+            (),
+            {},
+            _policy(cap="50"),
+        )
+
+
+def test_require_guard_rejects_in_place_assessment_code_mutation() -> None:
+    proposal = _proposal(A="40")
+    retained = correlation_module.assess_correlation_concentration
+    original_code = retained.__code__
+
+    def forged_assessment(*_args, **_kwargs):
+        raise AssertionError("forged correlation assessment executed")
+
+    retained.__code__ = forged_assessment.__code__
+    try:
+        with pytest.raises(
+            CorrelationConcentrationError,
+            match="assessment executable changed after binding",
+        ):
+            require_correlation_safe_proposal(
+                proposal,
+                (),
+                {},
+                _policy(cap="50"),
+            )
+    finally:
+        retained.__code__ = original_code
 
 
 def test_result_class_attribute_dispatch_is_not_used_for_financial_fields():

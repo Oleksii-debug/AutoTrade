@@ -613,10 +613,26 @@ def assess_correlation_concentration(
     )
 
 
-def require_correlation_safe_proposal(result, evidence, resolved_evidence, policy):
+def require_correlation_safe_proposal(
+    result,
+    evidence,
+    resolved_evidence,
+    policy,
+    _assess=assess_correlation_concentration,
+    _assess_code=getattr(assess_correlation_concentration, "__code__", None),
+    _get=object.__getattribute__,
+):
     """Return the unchanged proposal only after this non-authorizing guard passes."""
-    assessment = assess_correlation_concentration(result, evidence, resolved_evidence, policy)
-    status = object.__getattribute__(assessment, "status")
+    # Retain the reviewed assessment function instead of resolving its public
+    # module name at trust use. Otherwise a post-import rebinding can replace
+    # the complete correlation assessment while this guard's own code remains
+    # unchanged. Reject in-place mutation before the retained authority runs.
+    if _get(_assess, "__code__") is not _assess_code:
+        raise CorrelationConcentrationError(
+            "correlation assessment executable changed after binding"
+        )
+    assessment = _assess(result, evidence, resolved_evidence, policy)
+    status = _get(assessment, "status")
     if status != "PASS":
         raise CorrelationConcentrationError(
             f"correlation concentration {status.lower()}: "

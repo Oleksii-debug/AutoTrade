@@ -8,6 +8,12 @@
         "resolved": "1.0.4191.47",
         "contentHash": "Snb6mlTpuz6ZFjWMwIdg28Xp6kAUMy3zaLUyGbFSaw+/AJKlwoX8EiaWJ1eUMfKyJHksPkFjJHl1LIB7kX+0AQ=="
       },
+      "Velopack": {
+        "type": "Direct",
+        "requested": "[1.2.158, )",
+        "resolved": "1.2.158",
+        "contentHash": "wQN38beVrAf0WzFMnZtl7UmwxqwaJ7xVYypqITdOI4YUTYch2UvE+xAjg9msfaitVDtgfWeIcGsjRNQ65C03ZQ=="
+      },
       "autotrade.contracts": {
         "type": "Project"
       }
@@ -18,6 +24,12 @@
         "requested": "[1.0.4191.47, )",
         "resolved": "1.0.4191.47",
         "contentHash": "Snb6mlTpuz6ZFjWMwIdg28Xp6kAUMy3zaLUyGbFSaw+/AJKlwoX8EiaWJ1eUMfKyJHksPkFjJHl1LIB7kX+0AQ=="
+      },
+      "Velopack": {
+        "type": "Direct",
+        "requested": "[1.2.158, )",
+        "resolved": "1.2.158",
+        "contentHash": "wQN38beVrAf0WzFMnZtl7UmwxqwaJ7xVYypqITdOI4YUTYch2UvE+xAjg9msfaitVDtgfWeIcGsjRNQ65C03ZQ=="
       }
     }
   }

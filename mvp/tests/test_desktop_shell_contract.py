@@ -24,8 +24,13 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("<TargetFramework>net10.0-windows</TargetFramework>", text)
         self.assertIn("<UseWPF>true</UseWPF>", text)
         packages = project.findall(".//PackageReference")
-        self.assertEqual([(p.get("Include"), p.get("Version")) for p in packages],
-            [("Microsoft.Web.WebView2", "1.0.4191.47")])
+        self.assertEqual(
+            [(p.get("Include"), p.get("Version")) for p in packages],
+            [
+                ("Microsoft.Web.WebView2", "1.0.4191.47"),
+                ("Velopack", "1.2.158"),
+            ],
+        )
         self.assertIn("<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>", text)
         self.assertEqual(project.tag, "Project")
 
@@ -105,9 +110,16 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         main_body = app_text.split(
             "private static void Main(string[] args)", 1
         )[1].split("protected override async void OnStartup", 1)[0]
+        self.assertIn("using Velopack;", app_text)
+        self.assertIn("VelopackApp.Build()", main_body)
+        self.assertIn(".SetAutoApplyOnStartup(false)", main_body)
+        self.assertIn(".Run();", main_body)
         self.assertIn("App app = new();", main_body)
         self.assertIn("app.InitializeComponent();", main_body)
         self.assertIn("app.Run();", main_body)
+        self.assertLess(main_body.index("VelopackApp.Build()"), main_body.index("App app = new();"))
+        self.assertNotIn("UpdateManager", main_body)
+        self.assertNotIn("ApplyUpdates", main_body)
         self.assertNotIn("OnStartup(", main_body)
 
     def test_native_surface_exposes_copyable_host_account_environment_and_evidence(self):
@@ -396,6 +408,18 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn('src/**/*.xaml', workflow)
         self.assertIn("desktop-build:", workflow)
         self.assertIn("runs-on: windows-latest", workflow)
+        self.assertIn(
+            "dotnet tool restore --tool-manifest .config/dotnet-tools.json",
+            workflow,
+        )
+        self.assertIn(
+            "dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --locked-mode",
+            workflow,
+        )
+        self.assertIn(
+            "dotnet restore tests/Desktop.Client/Desktop.Client.csproj --locked-mode",
+            workflow,
+        )
         self.assertIn(
             "dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj",
             workflow,

@@ -29,12 +29,38 @@ The checkpoint/execution boundary revalidates the nested current/candidate relea
 
 ## Verified installer input
 
-`tools/build_windows_install_manifest.py` is the verified installer-input boundary. It accepts only a release-mode, release-eligible deterministic bundle, holds one verified regular-file descriptor from whole-archive hashing through ZIP validation, revalidates the path identity before success, streams payload hashing from that same ZIP snapshot, rejects non-canonical compressed payloads plus untracked/duplicate/unsafe entries, and emits a deterministic manifest for a future signed installer technology. The manifest records runtime dependency mode, per-user versioned application placement, explicit preservation of durable state on uninstall, and the requirement that update/recovery use the separately verified Windows update plan. It never claims that an MSI/MSIX exists or is signed. Manifest and SHA-256 sidecar publication reuse the same canonical durable-publication boundary, including cross-process locking and final symlink/special-file/hardlink rejection. Safe stale predictable `.tmp` files are compatibility cleanup only; new writes use random same-directory temporaries. The manifest or its digest is also forbidden from aliasing the verified release bundle itself.
+`tools/build_windows_install_manifest.py` is the verified installer-input boundary. It accepts only a release-mode, release-eligible deterministic bundle, holds one verified regular-file descriptor from whole-archive hashing through ZIP validation, revalidates the path identity before success, streams payload hashing from that same ZIP snapshot, rejects non-canonical compressed payloads plus untracked/duplicate/unsafe entries, and emits the deterministic input manifest consumed by the selected Velopack packaging boundary. The manifest records runtime dependency mode, per-user versioned application placement, explicit preservation of durable state on uninstall, and the requirement that update/recovery use the separately verified Windows update plan. It never claims that an MSI/MSIX exists or is signed. Manifest and SHA-256 sidecar publication reuse the same canonical durable-publication boundary, including cross-process locking and final symlink/special-file/hardlink rejection. Safe stale predictable `.tmp` files are compatibility cleanup only; new writes use random same-directory temporaries. The manifest or its digest is also forbidden from aliasing the verified release bundle itself.
 
 Publication creates persistent hidden `.lock` sidecars next to bundle, digest and installer-manifest outputs. They are coordination metadata for cooperating writers, not release payload, provenance, signature or user data. Release upload/install manifests must enumerate explicit deliverables and must never glob these lock files into a shipped artifact.
 
 ## Remaining terminal WP-50 work
 
-This lineage is still not a qualified installer or updater. Terminal WP-50 still requires the final converged runtime/host composition; one selected and pinned installer/update technology; generation and qualified signing of installer and executable artifacts; prerequisites; executable migration/update/rollback orchestration through WP-48/WP-49; clean Windows 11 install/update/interrupted-update/rollback/uninstall matrices; split-brain fencing; durable-state preserve/delete-choice semantics; final supply-chain trust; and real keyboard/NVDA evidence bound to the delivered signed artifact digest and exact internal source SHA.
+This lineage is still not a qualified installer or updater. Terminal WP-50 still requires the final converged runtime/host composition; qualification of the selected pinned Velopack/update path; generation and qualified signing of installer and executable artifacts; prerequisites; executable migration/update/rollback orchestration through WP-48/WP-49; clean Windows 11 install/update/interrupted-update/rollback/uninstall matrices; split-brain fencing; durable-state preserve/delete-choice semantics; final supply-chain trust; and real keyboard/NVDA evidence bound to the delivered signed artifact digest and exact internal source SHA.
 
 WP-50 must consume a release candidate accepted by the canonical release/trust authority; it must not self-authorize a structurally plausible FROZEN manifest. Until those gates pass, these artifacts remain implementation foundations rather than release qualification.
+
+## Selected Velopack + Artifact Signing candidate
+
+The current WP-50 successor selects the repository-pinned Velopack CLI as the
+single installer/update packaging candidate and Azure Artifact Signing as the
+single production Authenticode backend. This is a source-level selection, not
+release qualification.
+
+`packaging/windows/authenticode-policy.json` remains deliberately disabled.
+Enabling it requires a separately reviewed real Artifact Signing account,
+certificate profile, credential/RBAC boundary and exact regional endpoint.
+Signer policy is loaded from the exact release Git object through a reviewed
+absolute system Git executable with replacement/config injection disabled; a
+mutable checkout policy is not signer authority.
+
+Before publication, signed Setup, packaged `AutoTrade.Desktop.exe`, packaged
+`Update.exe` and the exact full package remain inside the verification
+boundary. Windows reparse points, symlinks/special files, hard-link aliases,
+identity drift and digest drift are rejected at the relevant file-admission
+boundaries.
+
+Even a valid Authenticode result remains
+`AUTHENTICODE_VERIFIED_REQUIRES_WP64`: it grants no trading authority and does
+not replace WP-64 independent trust, target Windows install/update/rollback
+evidence, recovery qualification, or keyboard/NVDA qualification on the same
+delivered artifact.

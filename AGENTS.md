@@ -108,7 +108,7 @@ Objective: TIME_TO_WHOLE_FINISHED_AUTOTRADE.
 
 Read `control/INDEX.json` before work.
 
-Current mode: `SEQUENTIAL_CLOSURE_WITH_PARALLEL_RESIDUALS`.
+Current mode: `TERMINAL_SECTION_CLOSURE_V2`.
 
 Canonical worker-coordination override:
 - No repository-defined worker, coordinator, WIP, work-package, branch, or PR cap.

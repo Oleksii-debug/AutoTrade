@@ -219,6 +219,27 @@ class ZeroModelQualificationTests(unittest.TestCase):
 
         self.assertEqual(calls, [])
 
+    def test_network_decorator_blocks_new_socket_construction(self):
+        @_network_denied
+        def probe():
+            socket.socket()
+            return {"claims": {}}
+
+        with self.assertRaisesRegex(RuntimeError, "attempted network access"):
+            probe()
+
+    def test_network_decorator_blocks_socketpair_construction(self):
+        if not hasattr(socket, "socketpair"):
+            self.skipTest("socketpair unavailable on this platform")
+
+        @_network_denied
+        def probe():
+            socket.socketpair()
+            return {"claims": {}}
+
+        with self.assertRaisesRegex(RuntimeError, "attempted network access"):
+            probe()
+
     def test_network_decorator_blocks_send_on_preexisting_socket(self):
         calls = []
 

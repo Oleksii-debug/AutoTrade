@@ -9,7 +9,7 @@ and economically reportable.  It does not claim economic edge or live authority.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from decimal import Decimal
@@ -70,7 +70,8 @@ def _deny_network_access():
         attempts.append(str(operation))
         raise RuntimeError("zero-model qualification attempted network access")
 
-    targets = (
+    targets = [
+        patch.object(socket.socket, "__init__", blocked),
         patch.object(socket.socket, "connect", blocked),
         patch.object(socket.socket, "connect_ex", blocked),
         patch.object(socket.socket, "sendto", blocked),
@@ -81,19 +82,27 @@ def _deny_network_access():
         patch.object(socket, "gethostbyname", blocked),
         patch.object(socket, "gethostbyname_ex", blocked),
         patch.object(socket, "gethostbyaddr", blocked),
-    )
-    with (
-        targets[0],
-        targets[1],
-        targets[2],
-        targets[3],
-        targets[4],
-        targets[5],
-        targets[6],
-        targets[7],
-        targets[8],
-        targets[9],
+    ]
+    for name in (
+        "sendmsg",
+        "sendfile",
+        "recv",
+        "recv_into",
+        "recvfrom",
+        "recvfrom_into",
+        "recvmsg",
+        "recvmsg_into",
+        "accept",
     ):
+        if hasattr(socket.socket, name):
+            targets.append(patch.object(socket.socket, name, blocked))
+    for name in ("socketpair", "fromfd"):
+        if hasattr(socket, name):
+            targets.append(patch.object(socket, name, blocked))
+
+    with ExitStack() as stack:
+        for target in targets:
+            stack.enter_context(target)
         yield attempts
 
 

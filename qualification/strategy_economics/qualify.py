@@ -215,7 +215,7 @@ class StrategyEconomicsAuthorityAssessment:
     unresolved_owners: tuple[str, ...]
     registered_run_receipt_digest: str | None = None
     provider_economic_cut_digest: str | None = None
-    capacity_assessment_digest: str | None = None
+    capacity_replay_digest: str | None = None
     _token: InitVar[object | None] = None
 
     def __post_init__(self, _token: object | None) -> None:
@@ -247,7 +247,7 @@ class StrategyEconomicsAuthorityAssessment:
         for name in (
             "registered_run_receipt_digest",
             "provider_economic_cut_digest",
-            "capacity_assessment_digest",
+            "capacity_replay_digest",
         ):
             value = getattr(self, name)
             if value is not None:
@@ -266,7 +266,7 @@ class StrategyEconomicsAuthorityAssessment:
             "unresolved_owners": list(self.unresolved_owners),
             "registered_run_receipt_digest": self.registered_run_receipt_digest,
             "provider_economic_cut_digest": self.provider_economic_cut_digest,
-            "capacity_assessment_digest": self.capacity_assessment_digest,
+            "capacity_replay_digest": self.capacity_replay_digest,
         }
         rendered = json.dumps(
             payload, sort_keys=True, separators=(",", ":"),
@@ -281,7 +281,7 @@ def _issued_seal(value: StrategyEconomicsAuthorityAssessment) -> tuple[object, .
         value.instrument_version, value.instrument_provider_id,
         value.verified_owners, value.unresolved_owners,
         value.registered_run_receipt_digest, value.provider_economic_cut_digest,
-        value.capacity_assessment_digest, value.digest,
+        value.capacity_replay_digest, value.digest,
     )
 
 
@@ -544,7 +544,7 @@ def assess_strategy_economics_authority(
         unresolved_owners=tuple(sorted(unresolved)),
         registered_run_receipt_digest=receipt_digest,
         provider_economic_cut_digest=cut_digest,
-        capacity_assessment_digest=capacity_digest,
+        capacity_replay_digest=capacity_digest,
         _token=_ISSUE_TOKEN,
     )
     return _register_issued(assessment, _token=_ISSUE_TOKEN)

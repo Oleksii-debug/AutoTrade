@@ -1444,18 +1444,13 @@ class AllocationAuthoritySnapshot:
         _policy_type=AllocationPolicy,
         _evidence_type=ImmutableAllocationEvidence,
         _instrument_type=InstrumentVersionIdentity,
-        _authority_text_fn=_authority_text,
-        _authority_text_code=getattr(_authority_text, "__code__", None),
-        _getattr=getattr,
+        _str_strip=str.strip,
+        _object_new=object.__new__,
         _uuid_type=UUID,
         _type_error=TypeError,
         _value_error=ValueError,
+        _attribute_error=AttributeError,
     ) -> None:
-        if _getattr(_authority_text_fn, "__code__", None) is not _authority_text_code:
-            raise _value_error(
-                "allocation authority text normalizer executable changed after binding"
-            )
-
         policy = _get(self, "allocation_policy")
         if _type(policy) is not _policy_type:
             raise _type_error("allocation_policy must be exact AllocationPolicy")
@@ -1469,7 +1464,12 @@ class AllocationAuthoritySnapshot:
             return _dict_copy(raw)
 
         def exact_text(raw, *, name: str) -> str:
-            return _authority_text_fn(raw, name=name)
+            if _type(raw) is not _str:
+                raise _type_error(f"{name} must be exact text")
+            normalized = _str_strip(raw)
+            if not normalized:
+                raise _value_error(f"{name} is required")
+            return normalized
 
         def detached_instrument_identity(
             raw,
@@ -1506,11 +1506,11 @@ class AllocationAuthoritySnapshot:
                 )
             try:
                 canonical_id = _str(_uuid_type(instrument_id))
-            except (_value_error, _type_error, AttributeError) as error:
+            except (_value_error, _type_error, _attribute_error) as error:
                 raise _value_error(
                     f"{name} instrument_id must be a UUID"
                 ) from error
-            detached = object.__new__(_instrument_type)
+            detached = _object_new(_instrument_type)
             _set(detached, "instrument_id", canonical_id)
             _set(detached, "version", version)
             return detached

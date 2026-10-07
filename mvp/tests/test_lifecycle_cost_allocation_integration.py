@@ -7,6 +7,7 @@ from mvp.autotrade_mvp.allocation import (
     AllocationPolicy,
     allocate_targets,
 )
+from mvp.autotrade_mvp.authority import AuthoritativeRiskSnapshot
 from mvp.autotrade_mvp.lifecycle_cost import (
     LifecycleCostComponent,
     LifecycleCostProfile,
@@ -20,6 +21,10 @@ from research.autotrade_research.evaluation.gates import (
     GateEvidenceRef,
     GateProfile,
     evaluate_gates,
+)
+from mvp.tests.test_authority import (
+    public_authoritative_risk_snapshot,
+    public_risk_authority_request,
 )
 
 
@@ -108,6 +113,22 @@ class LifecycleCostAllocationIntegrationTests(unittest.TestCase):
             split.lifecycle_cost_digest,
         )
         self.assertEqual(binding.missing_dimensions, ())
+
+    def test_authoritative_risk_identity_binds_exact_lifecycle_cost_digest(self):
+        split = split_for_profile(self.profile())
+        base = public_authoritative_risk_snapshot(public_risk_authority_request())
+        refs = dict(base.evidence_refs.items())
+        refs["COST"] = split.lifecycle_cost_digest
+        values = dict(vars(base))
+        values["evidence_refs"] = refs
+
+        bound = AuthoritativeRiskSnapshot(**values)
+
+        self.assertEqual(
+            dict(bound.evidence_refs.items())["COST"],
+            split.lifecycle_cost_digest,
+        )
+        self.assertNotEqual(bound.snapshot_id, base.snapshot_id)
 
     def test_lifecycle_cost_digest_reaches_science_but_cannot_self_issue_pass(self):
         split = split_for_profile(self.profile())

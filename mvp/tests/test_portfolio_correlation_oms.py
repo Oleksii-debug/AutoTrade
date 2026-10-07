@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+from decimal import Decimal
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -317,3 +318,122 @@ def test_in_place_open_exposure_helper_code_mutation_fails_closed():
         finally:
             correlation_oms._unvalued_open_orders.__code__ = original_code
 
+
+
+def test_changed_open_order_helper_defaults_cannot_hide_durable_open_order():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        proposal, evidence, resolver, policy = _passing_inputs()
+        helper = correlation_oms._unvalued_open_orders
+        original_defaults = helper.__defaults__
+        parameter_names = helper.__code__.co_varnames[:helper.__code__.co_argcount]
+        default_offset = len(parameter_names) - len(original_defaults)
+        changed = list(original_defaults)
+        forged_calls = []
+
+        def forged_snapshots(_oms):
+            forged_calls.append("forged-snapshots")
+            return ()
+
+        for name, replacement in (
+            ("_snapshots_getter", forged_snapshots),
+            ("_snapshots_getter_code", forged_snapshots.__code__),
+        ):
+            changed[parameter_names.index(name) - default_offset] = replacement
+
+        helper.__defaults__ = tuple(changed)
+        try:
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="OMS open-exposure resolver defaults changed after binding",
+            ):
+                require_correlation_safe_proposal_with_oms(
+                    proposal, evidence, resolver, policy, oms=oms,
+                )
+        finally:
+            helper.__defaults__ = original_defaults
+        assert forged_calls == []
+
+
+def test_in_place_quantity_parser_defaults_cannot_zero_open_order():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        proposal, evidence, resolver, policy = _passing_inputs()
+        helper = correlation_oms._exact_open_quantity
+        original_defaults = dict(helper.__kwdefaults__)
+        forged_calls = []
+
+        def forged_parse(_value):
+            forged_calls.append("forged-parser")
+            return Decimal("0")
+
+        helper.__kwdefaults__["_parse"] = forged_parse
+        helper.__kwdefaults__["_parse_code"] = forged_parse.__code__
+        try:
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="OMS quantity normalizer defaults changed after binding",
+            ):
+                require_correlation_safe_proposal_with_oms(
+                    proposal, evidence, resolver, policy, oms=oms,
+                )
+        finally:
+            helper.__kwdefaults__.clear()
+            helper.__kwdefaults__.update(original_defaults)
+        assert forged_calls == []
+
+
+def test_in_place_public_admission_defaults_cannot_replace_oms_guard():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        proposal, evidence, resolver, policy = _passing_inputs()
+        function = correlation_oms.require_correlation_safe_proposal_with_oms
+        original_defaults = dict(function.__kwdefaults__)
+        forged_calls = []
+
+        def forged_open_orders(_oms):
+            forged_calls.append("forged-open-orders")
+            return ()
+
+        function.__kwdefaults__["_open_orders"] = forged_open_orders
+        function.__kwdefaults__["_open_orders_code"] = forged_open_orders.__code__
+        try:
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="OMS admission defaults changed after binding",
+            ):
+                function(proposal, evidence, resolver, policy, oms=oms)
+        finally:
+            function.__kwdefaults__.clear()
+            function.__kwdefaults__.update(original_defaults)
+        assert forged_calls == []
+
+
+def test_explicit_helper_override_cannot_bypass_open_oms_exposure():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        proposal, evidence, resolver, policy = _passing_inputs()
+        forged_calls = []
+
+        def forged_open_orders(_oms):
+            forged_calls.append("forged-open-orders")
+            return ()
+
+        with pytest.raises(
+            CorrelationConcentrationError,
+            match="OMS admission helper override is not authoritative",
+        ):
+            require_correlation_safe_proposal_with_oms(
+                proposal,
+                evidence,
+                resolver,
+                policy,
+                oms=oms,
+                _open_orders=forged_open_orders,
+                _open_orders_code=forged_open_orders.__code__,
+            )
+        assert forged_calls == []

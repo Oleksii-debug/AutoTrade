@@ -57,8 +57,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through contracts/jsonschema/ and its contract/qualification evidence.
 - **Forbidden scope:** Provider-specific financial semantics hidden in generic payloads; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: CONTRACT / core-schemas; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Canonical JSON Schema coverage now materializes common, event, instrument/market, information/dataset, decision/portfolio, authority/risk, execution, provider results, persistence/reconciliation, learning/science/jobs, model gateway and UI contracts; OpenAPI host entrypoint and common fixtures committed. Remaining WP-01 work: cross-language generated bindings/corpus equivalence, OpenAPI validation/codegen and version-change enforcement. Finalization repaired invalid execution JSON and added whole-schema reference resolution; no generated binding completion claimed.
+- **Status:** DONE
+- **Status evidence / remaining work:** DONE on main via PR #1440, merge commit 57f1064fbdf0e13ecdf563da6f0ebdbf3ab0131a. Canonical contract v6 (6.0.0) now includes complete JSON Schema/OpenAPI authority, cross-language Python/C#/TypeScript conformance corpora (51 common-scalar cases, 13 DatasetManifest semantic cases, 201 closed-object shape cases across 48 definitions), major-version breaking-change enforcement, exact-numeric package identity 0.0.2, Host canonical Sequence contract/runtime convergence, MarketEvent adapter-build identity, and exact-head CI evidence generation that records source SHA, input/schema versions, tested commands and unresolved qualification limits. Historical duplicate Section-1 lineages were superseded by #1440.
 
 ### WP-02 — lean-adoption
 
@@ -92,7 +92,7 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Forbidden scope:** Assuming public repository implies permission; importing ambiguous adapters; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PROVENANCE / dependency-policy; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
 - **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Exact revision/license evidence recorded for LEAN, WhiteBit.Net, CryptoExchange.Net and Alpaca C# SDK; Autosport/Nika root license absence recorded. Transitive locks, advisories, first-party contributor rights, model/data rights and release SBOM remain.
+- **Status evidence / remaining work:** SOURCE/INTEGRATION AUTHORITY COMPLETE on main via PR #2264, merge 458cd7bb43b8457e0bb0593b523f54e35f5cd54d. Exact dependency locks/content identities, restored NuGet package-rights verification, release dependency provenance, distributed release composition-to-provenance mapping (issue #2203), SBOM dependency reachability/scope closure and canonical WP-64 supply-chain proof binding are integrated. Remaining terminal WP-03 evidence is external/fail-closed: complete first-party contributor/release-distribution rights, model/data/news rights where applicable to the selected distribution, independently reviewed production qualification trust-policy bytes/pin, exact dependency-advisory qualification, and a final frozen-release SBOM/provenance bound to the delivered release. Public repository visibility or development authorization is not release-rights evidence.
 
 ### WP-04 — neutral-first-party
 
@@ -108,8 +108,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through research/autotrade_research/io/ and its contract/qualification evidence.
 - **Forbidden scope:** Sports ledger, GUI or orchestration import; financial DB writes through file helpers; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: REUSE / neutral-first-party; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Three neutral research primitives migrated from Autosport into AutoTrade with focused local 6/6 migration tests; Windows CI, full characterization and release rights qualification remain open.
+- **Status:** DONE
+- **Status evidence / remaining work:** DONE on main as the neutral production primitive prerequisite for Section 3. Strict JSON, ResourceLock and durable publication have one neutral runtime authority under autotrade_runtime with research compatibility aliases. Historical exact-head #843 and merged #1022 each passed baseline, research-primitives and full Verify AutoTrade; current main additionally contains 13 durable-publication hardening tests, 22 ResourceLock race/Windows path-fence tests, bounded JSON size/depth/node/integer semantics, exact built-in str/bytes ingress, and the 2026-10-06 float-domain repair rejecting lossy nonzero underflow and unbounded significand/exponent lexemes. Canonical float repair commits: a2dbfa41702837163fde3dec6cdf7b1b92a3b290 and 54e8eed276296ae8f4d27e62453d06e9c97e4aa6.
 
 ### WP-05 — journal-outbox
 
@@ -125,8 +125,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Persistence/ and its contract/qualification evidence.
 - **Forbidden scope:** Network send inside DB transaction; mutable source facts; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PERSISTENCE / journal-outbox; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** SQLite WAL journal/outbox and command-dedupe primitive implemented in mvp/autotrade_mvp/persistence.py with focused tests covering atomic event/outbox commit, idempotent replay, payload tamper rejection, aggregate-version gaps, event-ID conflicts, command idempotency conflicts and reopen persistence. Focused standalone suite passed 5/5 locally before commit. Remaining WP-05 work: integrate canonical EventEnvelope/UiCommand validation into the runtime, crash-at-each-commit-boundary qualification, projection rebuild equivalence, migration rollback/upgrade tests, Windows/exact-head CI and production placement under src/AutoTrade.Persistence/.
+- **Status:** DONE
+- **Status evidence / remaining work:** DONE on main via Section-4 closure PR #2196, merge commit c0f929e25fbfc2df1f33b2746f5f486d9819ee74. Canonical JournalStore now covers atomic journal/outbox and command effects, exact dedupe/replay identity, one-snapshot journal/checkpoint cuts, full replay versus checkpoint-tail equivalence, hard-process crash boundaries, migration rollback/upgrade, canonical EventEnvelope and UiCommand persistence admission, exact durable storage-class/text ingress, first-event ownership, and physical backing-file authority with callback-safe JournalStoreIdentity/path fencing. Historical #1577/#1612/#2030/#2163 integration roles are superseded by #2196. Hosted exact-head jobs were queued without runner assignment at closure and are not recorded as PASS; broader WP-48/WP-49 recovery remains a separate gate.
 
 ### WP-06 — immutable-store
 
@@ -142,8 +142,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Data/Artifacts/ and its contract/qualification evidence.
 - **Forbidden scope:** Artifact hashes presented as admin-proof security; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: ARTIFACT / immutable-store; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Content-addressed artifact store implemented under research/autotrade_research/artifacts/store.py using the migrated durable publication and resource-lock primitives. It verifies SHA-256 and size, enforces explicit storage/export rights, rejects immutable identity conflicts, audits missing/corrupt/unreferenced objects and removes only unreferenced objects/staging leftovers under a store lock. Focused tests cover idempotent publication, corruption, rights-aware export, orphan recovery and denied storage. Remaining WP-06 work: crash-injection qualification at every publication boundary, manifest schema/version contract, lawful dataset/model integration, Windows exact-head evidence and production integration.
+- **Status:** DONE
+- **Status evidence / remaining work:** DONE on main as Section 3 sealed ArtifactStore / neutral installed runtime. The selected sealed-reader source #1098 passed baseline, research-primitives and full dual-OS Verify on exact head 55d97774e8c3225374f1fff9cdb0c62f7ee157eb. Neutral materialization #1313 is a direct ancestor of current main and establishes autotrade_runtime.artifacts as the single canonical store identity with research aliases, exact-source 30-file staging and isolated python -I -S publish/authenticated-read/audit tests. Current main carries stronger root-authority generation pinning and hostile ingress tests. The current corpus includes 55 ArtifactStore tests plus crash-atomic manifest/publication, retained recovery, generation-bound read and 18 trusted-reader falsifiers. Acceptance is covered explicitly by restart_after_manifest_commit_exposes_only_verified_complete_artifact and recovery_removes_only_unreferenced_objects. #1313 GitHub artifact/WP-04 suites passed on Ubuntu/Windows before unrelated update-producer failures. Historical #1573 is fully absorbed: all 38 paths exist on main, 33 byte-identical and 5 replaced by stronger versions.
 
 ### WP-07 — instrument-registry
 
@@ -159,8 +159,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Data/Instruments/ and its contract/qualification evidence.
 - **Forbidden scope:** Ticker as global identity; default 100-share option assumption; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: INSTRUMENT / instrument-registry; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Immutable instrument-version registry foundation is present on main and covers stable identities, effective-dated symbol versions, calendars, exact price/quantity steps and derivative descriptors. Remaining work: provider metadata/lifecycle ingestion, broader DST/delisting/adjusted-deliverable qualification and production placement.
+- **Status:** DONE
+- **Status evidence / remaining work:** DONE on main through Section-5 final closure PR #2155, merge commit 3e28de127dea011a73c6000e46b0513ed2ba8ea9. Canonical InstrumentRegistry now has stable immutable/effective-dated identities, causal knowledge lookup, calendars/DST evidence, exact units/price/quantity bounds, derivative descriptors, adjusted-option explicit exercise cash, immutable inverse-futures settlement conventions, and hostile executable metadata ingress rejection. WP-07 hardening #2192 was mechanically converged into #2155 with zero overlapping base hunks and is superseded.
 
 ### WP-08 — account-capabilities
 
@@ -193,8 +193,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Data/Market/ and its contract/qualification evidence.
 - **Forbidden scope:** Inventing ticks from OHLC; using future finalized bars; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: DATA / market-normalization; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Market normalization foundation is present on main in mvp/autotrade_mvp/market_data.py with raw evidence binding, canonical normalized events, explicit causal timestamps, exact decimal fields and sequence/conflict handling. Remaining work: provider-stream integration, broader gap/freshness qualification and production placement.
+- **Status:** DONE
+- **Status evidence / remaining work:** DONE for the provider-free market-normalization authority used by Section 5. Main retains the #1615 canonical normalized MarketEvent/raw-evidence chronology semantics, adapter-build identity, exact decimal fields, causal timestamps, sequence/conflict handling and verified snapshot recovery behavior. Live provider acquisition/route qualification remains owned by provider WPs and is not part of WP-09 normalization closure.
 
 ### WP-10 — historical-vintages
 
@@ -210,8 +210,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Data/History/ and its contract/qualification evidence.
 - **Forbidden scope:** Replacing old vintages with latest revised data; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: DATA / historical-vintages; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Immutable historical-vintage foundation is present on main in research/autotrade_research/data/vintages.py with point-in-time revisions/universes, explicit missingness, raw/adjusted consistency, rights-aware manifests and append-only version storage. Remaining work: deeper causal lineage hardening, large-dataset storage integration and production qualification.
+- **Status:** DONE
+- **Status evidence / remaining work:** DONE for immutable historical-vintage/source-population authority. Main retains the #1615/#1441 lineage: append-only point-in-time vintages, causal revision visibility, authenticated ArtifactStore-bound source populations, exact rights/evidence binding, deterministic population fingerprints, and authoritative fold population re-resolution. Issue #974's final caller-selected replay-fingerprint seam is closed by #2155's verified product-side runtime-cut bridge.
 
 ### WP-11 — news-macro-claims
 
@@ -227,8 +227,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Information/ and its contract/qualification evidence.
 - **Forbidden scope:** Unlicensed redistribution; source popularity as evidence of edge; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: INFORMATION / news-macro-claims; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Evidence-bound information-claim foundation is present on main in mvp/autotrade_mvp/information_claims.py with source documents, availability times, provenance digests, immutable claim identity and store ingestion. Remaining work: source-policy breadth, contradiction/supersession qualification and production information pipelines.
+- **Status:** DONE
+- **Status evidence / remaining work:** DONE for evidence/time/rights-bound internal information claims. Main retains the Section-5 convergence semantics for immutable source documents/claim identity, publication and availability chronology, provenance digests, contradiction/supersession history and fail-closed evidence handling. External source breadth/feed onboarding remains a provider/information-source integration concern rather than a second claim authority.
 
 ### WP-12 — causal-feeder
 
@@ -244,8 +244,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through research/autotrade_research/evaluation/replay/ and its contract/qualification evidence.
 - **Forbidden scope:** In-process conventions claimed as hostile-code isolation; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: REPLAY / causal-feeder; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Deterministic causal replay foundation is present on main in mvp/autotrade_mvp/replay.py with availability-time ordering, frozen dataset digest, monotonic simulation clock and checkpoint/resume primitives. Remaining work: pending-event/RNG/strategy/account state completeness, hostile-process isolation and exact resume-equivalence qualification.
+- **Status:** DONE
+- **Status evidence / remaining work:** DONE for Section 7 causal replay / deterministic whole-runtime checkpoint-resume semantics on main. Canonical CompositeReplayCheckpoint binds replay cursor/clock plus all required runtime component classes (pending queue, RNG, strategy, portfolio/accounting, execution, accrual/settlement, policy, instrument, provider, experiment), exact JournalStore identity, build SHA and protocol identity. Main-resident regressions cover uninterrupted-vs-resume equivalence, tamper/missing/stale rejection, authority-key replacement, crash after durable completion, UNKNOWN no-resend, and hostile authority ingress. Portable backup/restore reconstitution remains WP-49 and does not reopen Section 7.
 
 ### WP-13 — execution-realism
 
@@ -278,8 +278,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Portfolio/Accounting/ and its contract/qualification evidence.
 - **Forbidden scope:** Sports win/loss ledger; silent float money coercion; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: FINANCE / economic-ledger; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Provider-neutral exact double-entry accounting foundation implemented in mvp/autotrade_mvp/accounting.py with per-asset/currency conservation, cash and position projections, external flows, third-currency fees/rebates, explicit FX clearing, exact reversals and duplicate/double-reversal protection. Independent economic reference vectors cover cash round trip, linear/inverse futures, funding, split, deposit neutrality and bust/correction. Remaining WP-14 work: production journal persistence integration, lot/basis and realized/unrealized projection policy, settled/unsettled cash, full FX valuation freshness, derivative lifecycle postings, corrections from provider events and exact-head cross-platform qualification.
+- **Status:** DONE
+- **Status evidence / remaining work:** DONE for Section 8 core economic-ledger / exact financial conservation on main. Exact accounting, FIFO basis/P&L, reversals/corrections, context-independent arithmetic, trade-date obligations vs settled spendable CASH, typed MARGIN_CREDIT separation, versioned settlement rules, provider settlement exactly-once across restart, FX settlement availability and bust/correction conservation are integrated. Current-main settlement-capital successor #2275 merged as 11da6a62888bb832546a0063ebcbbada0fed7042 with candidate/post-merge tree equality. WP-15 reservations, asset-specific lifecycle economics, hard-risk and provider qualification remain separately owned and do not reopen Section 8.
 
 ### WP-15 — reservations
 
@@ -295,8 +295,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Portfolio/Reservations/ and its contract/qualification evidence.
 - **Forbidden scope:** Ignoring pending cancel/unknown/manual exposure; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: FINANCE / reservations; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Conservative reservation foundation implemented in mvp/autotrade_mvp/reservations.py with multi-resource availability, duplicate-safe immutable reservations, partial consumption, UNKNOWN retention, evidenced terminal release and overlap protection. Additional invariants prohibit FILLED from releasing unconsumed remainder and prohibit REJECTED/PROVEN_ABSENT from erasing consumed exposure. Remaining WP-15 work: bind reservations atomically to accounting/admission transactions, provider fill quantities and fee/slippage bounds; add persistence/restart/concurrency stress and exact-head cross-platform qualification.
+- **Status:** DONE
+- **Status evidence / remaining work:** DONE for Section 12 reservation conservation. Current main already contains the canonical Section-12 lineage (#1624/#1872) plus later #2035 ingress/replay hardening, while historical #501 and #649 close atomic risk/admission/reservation and provider-fill/accounting/reservation transaction boundaries with exact-head qualification evidence. Current source/tests cover concurrent intent double-spend prevention, partial/full fill consumption, terminalization, cancel/UNKNOWN/overlapping replacement conservation, exact retry/restart, fill corrections, FILLED/CANCELED bust restoration, hostile ingress, cross-scope replay rejection and callback-free reservation-authority lifetime cleanup. Provider/PAPER/LIVE qualification, independent production risk authority, release readiness and economic-edge evidence remain separate gates.
 
 ### WP-16 — independent-risk
 
@@ -312,8 +312,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Risk/ and its contract/qualification evidence.
 - **Forbidden scope:** Risk penalties posted as cash expenses; VaR-only safety claims; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: RISK / independent-risk; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Independent deterministic risk admission is present on main with state-version, reservation, freshness, leverage, loss, drawdown, margin, stress, borrow and reduce-only gates. Remaining work: full portfolio/correlation/margin model coverage, provider-account constraints, property/stress qualification and production integration.
+- **Status:** DONE
+- **Status evidence / remaining work:** DONE for Section 13 provider-free independent hard-risk authority. Current main contains the merged Section-13 closure #1594 and stronger #1726 hard-risk trust-ingress result, with exact Decimal/Fraction arithmetic, freshness, leverage, concentration, liquidity, stress/expected-shortfall, margin/liquidation, borrow, settlement, option/derivative/futures and strict reduce-only gates. Durable quantitative RiskPolicy registration/activation, rollback protection, exact JournalStore-generation binding and registry-issued ResolvedRiskPolicy are integrated, together with durable MARK/FX valuation history and policy-bound exact freshness evidence. Positive PAPER/LIVE provider-origin risk composition remains deliberately fail-closed and is separately tracked by #987/#652; it is not a reason to reopen the provider-free hard-risk section.
 
 ### WP-17 — policy-confirmation
 
@@ -364,7 +364,7 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Forbidden scope:** Terminal status suppressing later economic corrections; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: EXECUTION / order-projection; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
 - **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Order lifecycle projection is integrated on main at d412fde8c64f22595142c646c524449b70d4dc28, including ACK != fill, partial fill/cancel, correction/bust and overfill/OCO violation handling. Remaining work: provider-normalized event integration, restart projection rebuild and broader lifecycle qualification.
+- **Status evidence / remaining work:** Provider-free internal OMS/order-projection lifecycle is closed on main through Section 14 / PR #1629, including durable restart rebuild, retained registration identity, amendment/OCO conservation, aggregate scope seals and hostile-caller trust-boundary hardening. WP-19 remains IN_PROGRESS only for provider-normalized financial-event integration, real-provider/reconciliation lifecycle qualification and release evidence.
 
 ### WP-20 — account-truth
 
@@ -567,8 +567,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Portfolio/CorporateActions/ and its contract/qualification evidence.
 - **Forbidden scope:** Tax residence inferred; backadjusted data mutating live holdings twice; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: FINANCE / corporate-settlement; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Corporate-action/settlement foundation is present on main from the integrated financial-core wave. Remaining work: broader split/dividend/merger/delisting/settlement cases and exact accounting/reconciliation qualification.
+- **Status:** DONE
+- **Status evidence / remaining work:** DONE for Section 11 corporate-settlement on main via PR #2294, merge commit 70718f6f509de3ec0b11267df4809a6e72d84df6. The merged tree is byte-identical to the accepted candidate. Canonical source/integration authority now covers sealed corporate-action provider facts and revisions, durable evidence/reconciliation, CASH_DIVIDEND, qualified long-position SPLIT economics and correction/restart, fail-closed unsupported merger/delist boundaries, securities-borrow quantity-unit authority through admission/replay/dispatch, and durable financing chronology/lifetime binding. Section-10 InstrumentRegistry remains the single product-selected registry authority; no duplicate registry was introduced. Positive PAPER/LIVE provider-origin qualification, release readiness and economic-edge claims remain separately owned and do not reopen Section 11.
 
 ### WP-32 — allocation-objective
 
@@ -687,7 +687,7 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Forbidden scope:** Archive existence claimed as proof of no forgetting; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: LEARNING / continual-candidates; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
 - **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Continual-candidate retention foundation is present on main in research/autotrade_research/learning/retention.py with protected/recent regime matrices, delayed-label inconclusive handling and independent science/risk promotion gates. Remaining work: actual bounded update pipelines, drift calibration, evidence-bound gate references and production candidate generation.
+- **Status evidence / remaining work:** Section 15 causal learning-wave coordination and isolated candidate validation are integrated on main through PR #1630, with causal pause/candidate cuts, disjoint validation populations, immutable resolution evidence and fail-closed executable-caller ingress. Continual retention foundation is also present. WP-38 remains IN_PROGRESS for actual bounded update pipelines, drift calibration, retention hardening/qualification, evidence-bound gate references and production candidate generation.
 
 ### WP-39 — routing-budgets
 

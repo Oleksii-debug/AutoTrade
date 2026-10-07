@@ -15,6 +15,7 @@ authenticated valuation cut for working/UNKNOWN order exposure.
 from __future__ import annotations
 
 from decimal import Decimal
+from types import MappingProxyType
 
 from .durable_order_projection import (
     DurableOrderBookProjection,
@@ -103,6 +104,14 @@ def _exact_open_quantity(
     return amount
 
 
+# Function-code identity alone is insufficient: Python permits in-place edits
+# to keyword defaults and wholesale replacement of positional defaults while
+# leaving __code__ unchanged. Bind both before admission can inspect the OMS.
+_EXACT_QUANTITY_KWDEFAULTS = MappingProxyType(
+    dict(_GET(_exact_open_quantity, "__kwdefaults__"))
+)
+
+
 def _unvalued_open_orders(
     oms: DurableOrderBookProjection,
     _oms_type=_OMS_TYPE,
@@ -117,6 +126,7 @@ def _unvalued_open_orders(
     _text_code=_GET(_exact_text, "__code__"),
     _open_quantity=_exact_open_quantity,
     _open_quantity_code=_GET(_exact_open_quantity, "__code__"),
+    _quantity_kwdefaults=_EXACT_QUANTITY_KWDEFAULTS,
     _get=_GET,
     _type=type,
     _tuple=tuple,
@@ -132,6 +142,15 @@ def _unvalued_open_orders(
     ):
         if _get(function, "__code__") is not expected_code:
             raise _error_type(f"{name} executable changed after binding")
+
+    quantity_defaults = _get(_open_quantity, "__kwdefaults__")
+    if _type(quantity_defaults) is not dict or (
+        quantity_defaults.keys() != _quantity_kwdefaults.keys()
+    ):
+        raise _error_type("OMS quantity normalizer defaults changed after binding")
+    for name, expected in _quantity_kwdefaults.items():
+        if quantity_defaults[name] is not expected:
+            raise _error_type("OMS quantity normalizer defaults changed after binding")
 
     if _type(oms) is not _oms_type:
         raise TypeError("oms must be exact DurableOrderBookProjection")
@@ -172,6 +191,10 @@ def _unvalued_open_orders(
     return _tuple(_sorted(blockers, key=lambda item: (item[1], item[0])))
 
 
+# The tuple itself is immutable; a replacement signals a changed trust binding.
+_OPEN_ORDERS_DEFAULTS = _GET(_unvalued_open_orders, "__defaults__")
+
+
 def require_correlation_safe_proposal_with_oms(
     result,
     evidence,
@@ -195,6 +218,41 @@ def require_correlation_safe_proposal_with_oms(
     valuation cut. Treating quantity as notional, using last fill price, or
     asking the caller for an estimate would manufacture financial authority.
     """
+
+    # Verify the public call's keyword-default table *and* effective helper
+    # arguments, before invoking anything that could conceal open exposure.
+    current_defaults = object.__getattribute__(
+        require_correlation_safe_proposal_with_oms, "__kwdefaults__"
+    )
+    if type(current_defaults) is not dict or (
+        current_defaults.keys() != _WITH_OMS_KWDEFAULTS.keys()
+    ):
+        raise CorrelationConcentrationError(
+            "OMS admission defaults changed after binding"
+        )
+    for name, expected in _WITH_OMS_KWDEFAULTS.items():
+        if current_defaults[name] is not expected:
+            raise CorrelationConcentrationError(
+                "OMS admission defaults changed after binding"
+            )
+    for name, effective in (
+        ("_bound_check", _bound_check),
+        ("_bound_check_code", _bound_check_code),
+        ("_open_orders", _open_orders),
+        ("_open_orders_code", _open_orders_code),
+        ("_base_guard", _base_guard),
+        ("_base_guard_code", _base_guard_code),
+        ("_get", _get),
+        ("_error_type", _error_type),
+    ):
+        if effective is not _WITH_OMS_KWDEFAULTS[name]:
+            raise CorrelationConcentrationError(
+                "OMS admission helper override is not authoritative"
+            )
+    if _get(_open_orders, "__defaults__") is not _OPEN_ORDERS_DEFAULTS:
+        raise CorrelationConcentrationError(
+            "OMS open-exposure resolver defaults changed after binding"
+        )
 
     for function, expected_code, name in (
         (_bound_check, _bound_check_code, "OMS executable verifier"),
@@ -221,6 +279,11 @@ def require_correlation_safe_proposal_with_oms(
         resolved_evidence,
         policy,
     )
+
+# A detached immutable copy, not the caller-editable __kwdefaults__ dict.
+_WITH_OMS_KWDEFAULTS = MappingProxyType(
+    dict(_GET(require_correlation_safe_proposal_with_oms, "__kwdefaults__"))
+)
 
 
 __all__ = ["require_correlation_safe_proposal_with_oms"]

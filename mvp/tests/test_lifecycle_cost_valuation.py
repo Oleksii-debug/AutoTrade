@@ -4,7 +4,6 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import unittest
-from types import MappingProxyType
 
 from mvp.autotrade_mvp.allocation import ObjectiveCandidate
 from mvp.autotrade_mvp.allocation_valuation import normalize_allocation_valuation

@@ -115,6 +115,7 @@ def _write_policy(root: Path) -> None:
                         "name": "Example.Package",
                         "version": "1.2.3",
                         "content_hash_sha512_base64": _HASH,
+                        "archive_sha512_base64": _HASH,
                         "license_id": "EXAMPLE-REDISTRIBUTABLE",
                         "license_file": "LICENSE.txt",
                         "expected_license_text_path": "provenance/licenses/Example.Package.LICENSE.txt",
@@ -138,6 +139,9 @@ def _write_restored_package(root: Path, *, license_text: str = _LICENSE) -> Path
         encoding="ascii",
     )
     (package / "example.package.1.2.3.nupkg").write_bytes(_NUPKG_BYTES)
+    (package / ".nupkg.metadata").write_text(
+        json.dumps({"version": 2, "contentHash": _HASH}), encoding="utf-8"
+    )
     (package / "LICENSE.txt").write_bytes(license_text.encode("utf-8"))
     (package / "NOTICE.txt").write_bytes(_NOTICE.encode("utf-8"))
     (package / "example.package.nuspec").write_bytes(_NUSPEC.encode("utf-8"))

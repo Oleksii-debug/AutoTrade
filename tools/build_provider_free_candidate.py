@@ -508,16 +508,17 @@ def _require_webview2_archive_rights(
     *,
     version,
     content_hash,
+    archive_hash,
 ):
     if type(product_root) is not _PATH_TYPE or type(archive_path) is not _PATH_TYPE:
         raise TypeError('WebView2 rights verification requires exact Path values')
-    if type(version) is not str or type(content_hash) is not str:
+    if type(version) is not str or type(content_hash) is not str or type(archive_hash) is not str:
         raise TypeError('WebView2 rights identity must be exact str values')
     actual_hash = base64.b64encode(
         sha512(archive_path.read_bytes()).digest()
     ).decode('ascii')
-    if actual_hash != content_hash:
-        raise ValueError('WebView2 archive differs from locked rights identity; expected SHA-512 ' + content_hash + '; observed SHA-512 ' + actual_hash)
+    if actual_hash != archive_hash:
+        raise ValueError('WebView2 archive differs from pinned full-archive identity; expected SHA-512 ' + archive_hash + '; observed SHA-512 ' + actual_hash)
 
     policy = strict_json_bytes(
         (product_root / 'provenance/dotnet-package-rights.json').read_bytes(),
@@ -538,6 +539,7 @@ def _require_webview2_archive_rights(
             and record.get('name') == 'Microsoft.Web.WebView2'
             and record.get('version') == version
             and record.get('content_hash_sha512_base64') == content_hash
+            and record.get('archive_sha512_base64') == archive_hash
         )
     ]
     if len(matches) != 1:
@@ -623,15 +625,18 @@ def _require_webview2_input_identity(product_root, inputs, nuget_lock):
     if type(inputs) is not dict or type(inputs.get('webview2_sdk')) is not dict:
         raise ValueError('provider-free WebView2 input is missing')
     webview = inputs['webview2_sdk']
-    if set(webview) != {'version', 'url', 'content_hash_sha512_base64'}:
+    if set(webview) != {'version', 'url', 'content_hash_sha512_base64', 'archive_sha512_base64'}:
         raise ValueError('provider-free WebView2 input fields mismatch')
     version = webview['version']
     content_hash = webview['content_hash_sha512_base64']
+    archive_hash = webview['archive_sha512_base64']
     url = webview['url']
     if type(version) is not str or not version or version != version.strip():
         raise ValueError('provider-free WebView2 version is invalid')
     if type(content_hash) is not str or not content_hash or content_hash != content_hash.strip():
         raise ValueError('provider-free WebView2 content hash is invalid')
+    if type(archive_hash) is not str or not archive_hash or archive_hash != archive_hash.strip():
+        raise ValueError('provider-free WebView2 full-archive hash is invalid')
     expected_url = (
         'https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/'
         + version.lower()
@@ -764,6 +769,7 @@ def build_candidate(*, source_root, source_sha, desktop, host, python_archive, w
         webview_archive,
         version=inputs['webview2_sdk']['version'],
         content_hash=webview_content_hash,
+        archive_hash=inputs['webview2_sdk']['archive_sha512_base64'],
     )
 
     desktop_publish_snapshot = _capture_publish(desktop)

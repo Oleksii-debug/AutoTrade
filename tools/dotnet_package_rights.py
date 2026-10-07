@@ -35,6 +35,7 @@ _CANONICAL_NUGET_PACKAGES_AUTHORITY = (
 )
 _CANONICAL_VERIFY_PACKAGES_ROOT = "${{ env.NUGET_PACKAGES }}"
 _CANONICAL_WORKFLOW_STEP_INDENT = 6
+_CONCRETE_PATH_TYPE = type(Path())
 
 _REQUIRED_PACKAGE_FIELDS = frozenset(
     {
@@ -110,7 +111,14 @@ def locked_package_artifacts(
     *,
     projects: list[Path] | None = None,
 ) -> list[dict[str, str]]:
-    selected = _package_projects(root) if projects is None else sorted(set(projects))
+    if projects is None:
+        selected = _package_projects(root)
+    else:
+        selected = [
+            project
+            for project in sorted(set(projects))
+            if dotnet_project_package_references(project)
+        ]
     graph = dotnet_locked_dependency_graph(root, selected)
     artifacts: dict[tuple[str, str, str], dict[str, str]] = {}
     by_name_version: dict[tuple[str, str], str] = {}
@@ -310,6 +318,14 @@ def workflow_restored_rights_projects(
             or "--verify-restored" not in candidate
         ):
             continue
+        if (
+            direct is None
+            and candidate.startswith("- run: ")
+            and _workflow_job_name(lines, line_number) is None
+        ):
+            # Preserve the project identity for the later same-job/order fence,
+            # but never treat an out-of-jobs verifier as executable authority.
+            direct = candidate.removeprefix("- run: ")
         if direct is None:
             invalid_lines.append(line_number)
             continue
@@ -576,7 +592,7 @@ def _locked_nupkg_root_evidence(
     are allowed to support a rights decision.
     """
 
-    if type(nupkg_path) is not Path:
+    if type(nupkg_path) is not _CONCRETE_PATH_TYPE:
         raise TypeError("nupkg_path must be exact Path")
     for value, label in (
         (license_file, "license_file"),

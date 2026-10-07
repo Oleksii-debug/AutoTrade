@@ -581,13 +581,45 @@ def test_terminal_unfilled_remainder_is_not_working_oms_exposure(
                 status="REJECTED",
                 committed_at=NOW,
             )
-        snapshot = oms.snapshots[0]
+        # A fresh durable projection must make the same terminal decision;
+        # the guard cannot depend on in-process transient cancellation flags.
+        restored = _oms(directory)
+        snapshot = restored.snapshots[0]
         assert snapshot.state == expected_state
         assert snapshot.open_quantity > Decimal("0")
         proposal, evidence, resolver, policy = _passing_inputs()
         assert require_correlation_safe_proposal_with_oms(
-            proposal, evidence, resolver, policy, oms=oms,
+            proposal, evidence, resolver, policy, oms=restored,
         ) is proposal
+
+
+def test_a_terminal_order_cannot_mask_a_second_working_order():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        oms.confirm_cancel(
+            event_key="cancel-first",
+            client_order_id="open-order-1",
+            committed_at=NOW,
+        )
+        oms.create_order(
+            event_key="create-second",
+            client_order_id="open-order-2",
+            instrument="B",
+            side="SELL",
+            requested_quantity="2",
+            committed_at=NOW,
+        )
+        states = {snapshot.client_order_id: snapshot.state for snapshot in oms.snapshots}
+        assert states == {"open-order-1": "CANCELLED", "open-order-2": "PENDING"}
+        proposal, evidence, resolver, policy = _passing_inputs()
+        with pytest.raises(
+            CorrelationConcentrationError,
+            match="canonical OMS has unvalued open exposure",
+        ):
+            require_correlation_safe_proposal_with_oms(
+                proposal, evidence, resolver, policy, oms=_oms(directory),
+            )
 
 
 def test_rejected_cancel_retains_unvalued_open_oms_exposure():

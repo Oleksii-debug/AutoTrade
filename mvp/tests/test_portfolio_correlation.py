@@ -8,6 +8,7 @@ from mvp.autotrade_mvp.allocation import (
     AllocationTarget,
     EvidenceBoundObjectiveAllocationResult,
     ObjectiveAllocationResult,
+    _allocation_decision_digest,
 )
 from mvp.autotrade_mvp.portfolio_correlation import (
     CorrelationConcentrationError,
@@ -50,25 +51,59 @@ def _proposal(**notionals: str):
         objective_version="test:v1",
         reason="test",
     )
+    evidence_refs = ()
+    environment = "SIMULATION"
+    policy_version = "policy:1"
+    policy_config_digest = "b" * 64
+    objective_search_config_digest = "c" * 64
+    provider_id = "SIMULATED"
+    account_id = "acct:1"
+    instrument_versions = tuple((s, f"instrument:{s}:1") for s in notionals)
+    capability_snapshot_ids = tuple((s, f"capability:{s}:1") for s in notionals)
+    account_snapshot_id = "snapshot:1"
+    reconciliation_run_id = "reconciliation:1"
+    account_state_version = 1
+    reservation_state_version = 1
+    reservation_state_digest = "d" * 64
+    base_currency = "USD"
+    decision_digest = _allocation_decision_digest(
+        objective,
+        evidence_refs=evidence_refs,
+        environment=environment,
+        policy_version=policy_version,
+        policy_config_digest=policy_config_digest,
+        objective_search_config_digest=objective_search_config_digest,
+        decision_time=NOW,
+        provider_id=provider_id,
+        account_id=account_id,
+        instrument_versions=instrument_versions,
+        capability_snapshot_ids=capability_snapshot_ids,
+        account_snapshot_id=account_snapshot_id,
+        reconciliation_run_id=reconciliation_run_id,
+        account_state_version=account_state_version,
+        reservation_state_version=reservation_state_version,
+        reservation_state_digest=reservation_state_digest,
+        base_currency=base_currency,
+    )
     return EvidenceBoundObjectiveAllocationResult(
         objective=objective,
-        decision_digest="a" * 64,
-        policy_config_digest="b" * 64,
-        objective_search_config_digest="c" * 64,
-        evidence_refs=(),
-        environment="SIMULATION",
-        policy_version="policy:1",
+        decision_digest=decision_digest,
+        policy_config_digest=policy_config_digest,
+        objective_search_config_digest=objective_search_config_digest,
+        evidence_refs=evidence_refs,
+        environment=environment,
+        policy_version=policy_version,
         decision_time=NOW,
-        provider_id="SIMULATED",
-        account_id="acct:1",
-        instrument_versions=tuple((s, f"instrument:{s}:1") for s in notionals),
-        capability_snapshot_ids=tuple((s, f"capability:{s}:1") for s in notionals),
-        account_snapshot_id="snapshot:1",
-        reconciliation_run_id="reconciliation:1",
-        account_state_version=1,
-        reservation_state_version=1,
-        reservation_state_digest="d" * 64,
-        base_currency="USD",
+        provider_id=provider_id,
+        account_id=account_id,
+        instrument_versions=instrument_versions,
+        capability_snapshot_ids=capability_snapshot_ids,
+        account_snapshot_id=account_snapshot_id,
+        reconciliation_run_id=reconciliation_run_id,
+        account_state_version=account_state_version,
+        reservation_state_version=reservation_state_version,
+        reservation_state_digest=reservation_state_digest,
+        base_currency=base_currency,
     )
 
 

@@ -31,15 +31,27 @@
     {
       "code": "DEPENDENCY_ADVISORY_EVIDENCE_MISSING",
       "detail": "Exact release dependency graph has no qualified vulnerability/advisory review."
-    },
-    {
-      "code": "DOTNET_LOCK_WORKFLOW_PATH_MISSING",
-      "detail": "NuGet lock-file changes must trigger the canonical .NET workflow."
     }
   ],
   "dotnet_package_dependencies": [
     {
+      "content_hash_sha512_base64": "Snb6mlTpuz6ZFjWMwIdg28Xp6kAUMy3zaLUyGbFSaw+/AJKlwoX8EiaWJ1eUMfKyJHksPkFjJHl1LIB7kX+0AQ==",
+      "dependencies": [],
       "name": "Microsoft.Web.WebView2",
+      "project": "src/AutoTrade.Desktop/AutoTrade.Desktop.csproj",
+      "requested": "[1.0.4191.47, )",
+      "target": "net10.0-windows7.0",
+      "type": "Direct",
+      "version": "1.0.4191.47"
+    },
+    {
+      "content_hash_sha512_base64": "Snb6mlTpuz6ZFjWMwIdg28Xp6kAUMy3zaLUyGbFSaw+/AJKlwoX8EiaWJ1eUMfKyJHksPkFjJHl1LIB7kX+0AQ==",
+      "dependencies": [],
+      "name": "Microsoft.Web.WebView2",
+      "project": "src/AutoTrade.Desktop/AutoTrade.Desktop.csproj",
+      "requested": "[1.0.4191.47, )",
+      "target": "net10.0-windows7.0/win-x64",
+      "type": "Direct",
       "version": "1.0.4191.47"
     }
   ],

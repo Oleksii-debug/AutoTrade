@@ -22,7 +22,7 @@ from .durable_order_projection import (
     require_exact_order_projection_authority,
 )
 from .exact_decimal import ExactDecimalError, parse_bounded_exact_decimal
-from .order_projection import OrderSnapshot
+from .order_projection import OrderBookProjection, OrderSnapshot
 from .portfolio_correlation import (
     CorrelationConcentrationError,
     require_correlation_safe_proposal,
@@ -43,6 +43,8 @@ if _OMS_SNAPSHOTS_GETTER is None:  # pragma: no cover - import-time invariant
 _REQUIRE_OMS_AUTHORITY_CODE = _GET(_REQUIRE_OMS_AUTHORITY, "__code__")
 _OMS_SNAPSHOTS_GETTER_CODE = _GET(_OMS_SNAPSHOTS_GETTER, "__code__")
 _BASE_CORRELATION_GUARD_CODE = _GET(_BASE_CORRELATION_GUARD, "__code__")
+_BOOK_SNAPSHOTS = _GET(OrderBookProjection, "snapshots")
+_BOOK_SNAPSHOTS_CODE = _GET(_BOOK_SNAPSHOTS, "__code__")
 
 
 def _require_bound_executable(
@@ -175,6 +177,9 @@ def _unvalued_open_orders(
     _require_oms_code=_REQUIRE_OMS_AUTHORITY_CODE,
     _snapshots_getter=_OMS_SNAPSHOTS_GETTER,
     _snapshots_getter_code=_OMS_SNAPSHOTS_GETTER_CODE,
+    _book_type=OrderBookProjection,
+    _book_snapshots=_BOOK_SNAPSHOTS,
+    _book_snapshots_code=_BOOK_SNAPSHOTS_CODE,
     _bound_check=_require_bound_executable,
     _bound_check_code=_GET(_require_bound_executable, "__code__"),
     _text=_exact_text,
@@ -211,6 +216,15 @@ def _unvalued_open_orders(
         _snapshots_getter_code,
         name="canonical OMS snapshots getter",
     )
+    # The durable getter delegates to OrderBookProjection.snapshots. A later
+    # class-method replacement could otherwise forge an empty durable book.
+    _bound_check(
+        _book_snapshots,
+        _book_snapshots_code,
+        name="canonical order-book snapshots method",
+    )
+    if _get(_book_type, "snapshots") is not _book_snapshots:
+        raise _error_type("canonical order-book snapshots method was rebound")
     _require_oms(oms)
     snapshots = _snapshots_getter(oms)
     if _type(snapshots) is not _tuple:

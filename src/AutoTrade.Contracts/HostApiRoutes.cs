@@ -8,11 +8,6 @@ namespace AutoTrade.Contracts;
 public static class HostApiRoutes
 {
     /// <summary>
-    /// Relative route for OpenAPI operation pairLocalSession.
-    /// </summary>
-    public const string PairLocalSession = "api/v1/session";
-
-    /// <summary>
     /// Relative route for OpenAPI operation getState.
     /// </summary>
     public const string GetState = "api/v1/state";

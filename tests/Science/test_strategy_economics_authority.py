@@ -6,13 +6,24 @@ from types import SimpleNamespace
 import unittest
 from uuid import UUID
 
+from mvp.autotrade_mvp.allocation import (
+    AllocationCandidate,
+    AllocationPolicy,
+    StressScenarioEvidence,
+)
 from mvp.autotrade_mvp.instruments import (
     InstrumentNotFound,
     InstrumentRegistry,
     InstrumentVersion,
     TradingCalendar,
 )
+import qualification.strategy_economics.capacity as capacity_authority
 import qualification.strategy_economics.qualify as economics_authority
+from qualification.strategy_economics.capacity import (
+    StrategyCapacityAuthorityError,
+    issue_allocation_capacity_evidence,
+    require_allocation_capacity_evidence,
+)
 from qualification.strategy_economics.qualify import (
     StrategyEconomicsAuthorityAssessment,
     StrategyEconomicsAuthorityError,
@@ -162,7 +173,287 @@ def _registry(*versions: InstrumentVersion) -> InstrumentRegistry:
     )
 
 
+def _capacity_evidence(item, *, max_executable_notional="102"):
+    candidate = AllocationCandidate.create(
+        symbol=item.symbol,
+        desired_notional="204",
+        price="102",
+        lot_size="1",
+        max_executable_notional=max_executable_notional,
+    )
+    policy = AllocationPolicy.create(
+        cash_available="1000",
+        max_gross_notional="1000",
+        max_net_notional="1000",
+        max_symbol_notional="1000",
+        max_total_cost="100",
+        max_stress_loss="1000",
+        max_turnover_notional="1000",
+    )
+    stress = (
+        StressScenarioEvidence.create(
+            name="adverse-quarter",
+            shocks={item.symbol: "-0.25"},
+            observed_at=BASE.isoformat().replace("+00:00", "Z"),
+            valid_until=item.expiry.isoformat().replace("+00:00", "Z"),
+            source_ref="science:capacity:stress:v1",
+        ),
+    )
+    return issue_allocation_capacity_evidence(
+        item,
+        instrument_version=INSTRUMENT_VERSION,
+        candidate=candidate,
+        policy=policy,
+        stress_evidence=stress,
+    )
+
+
 class StrategyEconomicsAuthorityTests(unittest.TestCase):
+    def test_canonical_allocator_capacity_replay_does_not_mint_capacity_owner(self):
+        item = _proposal()
+        capacity = _capacity_evidence(item)
+        self.assertEqual(capacity.max_feasible_quantity, "1")
+        binding = _binding(
+            item,
+            capacity_assessment_sha256=capacity.digest,
+            max_feasible_quantity="1",
+            required_evidence_dimensions=("CAPACITY",),
+            dimension_evidence=(("CAPACITY", capacity.digest),),
+        )
+
+        assessment = assess_strategy_economics_authority(
+            item,
+            binding,
+            instrument_registry=_registry(),
+            capacity_evidence=capacity,
+        )
+
+        self.assertEqual(
+            assessment.capacity_replay_digest,
+            capacity.digest,
+        )
+        self.assertIn(
+            "capacity_replay_consistency",
+            assessment.verified_owners,
+        )
+        self.assertIn(
+            "capacity_evidence_authority",
+            assessment.unresolved_owners,
+        )
+        self.assertIn(
+            "after_cost_projection_authority",
+            assessment.unresolved_owners,
+        )
+        self.assertEqual(assessment.status, "INCONCLUSIVE")
+
+    def test_capacity_evidence_revalidates_canonical_identity_and_numbers(self):
+        item = _proposal()
+        capacity = _capacity_evidence(item)
+        values = {
+            "digest": capacity.digest,
+            "instrument_version": capacity.instrument_version,
+            "strategy_fingerprint": capacity.strategy_fingerprint,
+            "strategy_configuration_fingerprint": (
+                capacity.strategy_configuration_fingerprint
+            ),
+            "symbol": capacity.symbol,
+            "action": capacity.action,
+            "decision_time": capacity.decision_time,
+            "information_cutoff": capacity.information_cutoff,
+            "horizon_seconds": capacity.horizon_seconds,
+            "proposal_quantity": capacity.proposal_quantity,
+            "max_feasible_quantity": capacity.max_feasible_quantity,
+            "lot_size": capacity.lot_size,
+            "allocation_status": capacity.allocation_status,
+            "allocation_reason": capacity.allocation_reason,
+        }
+
+        with self.assertRaisesRegex(
+            StrategyCapacityAuthorityError,
+            "canonical UUID@positive-version",
+        ):
+            capacity_authority.AllocationCapacityEvidence(
+                **{**values, "instrument_version": "instrument:legacy:v1"},
+                _token=capacity_authority._ISSUE_TOKEN,
+            )
+        with self.assertRaisesRegex(
+            StrategyCapacityAuthorityError,
+            "canonical bounded Decimal text",
+        ):
+            capacity_authority.AllocationCapacityEvidence(
+                **{**values, "lot_size": "01"},
+                _token=capacity_authority._ISSUE_TOKEN,
+            )
+        with self.assertRaisesRegex(
+            StrategyCapacityAuthorityError,
+            "cannot exceed proposal_quantity",
+        ):
+            capacity_authority.AllocationCapacityEvidence(
+                **{
+                    **values,
+                    "proposal_quantity": "1",
+                    "max_feasible_quantity": "2",
+                },
+                _token=capacity_authority._ISSUE_TOKEN,
+            )
+        with self.assertRaisesRegex(
+            StrategyCapacityAuthorityError,
+            "registration is private",
+        ):
+            capacity_authority._register_issued(
+                capacity,
+                _token=object(),
+            )
+
+    def test_capacity_replay_rejects_existing_position_without_portfolio_owner(self):
+        item = _proposal()
+        candidate = AllocationCandidate.create(
+            symbol=item.symbol,
+            desired_notional="204",
+            price="102",
+            lot_size="1",
+            current_quantity="1",
+            turnover_cost_rate="0",
+            holding_cost_rate="0",
+        )
+        policy = AllocationPolicy.create(
+            cash_available="1000",
+            max_gross_notional="1000",
+            max_net_notional="1000",
+            max_symbol_notional="1000",
+            max_total_cost="100",
+            max_stress_loss="1000",
+        )
+        with self.assertRaisesRegex(
+            StrategyCapacityAuthorityError,
+            "flat current position",
+        ):
+            issue_allocation_capacity_evidence(
+                item,
+                instrument_version=INSTRUMENT_VERSION,
+                candidate=candidate,
+                policy=policy,
+            )
+
+    def test_capacity_replay_rejects_candidate_notional_detached_from_proposal(self):
+        item = _proposal()
+        candidate = AllocationCandidate.create(
+            symbol=item.symbol,
+            desired_notional="102",
+            price="102",
+            lot_size="1",
+        )
+        policy = AllocationPolicy.create(
+            cash_available="1000",
+            max_gross_notional="1000",
+            max_net_notional="1000",
+            max_symbol_notional="1000",
+            max_total_cost="100",
+            max_stress_loss="1000",
+            require_adverse_stress_evidence=False,
+            require_fresh_stress_evidence=False,
+        )
+        with self.assertRaisesRegex(
+            StrategyCapacityAuthorityError,
+            "exact proposal quantity",
+        ):
+            issue_allocation_capacity_evidence(
+                item,
+                instrument_version=INSTRUMENT_VERSION,
+                candidate=candidate,
+                policy=policy,
+            )
+
+    def test_stale_stress_replay_fails_closed_to_zero_capacity(self):
+        item = _proposal()
+        candidate = AllocationCandidate.create(
+            symbol=item.symbol,
+            desired_notional="204",
+            price="102",
+            lot_size="1",
+        )
+        policy = AllocationPolicy.create(
+            cash_available="1000",
+            max_gross_notional="1000",
+            max_net_notional="1000",
+            max_symbol_notional="1000",
+            max_total_cost="100",
+            max_stress_loss="1000",
+        )
+        stale = (
+            StressScenarioEvidence.create(
+                name="expired-adverse",
+                shocks={item.symbol: "-0.25"},
+                observed_at=BASE.isoformat().replace("+00:00", "Z"),
+                valid_until=(BASE + timedelta(seconds=30)).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                source_ref="science:capacity:expired:v1",
+            ),
+        )
+        capacity = issue_allocation_capacity_evidence(
+            item,
+            instrument_version=INSTRUMENT_VERSION,
+            candidate=candidate,
+            policy=policy,
+            stress_evidence=stale,
+        )
+        self.assertEqual(capacity.max_feasible_quantity, "0")
+        self.assertEqual(capacity.allocation_status, "NO_INCREASE_FALLBACK")
+        self.assertIn("expired", capacity.allocation_reason)
+
+    def test_capacity_evidence_digest_cannot_be_detached_from_binding(self):
+        item = _proposal()
+        capacity = _capacity_evidence(item)
+        binding = _binding(
+            item,
+            capacity_assessment_sha256="sha256:" + "7" * 64,
+            max_feasible_quantity="1",
+        )
+        with self.assertRaisesRegex(
+            StrategyEconomicsAuthorityError,
+            "capacity evidence digest does not match economics binding",
+        ):
+            assess_strategy_economics_authority(
+                item,
+                binding,
+                instrument_registry=_registry(),
+                capacity_evidence=capacity,
+            )
+
+    def test_capacity_evidence_is_non_expansive_and_tamper_evident(self):
+        item = _proposal()
+        capacity = _capacity_evidence(
+            item,
+            max_executable_notional="1000",
+        )
+        self.assertEqual(capacity.proposal_quantity, "2")
+        self.assertEqual(capacity.max_feasible_quantity, "2")
+        object.__setattr__(capacity, "max_feasible_quantity", "3")
+        with self.assertRaisesRegex(
+            StrategyCapacityAuthorityError,
+            "unissued or changed",
+        ):
+            require_allocation_capacity_evidence(capacity)
+
+    def test_public_allocator_rebind_cannot_redirect_capacity_issuer(self):
+        item = _proposal()
+        original = capacity_authority.allocate_targets
+        calls = []
+
+        def hostile_allocator(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("rebound public allocator executed")
+
+        capacity_authority.allocate_targets = hostile_allocator
+        try:
+            capacity = _capacity_evidence(item)
+        finally:
+            capacity_authority.allocate_targets = original
+
+        self.assertEqual(calls, [])
+        self.assertEqual(capacity.max_feasible_quantity, "1")
+
     def test_structural_qualified_binding_remains_terminally_inconclusive(self):
         item = _proposal()
         binding = _binding(item)

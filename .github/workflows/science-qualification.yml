@@ -6,6 +6,13 @@ on:
     branches: [main]
     paths:
       - "mvp/autotrade_mvp/science_qualification.py"
+      - "mvp/autotrade_mvp/allocation.py"
+      - "mvp/autotrade_mvp/allocation_valuation.py"
+      - "mvp/autotrade_mvp/lifecycle_cost.py"
+      - "mvp/autotrade_mvp/simulation_session.py"
+      - "mvp/tests/test_lifecycle_cost_*.py"
+      - "qualification/strategy_economics/**"
+      - "research/autotrade_research/strategies/**"
       - "tests/Science/**"
       - "research/autotrade_research/learning/**"
       - "research/autotrade_research/memory/episodes.py"
@@ -13,6 +20,13 @@ on:
   pull_request:
     paths:
       - "mvp/autotrade_mvp/science_qualification.py"
+      - "mvp/autotrade_mvp/allocation.py"
+      - "mvp/autotrade_mvp/allocation_valuation.py"
+      - "mvp/autotrade_mvp/lifecycle_cost.py"
+      - "mvp/autotrade_mvp/simulation_session.py"
+      - "mvp/tests/test_lifecycle_cost_*.py"
+      - "qualification/strategy_economics/**"
+      - "research/autotrade_research/strategies/**"
       - "tests/Science/**"
       - "research/autotrade_research/learning/**"
       - "research/autotrade_research/memory/episodes.py"

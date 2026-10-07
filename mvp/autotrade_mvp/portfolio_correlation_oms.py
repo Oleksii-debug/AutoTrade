@@ -183,6 +183,8 @@ def _unvalued_open_orders(
     _open_quantity_code=_GET(_exact_open_quantity, "__code__"),
     _get=_GET,
     _type=type,
+    _dict_type=dict,
+    _item=dict.__getitem__,
     _tuple=tuple,
     _sorted=sorted,
     _error_type=CorrelationConcentrationError,
@@ -220,16 +222,23 @@ def _unvalued_open_orders(
             raise _error_type(
                 "canonical OMS snapshots must contain exact OrderSnapshot values"
             )
-        order_id = _text(
-            _get(snapshot, "client_order_id"),
-            name="client_order_id",
-        )
-        instrument = _text(
-            _get(snapshot, "instrument"),
-            name="instrument",
-        )
-        state = _text(_get(snapshot, "state"), name="state")
-        open_quantity = _open_quantity(_get(snapshot, "open_quantity"))
+        # A class-level data descriptor can override object.__getattribute__
+        # even for a frozen dataclass. Read canonical exact instance fields;
+        # never let a monkeypatched OrderSnapshot property hide an open order.
+        snapshot_state = _get(snapshot, "__dict__")
+        if _type(snapshot_state) is not _dict_type:
+            raise _error_type("canonical OMS snapshot state must be an exact dict")
+        try:
+            order_id = _text(
+                _item(snapshot_state, "client_order_id"), name="client_order_id"
+            )
+            instrument = _text(
+                _item(snapshot_state, "instrument"), name="instrument"
+            )
+            state = _text(_item(snapshot_state, "state"), name="state")
+            open_quantity = _open_quantity(_item(snapshot_state, "open_quantity"))
+        except KeyError as error:
+            raise _error_type("canonical OMS snapshot is missing a required field") from error
         if open_quantity != 0:
             blockers.append((order_id, instrument, state, open_quantity))
 

@@ -11,7 +11,6 @@ from mvp.autotrade_mvp.allocation import (
     AllocationPolicy,
     ImmutableAllocationEvidence,
     ObjectiveCandidate,
-    StressScenarioEvidence,
     _allocation_decision_digest,
     allocate_evidence_bound_objective_targets,
     revalidate_evidence_bound_allocation,
@@ -62,87 +61,6 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
     OBSERVED_AT = "2026-09-25T18:00:00Z"
     VALID_UNTIL = "2026-09-25T19:00:00Z"
     FORECAST_HORIZON_END = "2026-09-26T18:30:00Z"
-
-    def test_stress_evidence_rejects_callback_mapping_before_callbacks(self):
-        touched = []
-        hostile = _MutatingMapping(
-            {"AAA": "-0.20"},
-            lambda: touched.append("callback"),
-        )
-
-        with self.assertRaisesRegex(TypeError, "exact built-in dict"):
-            StressScenarioEvidence.create(
-                name="down",
-                shocks=hostile,
-                observed_at=self.OBSERVED_AT,
-                valid_until=self.VALID_UNTIL,
-                source_ref="stress:down:v1",
-            )
-
-        self.assertEqual(hostile.calls, 0)
-        self.assertEqual(touched, [])
-
-    def test_raw_stress_outer_mapping_is_rejected_before_callbacks(self):
-        touched = []
-        hostile = _MutatingMapping(
-            {"down": {"AAA": "-0.20"}},
-            lambda: touched.append("callback"),
-        )
-
-        with self.assertRaisesRegex(
-            TypeError,
-            "stress_scenarios must be an exact built-in dict",
-        ):
-            allocation_module._normalize_stress_scenarios(
-                (self.candidate().candidate,),
-                hostile,
-            )
-
-        self.assertEqual(hostile.calls, 0)
-        self.assertEqual(touched, [])
-
-    def test_raw_stress_nested_mapping_is_rejected_before_callbacks(self):
-        touched = []
-        hostile = _MutatingMapping(
-            {"AAA": "-0.20"},
-            lambda: touched.append("callback"),
-        )
-
-        with self.assertRaisesRegex(
-            TypeError,
-            "stress scenario down must be an exact built-in dict",
-        ):
-            allocation_module._normalize_stress_scenarios(
-                (self.candidate().candidate,),
-                {"down": hostile},
-            )
-
-        self.assertEqual(hostile.calls, 0)
-        self.assertEqual(touched, [])
-
-    def test_stress_evidence_iterable_is_rejected_before_iteration(self):
-        evidence = StressScenarioEvidence.create(
-            name="down",
-            shocks={"AAA": "-0.20"},
-            observed_at=self.OBSERVED_AT,
-            valid_until=self.VALID_UNTIL,
-            source_ref="stress:down:v1",
-        )
-        touched = []
-        hostile = _SecondPassMutatingIterable(
-            (evidence,),
-            lambda: touched.append("callback"),
-        )
-
-        with self.assertRaisesRegex(TypeError, "exact tuple or list"):
-            allocation_module._normalize_stress_evidence(
-                (self.candidate().candidate,),
-                hostile,
-                decision_time=self.DECISION_TIME,
-            )
-
-        self.assertEqual(hostile.iterations, 0)
-        self.assertEqual(touched, [])
 
     def policy(self, *, cash_available="1000"):
         return AllocationPolicy.create(

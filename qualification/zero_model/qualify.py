@@ -40,7 +40,8 @@ FIXED_NOW = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)
 PRICES = ("100", "101", "102", "103")
 AUTONOMOUS_PRICES = ("100", "101", "103", "102", "100", "98", "100", "103") * 15
 AUTONOMOUS_NOW = "2026-10-03T00:00:00Z"
-_SOURCE_ROOT = Path(__file__).resolve().parents[2]
+_QUALIFIER_RUNTIME_PATH = Path(__file__).resolve()
+_SOURCE_ROOT = _QUALIFIER_RUNTIME_PATH.parents[2]
 _QUALIFIER_SOURCE_PATH = "qualification/zero_model/qualify.py"
 
 
@@ -251,6 +252,24 @@ def _require_exact_checkout(expected_source_sha: str) -> str:
     return observed
 
 
+def _runtime_qualifier_bytes() -> bytes:
+    """Read the exact source file that owns this loaded qualification module."""
+
+    try:
+        runtime_path = _QUALIFIER_RUNTIME_PATH.resolve(strict=True)
+        expected_path = (_SOURCE_ROOT / _QUALIFIER_SOURCE_PATH).resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError("cannot resolve runtime qualifier source path") from error
+    if runtime_path != expected_path:
+        raise RuntimeError(
+            "runtime qualifier source path is not the canonical checkout path"
+        )
+    try:
+        return runtime_path.read_bytes()
+    except OSError as error:
+        raise RuntimeError("cannot read runtime qualifier source bytes") from error
+
+
 def _qualifier_sha256(source_sha: str) -> str:
     source_sha = _require_source_sha(source_sha)
     raw = _git_bytes(
@@ -258,6 +277,11 @@ def _qualifier_sha256(source_sha: str) -> str:
         "blob",
         f"{source_sha}:{_QUALIFIER_SOURCE_PATH}",
     ).stdout
+    runtime_raw = _runtime_qualifier_bytes()
+    if runtime_raw != raw:
+        raise RuntimeError(
+            "runtime qualifier bytes do not match exact Git source blob"
+        )
     return "sha256:" + sha256(raw).hexdigest()
 
 

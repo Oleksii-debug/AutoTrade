@@ -411,6 +411,9 @@ def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
                 )
 
     for path in sorted(candidates):
+        if any(part in {"obj", "bin"} for part in path.relative_to(root).parts):
+            # Generated restore artifacts are outputs, not source-controlled authority.
+            continue
         relative = path.relative_to(root).as_posix()
         try:
             tree = ET.parse(path)

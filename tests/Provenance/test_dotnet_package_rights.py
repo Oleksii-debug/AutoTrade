@@ -105,7 +105,7 @@ def _write_rights_workflow(root: Path, projects: list[Path]) -> None:
 def _write_policy(root: Path) -> None:
     licenses = root / "provenance" / "licenses"
     licenses.mkdir(parents=True)
-    (licenses / "Example.Package.LICENSE.txt").write_text(_LICENSE, encoding="utf-8")
+    (licenses / "Example.Package.LICENSE.txt").write_bytes(_LICENSE.encode("utf-8"))
     (root / "provenance" / "dotnet-package-rights.json").write_text(
         json.dumps(
             {
@@ -138,9 +138,9 @@ def _write_restored_package(root: Path, *, license_text: str = _LICENSE) -> Path
         encoding="ascii",
     )
     (package / "example.package.1.2.3.nupkg").write_bytes(_NUPKG_BYTES)
-    (package / "LICENSE.txt").write_text(license_text, encoding="utf-8")
-    (package / "NOTICE.txt").write_text(_NOTICE, encoding="utf-8")
-    (package / "example.package.nuspec").write_text(_NUSPEC, encoding="utf-8")
+    (package / "LICENSE.txt").write_bytes(license_text.encode("utf-8"))
+    (package / "NOTICE.txt").write_bytes(_NOTICE.encode("utf-8"))
+    (package / "example.package.nuspec").write_bytes(_NUSPEC.encode("utf-8"))
     return packages
 
 

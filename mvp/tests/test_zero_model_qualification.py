@@ -1,14 +1,23 @@
+from contextlib import contextmanager
 from decimal import Decimal
-from pathlib import Path
+from hashlib import sha256
+import os
 import socket
+from pathlib import Path
 import platform
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from qualification.zero_model.qualify import (
+    _network_denied,
     _observed_source_sha,
+    _qualifier_sha256,
+    _require_clean_checkout,
+    _runtime_qualifier_bytes,
     _require_exact_checkout,
     _require_source_sha,
+    _trusted_git_environment,
     qualify,
 )
 
@@ -21,17 +30,29 @@ class ZeroModelQualificationTests(unittest.TestCase):
         workflow = (
             ROOT / ".github" / "workflows" / "zero-model-qualification.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn("os: [ubuntu-latest, windows-latest]", workflow)
+        self.assertIn("os: [ubuntu-22.04, windows-2025]", workflow)
         self.assertIn("runs-on: ${{ matrix.os }}", workflow)
         self.assertIn(
             "zero-model-qualification-${{ runner.os }}-${{ env.EXPECTED_SOURCE_SHA }}",
             workflow,
         )
+        self.assertIn('"mvp/autotrade_mvp/**"', workflow)
+        self.assertIn('"research/autotrade_research/**"', workflow)
+        self.assertIn("mvp.tests.test_zero_model_economics", workflow)
 
     def test_zero_model_slice_is_replayable_reconciled_and_cost_free(self):
         observed = _observed_source_sha()
-        evidence = qualify(observed)
+        with patch(
+            "qualification.zero_model.qualify._require_exact_checkout",
+            wraps=_require_exact_checkout,
+        ) as exact_checkout:
+            evidence = qualify(observed)
 
+        self.assertEqual(exact_checkout.call_count, 2)
+        self.assertEqual(
+            [entry.args for entry in exact_checkout.call_args_list],
+            [(observed,), (observed,)],
+        )
         self.assertEqual(evidence["qualification"], "WP-62_ZERO_MODEL_FOUNDATION")
         self.assertEqual(
             evidence["execution_platform"],
@@ -43,6 +64,7 @@ class ZeroModelQualificationTests(unittest.TestCase):
         )
         self.assertEqual(evidence["source_sha"], observed)
         self.assertEqual(evidence["observed_source_sha"], observed)
+        self.assertTrue(evidence["source_checkout_clean"])
         self.assertRegex(evidence["qualifier_sha256"], r"^sha256:[0-9a-f]{64}$")
         route = evidence["model_route"]
         self.assertEqual(route["status"], "NO_MODEL")
@@ -67,6 +89,46 @@ class ZeroModelQualificationTests(unittest.TestCase):
                 "network_attempt_count": 0,
             },
         )
+
+        autonomous = evidence["canonical_autonomous_zero_loop"]
+        self.assertEqual(autonomous["continuous_status"], "COMPLETED")
+        self.assertEqual(autonomous["paused_status"], "PAUSED")
+        self.assertEqual(autonomous["resumed_status"], "COMPLETED")
+        self.assertEqual(autonomous["replay_status"], "COMPLETED")
+        self.assertEqual(autonomous["mode"], "ZERO")
+        self.assertEqual(autonomous["episodes"], 120)
+        self.assertEqual(autonomous["pause_cut"], 41)
+        self.assertGreater(autonomous["continuous_outbound_requests"], 20)
+        self.assertEqual(
+            autonomous["pause_resume_outbound_requests"],
+            autonomous["continuous_outbound_requests"],
+        )
+        self.assertEqual(autonomous["replay_outbound_requests"], 0)
+        self.assertTrue(autonomous["same_decisions_after_resume"])
+        self.assertTrue(autonomous["same_economics_after_resume"])
+        self.assertEqual(autonomous["economic_edge_status"], "INCONCLUSIVE")
+
+        unknown = evidence["canonical_unknown_no_resend"]
+        self.assertEqual(unknown["initial_status"], "UNKNOWN")
+        self.assertEqual(unknown["reentry_status"], "UNKNOWN")
+        self.assertEqual(unknown["initial_outbound_requests"], 1)
+        self.assertEqual(unknown["reentry_outbound_requests"], 0)
+
+        emergency = evidence["canonical_emergency_zero_loop"]
+        self.assertEqual(emergency["status"], "COMPLETED")
+        self.assertEqual(emergency["episodes"], 8)
+        self.assertEqual(emergency["outbound_requests"], 1)
+        self.assertEqual(emergency["replay_outbound_requests"], 0)
+        self.assertEqual(emergency["economic_edge_status"], "INCONCLUSIVE")
+
+        partial = evidence["canonical_partial_fill_zero_loop"]
+        self.assertEqual(partial["status"], "COMPLETED")
+        self.assertEqual(partial["mode"], "ZERO")
+        self.assertEqual(partial["execution_profile"], "TWO_EQUAL_PARTIALS")
+        self.assertGreater(partial["new_outbound_requests"], 0)
+        self.assertEqual(partial["replay_outbound_requests"], 0)
+        self.assertTrue(partial["same_decisions_after_replay"])
+        self.assertEqual(partial["economic_edge_status"], "INCONCLUSIVE")
 
         financial = evidence["deterministic_financial_slice"]
         self.assertTrue(financial["resumed"])
@@ -115,7 +177,7 @@ class ZeroModelQualificationTests(unittest.TestCase):
         self.assertFalse(claims["economic_edge_proven"])
         self.assertFalse(claims["all_wp62_workflows_qualified"])
 
-    def test_qualification_installs_network_deny_fence_around_financial_slice(self):
+    def test_qualification_denies_python_network_access(self):
         observed = _observed_source_sha()
 
         def forbidden_network_slice(*args, **kwargs):
@@ -129,12 +191,173 @@ class ZeroModelQualificationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "attempted network access"):
                 qualify(observed)
 
+    def test_network_decorator_does_not_follow_rebound_guard_alias(self):
+        calls = []
+
+        def harmless_connect(*args, **kwargs):
+            calls.append((args, kwargs))
+            return object()
+
+        @contextmanager
+        def forged_guard():
+            yield []
+
+        @_network_denied
+        def probe():
+            socket.create_connection(("example.invalid", 443))
+            return {"claims": {}}
+
+        with (
+            patch(
+                "qualification.zero_model.qualify._deny_network_access",
+                forged_guard,
+            ),
+            patch.object(socket, "create_connection", harmless_connect),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "attempted network access"):
+                probe()
+
+        self.assertEqual(calls, [])
+
+    def test_network_decorator_blocks_send_on_preexisting_socket(self):
+        calls = []
+
+        def harmless_send(_self, data, *args, **kwargs):
+            calls.append((data, args, kwargs))
+            return len(data)
+
+        @_network_denied
+        def probe(sock):
+            sock.send(b"forbidden")
+            return {"claims": {}}
+
+        sock = socket.socket()
+        try:
+            with patch.object(socket.socket, "send", harmless_send):
+                with self.assertRaisesRegex(RuntimeError, "attempted network access"):
+                    probe(sock)
+        finally:
+            sock.close()
+
+        self.assertEqual(calls, [])
+
     def test_expected_source_identity_must_match_actual_checkout(self):
         observed = _observed_source_sha()
         different = ("0" if observed[0] != "0" else "1") + observed[1:]
         with self.assertRaisesRegex(RuntimeError, "actual Git checkout"):
             _require_exact_checkout(different)
         self.assertEqual(_require_exact_checkout(observed), observed)
+
+    def test_qualifier_digest_is_bound_to_exact_source_blob(self):
+        source_sha = "a" * 40
+        canonical_blob = b"canonical zero-model qualifier bytes\n"
+        with (
+            patch(
+                "qualification.zero_model.qualify._git_bytes",
+                return_value=SimpleNamespace(stdout=canonical_blob),
+            ) as git,
+            patch(
+                "qualification.zero_model.qualify._runtime_qualifier_bytes",
+                return_value=canonical_blob,
+            ) as runtime,
+        ):
+            digest = _qualifier_sha256(source_sha)
+
+        self.assertEqual(digest, "sha256:" + sha256(canonical_blob).hexdigest())
+        self.assertEqual(
+            git.call_args.args,
+            (
+                "cat-file",
+                "blob",
+                f"{source_sha}:qualification/zero_model/qualify.py",
+            ),
+        )
+        runtime.assert_called_once_with()
+
+    def test_runtime_qualifier_bytes_must_match_exact_source_blob(self):
+        source_sha = "a" * 40
+        with (
+            patch(
+                "qualification.zero_model.qualify._git_bytes",
+                return_value=SimpleNamespace(stdout=b"git-source\n"),
+            ),
+            patch(
+                "qualification.zero_model.qualify._runtime_qualifier_bytes",
+                return_value=b"runtime-source\n",
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "runtime qualifier bytes do not match exact Git source blob",
+            ):
+                _qualifier_sha256(source_sha)
+
+    def test_runtime_qualifier_source_is_canonical_checkout_path(self):
+        self.assertEqual(
+            _runtime_qualifier_bytes(),
+            (
+                ROOT / "qualification" / "zero_model" / "qualify.py"
+            ).read_bytes(),
+        )
+
+    def test_source_identity_is_read_from_exact_qualifier_checkout_root(self):
+        expected = "a" * 40
+        with patch(
+            "qualification.zero_model.qualify._git",
+            side_effect=(
+                SimpleNamespace(stdout=str(ROOT) + "\n"),
+                SimpleNamespace(stdout=expected + "\n"),
+            ),
+        ) as git:
+            self.assertEqual(_observed_source_sha(), expected)
+        self.assertEqual(git.call_args_list[0].args, ("rev-parse", "--show-toplevel"))
+        self.assertEqual(git.call_args_list[1].args, ("rev-parse", "HEAD"))
+
+    def test_dirty_checkout_cannot_issue_zero_model_qualification(self):
+        with patch(
+            "qualification.zero_model.qualify._git",
+            return_value=SimpleNamespace(
+                stdout=" M mvp/autotrade_mvp/simulation_session.py\n"
+            ),
+        ) as git:
+            with self.assertRaisesRegex(RuntimeError, "source changes"):
+                _require_clean_checkout()
+        self.assertEqual(
+            git.call_args.args,
+            (
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.untrackedCache=false",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ),
+        )
+
+    def test_git_inspection_environment_drops_caller_repository_authority(self):
+        poisoned = {
+            "PATH": str(ROOT / "attacker-bin"),
+            "GIT_DIR": str(ROOT / "attacker.git"),
+            "GIT_WORK_TREE": str(ROOT / "attacker-worktree"),
+            "GIT_CONFIG_GLOBAL": str(ROOT / "attacker.gitconfig"),
+        }
+        with patch.dict(os.environ, poisoned, clear=False):
+            environment = _trusted_git_environment()
+
+        self.assertNotIn("PATH", environment)
+        self.assertNotIn("GIT_DIR", environment)
+        self.assertNotIn("GIT_WORK_TREE", environment)
+        self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(environment["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
+
+    def test_source_sha_rejects_text_subclasses_before_observation(self):
+        class HostileSha(str):
+            pass
+
+        with self.assertRaisesRegex(TypeError, "exact text"):
+            _require_source_sha(HostileSha("a" * 40))
 
     def test_source_sha_accepts_canonical_sha1_or_sha256_only(self):
         self.assertEqual(_require_source_sha("a" * 40), "a" * 40)

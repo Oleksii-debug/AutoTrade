@@ -1,6 +1,7 @@
 from decimal import Decimal
 from hashlib import sha256
 import os
+import socket
 from pathlib import Path
 import platform
 from types import SimpleNamespace
@@ -78,6 +79,13 @@ class ZeroModelQualificationTests(unittest.TestCase):
             self.assertEqual(outage["reserved_cost"], "0")
             self.assertEqual(outage["reason"], "no_admissible_model")
         self.assertEqual(evidence["model_cost_total"], "0")
+        self.assertEqual(
+            evidence["network_guard"],
+            {
+                "python_socket_io_blocked": True,
+                "network_attempt_count": 0,
+            },
+        )
 
         autonomous = evidence["canonical_autonomous_zero_loop"]
         self.assertEqual(autonomous["continuous_status"], "COMPLETED")
@@ -165,6 +173,20 @@ class ZeroModelQualificationTests(unittest.TestCase):
         self.assertFalse(claims["live_trading_qualified"])
         self.assertFalse(claims["economic_edge_proven"])
         self.assertFalse(claims["all_wp62_workflows_qualified"])
+
+    def test_qualification_denies_python_network_access(self):
+        observed = _observed_source_sha()
+
+        def forbidden_network_slice(*args, **kwargs):
+            del args, kwargs
+            socket.create_connection(("127.0.0.1", 9), timeout=0.01)
+
+        with patch(
+            "qualification.zero_model.qualify.run_vertical_slice",
+            side_effect=forbidden_network_slice,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "attempted network access"):
+                qualify(observed)
 
     def test_expected_source_identity_must_match_actual_checkout(self):
         observed = _observed_source_sha()

@@ -277,6 +277,22 @@ class LifecycleCostTests(unittest.TestCase):
                 required_kinds=("COMMISSION",),
             )
 
+    def test_identity_text_rejects_surrounding_whitespace_instead_of_aliasing(self):
+        with self.assertRaisesRegex(LifecycleCostError, "surrounding whitespace"):
+            self.profile(decision_scope_ref=" decision-scope:test:v1")
+        with self.assertRaisesRegex(LifecycleCostError, "surrounding whitespace"):
+            LifecycleCostRequirements(
+                requirements_ref="requirements:test:v1 ",
+                required_kinds=("COMMISSION",),
+            )
+        with self.assertRaisesRegex(LifecycleCostError, "surrounding whitespace"):
+            self.component(
+                "commission",
+                "COMMISSION",
+                "0.001",
+                evidence_ref=" evidence:commission",
+            )
+
     def test_rate_sum_overflow_is_reported_as_lifecycle_error(self):
         maximum = "9" * 256
         profile = self.profile(

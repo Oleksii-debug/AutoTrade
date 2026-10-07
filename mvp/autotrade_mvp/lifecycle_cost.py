@@ -62,7 +62,9 @@ def _text(value: object, *, name: str) -> str:
     normalized = value.strip()
     if not normalized:
         raise LifecycleCostError(f"{name} is required")
-    return normalized
+    if value != normalized:
+        raise LifecycleCostError(f"{name} must not contain surrounding whitespace")
+    return value
 
 
 def _instrument_version_ref(value: object) -> str:

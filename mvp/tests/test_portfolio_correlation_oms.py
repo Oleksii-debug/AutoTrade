@@ -437,3 +437,41 @@ def test_explicit_helper_override_cannot_bypass_open_oms_exposure():
                 _open_orders_code=forged_open_orders.__code__,
             )
         assert forged_calls == []
+
+
+def test_in_place_verifier_lookup_defaults_cannot_hide_open_order():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        proposal, evidence, resolver, policy = _passing_inputs()
+        verifier = correlation_oms._require_bound_executable
+        getter = correlation_oms._OMS_SNAPSHOTS_GETTER
+        original_verifier_defaults = dict(verifier.__kwdefaults__)
+        original_getter_code = getter.__code__
+        forged_calls = []
+
+        def forged_snapshots(_self):
+            forged_calls.append("forged-snapshots")
+            return ()
+
+        def forged_code_lookup(function, attribute):
+            if function is getter and attribute == "__code__":
+                forged_calls.append("forged-code-lookup")
+                return original_getter_code
+            return object.__getattribute__(function, attribute)
+
+        verifier.__kwdefaults__["_get"] = forged_code_lookup
+        getter.__code__ = forged_snapshots.__code__
+        try:
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="OMS executable verifier defaults changed after binding",
+            ):
+                require_correlation_safe_proposal_with_oms(
+                    proposal, evidence, resolver, policy, oms=oms,
+                )
+        finally:
+            getter.__code__ = original_getter_code
+            verifier.__kwdefaults__.clear()
+            verifier.__kwdefaults__.update(original_verifier_defaults)
+        assert forged_calls == []

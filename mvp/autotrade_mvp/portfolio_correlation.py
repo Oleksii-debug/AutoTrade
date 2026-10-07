@@ -21,6 +21,7 @@ from .allocation import (
     AllocationTarget,
     EvidenceBoundObjectiveAllocationResult,
     ObjectiveAllocationResult,
+    _allocation_decision_digest,
 )
 from .exact_decimal import (
     ExactDecimalError,
@@ -356,6 +357,27 @@ def _allocation_context(
         or any(ch not in "0123456789abcdef" for ch in decision_digest)
     ):
         raise ValueError("allocation decision_digest must be lowercase sha256 hex")
+    expected_decision_digest = _allocation_decision_digest(
+        objective,
+        evidence_refs=_get(result, "evidence_refs"),
+        environment=_get(result, "environment"),
+        policy_version=_get(result, "policy_version"),
+        policy_config_digest=_get(result, "policy_config_digest"),
+        objective_search_config_digest=_get(result, "objective_search_config_digest"),
+        decision_time=_get(result, "decision_time"),
+        provider_id=_get(result, "provider_id"),
+        account_id=_get(result, "account_id"),
+        instrument_versions=_get(result, "instrument_versions"),
+        capability_snapshot_ids=_get(result, "capability_snapshot_ids"),
+        account_snapshot_id=_get(result, "account_snapshot_id"),
+        reconciliation_run_id=_get(result, "reconciliation_run_id"),
+        account_state_version=_get(result, "account_state_version"),
+        reservation_state_version=_get(result, "reservation_state_version"),
+        reservation_state_digest=_get(result, "reservation_state_digest"),
+        base_currency=_get(result, "base_currency"),
+    )
+    if expected_decision_digest != decision_digest:
+        raise ValueError("allocation decision_digest does not match result content")
     return exposures, environment, decision_time, base_currency, decision_digest
 
 

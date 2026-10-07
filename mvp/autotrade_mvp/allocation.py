@@ -2587,6 +2587,33 @@ def _allocation_decision_digest(
     _getattr=getattr,
     _type_error=TypeError,
     _value_error=ValueError,
+    _dict_get=dict.get,
+    _builtin_namespace=builtins.__dict__,
+    _builtin_authorities=tuple(
+        (name, builtins.__dict__[name])
+        for name in (
+            "any",
+            "bool",
+            "dict",
+            "float",
+            "getattr",
+            "int",
+            "isinstance",
+            "iter",
+            "len",
+            "list",
+            "next",
+            "object",
+            "set",
+            "sorted",
+            "str",
+            "tuple",
+            "type",
+            "RuntimeError",
+            "TypeError",
+            "ValueError",
+        )
+    ),
     _sha256=sha256,
     _canonical_json=_canonical_evidence_json,
     _canonical_json_code=getattr(_canonical_evidence_json, "__code__", None),
@@ -2597,6 +2624,11 @@ def _allocation_decision_digest(
         raise _value_error(
             "allocation decision canonicalizer executable changed after binding"
         )
+    for builtin_name, authority in _builtin_authorities:
+        if _dict_get(_builtin_namespace, builtin_name) is not authority:
+            raise _value_error(
+                f"allocation decision builtin authority changed after binding: {builtin_name}"
+            )
     if _type(result) is not _result_type:
         raise _type_error("allocation decision result must be exact ObjectiveAllocationResult")
 

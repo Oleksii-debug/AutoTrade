@@ -996,6 +996,7 @@ def build_production_host(
     security_boundary: SecurityBoundary,
     principal_resolver: PrincipalResolver,
     snapshot_provider: SnapshotProvider,
+    application_factory: Callable[..., AuthenticatedHostApplication] | None = None,
     tls_context: ssl.SSLContext | None = None,
     now: Callable[[], str] | None = None,
 ) -> ProductionHostRuntime:
@@ -1008,6 +1009,8 @@ def build_production_host(
         raise TypeError("principal_resolver must be callable")
     if not callable(snapshot_provider):
         raise TypeError("snapshot_provider must be callable")
+    if application_factory is not None and not callable(application_factory):
+        raise TypeError("application_factory must be callable")
 
     scheme = urlsplit(config.public_origin).scheme
     if tls_context is None and scheme != "http":
@@ -1019,7 +1022,7 @@ def build_production_host(
     server: AuthenticatedHostServer | None = None
     try:
         journal = JournalStore(config.journal_path)
-        application = AuthenticatedHostApplication(
+        application = (application_factory or AuthenticatedHostApplication)(
             journal,
             security_boundary=security_boundary,
             account_id=config.account_id,
@@ -1030,6 +1033,19 @@ def build_production_host(
             snapshot_provider=snapshot_provider,
             now=now,
         )
+        if application_factory is not None:
+            if (
+                not isinstance(application, AuthenticatedHostApplication)
+                or application.store._journal is not journal
+                or application.security_boundary is not security_boundary
+                or application.host_id != config.host_id
+                or application.public_origin != config.public_origin
+                or application._principal_resolver is not principal_resolver
+                or application._snapshot_provider is not snapshot_provider
+                or application.store.account_id != config.account_id
+                or application.store.environment != config.environment
+            ):
+                raise TypeError("application_factory changed canonical host authorities")
         identity_gate = _StoreIdentityGate(application, journal)
         admission_gate = _CommandAdmissionGate(identity_gate)
         application.dispatch = admission_gate.dispatch  # type: ignore[method-assign]

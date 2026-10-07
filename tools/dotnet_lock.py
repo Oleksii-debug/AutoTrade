@@ -26,6 +26,15 @@ _DOTNET_RESTORE_ENVIRONMENT_AUTHORITY = (
     "NuGetLockFilePath",
 )
 
+# These are framework SDKs supplied by the repository-pinned .NET SDK itself,
+# not arbitrary NuGet/MSBuild extension authorities. Keep this exact allowlist
+# closed so custom/version-qualified SDK imports still fail before release graph
+# qualification.
+_TRUSTED_PROJECT_SDK_AUTHORITIES = frozenset({
+    "Microsoft.NET.Sdk",
+    "Microsoft.NET.Sdk.Web",
+})
+
 
 def _nuget_identity_component_is_path_safe(value: object) -> bool:
     """Reject package identity text that can escape a restored package directory."""
@@ -382,7 +391,10 @@ def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
                 continue
             project_root = tree.getroot()
             sdk_attribute = project_root.attrib.get('Sdk')
-            if sdk_attribute is not None and sdk_attribute != 'Microsoft.NET.Sdk':
+            if (
+                sdk_attribute is not None
+                and sdk_attribute not in _TRUSTED_PROJECT_SDK_AUTHORITIES
+            ):
                 blockers.append(
                     f'DOTNET_PROJECT_SDK_AUTHORITY_UNSUPPORTED:'
                     f'{relative}:{sdk_attribute}'

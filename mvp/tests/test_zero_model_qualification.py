@@ -266,6 +266,13 @@ class ZeroModelQualificationTests(unittest.TestCase):
         self.assertEqual(environment["GIT_CONFIG_GLOBAL"], os.devnull)
         self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
 
+    def test_source_sha_rejects_text_subclasses_before_observation(self):
+        class HostileSha(str):
+            pass
+
+        with self.assertRaisesRegex(TypeError, "exact text"):
+            _require_source_sha(HostileSha("a" * 40))
+
     def test_source_sha_accepts_canonical_sha1_or_sha256_only(self):
         self.assertEqual(_require_source_sha("a" * 40), "a" * 40)
         self.assertEqual(_require_source_sha("b" * 64), "b" * 64)

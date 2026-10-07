@@ -117,8 +117,8 @@ def _network_denied(function):
 
 
 def _require_source_sha(value: str) -> str:
-    if not isinstance(value, str):
-        raise TypeError("source SHA must be text")
+    if type(value) is not str:
+        raise TypeError("source SHA must be exact text")
     if (
         len(value) not in {40, 64}
         or value != value.strip()

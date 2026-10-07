@@ -120,6 +120,30 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
         self.assertEqual(hostile.calls, 0)
         self.assertEqual(touched, [])
 
+    def test_stress_evidence_iterable_is_rejected_before_iteration(self):
+        evidence = StressScenarioEvidence.create(
+            name="down",
+            shocks={"AAA": "-0.20"},
+            observed_at=self.OBSERVED_AT,
+            valid_until=self.VALID_UNTIL,
+            source_ref="stress:down:v1",
+        )
+        touched = []
+        hostile = _SecondPassMutatingIterable(
+            (evidence,),
+            lambda: touched.append("callback"),
+        )
+
+        with self.assertRaisesRegex(TypeError, "exact tuple or list"):
+            allocation_module._normalize_stress_evidence(
+                (self.candidate().candidate,),
+                hostile,
+                decision_time=self.DECISION_TIME,
+            )
+
+        self.assertEqual(hostile.iterations, 0)
+        self.assertEqual(touched, [])
+
     def policy(self, *, cash_available="1000"):
         return AllocationPolicy.create(
             cash_available=cash_available,

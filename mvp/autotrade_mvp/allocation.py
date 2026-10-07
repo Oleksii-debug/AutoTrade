@@ -724,11 +724,16 @@ def _normalize_stress_evidence(
     if decision_time is None:
         return {}, "fresh stress evidence requires an explicit decision_time"
     point = _instant(decision_time, name="decision_time")
-    materialized = tuple(evidence)
+    if type(evidence) is tuple:
+        materialized = evidence
+    elif type(evidence) is list:
+        materialized = tuple(list.copy(evidence))
+    else:
+        raise TypeError("stress_evidence must be an exact tuple or list")
     if not materialized:
         return {}, "fresh stress evidence is required before increasing exposure"
-    if any(not isinstance(item, StressScenarioEvidence) for item in materialized):
-        raise TypeError("stress_evidence must contain StressScenarioEvidence values")
+    if any(type(item) is not StressScenarioEvidence for item in materialized):
+        raise TypeError("stress_evidence must contain exact StressScenarioEvidence values")
     names = [item.name for item in materialized]
     if len(names) != len(set(names)):
         raise ValueError("stress evidence names must be unique")

@@ -534,9 +534,6 @@ def _build_provider_borrow_evidence_verifier():
     return verify
 
 
-verify_provider_borrow_evidence = _build_provider_borrow_evidence_verifier()
-del _build_provider_borrow_evidence_verifier
-
 def _borrow_resource_key_from_identity(identity: list[object]) -> str:
     canonical = json.dumps(identity, ensure_ascii=True, separators=(",", ":"))
     return "BORROW:" + str(
@@ -946,6 +943,10 @@ class BorrowRecallResolutionEvidence:
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> "BorrowRecallResolutionEvidence":
         return cls(**dict(payload))
+
+
+verify_provider_borrow_evidence = _build_provider_borrow_evidence_verifier()
+del _build_provider_borrow_evidence_verifier
 
 
 @dataclass(frozen=True)

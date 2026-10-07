@@ -309,6 +309,7 @@ global.document = {
 };
 global.window = {
   addEventListener() {},
+  getSelection() { return null; },
   setTimeout(callback) {
     callback();
     return 1;

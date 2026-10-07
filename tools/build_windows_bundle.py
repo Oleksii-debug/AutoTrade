@@ -501,12 +501,10 @@ def _walk_staging_windows_retained(staging: Path) -> list[tuple[Path, bytes]]:
 
             if not stat.S_ISREG(observed.st_mode):
                 raise BundleError(f"unsupported filesystem entry: {path}")
-            if observed.st_nlink > 1:
-                raise BundleError(f"hardlinked staged files are forbidden: {path}")
-            if observed.st_nlink != 1:
-                raise BundleError(f"staged file changed during collection: {path}")
-
-            # Entry metadata admits only type/reparse/link shape. Exact
+            # Windows DirEntry.stat may report st_nlink=0 even for a regular
+            # single-link file. The native handle checks below authoritatively
+            # reject hard links and vanished files after opening them.
+            # Entry metadata admits only type/reparse shape. Exact
             # generation identity is established by two descriptors in the
             # same CRT/fstat domain, with the second descriptor held by the
             # canonical retained no-WRITE/no-DELETE Windows authority.

@@ -285,7 +285,9 @@ class JournalBackedHostCommandStore:
         if account_id != self.account_id or environment != self.environment:
             raise ValueError("command scope does not match active host account/environment")
         action = canonical_host_action(command.get("action"))
-        expected_raw = self._required_text(command, "expected_state_version")
+        # Preserve the exact wire value. Trimming here would turn a malformed
+        # sequence into a valid command before the canonical scalar check.
+        expected_raw = command.get("expected_state_version")
         if "payload" not in command or not isinstance(command["payload"], dict):
             raise ValueError("payload must be an object")
         if not is_valid_common_scalar("Sequence", expected_raw):

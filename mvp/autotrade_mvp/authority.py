@@ -1449,11 +1449,13 @@ class AllocationAuthoritySnapshot:
         evidence: dict[str, ImmutableAllocationEvidence] = {}
         for raw_id, item in dict.items(raw_resolved_evidence):
             evidence_id = _text(raw_id, name="allocation evidence id")
-            if not isinstance(item, ImmutableAllocationEvidence):
+            if type(item) is not ImmutableAllocationEvidence:
                 raise TypeError(
-                    "resolved allocation evidence values must be ImmutableAllocationEvidence"
+                    "resolved allocation evidence values must use the exact "
+                    "ImmutableAllocationEvidence type"
                 )
-            if evidence_id != item.evidence_id:
+            item_evidence_id = object.__getattribute__(item, "evidence_id")
+            if evidence_id != item_evidence_id:
                 raise ValueError(
                     "resolved allocation evidence key must match evidence_id"
                 )
@@ -1479,12 +1481,11 @@ class AllocationAuthoritySnapshot:
             return MappingProxyType(dict(sorted(result.items())))
 
         if (
-            not isinstance(self.account_state_version, int)
-            or isinstance(self.account_state_version, bool)
+            type(self.account_state_version) is not int
             or self.account_state_version < 0
         ):
             raise ValueError(
-                "allocation account_state_version must be a non-negative integer"
+                "allocation account_state_version must be a non-negative exact integer"
             )
         object.__setattr__(
             self,

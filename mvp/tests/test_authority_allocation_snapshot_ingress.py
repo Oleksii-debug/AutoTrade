@@ -1,7 +1,7 @@
 import unittest
 from collections.abc import Mapping
 
-from mvp.autotrade_mvp.allocation import AllocationPolicy
+from mvp.autotrade_mvp.allocation import AllocationPolicy, ImmutableAllocationEvidence
 from mvp.autotrade_mvp.authority import AllocationAuthoritySnapshot
 
 
@@ -31,6 +31,24 @@ class _CallbackDict(dict):
 
     def __getitem__(self, key):
         raise AssertionError("authority boundary executed dict-subclass __getitem__")
+
+
+class _CallbackEvidence(ImmutableAllocationEvidence):
+    calls = []
+
+    def __getattribute__(self, name):
+        type(self).calls.append(name)
+        raise AssertionError(
+            f"authority boundary executed evidence subclass attribute {name}"
+        )
+
+
+class _CallbackInt(int):
+    calls = []
+
+    def __lt__(self, other):
+        type(self).calls.append(("lt", other))
+        raise AssertionError("authority boundary executed int-subclass comparison")
 
 
 def _policy():
@@ -104,6 +122,25 @@ class AllocationAuthoritySnapshotIngressTests(unittest.TestCase):
             dict(snapshot.capability_snapshot_ids),
             {"ABC": "capability-v1"},
         )
+
+
+    def test_evidence_subclass_is_rejected_before_attribute_dispatch(self):
+        hostile = object.__new__(_CallbackEvidence)
+        _CallbackEvidence.calls.clear()
+
+        with self.assertRaisesRegex(TypeError, "exact ImmutableAllocationEvidence"):
+            _snapshot(resolved_evidence={"evidence-1": hostile})
+
+        self.assertEqual(_CallbackEvidence.calls, [])
+
+    def test_account_state_version_int_subclass_is_rejected_before_comparison(self):
+        hostile = _CallbackInt(0)
+        _CallbackInt.calls.clear()
+
+        with self.assertRaisesRegex(ValueError, "non-negative exact integer"):
+            _snapshot(account_state_version=hostile)
+
+        self.assertEqual(_CallbackInt.calls, [])
 
 
 if __name__ == "__main__":

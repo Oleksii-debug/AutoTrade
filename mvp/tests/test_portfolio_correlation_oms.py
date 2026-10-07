@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+from decimal import Decimal
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -8,6 +9,7 @@ import pytest
 
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.order_projection import OrderSnapshot
 from mvp.autotrade_mvp.portfolio_correlation import CorrelationConcentrationError
 import mvp.autotrade_mvp.portfolio_correlation_oms as correlation_oms
 from mvp.autotrade_mvp.portfolio_correlation_oms import (
@@ -154,6 +156,71 @@ def test_proposal_class_property_spoof_cannot_fake_matching_oms_scope():
                     oms=oms,
                 )
         assert callbacks == []
+
+
+
+def test_order_snapshot_open_quantity_descriptor_spoof_cannot_hide_open_order():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        proposal, evidence, resolver, policy = _passing_inputs()
+        calls: list[str] = []
+
+        def forged_open_quantity(_snapshot):
+            calls.append("open_quantity")
+            return Decimal("0")
+
+        def retain_real_quantity(snapshot, value):
+            object.__getattribute__(snapshot, "__dict__")["open_quantity"] = value
+
+        with patch.object(
+            OrderSnapshot,
+            "open_quantity",
+            new=property(forged_open_quantity, retain_real_quantity),
+            create=True,
+        ):
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="canonical OMS has unvalued open exposure",
+            ):
+                require_correlation_safe_proposal_with_oms(
+                    proposal, evidence, resolver, policy, oms=oms
+                )
+
+        assert calls == []
+
+
+def test_order_snapshot_identifier_descriptor_spoof_cannot_change_exposure_identity():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        proposal, evidence, resolver, policy = _passing_inputs()
+        calls: list[str] = []
+
+        def forged_identifier(_snapshot):
+            calls.append("client_order_id")
+            return "forged-hidden-order"
+
+        def retain_real_identifier(snapshot, value):
+            object.__getattribute__(snapshot, "__dict__")["client_order_id"] = value
+
+        with patch.object(
+            OrderSnapshot,
+            "client_order_id",
+            new=property(forged_identifier, retain_real_identifier),
+            create=True,
+        ):
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="canonical OMS has unvalued open exposure",
+            ) as caught:
+                require_correlation_safe_proposal_with_oms(
+                    proposal, evidence, resolver, policy, oms=oms
+                )
+
+        assert "open-order-1" in str(caught.value)
+        assert "forged-hidden-order" not in str(caught.value)
+        assert calls == []
 
 
 def test_open_durable_order_blocks_otherwise_passing_correlation_admission():

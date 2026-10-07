@@ -39,6 +39,7 @@ _PHASE_KINDS = {
             "EXCHANGE_FEE",
             "SPREAD",
             "SLIPPAGE",
+            "MARKET_IMPACT",
             "FX_CONVERSION",
             "TRANSACTION_TAX",
         }

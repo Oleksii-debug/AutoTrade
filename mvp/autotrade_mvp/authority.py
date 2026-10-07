@@ -1433,16 +1433,29 @@ class AllocationAuthoritySnapshot:
             or self.max_candidate_sets < 1
         ):
             raise ValueError("max_candidate_sets must be a positive exact integer")
-        if not isinstance(self.resolved_evidence, Mapping):
-            raise TypeError("resolved_evidence must be a mapping")
+        def detached_exact_dict(raw, *, name: str) -> dict:
+            # Authority-bearing resolver snapshots must be inert before any
+            # semantic traversal.  Generic Mapping or dict-subclass ingress
+            # can execute caller callbacks from items/iter/getitem while this
+            # boundary is deciding which financial facts are authoritative.
+            if type(raw) is not dict:
+                raise TypeError(f"{name} must be an exact built-in dict")
+            return dict.copy(raw)
+
+        raw_resolved_evidence = detached_exact_dict(
+            self.resolved_evidence,
+            name="resolved_evidence",
+        )
         evidence: dict[str, ImmutableAllocationEvidence] = {}
-        for raw_id, item in self.resolved_evidence.items():
+        for raw_id, item in dict.items(raw_resolved_evidence):
             evidence_id = _text(raw_id, name="allocation evidence id")
-            if not isinstance(item, ImmutableAllocationEvidence):
+            if type(item) is not ImmutableAllocationEvidence:
                 raise TypeError(
-                    "resolved allocation evidence values must be ImmutableAllocationEvidence"
+                    "resolved allocation evidence values must use the exact "
+                    "ImmutableAllocationEvidence type"
                 )
-            if evidence_id != item.evidence_id:
+            item_evidence_id = object.__getattribute__(item, "evidence_id")
+            if evidence_id != item_evidence_id:
                 raise ValueError(
                     "resolved allocation evidence key must match evidence_id"
                 )
@@ -1455,10 +1468,9 @@ class AllocationAuthoritySnapshot:
             *,
             name: str,
         ) -> Mapping[str, str]:
-            if not isinstance(raw, Mapping):
-                raise TypeError(f"{name} must be a mapping")
+            snapshot = detached_exact_dict(raw, name=name)
             result: dict[str, str] = {}
-            for raw_symbol, raw_identity in raw.items():
+            for raw_symbol, raw_identity in dict.items(snapshot):
                 symbol = _text(raw_symbol, name=f"{name} symbol")
                 if symbol in result:
                     raise ValueError(f"{name} symbols must be unique")
@@ -1469,12 +1481,11 @@ class AllocationAuthoritySnapshot:
             return MappingProxyType(dict(sorted(result.items())))
 
         if (
-            not isinstance(self.account_state_version, int)
-            or isinstance(self.account_state_version, bool)
+            type(self.account_state_version) is not int
             or self.account_state_version < 0
         ):
             raise ValueError(
-                "allocation account_state_version must be a non-negative integer"
+                "allocation account_state_version must be a non-negative exact integer"
             )
         object.__setattr__(
             self,
@@ -1504,10 +1515,12 @@ class AllocationAuthoritySnapshot:
                 name="allocation instrument_versions",
             ),
         )
-        if not isinstance(self.financial_instruments, Mapping):
-            raise TypeError("financial_instruments must be a mapping")
+        raw_financial_instruments = detached_exact_dict(
+            self.financial_instruments,
+            name="financial_instruments",
+        )
         normalized_financial_instruments: dict[str, InstrumentVersionIdentity] = {}
-        for raw_symbol, raw_identity in self.financial_instruments.items():
+        for raw_symbol, raw_identity in dict.items(raw_financial_instruments):
             symbol = _text(
                 raw_symbol,
                 name="allocation financial_instruments symbol",

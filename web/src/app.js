@@ -1626,6 +1626,8 @@
         let acceptedMessage =
           "Command " + commandId +
           " was accepted for processing. It is not yet a completed financial outcome.";
+        text("command-result", acceptedMessage);
+        byId("command-result").focus();
         if (result.operationId !== null) {
           try {
             const operation = await refreshOperation(result.operationId);

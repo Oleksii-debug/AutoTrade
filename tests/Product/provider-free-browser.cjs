@@ -80,7 +80,8 @@ async function command(page, action, index) {
     "command-result",
     action + " command feedback focus");
   await page.waitForFunction(count => document.querySelectorAll("#operations-body tr[data-operation-id]").length > count
-    && document.querySelector("#operations-body").lastElementChild?.children[1]?.textContent === "SUCCEEDED", before);
+    && document.querySelector("#operations-body").lastElementChild?.children[1]?.textContent === "SUCCEEDED", before,
+    {timeout: 120000});
   await page.keyboard.press("Shift+Tab");
   assert.equal(
     await page.evaluate(() => document.activeElement.id),

@@ -227,20 +227,23 @@ def _unvalued_open_orders(
         )
         state = _text(_get(snapshot, "state"), name="state")
         open_quantity = _open_quantity(_get(snapshot, "open_quantity"))
-        # OrderSnapshot.open_quantity means *unfilled remainder*, including a
-        # remainder already released by confirmed cancellation/rejection/expiry.
-        # It is not by itself working-order exposure. Never turn an unconfirmed
-        # cancel/replace/UNKNOWN into a terminal release.
+        # The OMS open_quantity is an arithmetic unfilled remainder, including
+        # a provider-confirmed terminal remainder. Such a remainder is not
+        # working risk only if the order has *no* executed exposure. Partially
+        # filled terminal orders remain INCONCLUSIVE until the accounting/
+        # reconciliation cut proves their fills are in the allocated positions.
+        # Unknown, pending cancel/replace and OCO-violating states never release.
         if open_quantity != 0:
-            if state in ("CANCELLED", "PARTIALLY_FILLED_CANCELLED"):
-                if _get(snapshot, "cancel_confirmed") is not True:
+            if state in ("CANCELLED", "EXPIRED", "REJECTED"):
+                filled = _open_quantity(_get(snapshot, "filled_quantity"))
+                if filled != 0:
+                    raise _error_type(
+                        "terminal OMS fills need authenticated allocation reconciliation"
+                    )
+                if state == "CANCELLED" and _get(snapshot, "cancel_confirmed") is not True:
                     raise _error_type("canonical OMS cancellation lacks confirmation")
-                continue
-            if state in ("EXPIRED", "PARTIALLY_FILLED_EXPIRED"):
-                if _get(snapshot, "expired") is not True:
+                if state == "EXPIRED" and _get(snapshot, "expired") is not True:
                     raise _error_type("canonical OMS expiry lacks confirmation")
-                continue
-            if state == "REJECTED":
                 continue
             blockers.append((order_id, instrument, state, open_quantity))
 

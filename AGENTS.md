@@ -11,8 +11,8 @@ Canonical worker-coordination override:
 - Any older fixed worker count, WIP limit, serialized lane, ownership/claim lock, exclusive integration owner, mandatory PR-order waiting rule, or CI-wait stop rule is non-binding if it conflicts with this section.
 - Claims, leases, ownership, assignments, queues, and coordinator labels are advisory coordination metadata only; they do not override the ordered Sequential closure authority below.
 - Workers may create branches, commits, pull requests, tests, fixes, integration commits, and merges when GitHub permissions allow and the change is honestly verified.
-- Dependencies constrain final integration order only. They must not stop independent implementation, testing, hardening, research, documentation, accessibility, packaging, fixtures, adapters, or other non-conflicting work.
-- Queued, pending, slow, or unavailable CI is never by itself a reason to terminate. Record the pending state and immediately continue another valuable independent task.
+- Parallel implementation, testing, hardening, research, documentation, accessibility, packaging, fixtures and adapters are allowed only when consistent with the ordered Sequential closure authority below: prioritize the earliest unfinished Section and use later work only when dependency-safe or directly supportive.
+- Queued, pending, slow, or unavailable CI is never by itself a reason to terminate. Record the pending state and continue only work permitted by the current ordered closure front.
 - A blocked primary closure front may be left only after all safe internally controllable residual work is exhausted and the blocker is durably recorded; later work must remain dependency-safe.
 - Do not idle because another PR, branch, worker, check, review, claim, or queue is active. Switch to non-conflicting work or reconcile/rebase instead of abandoning the run.
 - No repository-defined exclusive integration owner is required.

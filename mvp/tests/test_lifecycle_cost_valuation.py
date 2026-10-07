@@ -101,6 +101,53 @@ class LifecycleCostValuationBridgeTests(unittest.TestCase):
         for ref in projection.cost_evidence_refs.values():
             self.assertRegex(ref, r"^sha256:[0-9a-f]{64}$")
 
+    def test_market_impact_requires_frozen_evidence_and_is_charged_separately(self):
+        base = _profile()
+        requirements = LifecycleCostRequirements(
+            requirements_ref="requirements:test:market-impact:v2",
+            required_kinds=base.requirements.required_kinds + ("MARKET_IMPACT",),
+        )
+        with self.assertRaisesRegex(LifecycleCostError, "missing required kinds: MARKET_IMPACT"):
+            LifecycleCostProfile(
+                profile_id=base.profile_id,
+                decision_scope_ref=base.decision_scope_ref,
+                instrument_version=base.instrument_version,
+                as_of=base.as_of,
+                horizon_end=base.horizon_end,
+                requirements=requirements,
+                components=base.components,
+            )
+
+        impact = LifecycleCostComponent(
+            component_id="component:market_impact",
+            phase="TURNOVER",
+            kind="MARKET_IMPACT",
+            normalized_rate="0.0017",
+            evidence_ref="evidence:market-impact:v2",
+            observed_at=BASE - timedelta(minutes=1),
+            valid_until=HORIZON,
+        )
+        complete = LifecycleCostProfile(
+            profile_id=base.profile_id,
+            decision_scope_ref=base.decision_scope_ref,
+            instrument_version=base.instrument_version,
+            as_of=base.as_of,
+            horizon_end=base.horizon_end,
+            requirements=requirements,
+            components=base.components + (impact,),
+        )
+        projection = _project(complete)
+        self.assertEqual(projection.cost_rate_components["execution"], Decimal("0.0037"))
+        self.assertEqual(projection.cost_rate, Decimal("0.0073"))
+        self.assertIn(
+            ("MARKET_IMPACT", "evidence:market-impact:v2"),
+            projection.component_evidence_refs,
+        )
+        self.assertEqual(
+            projection.mapping_policy_id,
+            "LIFECYCLE_TO_WP32_COST_BUCKETS_V2",
+        )
+
     def test_favorable_funding_is_evidence_but_cannot_reduce_valuation_cost(self):
         projection = _project(_profile())
 

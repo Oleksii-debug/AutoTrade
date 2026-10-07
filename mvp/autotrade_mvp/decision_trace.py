@@ -579,13 +579,13 @@ class DecisionTraceStore:
             prepared = _redact(trace)
         except RecursionError as error:
             raise ValueError(
-                "Decision trace exceeds strict JSON resource domain"
+                "Decision trace is not JSON compliant or exceeds strict JSON resource domain"
             ) from error
         try:
             strict_json_loads(canonical_json(prepared))
         except (ValueError, RecursionError) as error:
             raise ValueError(
-                "Decision trace exceeds strict JSON resource domain"
+                "Decision trace is not JSON compliant or exceeds strict JSON resource domain"
             ) from error
         store_owned = {"recorded_at", "previous_hash", "record_hash"} & set(prepared)
         if store_owned:
@@ -629,14 +629,21 @@ class DecisionTraceStore:
             return True
 
     def records(self) -> list[dict[str, Any]]:
-        with durable_path_lock(self.path):
-            try:
-                records = self._load()
-            except ValueError as error:
-                raise ValueError("Decision trace chain is corrupt") from error
-            if records and not self._records_are_valid(records):
-                raise ValueError("Decision trace chain is corrupt")
-            return records
+        # An absent parent is a valid empty read, not a reason to create
+        # filesystem state as a side effect of an observation.
+        if not self.path.parent.exists():
+            return []
+        try:
+            with durable_path_lock(self.path):
+                try:
+                    records = self._load()
+                except ValueError as error:
+                    raise ValueError("Decision trace chain is corrupt") from error
+                if records and not self._records_are_valid(records):
+                    raise ValueError("Decision trace chain is corrupt")
+                return records
+        except DurablePublishLockError as error:
+            raise ValueError("Decision trace chain is corrupt") from error
 
     def reconstruct(
         self,

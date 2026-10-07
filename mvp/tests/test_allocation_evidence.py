@@ -1350,6 +1350,53 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
 
         self.assertGreater(hostile_market.calls, 0)
 
+    def test_mapping_snapshot_cannot_retarget_payload_text_defaults(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        valuation = resolved["valuation:aaa:v1"]
+        helper = allocation_module._payload_text
+        original_defaults = helper.__defaults__
+        forged_calls = []
+
+        def forged_text(_value, *, name):
+            forged_calls.append(name)
+            return "FORGED"
+
+        def retarget_payload_text_defaults():
+            helper.__defaults__ = (
+                original_defaults[0],
+                forged_text,
+                forged_text.__code__,
+            )
+
+        hostile_market = _MutatingMapping(
+            {"AAA": market},
+            retarget_payload_text_defaults,
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "allocation proposal trust helper changed during input snapshot: "
+                "_payload_text",
+            ):
+                allocate_evidence_bound_objective_targets(
+                    (self.candidate(),),
+                    self.policy(),
+                    objective_evidence={"AAA": objective},
+                    market_evidence=hostile_market,
+                    valuation_evidence={"AAA": valuation},
+                    capital_evidence=capital,
+                    stress_source_evidence=(stress,),
+                    resolved_evidence=resolved,
+                    environment="SIMULATION",
+                    decision_time=self.DECISION_TIME,
+                    policy_version="risk-policy:12",
+                )
+        finally:
+            helper.__defaults__ = original_defaults
+
+        self.assertGreater(hostile_market.calls, 0)
+        self.assertEqual(forged_calls, [])
+
     def test_mapping_snapshot_cannot_retarget_builtin_set_authority(self):
         objective, market, capital, stress, resolved = self.bundle()
         valuation = resolved["valuation:aaa:v1"]
@@ -1579,6 +1626,56 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 )
         finally:
             allocation_module._allocation_policy_digest = original_digest
+
+        self.assertGreater(hostile_resolved.calls, 0)
+        self.assertEqual(forged_calls, [])
+
+    def test_revalidation_snapshot_cannot_mutate_decision_digest_kwdefaults(self):
+        bundle = self.bundle()
+        result = self.allocate(bundle=bundle)
+        helper = allocation_module._allocation_decision_digest
+        kwdefaults = helper.__kwdefaults__
+        original_kwdefaults = dict(kwdefaults)
+        forged_calls = []
+
+        def forged_sha256(*args, **kwargs):
+            forged_calls.append((args, kwargs))
+            raise AssertionError("retargeted decision digest sha256 executed")
+
+        def retarget_decision_digest_kwdefaults():
+            kwdefaults["_sha256"] = forged_sha256
+
+        hostile_resolved = _MutatingMapping(
+            bundle[-1],
+            retarget_decision_digest_kwdefaults,
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "allocation admission trust helper changed during input snapshot: "
+                "_allocation_decision_digest",
+            ):
+                revalidate_evidence_bound_allocation(
+                    result,
+                    resolved_evidence=hostile_resolved,
+                    environment="SIMULATION",
+                    as_of="2026-09-25T18:40:00Z",
+                    current_policy_version="risk-policy:12",
+                    current_policy=self.policy(),
+                    current_max_candidate_sets=64,
+                    current_provider_id="SIMULATED",
+                    current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                    current_capability_snapshot_ids={"AAA": "capability:1"},
+                    current_account_id="acct:paper:1",
+                    current_account_snapshot_id="snapshot:acct:1:v5",
+                    current_reconciliation_run_id="reconciliation:acct:1:v5",
+                    current_account_state_version=5,
+                    current_reservation_state_version=9,
+                    current_reservation_state_digest="3" * 64,
+                )
+        finally:
+            kwdefaults.clear()
+            kwdefaults.update(original_kwdefaults)
 
         self.assertGreater(hostile_resolved.calls, 0)
         self.assertEqual(forged_calls, [])

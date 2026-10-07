@@ -110,7 +110,7 @@ paths:
           name: after
           required: false
           schema:
-            $ref: https://schemas.autotrade.local/5.0.0/common.schema.json#/$defs/Sequence
+            $ref: ../jsonschema/common.schema.json#/$defs/Sequence
       responses:
         "200":
           description: Resumable projection event stream; a detected cursor gap requires /api/v1/state resnapshot

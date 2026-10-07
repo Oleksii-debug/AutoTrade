@@ -29,6 +29,7 @@ class HostApiRouteCodegenTests(unittest.TestCase):
         self.assertEqual(
             operations,
             (
+                Operation("post", "/api/v1/session", "pairLocalSession", ()),
                 Operation("get", "/api/v1/state", "getState", ()),
                 Operation(
                     "post",

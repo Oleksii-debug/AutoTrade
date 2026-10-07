@@ -211,8 +211,11 @@ def main():
     parser.add_argument('--work', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    result = build_candidate(source_root=ROOT, source_sha=args.source_sha, desktop=args.desktop_publish,
-        python_archive=args.python_archive, webview_archive=args.webview_archive, work=args.work, output=args.output)
+    result = build_candidate(source_root=ROOT, source_sha=args.source_sha,
+        desktop=args.desktop_publish.absolute(),
+        python_archive=args.python_archive.absolute(),
+        webview_archive=args.webview_archive.absolute(),
+        work=args.work.absolute(), output=args.output.absolute())
     print(json.dumps({'source_sha': args.source_sha, 'package_sha256': result['sha256'], 'release_eligible': False}))
 
 

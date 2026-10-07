@@ -1607,6 +1607,7 @@
     }
     const payload = commandForSubmission(action);
     const commandId = payload.command_id;
+    const submittedHostId = state.renderedHostId;
     if (recovering && action !== payload.action) {
       byId("host-action").value = payload.action;
     }
@@ -1659,6 +1660,23 @@
       byId("command-result").focus();
       try {
         await refreshSnapshot();
+        const operationsBody = byId("operations-body");
+        if (result.status === "ACCEPTED" && result.operationId !== null &&
+            state.renderedHostId === submittedHostId &&
+            state.accountId === payload.account_id &&
+            state.environment === payload.environment &&
+            operationsBody &&
+            ![...operationsBody.querySelectorAll("tr[data-operation-id]")].some(
+              row => row.dataset.operationId === result.operationId)) {
+          // A coherent snapshot may overtake the event poll and clear an
+          // event-derived row. Reload only this accepted operation from Host.
+          try {
+            await refreshOperation(result.operationId);
+          } catch {
+            queuePoliteAnnouncement(
+              "The accepted operation could not be reloaded after a host event gap.");
+          }
+        }
       } catch (refreshError) {
         if (isSnapshotBusy(refreshError)) {
           reportSnapshotBusy();

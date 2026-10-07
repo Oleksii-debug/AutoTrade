@@ -12,6 +12,7 @@ from qualification.zero_model.qualify import (
     _observed_source_sha,
     _qualifier_sha256,
     _require_clean_checkout,
+    _runtime_qualifier_bytes,
     _require_exact_checkout,
     _require_source_sha,
     _trusted_git_environment,
@@ -198,10 +199,16 @@ class ZeroModelQualificationTests(unittest.TestCase):
     def test_qualifier_digest_is_bound_to_exact_source_blob(self):
         source_sha = "a" * 40
         canonical_blob = b"canonical zero-model qualifier bytes\n"
-        with patch(
-            "qualification.zero_model.qualify._git_bytes",
-            return_value=SimpleNamespace(stdout=canonical_blob),
-        ) as git:
+        with (
+            patch(
+                "qualification.zero_model.qualify._git_bytes",
+                return_value=SimpleNamespace(stdout=canonical_blob),
+            ) as git,
+            patch(
+                "qualification.zero_model.qualify._runtime_qualifier_bytes",
+                return_value=canonical_blob,
+            ) as runtime,
+        ):
             digest = _qualifier_sha256(source_sha)
 
         self.assertEqual(digest, "sha256:" + sha256(canonical_blob).hexdigest())
@@ -212,6 +219,33 @@ class ZeroModelQualificationTests(unittest.TestCase):
                 "blob",
                 f"{source_sha}:qualification/zero_model/qualify.py",
             ),
+        )
+        runtime.assert_called_once_with()
+
+    def test_runtime_qualifier_bytes_must_match_exact_source_blob(self):
+        source_sha = "a" * 40
+        with (
+            patch(
+                "qualification.zero_model.qualify._git_bytes",
+                return_value=SimpleNamespace(stdout=b"git-source\n"),
+            ),
+            patch(
+                "qualification.zero_model.qualify._runtime_qualifier_bytes",
+                return_value=b"runtime-source\n",
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "runtime qualifier bytes do not match exact Git source blob",
+            ):
+                _qualifier_sha256(source_sha)
+
+    def test_runtime_qualifier_source_is_canonical_checkout_path(self):
+        self.assertEqual(
+            _runtime_qualifier_bytes(),
+            (
+                ROOT / "qualification" / "zero_model" / "qualify.py"
+            ).read_bytes(),
         )
 
     def test_source_identity_is_read_from_exact_qualifier_checkout_root(self):

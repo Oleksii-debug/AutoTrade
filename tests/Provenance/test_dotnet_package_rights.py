@@ -287,7 +287,7 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertIn(
-                "DOTNET_PACKAGE_RIGHTS_VERIFY_ORDER_INVALID:src/App/App.csproj",
+                "DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_MISSING:src/App/App.csproj",
                 package_rights_blockers(root),
             )
 

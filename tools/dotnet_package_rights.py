@@ -111,6 +111,9 @@ def locked_package_artifacts(
     projects: list[Path] | None = None,
 ) -> list[dict[str, str]]:
     selected = _package_projects(root) if projects is None else sorted(set(projects))
+    selected = [project for project in selected if dotnet_project_package_references(project)]
+    if not selected:
+        return []
     graph = dotnet_locked_dependency_graph(root, selected)
     artifacts: dict[tuple[str, str, str], dict[str, str]] = {}
     by_name_version: dict[tuple[str, str], str] = {}
@@ -576,8 +579,8 @@ def _locked_nupkg_root_evidence(
     are allowed to support a rights decision.
     """
 
-    if type(nupkg_path) is not Path:
-        raise TypeError("nupkg_path must be exact Path")
+    if type(nupkg_path) is not type(Path(".")):
+        raise TypeError("nupkg_path must be an exact platform Path")
     for value, label in (
         (license_file, "license_file"),
         (notice_file, "notice_file"),

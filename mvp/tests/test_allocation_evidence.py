@@ -2,6 +2,7 @@ from collections.abc import Mapping
 from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, ROUND_FLOOR, localcontext
 from fractions import Fraction
 from unittest.mock import patch
+import builtins
 import unittest
 import mvp.autotrade_mvp.allocation as allocation_module
 
@@ -1348,6 +1349,47 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
 
         self.assertGreater(hostile_market.calls, 0)
 
+    def test_mapping_snapshot_cannot_retarget_builtin_set_authority(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        valuation = resolved["valuation:aaa:v1"]
+        original_set = builtins.set
+        forged_calls = []
+
+        def forged_set(*args, **kwargs):
+            forged_calls.append("set")
+            raise AssertionError("retargeted builtin set executed")
+
+        def retarget_builtin_set():
+            builtins.set = forged_set
+
+        hostile_market = _MutatingMapping(
+            {"AAA": market},
+            retarget_builtin_set,
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "allocation proposal builtin authority changed during input snapshot: set",
+            ):
+                allocate_evidence_bound_objective_targets(
+                    (self.candidate(),),
+                    self.policy(),
+                    objective_evidence={"AAA": objective},
+                    market_evidence=hostile_market,
+                    valuation_evidence={"AAA": valuation},
+                    capital_evidence=capital,
+                    stress_source_evidence=(stress,),
+                    resolved_evidence=resolved,
+                    environment="SIMULATION",
+                    decision_time=self.DECISION_TIME,
+                    policy_version="risk-policy:12",
+                )
+        finally:
+            builtins.set = original_set
+
+        self.assertGreater(hostile_market.calls, 0)
+        self.assertEqual(forged_calls, [])
+
     def test_candidates_are_materialized_once_before_trust_checkpoint(self):
         objective, market, capital, stress, resolved = self.bundle()
         valuation = resolved["valuation:aaa:v1"]
@@ -1492,6 +1534,99 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             )
 
         self.assertGreater(hostile_resolved.calls, 0)
+
+    def test_revalidation_snapshot_cannot_rebind_policy_digest_authority(self):
+        bundle = self.bundle()
+        result = self.allocate(bundle=bundle)
+        original_digest = allocation_module._allocation_policy_digest
+        forged_calls = []
+
+        def forged_digest(*args, **kwargs):
+            forged_calls.append("digest")
+            raise AssertionError("retargeted policy digest executed")
+
+        def retarget_policy_digest():
+            allocation_module._allocation_policy_digest = forged_digest
+
+        hostile_resolved = _MutatingMapping(
+            bundle[-1],
+            retarget_policy_digest,
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "allocation admission trust helper changed during input snapshot: "
+                "_allocation_policy_digest",
+            ):
+                revalidate_evidence_bound_allocation(
+                    result,
+                    resolved_evidence=hostile_resolved,
+                    environment="SIMULATION",
+                    as_of="2026-09-25T18:40:00Z",
+                    current_policy_version="risk-policy:12",
+                    current_policy=self.policy(),
+                    current_max_candidate_sets=64,
+                    current_provider_id="SIMULATED",
+                    current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                    current_capability_snapshot_ids={"AAA": "capability:1"},
+                    current_account_id="acct:paper:1",
+                    current_account_snapshot_id="snapshot:acct:1:v5",
+                    current_reconciliation_run_id="reconciliation:acct:1:v5",
+                    current_account_state_version=5,
+                    current_reservation_state_version=9,
+                    current_reservation_state_digest="3" * 64,
+                )
+        finally:
+            allocation_module._allocation_policy_digest = original_digest
+
+        self.assertGreater(hostile_resolved.calls, 0)
+        self.assertEqual(forged_calls, [])
+
+    def test_revalidation_snapshot_cannot_retarget_builtin_sorted_authority(self):
+        bundle = self.bundle()
+        result = self.allocate(bundle=bundle)
+        original_sorted = builtins.sorted
+        forged_calls = []
+
+        def forged_sorted(*args, **kwargs):
+            forged_calls.append("sorted")
+            raise AssertionError("retargeted builtin sorted executed")
+
+        def retarget_builtin_sorted():
+            builtins.sorted = forged_sorted
+
+        hostile_resolved = _MutatingMapping(
+            bundle[-1],
+            retarget_builtin_sorted,
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "allocation admission builtin authority changed during input snapshot: sorted",
+            ):
+                revalidate_evidence_bound_allocation(
+                    result,
+                    resolved_evidence=hostile_resolved,
+                    environment="SIMULATION",
+                    as_of="2026-09-25T18:40:00Z",
+                    current_policy_version="risk-policy:12",
+                    current_policy=self.policy(),
+                    current_max_candidate_sets=64,
+                    current_provider_id="SIMULATED",
+                    current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                    current_capability_snapshot_ids={"AAA": "capability:1"},
+                    current_account_id="acct:paper:1",
+                    current_account_snapshot_id="snapshot:acct:1:v5",
+                    current_reconciliation_run_id="reconciliation:acct:1:v5",
+                    current_account_state_version=5,
+                    current_reservation_state_version=9,
+                    current_reservation_state_digest="3" * 64,
+                )
+        finally:
+            builtins.sorted = original_sorted
+
+        self.assertGreater(hostile_resolved.calls, 0)
+        self.assertEqual(forged_calls, [])
 
     def test_authoritative_resolver_rejects_same_id_with_new_content(self):
         objective, market, capital, stress, resolved = self.bundle()

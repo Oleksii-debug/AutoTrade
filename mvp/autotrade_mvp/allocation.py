@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, localcontext
 from fractions import Fraction
 from hashlib import sha256
+import builtins
 import json
 import weakref
 from types import MappingProxyType
@@ -2656,6 +2657,7 @@ def allocate_evidence_bound_objective_targets(
 
     module_namespace = globals()
     raw_dict_getitem = dict.__getitem__
+    raw_dict_get = dict.get
     raw_getattribute = object.__getattribute__
     builtin_dict = dict
     builtin_tuple = tuple
@@ -2665,6 +2667,25 @@ def allocate_evidence_bound_objective_targets(
     builtin_type_error = TypeError
     builtin_value_error = ValueError
     mapping_type = Mapping
+    builtin_namespace = builtins.__dict__
+    builtin_authorities = builtin_tuple(
+        (name, raw_dict_getitem(builtin_namespace, name))
+        for name in (
+            "any",
+            "dict",
+            "isinstance",
+            "iter",
+            "len",
+            "next",
+            "set",
+            "sorted",
+            "str",
+            "tuple",
+            "type",
+            "TypeError",
+            "ValueError",
+        )
+    )
 
     trust_callables = (
         ("_text", _text, raw_getattribute(_text, "__code__")),
@@ -2795,22 +2816,11 @@ def allocate_evidence_bound_objective_targets(
     # Built-ins used below are resolved through Python's module/builtins lookup.
     # A snapshot callback must not be able to create a module shadow that gains
     # execution after this trust checkpoint.
-    for builtin_name in (
-        "any",
-        "dict",
-        "isinstance",
-        "iter",
-        "len",
-        "next",
-        "set",
-        "sorted",
-        "str",
-        "tuple",
-        "type",
-        "TypeError",
-        "ValueError",
-    ):
-        if builtin_name in module_namespace:
+    for builtin_name, builtin_authority in builtin_authorities:
+        if (
+            builtin_name in module_namespace
+            or raw_dict_get(builtin_namespace, builtin_name) is not builtin_authority
+        ):
             raise builtin_value_error(
                 "allocation proposal builtin authority changed during input snapshot: "
                 + builtin_name
@@ -3380,13 +3390,77 @@ def revalidate_evidence_bound_allocation(
 ) -> bool:
     """Fail closed if evidence or reconciled capital state changed after proposal."""
 
-    def snapshot_mapping(value, *, name: str):
-        if not isinstance(value, Mapping):
-            raise TypeError(f"{name} must be a mapping")
-        snapshot = dict(value)
-        for key in dict.keys(snapshot):
-            if type(key) is not str:
-                raise TypeError(f"{name} keys must be exact built-in strings")
+    module_namespace = globals()
+    raw_dict_getitem = dict.__getitem__
+    raw_dict_get = dict.get
+    raw_getattribute = object.__getattribute__
+    builtin_dict = dict
+    builtin_type = type
+    builtin_str = str
+    builtin_isinstance = isinstance
+    builtin_type_error = TypeError
+    builtin_value_error = ValueError
+    mapping_type = Mapping
+    builtin_namespace = builtins.__dict__
+    builtin_authorities = tuple(
+        (name, raw_dict_getitem(builtin_namespace, name))
+        for name in (
+            "dict",
+            "getattr",
+            "int",
+            "isinstance",
+            "len",
+            "set",
+            "sorted",
+            "str",
+            "tuple",
+            "type",
+            "TypeError",
+            "ValueError",
+        )
+    )
+    trust_callables = (
+        ("_text", _text, raw_getattribute(_text, "__code__")),
+        ("_instant", _instant, raw_getattribute(_instant, "__code__")),
+        (
+            "_allocation_policy_digest",
+            _allocation_policy_digest,
+            raw_getattribute(_allocation_policy_digest, "__code__"),
+        ),
+        (
+            "_objective_search_config_digest",
+            _objective_search_config_digest,
+            raw_getattribute(_objective_search_config_digest, "__code__"),
+        ),
+        (
+            "_normalize_current_scope_mapping",
+            _normalize_current_scope_mapping,
+            raw_getattribute(_normalize_current_scope_mapping, "__code__"),
+        ),
+        (
+            "_allocation_decision_digest",
+            _allocation_decision_digest,
+            raw_getattribute(_allocation_decision_digest, "__code__"),
+        ),
+    )
+
+    def snapshot_mapping(
+        value,
+        *,
+        name: str,
+        _mapping_type=mapping_type,
+        _dict_type=builtin_dict,
+        _type=builtin_type,
+        _str_type=builtin_str,
+        _isinstance=builtin_isinstance,
+        _type_error=builtin_type_error,
+    ):
+        if not _isinstance(value, _mapping_type):
+            raise _type_error(f"{name} must be a mapping")
+        snapshot = _dict_type(value)
+        for key in _dict_type.keys(snapshot):
+            if _type(key) is not _str_type:
+                raise _type_error(f"{name} keys must be exact built-in strings")
         return snapshot
 
     # Freeze every callback-capable authority input before checking the result.
@@ -3403,12 +3477,31 @@ def revalidate_evidence_bound_allocation(
         name="current_capability_snapshot_ids",
     )
 
+    for builtin_name, builtin_authority in builtin_authorities:
+        if (
+            builtin_name in module_namespace
+            or raw_dict_get(builtin_namespace, builtin_name) is not builtin_authority
+        ):
+            raise builtin_value_error(
+                "allocation admission builtin authority changed during input snapshot: "
+                + builtin_name
+            )
+    for binding_name, authority, authority_code in trust_callables:
+        if (
+            raw_dict_getitem(module_namespace, binding_name) is not authority
+            or raw_getattribute(authority, "__code__") is not authority_code
+        ):
+            raise builtin_value_error(
+                "allocation admission trust helper changed during input snapshot: "
+                + binding_name
+            )
+
     if (
-        getattr(_verify_evidence, "__code__", None) is not _verify_evidence_code
-        or getattr(_evidence_valid_at, "__code__", None)
+        raw_getattribute(_verify_evidence, "__code__") is not _verify_evidence_code
+        or raw_getattribute(_evidence_valid_at, "__code__")
         is not _evidence_valid_at_code
     ):
-        raise ValueError(
+        raise builtin_value_error(
             "allocation admission evidence verifier executable changed after binding"
         )
 

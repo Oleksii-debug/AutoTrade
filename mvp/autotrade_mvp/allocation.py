@@ -2837,6 +2837,7 @@ def allocate_evidence_bound_objective_targets(
     builtin_tuple = tuple
     builtin_type = type
     builtin_str = str
+    builtin_sorted = sorted
     builtin_isinstance = isinstance
     builtin_type_error = TypeError
     builtin_value_error = ValueError
@@ -2943,6 +2944,27 @@ def allocate_evidence_bound_objective_targets(
         ),
     )
 
+    def callable_metadata(authority):
+        defaults = raw_getattribute(authority, "__defaults__")
+        kwdefaults = raw_getattribute(authority, "__kwdefaults__")
+        if kwdefaults is None:
+            kwdefaults_items = None
+        else:
+            if builtin_type(kwdefaults) is not builtin_dict:
+                raise builtin_value_error(
+                    "allocation proposal trust helper kwdefaults are malformed"
+                )
+            kwdefaults_items = builtin_tuple(
+                (key, raw_dict_getitem(kwdefaults, key))
+                for key in builtin_sorted(builtin_dict.keys(kwdefaults))
+            )
+        return defaults, kwdefaults, kwdefaults_items
+
+    trust_callable_metadata = builtin_tuple(
+        (binding_name, authority, *callable_metadata(authority))
+        for binding_name, authority, _authority_code in trust_callables
+    )
+
     def snapshot_mapping(
         value,
         *,
@@ -3000,10 +3022,52 @@ def allocate_evidence_bound_objective_targets(
                 + builtin_name
             )
 
-    for binding_name, authority, authority_code in trust_callables:
+    for (
+        (binding_name, authority, authority_code),
+        (
+            metadata_binding_name,
+            metadata_authority,
+            expected_defaults,
+            expected_kwdefaults,
+            expected_kwdefaults_items,
+        ),
+    ) in zip(trust_callables, trust_callable_metadata):
+        current_defaults, current_kwdefaults, current_kwdefaults_items = (
+            callable_metadata(authority)
+        )
+        metadata_changed = (
+            metadata_binding_name != binding_name
+            or metadata_authority is not authority
+            or current_defaults is not expected_defaults
+            or current_kwdefaults is not expected_kwdefaults
+        )
+        if not metadata_changed:
+            if (
+                current_kwdefaults_items is None
+                or expected_kwdefaults_items is None
+            ):
+                metadata_changed = (
+                    current_kwdefaults_items is not expected_kwdefaults_items
+                )
+            elif len(current_kwdefaults_items) != len(expected_kwdefaults_items):
+                metadata_changed = True
+            else:
+                for current_item, expected_item in zip(
+                    current_kwdefaults_items,
+                    expected_kwdefaults_items,
+                ):
+                    current_key, current_value = current_item
+                    expected_key, expected_value = expected_item
+                    if (
+                        current_key != expected_key
+                        or current_value is not expected_value
+                    ):
+                        metadata_changed = True
+                        break
         if (
             raw_dict_getitem(module_namespace, binding_name) is not authority
             or raw_getattribute(authority, "__code__") is not authority_code
+            or metadata_changed
         ):
             raise builtin_value_error(
                 "allocation proposal trust helper changed during input snapshot: "
@@ -3569,8 +3633,10 @@ def revalidate_evidence_bound_allocation(
     raw_dict_get = dict.get
     raw_getattribute = object.__getattribute__
     builtin_dict = dict
+    builtin_tuple = tuple
     builtin_type = type
     builtin_str = str
+    builtin_sorted = sorted
     builtin_isinstance = isinstance
     builtin_type_error = TypeError
     builtin_value_error = ValueError
@@ -3618,6 +3684,27 @@ def revalidate_evidence_bound_allocation(
         ),
     )
 
+    def callable_metadata(authority):
+        defaults = raw_getattribute(authority, "__defaults__")
+        kwdefaults = raw_getattribute(authority, "__kwdefaults__")
+        if kwdefaults is None:
+            kwdefaults_items = None
+        else:
+            if builtin_type(kwdefaults) is not builtin_dict:
+                raise builtin_value_error(
+                    "allocation admission trust helper kwdefaults are malformed"
+                )
+            kwdefaults_items = builtin_tuple(
+                (key, raw_dict_getitem(kwdefaults, key))
+                for key in builtin_sorted(builtin_dict.keys(kwdefaults))
+            )
+        return defaults, kwdefaults, kwdefaults_items
+
+    trust_callable_metadata = builtin_tuple(
+        (binding_name, authority, *callable_metadata(authority))
+        for binding_name, authority, _authority_code in trust_callables
+    )
+
     def snapshot_mapping(
         value,
         *,
@@ -3660,10 +3747,52 @@ def revalidate_evidence_bound_allocation(
                 "allocation admission builtin authority changed during input snapshot: "
                 + builtin_name
             )
-    for binding_name, authority, authority_code in trust_callables:
+    for (
+        (binding_name, authority, authority_code),
+        (
+            metadata_binding_name,
+            metadata_authority,
+            expected_defaults,
+            expected_kwdefaults,
+            expected_kwdefaults_items,
+        ),
+    ) in zip(trust_callables, trust_callable_metadata):
+        current_defaults, current_kwdefaults, current_kwdefaults_items = (
+            callable_metadata(authority)
+        )
+        metadata_changed = (
+            metadata_binding_name != binding_name
+            or metadata_authority is not authority
+            or current_defaults is not expected_defaults
+            or current_kwdefaults is not expected_kwdefaults
+        )
+        if not metadata_changed:
+            if (
+                current_kwdefaults_items is None
+                or expected_kwdefaults_items is None
+            ):
+                metadata_changed = (
+                    current_kwdefaults_items is not expected_kwdefaults_items
+                )
+            elif len(current_kwdefaults_items) != len(expected_kwdefaults_items):
+                metadata_changed = True
+            else:
+                for current_item, expected_item in zip(
+                    current_kwdefaults_items,
+                    expected_kwdefaults_items,
+                ):
+                    current_key, current_value = current_item
+                    expected_key, expected_value = expected_item
+                    if (
+                        current_key != expected_key
+                        or current_value is not expected_value
+                    ):
+                        metadata_changed = True
+                        break
         if (
             raw_dict_getitem(module_namespace, binding_name) is not authority
             or raw_getattribute(authority, "__code__") is not authority_code
+            or metadata_changed
         ):
             raise builtin_value_error(
                 "allocation admission trust helper changed during input snapshot: "

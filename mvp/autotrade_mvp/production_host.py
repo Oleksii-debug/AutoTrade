@@ -998,10 +998,19 @@ def build_production_host(
     snapshot_provider: SnapshotProvider,
     tls_context: ssl.SSLContext | None = None,
     now: Callable[[], str] | None = None,
+    application_factory: Callable[..., AuthenticatedHostApplication] | None = None,
 ) -> ProductionHostRuntime:
     """Compose the existing durable host authorities into one runnable process seam."""
 
     config = _readmit_production_host_config(config)
+    # The provider-free UI needs a specialized dispatcher for local simulation.
+    # Never allow a supplied application to replace the financial host in PAPER
+    # or LIVE, where canonical authenticated admission is mandatory.
+    if application_factory is not None:
+        if config.environment != "SIMULATION" or config.account_id != "canonical-sim-account":
+            raise PermissionError("custom host application is restricted to ZERO simulation")
+        if not callable(application_factory):
+            raise TypeError("application_factory must be callable")
     if type(security_boundary) is not SecurityBoundary:
         raise TypeError("security_boundary must be exact SecurityBoundary")
     if not callable(principal_resolver):
@@ -1019,7 +1028,12 @@ def build_production_host(
     server: AuthenticatedHostServer | None = None
     try:
         journal = JournalStore(config.journal_path)
-        application = AuthenticatedHostApplication(
+        factory = (
+            AuthenticatedHostApplication
+            if application_factory is None
+            else application_factory
+        )
+        application = factory(
             journal,
             security_boundary=security_boundary,
             account_id=config.account_id,
@@ -1030,6 +1044,8 @@ def build_production_host(
             snapshot_provider=snapshot_provider,
             now=now,
         )
+        if not isinstance(application, AuthenticatedHostApplication):
+            raise TypeError("host application must retain authenticated host authority")
         identity_gate = _StoreIdentityGate(application, journal)
         admission_gate = _CommandAdmissionGate(identity_gate)
         application.dispatch = admission_gate.dispatch  # type: ignore[method-assign]

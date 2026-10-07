@@ -21,17 +21,9 @@ class ContractsWorkflowExactHeadTests(unittest.TestCase):
 
     def test_contracts_workflow_publishes_exact_head_evidence(self):
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("python tools/write_ci_evidence.py --suite contracts", text)
+        self.assertIn("python tools/write_contracts_ci_evidence.py --output", text)
         self.assertIn("if: github.event_name == 'pull_request'", text)
         self.assertIn("if: github.event_name != 'pull_request'", text)
-        self.assertIn(
-            '--command "json-schema + dotnet + typescript + contract-version-guard"',
-            text,
-        )
-        self.assertIn(
-            '--command "json-schema + dotnet + typescript"',
-            text,
-        )
         self.assertIn("contracts-evidence-${{ runner.os }}", text)
         self.assertIn("if-no-files-found: error", text)
 

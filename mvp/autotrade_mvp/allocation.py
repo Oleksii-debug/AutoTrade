@@ -191,10 +191,13 @@ class StressScenarioEvidence:
         valid_until = _instant(self.valid_until, name="stress evidence valid_until")
         if valid_until < observed:
             raise ValueError("stress evidence valid_until must not precede observed_at")
-        if not isinstance(self.shocks, Mapping) or not self.shocks:
-            raise ValueError("stress evidence shocks must be a non-empty mapping")
+        if type(self.shocks) is not dict:
+            raise TypeError("stress evidence shocks must be an exact built-in dict")
+        shocks_snapshot = dict.copy(self.shocks)
+        if not shocks_snapshot:
+            raise ValueError("stress evidence shocks must be non-empty")
         normalized: dict[str, Decimal] = {}
-        for symbol, shock in self.shocks.items():
+        for symbol, shock in dict.items(shocks_snapshot):
             key = _text(symbol, name="stress evidence symbol")
             if key in normalized:
                 raise ValueError("stress evidence symbols must be unique")
@@ -665,16 +668,28 @@ def _normalize_stress_scenarios(
     if len(symbols) != len(set(symbols)):
         raise ValueError("candidate symbols must be unique")
 
-    normalized = {
-        _text(name, name="scenario name"): {
+    if stress_scenarios is None:
+        stress_snapshot: dict[str, Mapping[str, object]] = {}
+    else:
+        if type(stress_scenarios) is not dict:
+            raise TypeError("stress_scenarios must be an exact built-in dict")
+        stress_snapshot = dict.copy(stress_scenarios)
+
+    normalized: dict[str, dict[str, Decimal]] = {}
+    for name, scenario in dict.items(stress_snapshot):
+        scenario_name = _text(name, name="scenario name")
+        if type(scenario) is not dict:
+            raise TypeError(
+                f"stress scenario {scenario_name} must be an exact built-in dict"
+            )
+        scenario_snapshot = dict.copy(scenario)
+        normalized[scenario_name] = {
             _text(symbol, name="stress symbol"): _decimal(
                 shock,
                 name=f"stress shock {symbol}",
             )
-            for symbol, shock in scenario.items()
+            for symbol, shock in dict.items(scenario_snapshot)
         }
-        for name, scenario in (stress_scenarios or {}).items()
-    }
     symbol_set = set(symbols)
     unknown = sorted(
         {

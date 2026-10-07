@@ -5,7 +5,9 @@ from decimal import Decimal
 import unittest
 from types import MappingProxyType
 
+from mvp.autotrade_mvp.allocation import ObjectiveCandidate
 from mvp.autotrade_mvp.allocation_valuation import normalize_allocation_valuation
+import mvp.tests.test_allocation_evidence as allocation_evidence_tests
 from mvp.autotrade_mvp.lifecycle_cost import (
     LifecycleCostComponent,
     LifecycleCostError,
@@ -292,6 +294,148 @@ class LifecycleCostValuationBridgeTests(unittest.TestCase):
         ):
             LifecycleValuationProjection(
                 **{**kwargs, "component_evidence_refs": duplicated}
+            )
+
+
+    def test_lifecycle_projection_flows_through_evidence_bound_cost_capacity_fx(self):
+        helper = allocation_evidence_tests.EvidenceBoundAllocationTests(
+            "test_objective_forecast_horizon_must_extend_beyond_decision_time"
+        )
+        decision_time = datetime.fromisoformat(
+            helper.DECISION_TIME.replace("Z", "+00:00")
+        )
+        horizon_end = datetime.fromisoformat(
+            helper.FORECAST_HORIZON_END.replace("Z", "+00:00")
+        )
+        profile = LifecycleCostProfile(
+            profile_id="profile:evidence-bound:v1",
+            decision_scope_ref="allocation-evidence:AAA:v1",
+            instrument_version=INSTRUMENT_VERSION,
+            as_of=decision_time,
+            horizon_end=horizon_end,
+            requirements=LifecycleCostRequirements(
+                requirements_ref="requirements:evidence-bound:v1",
+                required_kinds=tuple(RATES),
+            ),
+            components=tuple(
+                LifecycleCostComponent(
+                    component_id=f"evidence-bound:{kind.lower()}",
+                    phase=phase,
+                    kind=kind,
+                    normalized_rate=rate,
+                    evidence_ref=f"source:{kind.lower()}:v1",
+                    observed_at=decision_time,
+                    valid_until=horizon_end,
+                )
+                for kind, (phase, rate) in RATES.items()
+            ),
+        )
+        projection = project_lifecycle_cost_to_valuation(
+            profile,
+            decision_scope_ref=profile.decision_scope_ref,
+            instrument_version=INSTRUMENT_VERSION,
+            decision_time=decision_time,
+            horizon_end=horizon_end,
+        )
+
+        objective, market, capital, stress, resolved = helper.bundle()
+        market = helper.evidence(
+            evidence_id=market.evidence_id,
+            kind=market.kind,
+            payload={
+                **market.payload,
+                "instrument_version": INSTRUMENT_VERSION,
+                "cost_rate": str(projection.cost_rate),
+            },
+        )
+        original_valuation = resolved["valuation:aaa:v1"]
+        valuation = helper.evidence(
+            evidence_id=original_valuation.evidence_id,
+            kind=original_valuation.kind,
+            payload={
+                **original_valuation.payload,
+                "instrument_version": INSTRUMENT_VERSION,
+                "cost_rate_components": {
+                    name: str(value)
+                    for name, value in projection.cost_rate_components.items()
+                },
+                "cost_evidence_refs": dict(projection.cost_evidence_refs),
+            },
+        )
+        stress = helper.evidence(
+            evidence_id=stress.evidence_id,
+            kind=stress.kind,
+            payload={
+                **stress.payload,
+                "instrument_versions": {"AAA": INSTRUMENT_VERSION},
+            },
+        )
+        resolved = {
+            objective.evidence_id: objective,
+            market.evidence_id: market,
+            valuation.evidence_id: valuation,
+            capital.evidence_id: capital,
+            stress.evidence_id: stress,
+        }
+        base_candidate = helper.candidate()
+        candidate = ObjectiveCandidate.create(
+            symbol=base_candidate.candidate.symbol,
+            desired_notional=base_candidate.candidate.desired_notional,
+            price=base_candidate.candidate.price,
+            lot_size=base_candidate.candidate.lot_size,
+            expected_return_rate=base_candidate.expected_return_rate,
+            risk_penalty_rate=base_candidate.risk_penalty_rate,
+            cost_rate=projection.cost_rate,
+            capital_requirement_rate=base_candidate.candidate.capital_requirement_rate,
+            min_notional=base_candidate.candidate.min_notional,
+            fee_floor=base_candidate.candidate.fee_floor,
+            max_executable_notional=base_candidate.candidate.max_executable_notional,
+        )
+
+        result = helper.allocate(
+            candidate=candidate,
+            bundle=(objective, market, capital, stress, resolved),
+        )
+
+        self.assertEqual(result.objective.allocation.status, "ALLOCATED")
+        self.assertLessEqual(
+            result.objective.allocation.gross_notional,
+            Decimal("500"),
+        )
+        self.assertGreater(result.objective.allocation.estimated_cost, Decimal("0"))
+        self.assertIn(
+            (valuation.evidence_id, valuation.digest),
+            result.evidence_refs,
+        )
+
+        understated = helper.evidence(
+            evidence_id=valuation.evidence_id,
+            kind=valuation.kind,
+            payload={
+                **valuation.payload,
+                "cost_rate_components": {
+                    **dict(valuation.payload["cost_rate_components"]),
+                    "execution": "0",
+                },
+            },
+        )
+        understated_resolved = {
+            **resolved,
+            understated.evidence_id: understated,
+        }
+        with self.assertRaisesRegex(
+            ValueError,
+            "allocation valuation evidence is unusable",
+        ):
+            helper.allocate(
+                candidate=candidate,
+                bundle=(
+                    objective,
+                    market,
+                    capital,
+                    stress,
+                    understated_resolved,
+                ),
             )
 
 

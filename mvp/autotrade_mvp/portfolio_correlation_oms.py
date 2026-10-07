@@ -119,6 +119,8 @@ def _require_matching_proposal_oms_scope(
     _text_code=_GET(_exact_text, "__code__"),
     _get=_GET,
     _type=type,
+    _dict_type=dict,
+    _item=dict.__getitem__,
     _error_type=CorrelationConcentrationError,
 ) -> None:
     """Bind the OMS cut to the exact proposal provider/account/environment scope."""
@@ -141,15 +143,22 @@ def _require_matching_proposal_oms_scope(
     )
     _require_oms(oms)
 
+    # object.__getattribute__(instance, field) still invokes a class-level
+    # data descriptor. Read the exact instance state instead so a later
+    # class-property rebinding cannot counterfeit the OMS/proposal scope.
+    proposal_state = _get(result, "__dict__")
+    oms_state = _get(oms, "__dict__")
+    if _type(proposal_state) is not _dict_type or _type(oms_state) is not _dict_type:
+        raise _error_type("canonical proposal/OMS scope state is not an exact dict")
     proposal_scope = (
-        _text(_get(result, "provider_id"), name="proposal provider_id").upper(),
-        _text(_get(result, "account_id"), name="proposal account_id"),
-        _text(_get(result, "environment"), name="proposal environment").upper(),
+        _text(_item(proposal_state, "provider_id"), name="proposal provider_id").upper(),
+        _text(_item(proposal_state, "account_id"), name="proposal account_id"),
+        _text(_item(proposal_state, "environment"), name="proposal environment").upper(),
     )
     oms_scope = (
-        _text(_get(oms, "provider_id"), name="OMS provider_id").upper(),
-        _text(_get(oms, "account_id"), name="OMS account_id"),
-        _text(_get(oms, "environment"), name="OMS environment").upper(),
+        _text(_item(oms_state, "provider_id"), name="OMS provider_id").upper(),
+        _text(_item(oms_state, "account_id"), name="OMS account_id"),
+        _text(_item(oms_state, "environment"), name="OMS environment").upper(),
     )
     if proposal_scope != oms_scope:
         raise _error_type(

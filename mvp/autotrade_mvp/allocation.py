@@ -2032,8 +2032,8 @@ def _allocation_evidence_digest(
     _sha256=sha256,
     _canonical_json_code=getattr(_canonical_evidence_json, "__code__", None),
 ) -> str:
-    if _getattr(_canonical_json, "__code__", None) is not _canonical_json_code:
-        raise _value_error(
+    if getattr(_canonical_json, "__code__", None) is not _canonical_json_code:
+        raise ValueError(
             "allocation evidence digest canonicalizer executable changed after binding"
         )
     body = {
@@ -2593,8 +2593,8 @@ def _allocation_decision_digest(
 ) -> str:
     """Digest one exact detached allocation result without caller dispatch."""
 
-    if getattr(_canonical_json, "__code__", None) is not _canonical_json_code:
-        raise ValueError(
+    if _getattr(_canonical_json, "__code__", None) is not _canonical_json_code:
+        raise _value_error(
             "allocation decision canonicalizer executable changed after binding"
         )
     if _type(result) is not _result_type:

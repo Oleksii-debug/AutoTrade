@@ -528,7 +528,6 @@ def test_matching_scope_oms_with_open_order_remains_inconclusive():
         ("confirmed_cancel", "CANCELLED"),
         ("confirmed_expiry", "EXPIRED"),
         ("provider_rejection", "REJECTED"),
-        ("partial_cancel", "PARTIALLY_FILLED_CANCELLED"),
     ],
 )
 def test_terminal_unfilled_remainder_is_not_working_oms_exposure(
@@ -538,17 +537,7 @@ def test_terminal_unfilled_remainder_is_not_working_oms_exposure(
     with TemporaryDirectory() as directory:
         oms = _oms(directory)
         _create_open_order(oms)
-        if terminal_outcome == "partial_cancel":
-            oms.record_fill(
-                event_key="fill-before-cancel",
-                client_order_id="open-order-1",
-                fill_id="fill-one",
-                provider_execution_id="execution-one",
-                quantity="0.25",
-                price="100",
-                committed_at=NOW,
-            )
-        if terminal_outcome in {"confirmed_cancel", "partial_cancel"}:
+        if terminal_outcome == "confirmed_cancel":
             oms.request_cancel(
                 event_key="cancel-request",
                 client_order_id="open-order-1",
@@ -647,4 +636,44 @@ def test_rejected_cancel_retains_unvalued_open_oms_exposure():
         ):
             require_correlation_safe_proposal_with_oms(
                 proposal, evidence, resolver, policy, oms=oms,
+            )
+
+
+def test_partially_filled_cancelled_order_requires_fill_reconciliation():
+    """Terminal remainder is safe to release only when no fills need accounting."""
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        oms.record_fill(
+            event_key="partial-fill",
+            client_order_id="open-order-1",
+            fill_id="partial-f1",
+            provider_execution_id="execution-f1",
+            quantity="0.25",
+            price="100",
+            committed_at=NOW,
+        )
+        oms.request_cancel(
+            event_key="cancel-request",
+            client_order_id="open-order-1",
+            command_id="cancel-command",
+            committed_at=NOW,
+        )
+        oms.confirm_cancel(
+            event_key="cancel-confirmation",
+            client_order_id="open-order-1",
+            committed_at=NOW,
+        )
+        fresh_oms = _oms(directory)
+        snapshot = fresh_oms.snapshots[0]
+        assert snapshot.state == "PARTIALLY_FILLED_CANCELLED"
+        assert snapshot.filled_quantity == Decimal("0.25")
+        assert snapshot.open_quantity == Decimal("0.75")
+        proposal, evidence, resolver, policy = _passing_inputs()
+        with pytest.raises(
+            CorrelationConcentrationError,
+            match="canonical OMS has unvalued open exposure",
+        ):
+            require_correlation_safe_proposal_with_oms(
+                proposal, evidence, resolver, policy, oms=fresh_oms,
             )

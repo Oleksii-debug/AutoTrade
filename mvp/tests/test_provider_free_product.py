@@ -326,7 +326,7 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
         from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
         with TemporaryDirectory() as directory:
             run_autonomous_simulation(['100', '101', '103', '102', '100'], directory,
-                run_id='historical-cut', now='2026-10-04T00:00:00Z', partial_fills=True)
+                run_id='historical-cut', now='2026-10-04T00:00:00Z', execution_profile='TWO_EQUAL_PARTIALS')
             journal = JournalStore(Path(directory) / 'journal.sqlite3')
             risk = journal.load_events_by_aggregate_type('risk_decision')[0]
             evidence = risk['payload']['reservation_availability_evidence']

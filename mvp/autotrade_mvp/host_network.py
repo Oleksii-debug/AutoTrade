@@ -44,6 +44,13 @@ _OPERATION_PATH = re.compile(
     r"^/api/v1/operations/([0-9a-fA-F-]{36})$"
 )
 _MAX_BODY_BYTES = 1024 * 1024
+_SNAPSHOT_MAX_ATTEMPTS = 4
+
+
+class SnapshotTemporarilyUnavailable(RuntimeError):
+    """The requested state cut changed while its projection was being built."""
+
+
 _SNAPSHOT_FIELDS = {
     "state_version",
     "event_cursor",
@@ -519,6 +526,19 @@ class AuthenticatedHostApplication:
         rendered = _json_bytes(payload)
         if principal.token.encode("utf-8") in rendered:
             raise ValueError("UiSnapshot must never contain bearer credential material")
+
+        # The projection can read additional journal-backed truth after the
+        # durable host cut is captured.  Never publish a mixed-generation
+        # snapshot: re-read the durable cut and retry only when its canonical
+        # version/cursor moved while projection was in progress.
+        current = self.store.snapshot()
+        if (
+            current.get("state_version") != durable.get("state_version")
+            or current.get("event_cursor") != durable.get("event_cursor")
+        ):
+            raise SnapshotTemporarilyUnavailable(
+                "durable host state changed during snapshot projection"
+            )
         return MappingProxyType(payload)
 
     @staticmethod
@@ -610,11 +630,25 @@ class AuthenticatedHostApplication:
             principal, authenticated_role = self._principal(normalized_headers)
 
             if method == "GET" and path == "/api/v1/state":
-                return _json_response(
-                    200,
-                    dict(self._snapshot(principal, authenticated_role)),
-                    headers=(("Cache-Control", "no-store"),),
-                )
+                for attempt in range(_SNAPSHOT_MAX_ATTEMPTS):
+                    try:
+                        snapshot = self._snapshot(principal, authenticated_role)
+                    except SnapshotTemporarilyUnavailable:
+                        if attempt + 1 < _SNAPSHOT_MAX_ATTEMPTS:
+                            continue
+                        return _json_response(
+                            503,
+                            {"error": "SNAPSHOT_BUSY", "retryable": True},
+                            headers=(
+                                ("Cache-Control", "no-store"),
+                                ("Retry-After", "1"),
+                            ),
+                        )
+                    return _json_response(
+                        200,
+                        dict(snapshot),
+                        headers=(("Cache-Control", "no-store"),),
+                    )
 
             if method == "POST" and path == "/api/v1/commands":
                 command = self._parse_body(body, normalized_headers)

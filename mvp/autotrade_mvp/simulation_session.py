@@ -3055,7 +3055,11 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                     journal_sequence_cut=request.journal_sequence_cut)
                 refs = {name: f"simulated:{name.lower()}:{key}" for name in
                         ("PORTFOLIO", "MARGIN", "RECONCILIATION", "CAPABILITY", "BORROW", "STRESS")}
-                refs.update(POLICY=resolved.registration_event_id, MARKET=selected.observation_id + ":" + fresh.evidence_digest)
+                refs.update(
+                    POLICY=resolved.registration_event_id,
+                    MARKET=selected.observation_id + ":" + fresh.evidence_digest,
+                    COST=lifecycle_cost.lifecycle_cost_digest,
+                )
                 return AuthoritativeRiskSnapshot(context=context, risk_policy=resolved.policy,
                     resolved_risk_policy=resolved, provider_environment=request.provider_environment,
                     entity_policy_id=request.entity_policy_id, instrument_family=request.instrument_family,

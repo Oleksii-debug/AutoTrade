@@ -46,14 +46,31 @@ _QUALIFIER_SOURCE_PATH = "qualification/zero_model/qualify.py"
 
 
 class UnavailableModelInventory:
-    """Sentinel iterable that fails if ZERO mode tries to inspect model inventory."""
+    """Fail on all ordinary container inspection in ZERO mode."""
 
     def __init__(self) -> None:
         self.touched = False
 
-    def __iter__(self):
+    def _reject_access(self):
         self.touched = True
         raise RuntimeError("ZERO mode must not inspect unavailable model inventory")
+
+    def __iter__(self):
+        self._reject_access()
+
+    def __len__(self):
+        self._reject_access()
+
+    def __bool__(self):
+        self._reject_access()
+
+    def __getitem__(self, index):
+        del index
+        self._reject_access()
+
+    def __contains__(self, item):
+        del item
+        self._reject_access()
 
 
 @contextmanager

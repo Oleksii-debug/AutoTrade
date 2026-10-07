@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from qualification.zero_model.qualify import (
+    UnavailableModelInventory,
     _network_denied,
     _observed_source_sha,
     _qualifier_sha256,
@@ -176,6 +177,22 @@ class ZeroModelQualificationTests(unittest.TestCase):
         self.assertFalse(claims["live_trading_qualified"])
         self.assertFalse(claims["economic_edge_proven"])
         self.assertFalse(claims["all_wp62_workflows_qualified"])
+
+    def test_zero_inventory_sentinel_rejects_all_container_inspection(self):
+        for name, inspect in (
+            ("iter", lambda inventory: iter(inventory)),
+            ("len", lambda inventory: len(inventory)),
+            ("bool", lambda inventory: bool(inventory)),
+            ("index", lambda inventory: inventory[0]),
+            ("contains", lambda inventory: "remote" in inventory),
+        ):
+            with self.subTest(operation=name):
+                inventory = UnavailableModelInventory()
+                with self.assertRaisesRegex(
+                    RuntimeError, "must not inspect unavailable model inventory"
+                ):
+                    inspect(inventory)
+                self.assertTrue(inventory.touched)
 
     def test_qualification_denies_python_network_access(self):
         observed = _observed_source_sha()

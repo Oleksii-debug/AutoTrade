@@ -229,7 +229,7 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            assessment.capacity_assessment_digest,
+            assessment.capacity_replay_digest,
             capacity.digest,
         )
         self.assertIn(
@@ -245,6 +245,103 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
             assessment.unresolved_owners,
         )
         self.assertEqual(assessment.status, "INCONCLUSIVE")
+
+    def test_capacity_replay_rejects_existing_position_without_portfolio_owner(self):
+        item = _proposal()
+        candidate = AllocationCandidate.create(
+            symbol=item.symbol,
+            desired_notional="204",
+            price="102",
+            lot_size="1",
+            current_quantity="1",
+            turnover_cost_rate="0",
+            holding_cost_rate="0",
+        )
+        policy = AllocationPolicy.create(
+            cash_available="1000",
+            max_gross_notional="1000",
+            max_net_notional="1000",
+            max_symbol_notional="1000",
+            max_total_cost="100",
+            max_stress_loss="1000",
+        )
+        with self.assertRaisesRegex(
+            StrategyCapacityAuthorityError,
+            "flat current position",
+        ):
+            issue_allocation_capacity_evidence(
+                item,
+                instrument_version=INSTRUMENT_VERSION,
+                candidate=candidate,
+                policy=policy,
+            )
+
+    def test_capacity_replay_rejects_candidate_notional_detached_from_proposal(self):
+        item = _proposal()
+        candidate = AllocationCandidate.create(
+            symbol=item.symbol,
+            desired_notional="102",
+            price="102",
+            lot_size="1",
+        )
+        policy = AllocationPolicy.create(
+            cash_available="1000",
+            max_gross_notional="1000",
+            max_net_notional="1000",
+            max_symbol_notional="1000",
+            max_total_cost="100",
+            max_stress_loss="1000",
+            require_adverse_stress_evidence=False,
+            require_fresh_stress_evidence=False,
+        )
+        with self.assertRaisesRegex(
+            StrategyCapacityAuthorityError,
+            "exact proposal quantity",
+        ):
+            issue_allocation_capacity_evidence(
+                item,
+                instrument_version=INSTRUMENT_VERSION,
+                candidate=candidate,
+                policy=policy,
+            )
+
+    def test_stale_stress_replay_fails_closed_to_zero_capacity(self):
+        item = _proposal()
+        candidate = AllocationCandidate.create(
+            symbol=item.symbol,
+            desired_notional="204",
+            price="102",
+            lot_size="1",
+        )
+        policy = AllocationPolicy.create(
+            cash_available="1000",
+            max_gross_notional="1000",
+            max_net_notional="1000",
+            max_symbol_notional="1000",
+            max_total_cost="100",
+            max_stress_loss="1000",
+        )
+        stale = (
+            StressScenarioEvidence.create(
+                name="expired-adverse",
+                shocks={item.symbol: "-0.25"},
+                observed_at=BASE.isoformat().replace("+00:00", "Z"),
+                valid_until=(BASE + timedelta(seconds=30)).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                source_ref="science:capacity:expired:v1",
+            ),
+        )
+        capacity = issue_allocation_capacity_evidence(
+            item,
+            instrument_version=INSTRUMENT_VERSION,
+            candidate=candidate,
+            policy=policy,
+            stress_evidence=stale,
+        )
+        self.assertEqual(capacity.max_feasible_quantity, "0")
+        self.assertEqual(capacity.allocation_status, "NO_INCREASE_FALLBACK")
+        self.assertIn("expired", capacity.allocation_reason)
 
     def test_capacity_evidence_digest_cannot_be_detached_from_binding(self):
         item = _proposal()

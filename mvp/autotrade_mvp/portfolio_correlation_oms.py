@@ -41,6 +41,17 @@ _GET = object.__getattribute__
 if _OMS_SNAPSHOTS_GETTER is None:  # pragma: no cover - import-time invariant
     raise RuntimeError("DurableOrderBookProjection.snapshots lost its getter")
 
+_REQUIRE_OMS_AUTHORITY_CODE = _GET(_REQUIRE_OMS_AUTHORITY, "__code__")
+_OMS_SNAPSHOTS_GETTER_CODE = _GET(_OMS_SNAPSHOTS_GETTER, "__code__")
+_BASE_CORRELATION_GUARD_CODE = _GET(_BASE_CORRELATION_GUARD, "__code__")
+
+
+def _require_bound_executable(function, expected_code, *, name: str) -> None:
+    if _GET(function, "__code__") is not expected_code:
+        raise CorrelationConcentrationError(
+            f"{name} executable changed after binding"
+        )
+
 
 def _exact_text(value: object, *, name: str) -> str:
     if type(value) is not str or not value or value != value.strip():
@@ -75,6 +86,16 @@ def _unvalued_open_orders(
 
     if type(oms) is not _OMS_TYPE:
         raise TypeError("oms must be exact DurableOrderBookProjection")
+    _require_bound_executable(
+        _REQUIRE_OMS_AUTHORITY,
+        _REQUIRE_OMS_AUTHORITY_CODE,
+        name="canonical OMS authority verifier",
+    )
+    _require_bound_executable(
+        _OMS_SNAPSHOTS_GETTER,
+        _OMS_SNAPSHOTS_GETTER_CODE,
+        name="canonical OMS snapshots getter",
+    )
     _REQUIRE_OMS_AUTHORITY(oms)
     snapshots = _OMS_SNAPSHOTS_GETTER(oms)
     if type(snapshots) is not tuple:
@@ -120,6 +141,11 @@ def require_correlation_safe_proposal_with_oms(
     asking the caller for an estimate would manufacture financial authority.
     """
 
+    _require_bound_executable(
+        _BASE_CORRELATION_GUARD,
+        _BASE_CORRELATION_GUARD_CODE,
+        name="base correlation guard",
+    )
     blockers = _unvalued_open_orders(oms)
     if blockers:
         detail = ", ".join(

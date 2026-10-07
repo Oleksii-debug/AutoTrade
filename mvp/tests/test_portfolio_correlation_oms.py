@@ -8,6 +8,7 @@ import pytest
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.portfolio_correlation import CorrelationConcentrationError
+import mvp.autotrade_mvp.portfolio_correlation_oms as correlation_oms
 from mvp.autotrade_mvp.portfolio_correlation_oms import (
     require_correlation_safe_proposal_with_oms,
 )
@@ -135,3 +136,85 @@ def test_noncanonical_oms_object_is_rejected_before_correlation_admission():
             policy,
             oms=object(),
         )
+
+def test_in_place_snapshots_getter_code_mutation_fails_closed():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        proposal, evidence, resolver, policy = _passing_inputs()
+
+        original_code = correlation_oms._OMS_SNAPSHOTS_GETTER.__code__
+
+        def forged_snapshots(_self):
+            return ()
+
+        correlation_oms._OMS_SNAPSHOTS_GETTER.__code__ = forged_snapshots.__code__
+        try:
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="canonical OMS snapshots getter executable changed after binding",
+            ):
+                require_correlation_safe_proposal_with_oms(
+                    proposal,
+                    evidence,
+                    resolver,
+                    policy,
+                    oms=oms,
+                )
+        finally:
+            correlation_oms._OMS_SNAPSHOTS_GETTER.__code__ = original_code
+
+
+def test_in_place_oms_authority_verifier_code_mutation_fails_closed():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        proposal, evidence, resolver, policy = _passing_inputs()
+
+        original_code = correlation_oms._REQUIRE_OMS_AUTHORITY.__code__
+
+        def forged_authority(_oms):
+            return None
+
+        correlation_oms._REQUIRE_OMS_AUTHORITY.__code__ = forged_authority.__code__
+        try:
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="canonical OMS authority verifier executable changed after binding",
+            ):
+                require_correlation_safe_proposal_with_oms(
+                    proposal,
+                    evidence,
+                    resolver,
+                    policy,
+                    oms=oms,
+                )
+        finally:
+            correlation_oms._REQUIRE_OMS_AUTHORITY.__code__ = original_code
+
+
+def test_in_place_base_correlation_guard_code_mutation_fails_closed():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        proposal, evidence, resolver, policy = _passing_inputs()
+
+        original_code = correlation_oms._BASE_CORRELATION_GUARD.__code__
+
+        def forged_guard(_result, _evidence, _resolved_evidence, _policy):
+            return _result
+
+        correlation_oms._BASE_CORRELATION_GUARD.__code__ = forged_guard.__code__
+        try:
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="base correlation guard executable changed after binding",
+            ):
+                require_correlation_safe_proposal_with_oms(
+                    proposal,
+                    evidence,
+                    resolver,
+                    policy,
+                    oms=oms,
+                )
+        finally:
+            correlation_oms._BASE_CORRELATION_GUARD.__code__ = original_code
+

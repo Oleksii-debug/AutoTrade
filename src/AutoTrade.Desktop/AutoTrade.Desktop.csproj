@@ -7,6 +7,8 @@
     <AssemblyName>AutoTrade.Desktop</AssemblyName>
     <RootNamespace>AutoTrade.Desktop</RootNamespace>
     <IsPackable>false</IsPackable>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <StartupObject>AutoTrade.Desktop.App</StartupObject>
   </PropertyGroup>
   <ItemGroup>

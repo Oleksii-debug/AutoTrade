@@ -727,6 +727,7 @@ def _require_webview2_input_identity(product_root, inputs, nuget_lock):
 
 
 def build_candidate(*, source_root, source_sha, desktop, host, python_archive, webview_archive, work, output):
+    work = work.resolve()
     if work.exists(): raise ValueError('candidate work directory must be new')
     work.mkdir(parents=True)
     payload = work / 'payload'; payload.mkdir()

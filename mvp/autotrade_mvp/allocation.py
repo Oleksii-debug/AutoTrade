@@ -2032,8 +2032,8 @@ def _allocation_evidence_digest(
     _sha256=sha256,
     _canonical_json_code=getattr(_canonical_evidence_json, "__code__", None),
 ) -> str:
-    if getattr(_canonical_json, "__code__", None) is not _canonical_json_code:
-        raise ValueError(
+    if _getattr(_canonical_json, "__code__", None) is not _canonical_json_code:
+        raise _value_error(
             "allocation evidence digest canonicalizer executable changed after binding"
         )
     body = {
@@ -2579,8 +2579,14 @@ def _allocation_decision_digest(
     _get=object.__getattribute__,
     _type=type,
     _str=str,
+    _int=int,
     _tuple=tuple,
+    _list=list,
+    _len=len,
     _sorted=sorted,
+    _getattr=getattr,
+    _type_error=TypeError,
+    _value_error=ValueError,
     _sha256=sha256,
     _canonical_json=_canonical_evidence_json,
     _canonical_json_code=getattr(_canonical_evidence_json, "__code__", None),
@@ -2592,25 +2598,25 @@ def _allocation_decision_digest(
             "allocation decision canonicalizer executable changed after binding"
         )
     if _type(result) is not _result_type:
-        raise TypeError("allocation decision result must be exact ObjectiveAllocationResult")
+        raise _type_error("allocation decision result must be exact ObjectiveAllocationResult")
 
     def exact_text(value, *, name: str) -> str:
-        if _type(value) is not str:
-            raise TypeError(f"{name} must be exact built-in text")
+        if _type(value) is not _str:
+            raise _type_error(f"{name} must be exact built-in text")
         return value
 
     def exact_decimal_text(value, *, name: str) -> str:
         if _type(value) is not _decimal_type:
-            raise TypeError(f"{name} must be exact Decimal")
+            raise _type_error(f"{name} must be exact Decimal")
         return _str(value)
 
     def exact_pairs(value, *, name: str) -> tuple[tuple[str, str], ...]:
         if _type(value) is not _tuple:
-            raise TypeError(f"{name} must be an exact tuple")
+            raise _type_error(f"{name} must be an exact tuple")
         out = []
         for item in value:
-            if _type(item) is not _tuple or len(item) != 2:
-                raise TypeError(f"{name} entries must be exact two-item tuples")
+            if _type(item) is not _tuple or _len(item) != 2:
+                raise _type_error(f"{name} entries must be exact two-item tuples")
             left, right = item
             out.append(
                 (
@@ -2626,7 +2632,7 @@ def _allocation_decision_digest(
     )
     selected_symbols = _get(result, "selected_symbols")
     if _type(selected_symbols) is not _tuple:
-        raise TypeError("selected_symbols must be an exact tuple")
+        raise _type_error("selected_symbols must be an exact tuple")
     selected_symbols_snapshot = _tuple(
         exact_text(symbol, name="selected symbol") for symbol in selected_symbols
     )
@@ -2637,14 +2643,14 @@ def _allocation_decision_digest(
 
     allocation = _get(result, "allocation")
     if _type(allocation) is not _allocation_type:
-        raise TypeError("allocation decision allocation must be exact AllocationResult")
+        raise _type_error("allocation decision allocation must be exact AllocationResult")
     targets = _get(allocation, "targets")
     if _type(targets) is not _tuple:
-        raise TypeError("allocation decision targets must be an exact tuple")
+        raise _type_error("allocation decision targets must be an exact tuple")
     target_payload = []
     for target in targets:
         if _type(target) is not _target_type:
-            raise TypeError("allocation decision targets must be exact AllocationTarget")
+            raise _type_error("allocation decision targets must be exact AllocationTarget")
         target_payload.append(
             {
                 "symbol": exact_text(_get(target, "symbol"), name="target symbol"),
@@ -2669,7 +2675,7 @@ def _allocation_decision_digest(
 
     worst_stress_loss = _get(allocation, "worst_stress_loss")
     if worst_stress_loss is not None and _type(worst_stress_loss) is not _decimal_type:
-        raise TypeError("worst_stress_loss must be exact Decimal or None")
+        raise _type_error("worst_stress_loss must be exact Decimal or None")
 
     normalized_evidence_refs = exact_pairs(evidence_refs, name="evidence_refs")
     normalized_instrument_versions = exact_pairs(
@@ -2698,8 +2704,8 @@ def _allocation_decision_digest(
         ("account_state_version", account_state_version),
         ("reservation_state_version", reservation_state_version),
     ):
-        if _type(value) is not int or value < 0:
-            raise TypeError(f"{name} must be a non-negative exact integer")
+        if _type(value) is not _int or value < 0:
+            raise _type_error(f"{name} must be a non-negative exact integer")
 
     payload = {
         "environment": environment,
@@ -2724,7 +2730,7 @@ def _allocation_decision_digest(
         "reservation_state_digest": reservation_state_digest,
         "base_currency": base_currency,
         "objective_version": objective_version,
-        "selected_symbols": list(selected_symbols_snapshot),
+        "selected_symbols": _list(selected_symbols_snapshot),
         "expected_net_utility": expected_net_utility,
         "allocation": {
             "status": exact_text(_get(allocation, "status"), name="allocation status"),

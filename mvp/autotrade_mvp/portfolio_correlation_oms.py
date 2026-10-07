@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from .allocation import EvidenceBoundObjectiveAllocationResult
 from .durable_order_projection import (
     DurableOrderBookProjection,
     require_exact_order_projection_authority,
@@ -29,6 +30,7 @@ from .portfolio_correlation import (
 
 
 _OMS_TYPE = DurableOrderBookProjection
+_RESULT_TYPE = EvidenceBoundObjectiveAllocationResult
 _SNAPSHOT_TYPE = OrderSnapshot
 _REQUIRE_OMS_AUTHORITY = require_exact_order_projection_authority
 _OMS_SNAPSHOTS_GETTER = DurableOrderBookProjection.snapshots.fget
@@ -101,6 +103,59 @@ def _exact_open_quantity(
     if amount < 0:
         raise _error_type("canonical OMS open_quantity cannot be negative")
     return amount
+
+
+def _require_matching_proposal_oms_scope(
+    result: EvidenceBoundObjectiveAllocationResult,
+    oms: DurableOrderBookProjection,
+    *,
+    _result_type=_RESULT_TYPE,
+    _oms_type=_OMS_TYPE,
+    _require_oms=_REQUIRE_OMS_AUTHORITY,
+    _require_oms_code=_REQUIRE_OMS_AUTHORITY_CODE,
+    _bound_check=_require_bound_executable,
+    _bound_check_code=_GET(_require_bound_executable, "__code__"),
+    _text=_exact_text,
+    _text_code=_GET(_exact_text, "__code__"),
+    _get=_GET,
+    _type=type,
+    _error_type=CorrelationConcentrationError,
+) -> None:
+    """Bind the OMS cut to the exact proposal provider/account/environment scope."""
+
+    for function, expected_code, name in (
+        (_bound_check, _bound_check_code, "OMS executable verifier"),
+        (_text, _text_code, "OMS text normalizer"),
+    ):
+        if _get(function, "__code__") is not expected_code:
+            raise _error_type(f"{name} executable changed after binding")
+
+    if _type(result) is not _result_type:
+        raise TypeError("result must be exact EvidenceBoundObjectiveAllocationResult")
+    if _type(oms) is not _oms_type:
+        raise TypeError("oms must be exact DurableOrderBookProjection")
+    _bound_check(
+        _require_oms,
+        _require_oms_code,
+        name="canonical OMS authority verifier",
+    )
+    _require_oms(oms)
+
+    proposal_scope = (
+        _text(_get(result, "provider_id"), name="proposal provider_id").upper(),
+        _text(_get(result, "account_id"), name="proposal account_id"),
+        _text(_get(result, "environment"), name="proposal environment").upper(),
+    )
+    oms_scope = (
+        _text(_get(oms, "provider_id"), name="OMS provider_id").upper(),
+        _text(_get(oms, "account_id"), name="OMS account_id"),
+        _text(_get(oms, "environment"), name="OMS environment").upper(),
+    )
+    if proposal_scope != oms_scope:
+        raise _error_type(
+            "correlation concentration inconclusive: canonical OMS "
+            "provider/account/environment scope does not match the allocation proposal"
+        )
 
 
 def _unvalued_open_orders(
@@ -181,6 +236,8 @@ def require_correlation_safe_proposal_with_oms(
     oms: DurableOrderBookProjection,
     _bound_check=_require_bound_executable,
     _bound_check_code=_GET(_require_bound_executable, "__code__"),
+    _scope_match=_require_matching_proposal_oms_scope,
+    _scope_match_code=_GET(_require_matching_proposal_oms_scope, "__code__"),
     _open_orders=_unvalued_open_orders,
     _open_orders_code=_GET(_unvalued_open_orders, "__code__"),
     _base_guard=_BASE_CORRELATION_GUARD,
@@ -198,12 +255,14 @@ def require_correlation_safe_proposal_with_oms(
 
     for function, expected_code, name in (
         (_bound_check, _bound_check_code, "OMS executable verifier"),
+        (_scope_match, _scope_match_code, "proposal/OMS scope verifier"),
         (_open_orders, _open_orders_code, "canonical OMS open-exposure helper"),
         (_base_guard, _base_guard_code, "base correlation guard"),
     ):
         if _get(function, "__code__") is not expected_code:
             raise _error_type(f"{name} executable changed after binding")
 
+    _scope_match(result, oms)
     blockers = _open_orders(oms)
     if blockers:
         detail = ", ".join(

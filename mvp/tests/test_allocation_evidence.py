@@ -1891,6 +1891,55 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
         self.assertEqual(touched, [])
 
 
+    def test_revalidation_ignores_nested_allocation_attribute_dispatch(self):
+        bundle = self.bundle()
+        result = self.allocate(bundle=bundle)
+        objective = object.__getattribute__(result, "objective")
+        allocation = object.__getattribute__(objective, "allocation")
+        targets = object.__getattribute__(allocation, "targets")
+        target = targets[0]
+        guarded_types = (type(objective), type(allocation), type(target))
+        for guarded_type in guarded_types:
+            self.assertNotIn(
+                "__getattribute__",
+                type.__getattribute__(guarded_type, "__dict__"),
+            )
+        touched = []
+
+        def forged_getattribute(self, name):
+            touched.append((type(self).__name__, name))
+            raise AssertionError("forged nested allocation attribute dispatch executed")
+
+        for guarded_type in guarded_types:
+            guarded_type.__getattribute__ = forged_getattribute
+        try:
+            self.assertTrue(
+                revalidate_evidence_bound_allocation(
+                    result,
+                    resolved_evidence=bundle[-1],
+                    environment="SIMULATION",
+                    as_of="2026-09-25T18:40:00Z",
+                    current_policy_version="risk-policy:12",
+                    current_policy=self.policy(),
+                    current_max_candidate_sets=64,
+                    current_provider_id="SIMULATED",
+                    current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                    current_capability_snapshot_ids={"AAA": "capability:1"},
+                    current_account_id="acct:paper:1",
+                    current_account_snapshot_id="snapshot:acct:1:v5",
+                    current_reconciliation_run_id="reconciliation:acct:1:v5",
+                    current_account_state_version=5,
+                    current_reservation_state_version=9,
+                    current_reservation_state_digest="3" * 64,
+                )
+            )
+        finally:
+            for guarded_type in guarded_types:
+                del guarded_type.__getattribute__
+
+        self.assertEqual(touched, [])
+
+
     def test_same_policy_version_cannot_hide_policy_configuration_change(self):
         bundle = self.bundle()
         result = self.allocate(bundle=bundle)

@@ -1962,6 +1962,15 @@ def run_autonomous_simulation(
         "clock_order": "SETTLEMENT_AT_EVENT_TIME_THEN_DECISION_PLUS_1US", "run_id": run_id,
         "source_build_identity": _simulation_build_identity(),
         "account": ACCOUNT, "provider": PROVIDER, "environment": ENVIRONMENT,
+        # The checkpoint verifier requires positive, immutable ownership proof
+        # for all risk/OMS/financial component publications of this ZERO run.
+        "financial_scope": {
+            "account_id": ACCOUNT,
+            "provider_id": PROVIDER,
+            "environment": ENVIRONMENT,
+            "instrument_version": INSTRUMENT,
+            "instrument_id": INSTRUMENT_ID,
+        },
         "strategy_parameters": {"fast": 2, "slow": 3},
         "prices": [canonical_decimal_text(v) for v in values], "start_time": timestamp,
         "risk_policy": "canonical-provider-free-risk-v1",

@@ -1,5 +1,34 @@
 # AGENTS.md
 
+## Simplified Section Closure Protocol v3 — owner directive 2026-10-07
+
+**This v3 directive overrides Terminal Section Closure Protocol v2 and every older conflicting Section-closure rule in this repository.**
+
+### DONE rule
+A Section is `DONE` when all work that is controllable inside the repository has been completed and integrated, and all tests/checks that are actually available to autonomous workers have passed. Do not keep a Section open merely to wait for evidence that cannot presently be produced by the repository or its workers.
+
+### Human/NVDA acceptance is final-product work, not an intermediate blocker
+- Manual owner/NVDA testing MUST NOT block any intermediate Section.
+- Do not ask the owner to test unfinished or partially assembled product scope.
+- Do not use missing manual NVDA evidence as `INTERNAL_DONE_BLOCKED_EXTERNAL` for an intermediate Section.
+- Run automated accessibility checks when they exist and are relevant, but reserve real owner/NVDA acceptance for the final whole-product handoff/release stage, when there is a genuinely usable build to test.
+- Failure to have final owner/NVDA acceptance before that final stage is not a defect, blocker, or reason to slow sequential Section closure.
+
+### External infrastructure
+- A queued check that is expected to run normally may be awaited without mutating the frozen candidate.
+- If hosted CI/runner/infrastructure is unavailable and workers cannot restore it, record that fact, use all repository-local/static/test evidence that is actually available, and do not keep an otherwise complete Section permanently open solely because the external runner did not execute.
+- A known failing test/check remains a real blocker until repaired. "Unavailable" is not the same as "failed."
+
+### Sequencing and terminal lock
+- After the simplified DONE rule is met, record `DONE` durably and immediately advance to the next Section.
+- A DONE Section is terminally skipped by ordinary workers.
+- Reopen only for a concrete demonstrated regression, invalid closure evidence, a materially changed acceptance contract, or a later integration change that demonstrably broke the closed scope.
+- Do not invent extra hardening, polishing, repeat audits, duplicate PRs, or owner-side testing merely to delay closure.
+
+### Final acceptance
+Final whole-product release may still require real user/NVDA/device acceptance where applicable. That requirement belongs at the final product acceptance/handoff gate only, after a usable build exists.
+
+
 ## Terminal Section Closure Protocol v2 — owner directive 2026-10-07
 
 **This section overrides every older coordination rule in this repository, including any instruction to use the full execution window, keep creating residual work, prepare FRONT-2, avoid idling, satisfy a depth/work-unit floor, or keep mutating while CI is pending. Product correctness/safety requirements remain binding.**

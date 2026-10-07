@@ -520,3 +520,99 @@ def test_matching_scope_oms_with_open_order_remains_inconclusive():
             require_correlation_safe_proposal_with_oms(
                 proposal, evidence, resolver, policy, oms=oms
             )
+
+
+@pytest.mark.parametrize(
+    ("terminal_outcome", "expected_state"),
+    [
+        ("confirmed_cancel", "CANCELLED"),
+        ("confirmed_expiry", "EXPIRED"),
+        ("provider_rejection", "REJECTED"),
+        ("partial_cancel", "PARTIALLY_FILLED_CANCELLED"),
+    ],
+)
+def test_terminal_unfilled_remainder_is_not_working_oms_exposure(
+    terminal_outcome: str, expected_state: str,
+):
+    """An order's open_quantity is an unfilled remainder even when terminal."""
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        if terminal_outcome == "partial_cancel":
+            oms.record_fill(
+                event_key="fill-before-cancel",
+                client_order_id="open-order-1",
+                fill_id="fill-one",
+                provider_execution_id="execution-one",
+                quantity="0.25",
+                price="100",
+                committed_at=NOW,
+            )
+        if terminal_outcome in {"confirmed_cancel", "partial_cancel"}:
+            oms.request_cancel(
+                event_key="cancel-request",
+                client_order_id="open-order-1",
+                command_id="cancel-command",
+                committed_at=NOW,
+            )
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="canonical OMS has unvalued open exposure",
+            ):
+                proposal, evidence, resolver, policy = _passing_inputs()
+                require_correlation_safe_proposal_with_oms(
+                    proposal, evidence, resolver, policy, oms=oms,
+                )
+            oms.confirm_cancel(
+                event_key="cancel-confirmation",
+                client_order_id="open-order-1",
+                committed_at=NOW,
+            )
+        elif terminal_outcome == "confirmed_expiry":
+            oms.confirm_expired(
+                event_key="expiry-confirmation",
+                client_order_id="open-order-1",
+                committed_at=NOW,
+            )
+        else:
+            oms.acknowledge(
+                event_key="provider-rejection",
+                client_order_id="open-order-1",
+                status="REJECTED",
+                committed_at=NOW,
+            )
+        snapshot = oms.snapshots[0]
+        assert snapshot.state == expected_state
+        assert snapshot.open_quantity > Decimal("0")
+        proposal, evidence, resolver, policy = _passing_inputs()
+        assert require_correlation_safe_proposal_with_oms(
+            proposal, evidence, resolver, policy, oms=oms,
+        ) is proposal
+
+
+def test_rejected_cancel_retains_unvalued_open_oms_exposure():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        oms.request_cancel(
+            event_key="cancel-request",
+            client_order_id="open-order-1",
+            command_id="cancel-command",
+            committed_at=NOW,
+        )
+        oms.reject_cancel(
+            event_key="cancel-rejection",
+            client_order_id="open-order-1",
+            command_id="cancel-command",
+            reason_code="STILL_WORKING",
+            committed_at=NOW,
+        )
+        assert oms.snapshots[0].state == "PENDING"
+        proposal, evidence, resolver, policy = _passing_inputs()
+        with pytest.raises(
+            CorrelationConcentrationError,
+            match="canonical OMS has unvalued open exposure",
+        ):
+            require_correlation_safe_proposal_with_oms(
+                proposal, evidence, resolver, policy, oms=oms,
+            )

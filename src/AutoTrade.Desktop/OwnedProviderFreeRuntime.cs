@@ -104,7 +104,7 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
                 || launch.AbsolutePath != "/" || launch.Query.Length != 0 || !launch.Fragment.StartsWith("#pair=", StringComparison.Ordinal))
                 throw new InvalidOperationException("Host readiness origin differs from the installed ZERO authority.");
             string code = launch.Fragment[6..];
-            using HttpRequestMessage pair = new(HttpMethod.Post, new Uri(origin, HostApiRoutes.PairLocalSession));
+            using HttpRequestMessage pair = new(HttpMethod.Post, new Uri(origin, "api/v1/session"));
             pair.Headers.Add("Origin", origin.GetLeftPart(UriPartial.Authority));
             pair.Content = new StringContent(JsonSerializer.Serialize(new {pairing_code = code}), Encoding.UTF8, "application/json");
             // The canonical pairing endpoint requires this exact media type.

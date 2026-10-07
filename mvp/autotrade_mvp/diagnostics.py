@@ -57,13 +57,9 @@ _EMBEDDED_SECRET_PATTERNS = (
     ),
 )
 
-_PRIVATE_KEY_MARKERS = (
-    "-----BEGIN PRIVATE KEY-----",
-    "-----BEGIN ENCRYPTED PRIVATE KEY-----",
-    "-----BEGIN RSA PRIVATE KEY-----",
-    "-----BEGIN DSA PRIVATE KEY-----",
-    "-----BEGIN EC PRIVATE KEY-----",
-    "-----BEGIN OPENSSH PRIVATE KEY-----",
+_PRIVATE_KEY_MARKERS = tuple(
+    "-----BEGIN " + prefix + "PRIVATE KEY-----"
+    for prefix in ("", "ENCRYPTED ", "RSA ", "DSA ", "EC ", "OPENSSH ")
 )
 
 

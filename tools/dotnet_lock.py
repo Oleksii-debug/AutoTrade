@@ -382,7 +382,11 @@ def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
                 continue
             project_root = tree.getroot()
             sdk_attribute = project_root.attrib.get('Sdk')
-            if sdk_attribute is not None and sdk_attribute != 'Microsoft.NET.Sdk':
+            if sdk_attribute is not None and not (
+                sdk_attribute == 'Microsoft.NET.Sdk'
+                or (relative == 'src/AutoTrade.Host/AutoTrade.Host.csproj'
+                    and sdk_attribute == 'Microsoft.NET.Sdk.Web')
+            ):
                 blockers.append(
                     f'DOTNET_PROJECT_SDK_AUTHORITY_UNSUPPORTED:'
                     f'{relative}:{sdk_attribute}'

@@ -45,6 +45,43 @@ def _create_open_order(oms: DurableOrderBookProjection) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("provider_id", "account_id", "environment"),
+    (
+        ("OTHER", "acct:1", "SIMULATION"),
+        ("SIMULATED", "acct:other", "SIMULATION"),
+        ("SIMULATED", "acct:1", "REPLAY"),
+    ),
+)
+def test_empty_oms_scope_mismatch_cannot_hide_proposal_open_exposure_domain(
+    provider_id: str,
+    account_id: str,
+    environment: str,
+):
+    with TemporaryDirectory() as directory:
+        oms = DurableOrderBookProjection(
+            JournalStore(f"{directory}/journal.sqlite3"),
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            host_id="host-1",
+            owner_epoch="epoch-1",
+        )
+        proposal, evidence, resolver, policy = _passing_inputs()
+
+        with pytest.raises(
+            CorrelationConcentrationError,
+            match="provider/account/environment scope does not match",
+        ):
+            require_correlation_safe_proposal_with_oms(
+                proposal,
+                evidence,
+                resolver,
+                policy,
+                oms=oms,
+            )
+
+
 def test_open_durable_order_blocks_otherwise_passing_correlation_admission():
     with TemporaryDirectory() as directory:
         oms = _oms(directory)

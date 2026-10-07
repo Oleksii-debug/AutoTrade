@@ -9,7 +9,7 @@ import pytest
 
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.order_projection import OrderSnapshot
+from mvp.autotrade_mvp.order_projection import OrderBookProjection, OrderSnapshot
 from mvp.autotrade_mvp.portfolio_correlation import CorrelationConcentrationError
 import mvp.autotrade_mvp.portfolio_correlation_oms as correlation_oms
 from mvp.autotrade_mvp.portfolio_correlation_oms import (
@@ -157,6 +157,46 @@ def test_proposal_class_property_spoof_cannot_fake_matching_oms_scope():
                 )
         assert callbacks == []
 
+
+
+
+def test_order_book_snapshot_method_rebinding_cannot_hide_durable_order():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        proposal, evidence, resolver, policy = _passing_inputs()
+
+        with patch.object(OrderBookProjection, "snapshots", new=lambda _self: ()):
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="canonical order-book snapshots method was rebound",
+            ):
+                require_correlation_safe_proposal_with_oms(
+                    proposal, evidence, resolver, policy, oms=oms
+                )
+
+
+def test_order_book_snapshot_method_in_place_code_change_fails_closed():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        proposal, evidence, resolver, policy = _passing_inputs()
+        original = correlation_oms._BOOK_SNAPSHOTS.__code__
+
+        def forged_book_snapshots(_self):
+            return ()
+
+        correlation_oms._BOOK_SNAPSHOTS.__code__ = forged_book_snapshots.__code__
+        try:
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="canonical order-book snapshots method executable changed",
+            ):
+                require_correlation_safe_proposal_with_oms(
+                    proposal, evidence, resolver, policy, oms=oms
+                )
+        finally:
+            correlation_oms._BOOK_SNAPSHOTS.__code__ = original
 
 
 def test_order_snapshot_open_quantity_descriptor_spoof_cannot_hide_open_order():

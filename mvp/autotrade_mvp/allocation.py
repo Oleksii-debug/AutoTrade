@@ -2572,7 +2572,135 @@ def _allocation_decision_digest(
     reservation_state_version: int,
     reservation_state_digest: str,
     base_currency: str,
+    _result_type=ObjectiveAllocationResult,
+    _allocation_type=AllocationResult,
+    _target_type=AllocationTarget,
+    _decimal_type=Decimal,
+    _get=object.__getattribute__,
+    _type=type,
+    _str=str,
+    _tuple=tuple,
+    _sorted=sorted,
+    _sha256=sha256,
+    _canonical_json=_canonical_evidence_json,
+    _canonical_json_code=getattr(_canonical_evidence_json, "__code__", None),
 ) -> str:
+    """Digest one exact detached allocation result without caller dispatch."""
+
+    if getattr(_canonical_json, "__code__", None) is not _canonical_json_code:
+        raise ValueError(
+            "allocation decision canonicalizer executable changed after binding"
+        )
+    if _type(result) is not _result_type:
+        raise TypeError("allocation decision result must be exact ObjectiveAllocationResult")
+
+    def exact_text(value, *, name: str) -> str:
+        if _type(value) is not str:
+            raise TypeError(f"{name} must be exact built-in text")
+        return value
+
+    def exact_decimal_text(value, *, name: str) -> str:
+        if _type(value) is not _decimal_type:
+            raise TypeError(f"{name} must be exact Decimal")
+        return _str(value)
+
+    def exact_pairs(value, *, name: str) -> tuple[tuple[str, str], ...]:
+        if _type(value) is not _tuple:
+            raise TypeError(f"{name} must be an exact tuple")
+        out = []
+        for item in value:
+            if _type(item) is not _tuple or len(item) != 2:
+                raise TypeError(f"{name} entries must be exact two-item tuples")
+            left, right = item
+            out.append(
+                (
+                    exact_text(left, name=f"{name} key"),
+                    exact_text(right, name=f"{name} value"),
+                )
+            )
+        return _tuple(out)
+
+    objective_version = exact_text(
+        _get(result, "objective_version"),
+        name="objective_version",
+    )
+    selected_symbols = _get(result, "selected_symbols")
+    if _type(selected_symbols) is not _tuple:
+        raise TypeError("selected_symbols must be an exact tuple")
+    selected_symbols_snapshot = _tuple(
+        exact_text(symbol, name="selected symbol") for symbol in selected_symbols
+    )
+    expected_net_utility = exact_decimal_text(
+        _get(result, "expected_net_utility"),
+        name="expected_net_utility",
+    )
+
+    allocation = _get(result, "allocation")
+    if _type(allocation) is not _allocation_type:
+        raise TypeError("allocation decision allocation must be exact AllocationResult")
+    targets = _get(allocation, "targets")
+    if _type(targets) is not _tuple:
+        raise TypeError("allocation decision targets must be an exact tuple")
+    target_payload = []
+    for target in targets:
+        if _type(target) is not _target_type:
+            raise TypeError("allocation decision targets must be exact AllocationTarget")
+        target_payload.append(
+            {
+                "symbol": exact_text(_get(target, "symbol"), name="target symbol"),
+                "quantity": exact_decimal_text(
+                    _get(target, "quantity"),
+                    name="target quantity",
+                ),
+                "notional": exact_decimal_text(
+                    _get(target, "notional"),
+                    name="target notional",
+                ),
+                "estimated_cost": exact_decimal_text(
+                    _get(target, "estimated_cost"),
+                    name="target estimated_cost",
+                ),
+                "turnover_notional": exact_decimal_text(
+                    _get(target, "turnover_notional"),
+                    name="target turnover_notional",
+                ),
+            }
+        )
+
+    worst_stress_loss = _get(allocation, "worst_stress_loss")
+    if worst_stress_loss is not None and _type(worst_stress_loss) is not _decimal_type:
+        raise TypeError("worst_stress_loss must be exact Decimal or None")
+
+    normalized_evidence_refs = exact_pairs(evidence_refs, name="evidence_refs")
+    normalized_instrument_versions = exact_pairs(
+        instrument_versions,
+        name="instrument_versions",
+    )
+    normalized_capability_snapshot_ids = exact_pairs(
+        capability_snapshot_ids,
+        name="capability_snapshot_ids",
+    )
+    for name, value in (
+        ("environment", environment),
+        ("policy_version", policy_version),
+        ("policy_config_digest", policy_config_digest),
+        ("objective_search_config_digest", objective_search_config_digest),
+        ("decision_time", decision_time),
+        ("provider_id", provider_id),
+        ("account_id", account_id),
+        ("account_snapshot_id", account_snapshot_id),
+        ("reconciliation_run_id", reconciliation_run_id),
+        ("reservation_state_digest", reservation_state_digest),
+        ("base_currency", base_currency),
+    ):
+        exact_text(value, name=name)
+    for name, value in (
+        ("account_state_version", account_state_version),
+        ("reservation_state_version", reservation_state_version),
+    ):
+        if _type(value) is not int or value < 0:
+            raise TypeError(f"{name} must be a non-negative exact integer")
+
     payload = {
         "environment": environment,
         "policy_version": policy_version,
@@ -2583,11 +2711,11 @@ def _allocation_decision_digest(
         "account_id": account_id,
         "instrument_versions": [
             {"symbol": symbol, "instrument_version": version}
-            for symbol, version in sorted(instrument_versions)
+            for symbol, version in _sorted(normalized_instrument_versions)
         ],
         "capability_snapshot_ids": [
             {"symbol": symbol, "capability_snapshot_id": snapshot_id}
-            for symbol, snapshot_id in sorted(capability_snapshot_ids)
+            for symbol, snapshot_id in _sorted(normalized_capability_snapshot_ids)
         ],
         "account_snapshot_id": account_snapshot_id,
         "reconciliation_run_id": reconciliation_run_id,
@@ -2595,40 +2723,48 @@ def _allocation_decision_digest(
         "reservation_state_version": reservation_state_version,
         "reservation_state_digest": reservation_state_digest,
         "base_currency": base_currency,
-        "objective_version": result.objective_version,
-        "selected_symbols": list(result.selected_symbols),
-        "expected_net_utility": str(result.expected_net_utility),
+        "objective_version": objective_version,
+        "selected_symbols": list(selected_symbols_snapshot),
+        "expected_net_utility": expected_net_utility,
         "allocation": {
-            "status": result.allocation.status,
-            "scale": str(result.allocation.scale),
-            "gross_notional": str(result.allocation.gross_notional),
-            "net_notional": str(result.allocation.net_notional),
-            "estimated_cost": str(result.allocation.estimated_cost),
+            "status": exact_text(_get(allocation, "status"), name="allocation status"),
+            "scale": exact_decimal_text(_get(allocation, "scale"), name="allocation scale"),
+            "gross_notional": exact_decimal_text(
+                _get(allocation, "gross_notional"),
+                name="allocation gross_notional",
+            ),
+            "net_notional": exact_decimal_text(
+                _get(allocation, "net_notional"),
+                name="allocation net_notional",
+            ),
+            "estimated_cost": exact_decimal_text(
+                _get(allocation, "estimated_cost"),
+                name="allocation estimated_cost",
+            ),
             "worst_stress_loss": (
                 None
-                if result.allocation.worst_stress_loss is None
-                else str(result.allocation.worst_stress_loss)
+                if worst_stress_loss is None
+                else exact_decimal_text(
+                    worst_stress_loss,
+                    name="allocation worst_stress_loss",
+                )
             ),
-            "cash_required": str(result.allocation.cash_required),
-            "turnover_notional": str(result.allocation.turnover_notional),
-            "targets": [
-                {
-                    "symbol": target.symbol,
-                    "quantity": str(target.quantity),
-                    "notional": str(target.notional),
-                    "estimated_cost": str(target.estimated_cost),
-                    "turnover_notional": str(target.turnover_notional),
-                }
-                for target in result.allocation.targets
-            ],
+            "cash_required": exact_decimal_text(
+                _get(allocation, "cash_required"),
+                name="allocation cash_required",
+            ),
+            "turnover_notional": exact_decimal_text(
+                _get(allocation, "turnover_notional"),
+                name="allocation turnover_notional",
+            ),
+            "targets": target_payload,
         },
         "evidence_refs": [
             {"evidence_id": evidence_id, "digest": digest}
-            for evidence_id, digest in evidence_refs
+            for evidence_id, digest in normalized_evidence_refs
         ],
     }
-    return sha256(_canonical_evidence_json(payload).encode("utf-8")).hexdigest()
-
+    return _sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 def allocate_evidence_bound_objective_targets(
     candidates: Sequence[ObjectiveCandidate],

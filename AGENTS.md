@@ -4,12 +4,12 @@ Objective: TIME_TO_WHOLE_FINISHED_AUTOTRADE.
 
 Read `control/INDEX.json` before work.
 
-Current mode: `UNBOUNDED_AUTONOMOUS_PARALLEL_DELIVERY`.
+Current mode: `SEQUENTIAL_CLOSURE_WITH_PARALLEL_RESIDUALS`.
 
 Canonical worker-coordination override:
 - No repository-defined worker, coordinator, WIP, work-package, branch, or PR cap.
 - Any older fixed worker count, WIP limit, serialized lane, ownership/claim lock, exclusive integration owner, mandatory PR-order waiting rule, or CI-wait stop rule is non-binding if it conflicts with this section.
-- Claims, leases, ownership, assignments, queues, and coordinator labels are advisory coordination metadata only; they never block useful safe work.
+- Claims, leases, ownership, assignments, queues, and coordinator labels are advisory coordination metadata only; they do not override the ordered Sequential closure authority below.
 - Workers may create branches, commits, pull requests, tests, fixes, integration commits, and merges when GitHub permissions allow and the change is honestly verified.
 - Dependencies constrain final integration order only. They must not stop independent implementation, testing, hardening, research, documentation, accessibility, packaging, fixtures, adapters, or other non-conflicting work.
 - Queued, pending, slow, or unavailable CI is never by itself a reason to terminate. Record the pending state and immediately continue another valuable independent task.

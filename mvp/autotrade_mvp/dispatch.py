@@ -643,15 +643,6 @@ def _install_submission_response_binding_authority(loader):
     )
 
 
-(
-    load_submission_response_binding,
-    require_canonical_submission_response_binding,
-    submission_response_binding_projection,
-) = _install_submission_response_binding_authority(
-    load_submission_response_binding
-)
-del _install_submission_response_binding_authority
-
 def stable_client_order_id(
     provider: str,
     intent_id: str,
@@ -709,6 +700,16 @@ def _instant(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("now must include a timezone")
     return parsed.astimezone(timezone.utc)
+
+
+(
+    load_submission_response_binding,
+    require_canonical_submission_response_binding,
+    submission_response_binding_projection,
+) = _install_submission_response_binding_authority(
+    load_submission_response_binding
+)
+del _install_submission_response_binding_authority
 
 
 def _prepared_lease_state(

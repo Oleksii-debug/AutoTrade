@@ -56,6 +56,13 @@ def _require_bound_executable(
         raise _error_type(f"{name} executable changed after binding")
 
 
+# The executable code seal is not sufficient if its own keyword defaults can
+# be rewritten to provide a forged __code__ lookup.
+_BOUND_CHECK_KWDEFAULTS = MappingProxyType(
+    dict(_GET(_require_bound_executable, "__kwdefaults__"))
+)
+
+
 def _exact_text(
     value: object,
     *,
@@ -122,6 +129,7 @@ def _unvalued_open_orders(
     _snapshots_getter_code=_OMS_SNAPSHOTS_GETTER_CODE,
     _bound_check=_require_bound_executable,
     _bound_check_code=_GET(_require_bound_executable, "__code__"),
+    _bound_check_kwdefaults=_BOUND_CHECK_KWDEFAULTS,
     _text=_exact_text,
     _text_code=_GET(_exact_text, "__code__"),
     _open_quantity=_exact_open_quantity,
@@ -142,6 +150,15 @@ def _unvalued_open_orders(
     ):
         if _get(function, "__code__") is not expected_code:
             raise _error_type(f"{name} executable changed after binding")
+
+    verifier_defaults = _get(_bound_check, "__kwdefaults__")
+    if _type(verifier_defaults) is not dict or (
+        verifier_defaults.keys() != _bound_check_kwdefaults.keys()
+    ):
+        raise _error_type("OMS executable verifier defaults changed after binding")
+    for name, expected in _bound_check_kwdefaults.items():
+        if verifier_defaults[name] is not expected:
+            raise _error_type("OMS executable verifier defaults changed after binding")
 
     quantity_defaults = _get(_open_quantity, "__kwdefaults__")
     if _type(quantity_defaults) is not dict or (

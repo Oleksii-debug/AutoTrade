@@ -294,6 +294,33 @@ class LifecycleCostValuationBridgeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             LifecycleValuationProjectionError,
+            "instrument_version",
+        ):
+            LifecycleValuationProjection(
+                **{**kwargs, "instrument_version": "instrument:legacy:v1"}
+            )
+        with self.assertRaisesRegex(
+            LifecycleValuationProjectionError,
+            "component_evidence_refs must not be empty",
+        ):
+            LifecycleValuationProjection(
+                **{**kwargs, "component_evidence_refs": ()}
+            )
+        with self.assertRaisesRegex(
+            LifecycleValuationProjectionError,
+            "unsupported component evidence kind",
+        ):
+            LifecycleValuationProjection(
+                **{
+                    **kwargs,
+                    "component_evidence_refs": (
+                        ("UNKNOWN_COST", "evidence:unknown:v1"),
+                    ),
+                }
+            )
+
+        with self.assertRaisesRegex(
+            LifecycleValuationProjectionError,
             "horizon_end",
         ):
             LifecycleValuationProjection(

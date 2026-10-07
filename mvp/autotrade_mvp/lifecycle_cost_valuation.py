@@ -23,7 +23,9 @@ from typing import Mapping
 from .exact_decimal import ExactDecimalError, canonical_decimal_text, exact_sum
 from .lifecycle_cost import (
     AllocationCostSplit,
+    LifecycleCostError,
     LifecycleCostProfile,
+    _instrument_version_ref,
     allocation_cost_split,
 )
 
@@ -104,6 +106,17 @@ def _canonical_sha256(value: object, *, name: str) -> str:
             f"{name} must be canonical sha256:<64 lowercase hex>"
         )
     return text
+
+
+def _canonical_instrument_version(value: object) -> str:
+    if type(value) is not str:
+        raise TypeError("instrument_version must be exact text")
+    try:
+        return _instrument_version_ref(value)
+    except LifecycleCostError as error:
+        raise LifecycleValuationProjectionError(
+            "instrument_version must be canonical UUID@positive-version"
+        ) from error
 
 
 def _utc(value: object, *, name: str) -> datetime:
@@ -192,7 +205,7 @@ class LifecycleValuationProjection:
         object.__setattr__(
             self,
             "instrument_version",
-            _exact_text(self.instrument_version, name="instrument_version"),
+            _canonical_instrument_version(self.instrument_version),
         )
         decision_time = _utc(self.decision_time, name="decision_time")
         horizon_end = _utc(self.horizon_end, name="horizon_end")
@@ -247,6 +260,10 @@ class LifecycleValuationProjection:
                 )
         if type(self.component_evidence_refs) is not tuple:
             raise TypeError("component_evidence_refs must be an exact tuple")
+        if not self.component_evidence_refs:
+            raise LifecycleValuationProjectionError(
+                "component_evidence_refs must not be empty"
+            )
         seen_component_kinds: set[str] = set()
         normalized_component_refs: list[tuple[str, str]] = []
         for entry in self.component_evidence_refs:
@@ -254,7 +271,14 @@ class LifecycleValuationProjection:
                 raise TypeError(
                     "component_evidence_refs entries must be exact (kind, ref) tuples"
                 )
-            kind = _exact_text(entry[0], name="component evidence kind")
+            kind = _exact_text(
+                entry[0],
+                name="component evidence kind",
+            ).upper()
+            if kind not in _KIND_TO_BUCKET:
+                raise LifecycleValuationProjectionError(
+                    f"unsupported component evidence kind: {kind}"
+                )
             evidence_ref = _exact_text(entry[1], name="component evidence ref")
             if kind in seen_component_kinds:
                 raise LifecycleValuationProjectionError(
@@ -262,6 +286,7 @@ class LifecycleValuationProjection:
                 )
             seen_component_kinds.add(kind)
             normalized_component_refs.append((kind, evidence_ref))
+        normalized_component_refs.sort()
         object.__setattr__(
             self,
             "component_evidence_refs",

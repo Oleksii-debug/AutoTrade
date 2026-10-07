@@ -543,8 +543,9 @@ def _normalized_license_text(path: Path) -> str:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError as error:
         raise ValueError(f"license text is not UTF-8: {path}") from error
-    return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")).strip() + "\n"
-
+    # Fold presentation whitespace only. The signed NuGet archive remains
+    # byte-exact SHA-512 pinned; words and punctuation remain exact.
+    return " ".join(text.split()) + "\n"
 
 def _package_regular_file(
     package_dir: Path,

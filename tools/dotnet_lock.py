@@ -191,7 +191,10 @@ def dotnet_restore_command_tokens(command: str) -> tuple[str, ...]:
     if _DOTNET_RESTORE_SHELL_CONTROL.search(payload) is not None:
         raise ValueError('dotnet restore command must not contain shell execution control')
     try:
-        tokens = tuple(shlex.split(payload, comments=True))
+        # Preserve Windows separators as literal backslashes for the
+        # canonical repo-relative target check. POSIX shlex would otherwise
+        # silently remove them and admit a noncanonical path.
+        tokens = tuple(shlex.split(payload.replace("\\", "\\\\"), comments=True))
     except ValueError as error:
         raise ValueError('malformed dotnet restore command') from error
     if len(tokens) < 3 or tokens[:2] != ('dotnet', 'restore'):

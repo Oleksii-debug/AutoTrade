@@ -556,8 +556,8 @@ def _autonomous_owned_event_ids(
     store: JournalStore,
     *,
     run_id: str,
-) -> tuple[str, ...]:
-    """Resolve exact ZERO publication candidates without a bounded outbox scan."""
+) -> tuple[tuple[str, str], ...]:
+    """Resolve exact ZERO event/topic bindings without an unbounded outbox scan."""
 
     events = list(
         JournalStore.load_events(
@@ -585,7 +585,12 @@ def _autonomous_owned_event_ids(
         raise AutonomousRuntimeCheckpointError(
             "ZERO runtime event identities are not unique"
         )
-    return event_ids
+    result: list[tuple[str, str]] = []
+    for event in events:
+        topic = _canonical_publication_topic(event)
+        if topic is not None:
+            result.append((event["event_id"], topic))
+    return tuple(result)
 
 
 def _autonomous_owned_pending_publications(
@@ -595,10 +600,12 @@ def _autonomous_owned_pending_publications(
 ) -> tuple[dict[str, object], ...]:
     pending: list[dict[str, object]] = []
     financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
-    for event_id in _autonomous_owned_event_ids(store, run_id=run_id):
-        state = JournalStore.outbox_delivery_state(store, event_id)
-        if state is None:
-            continue
+    for event_id, topic in _autonomous_owned_event_ids(store, run_id=run_id):
+        # A publication is selected by its canonical topic, never by an
+        # implicit or caller-selected topic. Missing required rows fail closed.
+        state = JournalStore.outbox_delivery_state(
+            store, event_id, topic=topic
+        )
         if not _autonomous_publication_owned(
             state,
             run_id=run_id,

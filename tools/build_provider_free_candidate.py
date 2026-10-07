@@ -493,14 +493,9 @@ def _normalized_rights_text(payload, *, label):
         text = payload.decode('utf-8-sig')
     except UnicodeDecodeError as error:
         raise ValueError(label + ' is not UTF-8') from error
-    return (
-        '\n'.join(
-            line.rstrip()
-            for line in text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
-        ).strip()
-        + '\n'
-    )
-
+    # Preserve the exact lexical license while tolerating vendor line wrapping.
+    # Archive bytes are independently verified against the pinned full SHA-512.
+    return ' '.join(text.split()) + '\n'
 
 def _require_webview2_archive_rights(
     product_root,

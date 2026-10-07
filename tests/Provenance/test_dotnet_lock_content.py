@@ -99,14 +99,11 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 )
             )
         )
-        self.assertTrue(
-            dotnet_restore_tokens_are_locked(
-                dotnet_restore_command_tokens(
-                    'run: dotnet restore src/App/App.csproj '
-                    '-p:Other=x;RestoreLockedMode=true'
-                )
+        with self.assertRaisesRegex(ValueError, "shell execution control"):
+            dotnet_restore_command_tokens(
+                'run: dotnet restore src/App/App.csproj '
+                '-p:Other=x;RestoreLockedMode=true'
             )
-        )
 
     def test_comma_separated_properties_cannot_hide_restore_override(self):
         self.assertFalse(
@@ -135,15 +132,12 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 )
             )
         )
-        self.assertFalse(
-            dotnet_restore_tokens_are_locked(
-                dotnet_restore_command_tokens(
-                    "run: dotnet restore src/App/App.csproj "
-                    "-p:RestoreLockedMode=true;"
-                    "NuGetLockFilePath=artifacts/other.lock.json"
-                )
+        with self.assertRaisesRegex(ValueError, "shell execution control"):
+            dotnet_restore_command_tokens(
+                "run: dotnet restore src/App/App.csproj "
+                "-p:RestoreLockedMode=true;"
+                "NuGetLockFilePath=artifacts/other.lock.json"
             )
-        )
 
     def test_force_evaluate_defeats_locked_restore_authority(self):
         self.assertFalse(
@@ -154,22 +148,15 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 )
             )
         )
-        self.assertFalse(
-            dotnet_restore_tokens_are_locked(
-                dotnet_restore_command_tokens(
-                    "run: dotnet restore src/App/App.csproj "
-                    "-p:RestoreLockedMode=true;RestoreForceEvaluate=true"
-                )
-            )
-        )
-        self.assertTrue(
-            dotnet_restore_tokens_are_locked(
-                dotnet_restore_command_tokens(
-                    "run: dotnet restore src/App/App.csproj "
-                    "-p:RestoreLockedMode=true;RestoreForceEvaluate=false"
-                )
-            )
-        )
+        for text in (
+            "-p:RestoreLockedMode=true;RestoreForceEvaluate=true",
+            "-p:RestoreLockedMode=true;RestoreForceEvaluate=false",
+        ):
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(ValueError, "shell execution control"):
+                    dotnet_restore_command_tokens(
+                        "run: dotnet restore src/App/App.csproj " + text
+                    )
 
     def test_yaml_comment_cannot_mint_locked_restore_authority(self):
         tokens = dotnet_restore_command_tokens(
@@ -711,7 +698,7 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 }
             }
             (project.parent / 'packages.lock.json').write_text(json.dumps(payload), encoding='utf-8')
-            with self.assertRaisesRegex(ValueError, 'invalid NuGet content hash'):
+            with self.assertRaisesRegex(ValueError, 'DOTNET_PROJECT_LOCK_CONTENT_HASH_INVALID'):
                 dotnet_locked_dependency_graph(root, [project])
 
     def test_missing_package_version_fails_closed(self):

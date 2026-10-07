@@ -1,0 +1,64 @@
+name: temp-zero-scope-alias-conflicts
+
+on:
+  push:
+    branches:
+      - test/shared-store-zero-foreign-backlog-20261005-v2-sol56
+    paths:
+      - .github/workflows/temp-zero-scope-alias-conflicts.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Synchronize latest branch head
+        shell: bash
+        run: |
+          git fetch origin "${GITHUB_REF_NAME}"
+          git reset --hard "origin/${GITHUB_REF_NAME}"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply guarded ownership hardening
+        shell: bash
+        run: |
+          python .github/scripts/temp_zero_scope_alias_conflicts.py
+      - name: Compile touched Python
+        shell: bash
+        run: |
+          python -m py_compile \
+            mvp/autotrade_mvp/simulation_runtime_checkpoint.py \
+            mvp/tests/test_zero_scope_alias_conflicts.py
+      - name: Run focused authority regressions
+        shell: bash
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m unittest discover -s mvp/tests -p 'test_zero_scope_alias_conflicts.py' -v
+          python -m unittest discover -s mvp/tests -p 'test_zero_runtime_scope_ownership.py' -v
+          python -m unittest discover -s mvp/tests -p 'test_zero_runtime_aggregate_scope.py' -v
+          python -m unittest discover -s mvp/tests -p 'test_shared_store_zero_foreign_backlog.py' -v
+          python -m unittest discover -s mvp/tests -p 'test_zero_missing_loop_publication.py' -v
+      - name: Publish verified source and remove temporary harness
+        shell: bash
+        run: |
+          git config user.name 'Oleksii-debug'
+          git config user.email 'oleksiy.az.09@gmail.com'
+          git rm \
+            .github/workflows/temp-zero-scope-alias-conflicts.yml \
+            .github/scripts/temp_zero_scope_alias_conflicts.py
+          git add \
+            mvp/autotrade_mvp/simulation_runtime_checkpoint.py \
+            mvp/tests/test_zero_scope_alias_conflicts.py
+          if git diff --cached --quiet; then
+            echo 'No durable changes to publish'
+            exit 1
+          fi
+          git commit -m 'Harden ZERO scope alias conflict authority'
+          git push origin HEAD:${GITHUB_REF_NAME}

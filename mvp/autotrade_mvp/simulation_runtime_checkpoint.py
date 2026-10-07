@@ -53,6 +53,21 @@ _COMPONENT_AGGREGATE_TYPES = (
     "submission_attempt",
     "valuation_observation",
 )
+_COMPONENT_PUBLICATION_TOPICS: dict[str, str | None] = {
+    "account_reconciliation": "autotrade.reconciliation.events",
+    "authority_state": None,
+    "economic_book": "autotrade.economic.events",
+    "order_projection_book": "autotrade.order-projection.events",
+    "provider_activity": None,
+    "reservation_book": None,
+    "risk_decision": None,
+    "risk_policy_registry": None,
+    "settlement_book": None,
+    "submission_attempt": "autotrade.submission.events",
+    "valuation_observation": None,
+}
+_LOCAL_COMPONENT_HOST_IDS = frozenset({"local-simulation", "local-mvp"})
+_AGGREGATE_SCOPE_INHERITANCE_TYPES = frozenset({"submission_attempt"})
 _VERIFIER_LOCK = threading.RLock()
 _VERIFIERS: dict[str, RuntimeStateVerifier] = {}
 
@@ -243,6 +258,243 @@ def _aggregate_events(
     ]
 
 
+def _payload_scope_value(
+    payload: Mapping[str, object],
+    key: str,
+) -> object | None:
+    """Resolve common durable scope layouts without guessing from unrelated fields."""
+
+    if key in payload:
+        return payload.get(key)
+    scope = payload.get("scope")
+    if type(scope) is dict and key in scope:
+        return scope.get(key)
+    identity = payload.get("identity")
+    if type(identity) is dict:
+        identity_scope = identity.get("scope")
+        if type(identity_scope) is dict and key in identity_scope:
+            return identity_scope.get(key)
+    request = payload.get("request")
+    if type(request) is dict and key in request:
+        return request.get(key)
+    return None
+
+
+def _payload_provider_id(payload: Mapping[str, object]) -> object | None:
+    """Resolve the canonical provider id plus the durable submission `provider` alias."""
+
+    provider_id = _payload_scope_value(payload, "provider_id")
+    if provider_id is not None:
+        return provider_id
+    provider = _payload_scope_value(payload, "provider")
+    return provider if type(provider) is str else None
+
+
+def _component_environment(event: Mapping[str, object]) -> object | None:
+    payload = event.get("payload")
+    payload = payload if type(payload) is dict else {}
+    environment = event.get("environment")
+    return environment if environment is not None else _payload_scope_value(payload, "environment")
+
+
+def _component_host_id(event: Mapping[str, object]) -> object | None:
+    payload = event.get("payload")
+    payload = payload if type(payload) is dict else {}
+    host_id = event.get("host_id")
+    return host_id if host_id is not None else _payload_scope_value(payload, "host_id")
+
+
+def _autonomous_run_financial_scope(
+    store: JournalStore,
+    *,
+    run_id: str,
+) -> dict[str, str] | None:
+    """Load the immutable ZERO financial scope from its durable start event.
+
+    Synthetic journal tests may contain an isolated loop publication without a
+    start event; in that case component publications have no positive ownership
+    proof and are intentionally not acknowledged.
+    """
+
+    events = JournalStore.load_events(
+        store,
+        "canonical_autonomous_simulation",
+        run_id,
+    )
+    if not events or events[0].get("event_type") != "AutonomousSimulationStarted":
+        return None
+    payload = events[0].get("payload")
+    protocol = payload.get("protocol") if type(payload) is dict else None
+    scope = protocol.get("financial_scope") if type(protocol) is dict else None
+    if type(scope) is not dict:
+        raise AutonomousRuntimeCheckpointError(
+            "autonomous simulation start lacks durable financial scope"
+        )
+    account_id = _text(scope.get("account_id"), field="financial_scope.account_id")
+    provider_id = _text(scope.get("provider_id"), field="financial_scope.provider_id")
+    environment = _text(scope.get("environment"), field="financial_scope.environment")
+    if environment != "SIMULATION":
+        raise AutonomousRuntimeCheckpointError(
+            "autonomous simulation financial scope must be SIMULATION"
+        )
+    return {
+        "account_id": account_id,
+        "provider_id": provider_id,
+        "environment": environment,
+    }
+
+
+def _component_event_definitively_foreign(
+    event: Mapping[str, object],
+    *,
+    financial_scope: Mapping[str, str] | None = None,
+) -> bool:
+    """Exclude only component facts that prove they belong outside ZERO.
+
+    Durable component schemas predate universal host/provider field names. A
+    missing marker therefore remains checkpoint authority (fail closed), while
+    explicit environment/account/provider/host conflicts are foreign. Both
+    product-owned simulation writers (`local-simulation` and `local-mvp`) are
+    accepted; production or other hosts remain excluded.
+    """
+
+    payload = event.get("payload")
+    payload = payload if type(payload) is dict else {}
+    environment = _component_environment(event)
+    if environment is not None and environment != "SIMULATION":
+        return True
+
+    if environment is None:
+        environments = payload.get("environments")
+        if type(environments) in {list, tuple} and "SIMULATION" not in environments:
+            return True
+
+    host_id = _component_host_id(event)
+    if host_id is not None and host_id not in _LOCAL_COMPONENT_HOST_IDS:
+        return True
+
+    if financial_scope is not None:
+        account_id = _payload_scope_value(payload, "account_id")
+        if account_id is not None and account_id != financial_scope["account_id"]:
+            return True
+        provider_id = _payload_provider_id(payload)
+        if provider_id is not None and provider_id != financial_scope["provider_id"]:
+            return True
+    return False
+
+
+def _component_event_has_positive_run_scope(
+    event: Mapping[str, object],
+    *,
+    financial_scope: Mapping[str, str],
+) -> bool:
+    """Require positive environment/account proof; optional provider must agree."""
+
+    if _component_event_definitively_foreign(
+        event,
+        financial_scope=financial_scope,
+    ):
+        return False
+    payload = event.get("payload")
+    if type(payload) is not dict:
+        return False
+
+    environment = _component_environment(event)
+    if environment is None:
+        environments = payload.get("environments")
+        if (
+            type(environments) not in {list, tuple}
+            or financial_scope["environment"] not in environments
+        ):
+            return False
+    elif environment != financial_scope["environment"]:
+        return False
+
+    account_id = _payload_scope_value(payload, "account_id")
+    if account_id != financial_scope["account_id"]:
+        return False
+    provider_id = _payload_provider_id(payload)
+    if provider_id is not None and provider_id != financial_scope["provider_id"]:
+        return False
+    return True
+
+
+def _component_aggregate_events(
+    store: JournalStore,
+    event: Mapping[str, object],
+) -> tuple[Mapping[str, object], ...]:
+    aggregate_type = event.get("aggregate_type")
+    aggregate_id = event.get("aggregate_id")
+    if (
+        aggregate_type not in _AGGREGATE_SCOPE_INHERITANCE_TYPES
+        or type(aggregate_id) is not str
+        or not aggregate_id
+    ):
+        return (event,)
+    events = JournalStore.load_events(store, aggregate_type, aggregate_id)
+    return tuple(events) if events else (event,)
+
+
+def _component_publication_matches_run_scope(
+    store: JournalStore,
+    event: Mapping[str, object],
+    *,
+    financial_scope: Mapping[str, str] | None,
+) -> bool:
+    """Require positive aggregate financial-scope proof before ZERO acknowledges it.
+
+    Submission lifecycle events become sparse after `SubmissionPrepared`; the
+    immutable aggregate history is therefore the ownership authority for later
+    Sending/Sent/Failed publications. Any explicit conflict anywhere in that
+    lifecycle rejects the entire aggregate. Other aggregate types intentionally
+    remain event-scoped until their producer contract proves inheritance safe.
+    """
+
+    if financial_scope is None or event.get("aggregate_type") not in _COMPONENT_AGGREGATE_TYPES:
+        return False
+    aggregate_events = _component_aggregate_events(store, event)
+    if any(
+        _component_event_definitively_foreign(
+            candidate,
+            financial_scope=financial_scope,
+        )
+        for candidate in aggregate_events
+    ):
+        return False
+    return any(
+        _component_event_has_positive_run_scope(
+            candidate,
+            financial_scope=financial_scope,
+        )
+        for candidate in aggregate_events
+    )
+
+
+def _autonomous_event_owned(
+    store: JournalStore,
+    event: Mapping[str, object],
+    *,
+    run_id: str,
+    financial_scope: Mapping[str, str] | None = None,
+) -> bool:
+    """Return whether one durable event can affect the ZERO runtime checkpoint."""
+
+    aggregate_type = event.get("aggregate_type")
+    aggregate_id = event.get("aggregate_id")
+    if aggregate_type == "canonical_autonomous_simulation":
+        return aggregate_id == run_id
+    if aggregate_type not in _COMPONENT_AGGREGATE_TYPES:
+        return False
+    aggregate_events = _component_aggregate_events(store, event)
+    return not any(
+        _component_event_definitively_foreign(
+            candidate,
+            financial_scope=financial_scope,
+        )
+        for candidate in aggregate_events
+    )
+
+
 def _runtime_scope_snapshot(
     store: JournalStore,
     *,
@@ -282,8 +534,21 @@ def _runtime_scope_snapshot(
             )
         loop_events = loop_events[:-1]
 
+    financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
     authority_events = {
-        aggregate_type: _aggregate_events(store, aggregate_type)
+        aggregate_type: [
+            _event_identity(event)
+            for event in JournalStore.load_events_by_aggregate_type(
+                store,
+                aggregate_type,
+            )
+            if _autonomous_event_owned(
+                store,
+                event,
+                run_id=run_id,
+                financial_scope=financial_scope,
+            )
+        ]
         for aggregate_type in _COMPONENT_AGGREGATE_TYPES
     }
     cut = {
@@ -305,31 +570,81 @@ def _runtime_scope_snapshot(
 
 
 def _autonomous_publication_owned(
+    store: JournalStore,
     item: Mapping[str, object],
     *,
     run_id: str,
+    financial_scope: Mapping[str, str] | None,
 ) -> bool:
-    """Return whether one pending publication belongs to ZERO runtime authority."""
+    """Return whether one publication is positively owned by this ZERO run."""
 
     envelope = item.get("payload")
     if type(envelope) is not dict:
         raise AutonomousRuntimeCheckpointError(
-            "pending outbox payload is not a canonical event envelope"
+            "outbox payload is not a canonical event envelope"
         )
-    aggregate_type = envelope.get("aggregate_type")
-    aggregate_id = envelope.get("aggregate_id")
-    if aggregate_type == "canonical_autonomous_simulation":
-        return aggregate_id == run_id
-
-    event_payload = envelope.get("payload")
-    event_payload = event_payload if type(event_payload) is dict else {}
-    environment = envelope.get("environment", event_payload.get("environment"))
-    host_id = envelope.get("host_id", event_payload.get("host_id"))
-    return (
-        aggregate_type in _COMPONENT_AGGREGATE_TYPES
-        and environment == "SIMULATION"
-        and host_id == "local-simulation"
+    if envelope.get("aggregate_type") == "canonical_autonomous_simulation":
+        return envelope.get("aggregate_id") == run_id
+    return _component_publication_matches_run_scope(
+        store,
+        envelope,
+        financial_scope=financial_scope,
     )
+
+
+def _canonical_publication_topic(envelope: Mapping[str, object]) -> str | None:
+    aggregate_type = envelope.get("aggregate_type")
+    if aggregate_type == "canonical_autonomous_simulation":
+        return "autotrade.simulation.events"
+    if aggregate_type == "authority_state":
+        payload = envelope.get("payload")
+        if (
+            envelope.get("event_type") == "AuthorityAdmissionRecorded"
+            and type(payload) is dict
+            and payload.get("outcome") == "ADMITTED"
+        ):
+            return "financial.admission.ready"
+        return None
+    if aggregate_type not in _COMPONENT_PUBLICATION_TOPICS:
+        return None
+    return _COMPONENT_PUBLICATION_TOPICS[aggregate_type]
+
+
+def _autonomous_owned_event_ids(
+    store: JournalStore,
+    *,
+    run_id: str,
+) -> tuple[str, ...]:
+    """Resolve exact ZERO publication candidates without a bounded outbox scan."""
+
+    events = list(
+        JournalStore.load_events(
+            store,
+            "canonical_autonomous_simulation",
+            run_id,
+        )
+    )
+    financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
+    if financial_scope is not None:
+        for aggregate_type in _COMPONENT_AGGREGATE_TYPES:
+            events.extend(
+                event
+                for event in JournalStore.load_events_by_aggregate_type(
+                    store,
+                    aggregate_type,
+                )
+                if _component_publication_matches_run_scope(
+                    store,
+                    event,
+                    financial_scope=financial_scope,
+                )
+            )
+    event_ids = tuple(event["event_id"] for event in events)
+    if len(set(event_ids)) != len(event_ids):
+        raise AutonomousRuntimeCheckpointError(
+            "ZERO runtime event identities are not unique"
+        )
+    return event_ids
 
 
 def _autonomous_owned_pending_publications(
@@ -337,21 +652,48 @@ def _autonomous_owned_pending_publications(
     *,
     run_id: str,
 ) -> tuple[dict[str, object], ...]:
-    pending = JournalStore.pending_outbox(store, limit=1000)
-    count = JournalStore.pending_outbox_count(store)
-    if len(pending) == 1000 and count > len(pending):
-        raise AutonomousRuntimeCheckpointError(
-            "runtime checkpoint publication ownership scan exceeded bounded outbox window"
-        )
-    if len(pending) != count:
-        raise AutonomousRuntimeCheckpointError(
-            "runtime checkpoint pending outbox changed during ownership preflight"
-        )
-    return tuple(
-        item
-        for item in pending
-        if _autonomous_publication_owned(item, run_id=run_id)
-    )
+    pending: list[dict[str, object]] = []
+    financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
+    for event_id in _autonomous_owned_event_ids(store, run_id=run_id):
+        state = JournalStore.outbox_delivery_state(store, event_id)
+        if state is None:
+            event = JournalStore.get_event(store, event_id)
+            if event is None:
+                raise AutonomousRuntimeCheckpointError(
+                    "ZERO-owned journal event disappeared"
+                )
+            if _canonical_publication_topic(event) is not None:
+                raise AutonomousRuntimeCheckpointError(
+                    "ZERO publication is missing"
+                )
+            continue
+        if not _autonomous_publication_owned(
+            store,
+            state,
+            run_id=run_id,
+            financial_scope=financial_scope,
+        ):
+            raise AutonomousRuntimeCheckpointError(
+                "exact ZERO outbox state escaped runtime ownership"
+            )
+        envelope = state.get("payload")
+        if type(envelope) is not dict:
+            raise AutonomousRuntimeCheckpointError(
+                "ZERO publication payload is not a canonical event envelope"
+            )
+        expected_topic = _canonical_publication_topic(envelope)
+        if expected_topic is None:
+            raise AutonomousRuntimeCheckpointError(
+                "ZERO component event unexpectedly has an outbox publication"
+            )
+        if state.get("topic") != expected_topic:
+            raise AutonomousRuntimeCheckpointError(
+                "ZERO publication routing topic is not canonical"
+            )
+        if state["delivered"]:
+            continue
+        pending.append(state)
+    return tuple(pending)
 
 
 def deliver_autonomous_owned_publications(
@@ -849,6 +1191,8 @@ def _require_autonomous_runtime_authority_key(
 
 
 def _verifier(authority_id: str, key: bytes) -> RuntimeStateVerifier:
+    if type(authority_id) is not str or not authority_id:
+        raise TypeError("runtime checkpoint authority id is required")
     if type(key) is not bytes or len(key) != 32:
         raise TypeError("runtime checkpoint authority key must be 32 bytes")
     with _VERIFIER_LOCK:

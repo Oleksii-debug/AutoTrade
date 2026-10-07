@@ -65,6 +65,8 @@ class JournalStoreTests(unittest.TestCase):
             self.assertFalse(state["delivered"])
             self.assertEqual(state["outbox_id"], pending["outbox_id"])
             self.assertEqual(state["envelope_hash"], pending["envelope_hash"])
+            by_event_id = store.outbox_delivery_state("evt-1")
+            self.assertEqual(by_event_id, state)
             self.assertIsNone(
                 store.outbox_delivery_state("evt-1", topic="other.events")
             )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -217,4 +218,102 @@ def test_in_place_base_correlation_guard_code_mutation_fails_closed():
                 )
         finally:
             correlation_oms._BASE_CORRELATION_GUARD.__code__ = original_code
+
+def test_builtin_sorted_rebinding_cannot_hide_open_order():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        proposal, evidence, resolver, policy = _passing_inputs()
+        calls: list[str] = []
+        original_sorted = builtins.sorted
+
+        def forged_sorted(*_args, **_kwargs):
+            calls.append("sorted")
+            return []
+
+        caught = None
+        builtins.sorted = forged_sorted
+        try:
+            try:
+                require_correlation_safe_proposal_with_oms(
+                    proposal,
+                    evidence,
+                    resolver,
+                    policy,
+                    oms=oms,
+                )
+            except CorrelationConcentrationError as error:
+                caught = error
+        finally:
+            builtins.sorted = original_sorted
+
+        assert caught is not None
+        assert "canonical OMS has unvalued open exposure" in str(caught)
+        assert calls == []
+
+
+def test_public_open_exposure_helper_rebinding_cannot_hide_open_order():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        proposal, evidence, resolver, policy = _passing_inputs()
+
+        with patch.object(correlation_oms, "_unvalued_open_orders", lambda _oms: ()):
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="canonical OMS has unvalued open exposure",
+            ):
+                require_correlation_safe_proposal_with_oms(
+                    proposal,
+                    evidence,
+                    resolver,
+                    policy,
+                    oms=oms,
+                )
+
+
+def test_public_open_quantity_helper_rebinding_cannot_hide_open_order():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        _create_open_order(oms)
+        proposal, evidence, resolver, policy = _passing_inputs()
+
+        with patch.object(correlation_oms, "_exact_open_quantity", lambda _value: 0):
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="canonical OMS has unvalued open exposure",
+            ):
+                require_correlation_safe_proposal_with_oms(
+                    proposal,
+                    evidence,
+                    resolver,
+                    policy,
+                    oms=oms,
+                )
+
+
+def test_in_place_open_exposure_helper_code_mutation_fails_closed():
+    with TemporaryDirectory() as directory:
+        oms = _oms(directory)
+        proposal, evidence, resolver, policy = _passing_inputs()
+        original_code = correlation_oms._unvalued_open_orders.__code__
+
+        def forged_open_orders(_oms):
+            return ()
+
+        correlation_oms._unvalued_open_orders.__code__ = forged_open_orders.__code__
+        try:
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="OMS open-exposure resolver executable changed after binding",
+            ):
+                require_correlation_safe_proposal_with_oms(
+                    proposal,
+                    evidence,
+                    resolver,
+                    policy,
+                    oms=oms,
+                )
+        finally:
+            correlation_oms._unvalued_open_orders.__code__ = original_code
 

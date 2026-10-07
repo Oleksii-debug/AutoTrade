@@ -11,6 +11,7 @@ from mvp.autotrade_mvp.allocation import (
     AllocationPolicy,
     ImmutableAllocationEvidence,
     ObjectiveCandidate,
+    _allocation_decision_digest,
     allocate_evidence_bound_objective_targets,
     revalidate_evidence_bound_allocation,
 )
@@ -1889,6 +1890,110 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             del result_type.__getattribute__
 
         self.assertEqual(touched, [])
+
+
+    def test_revalidation_ignores_nested_allocation_attribute_dispatch(self):
+        bundle = self.bundle()
+        result = self.allocate(bundle=bundle)
+        objective = object.__getattribute__(result, "objective")
+        allocation = object.__getattribute__(objective, "allocation")
+        targets = object.__getattribute__(allocation, "targets")
+        target = targets[0]
+        guarded_types = (type(objective), type(allocation), type(target))
+        for guarded_type in guarded_types:
+            self.assertNotIn(
+                "__getattribute__",
+                type.__getattribute__(guarded_type, "__dict__"),
+            )
+        touched = []
+
+        def forged_getattribute(self, name):
+            touched.append((type(self).__name__, name))
+            raise AssertionError("forged nested allocation attribute dispatch executed")
+
+        for guarded_type in guarded_types:
+            guarded_type.__getattribute__ = forged_getattribute
+        try:
+            self.assertTrue(
+                revalidate_evidence_bound_allocation(
+                    result,
+                    resolved_evidence=bundle[-1],
+                    environment="SIMULATION",
+                    as_of="2026-09-25T18:40:00Z",
+                    current_policy_version="risk-policy:12",
+                    current_policy=self.policy(),
+                    current_max_candidate_sets=64,
+                    current_provider_id="SIMULATED",
+                    current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                    current_capability_snapshot_ids={"AAA": "capability:1"},
+                    current_account_id="acct:paper:1",
+                    current_account_snapshot_id="snapshot:acct:1:v5",
+                    current_reconciliation_run_id="reconciliation:acct:1:v5",
+                    current_account_state_version=5,
+                    current_reservation_state_version=9,
+                    current_reservation_state_digest="3" * 64,
+                )
+            )
+        finally:
+            for guarded_type in guarded_types:
+                del guarded_type.__getattribute__
+
+        self.assertEqual(touched, [])
+
+
+    def test_decision_digest_rejects_builtin_rebinding_without_callback(self):
+        bundle = self.bundle()
+        result = self.allocate(bundle=bundle)
+        raw_get = object.__getattribute__
+        objective = raw_get(result, "objective")
+        kwargs = {
+            "evidence_refs": raw_get(result, "evidence_refs"),
+            "environment": raw_get(result, "environment"),
+            "policy_version": raw_get(result, "policy_version"),
+            "policy_config_digest": raw_get(result, "policy_config_digest"),
+            "objective_search_config_digest": raw_get(
+                result,
+                "objective_search_config_digest",
+            ),
+            "decision_time": raw_get(result, "decision_time"),
+            "provider_id": raw_get(result, "provider_id"),
+            "account_id": raw_get(result, "account_id"),
+            "instrument_versions": raw_get(result, "instrument_versions"),
+            "capability_snapshot_ids": raw_get(
+                result,
+                "capability_snapshot_ids",
+            ),
+            "account_snapshot_id": raw_get(result, "account_snapshot_id"),
+            "reconciliation_run_id": raw_get(result, "reconciliation_run_id"),
+            "account_state_version": raw_get(result, "account_state_version"),
+            "reservation_state_version": raw_get(
+                result,
+                "reservation_state_version",
+            ),
+            "reservation_state_digest": raw_get(
+                result,
+                "reservation_state_digest",
+            ),
+            "base_currency": raw_get(result, "base_currency"),
+        }
+        calls = []
+        original_list = builtins.list
+
+        def forged_list(*args, **kwargs):
+            calls.append("list")
+            raise AssertionError("forged builtin list callback executed")
+
+        builtins.list = forged_list
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "allocation decision builtin authority changed after binding: list",
+            ):
+                _allocation_decision_digest(objective, **kwargs)
+        finally:
+            builtins.list = original_list
+
+        self.assertEqual(calls, [])
 
 
     def test_same_policy_version_cannot_hide_policy_configuration_change(self):

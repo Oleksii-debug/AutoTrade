@@ -2,7 +2,10 @@ import unittest
 from collections.abc import Mapping
 
 from mvp.autotrade_mvp.allocation import AllocationPolicy, ImmutableAllocationEvidence
-from mvp.autotrade_mvp.authority import AllocationAuthoritySnapshot
+from mvp.autotrade_mvp.authority import (
+    AllocationAuthoritySnapshot,
+    InstrumentVersionIdentity,
+)
 
 
 class _CallbackMapping(Mapping):
@@ -40,6 +43,24 @@ class _CallbackEvidence(ImmutableAllocationEvidence):
         type(self).calls.append(name)
         raise AssertionError(
             f"authority boundary executed evidence subclass attribute {name}"
+        )
+
+
+class _CallbackText(str):
+    calls = []
+
+    def strip(self, *args, **kwargs):
+        type(self).calls.append("strip")
+        raise AssertionError("authority boundary executed string-subclass strip")
+
+
+class _CallbackInstrumentIdentity(InstrumentVersionIdentity):
+    calls = []
+
+    def __getattribute__(self, name):
+        type(self).calls.append(name)
+        raise AssertionError(
+            f"authority boundary executed instrument identity attribute {name}"
         )
 
 
@@ -132,6 +153,69 @@ class AllocationAuthoritySnapshotIngressTests(unittest.TestCase):
             _snapshot(resolved_evidence={"evidence-1": hostile})
 
         self.assertEqual(_CallbackEvidence.calls, [])
+
+    def test_text_subclasses_are_rejected_before_strip_callbacks(self):
+        cases = (
+            ("provider_id", _CallbackText("TEST_PROVIDER")),
+            (
+                "instrument_versions",
+                {_CallbackText("ABC"): "instrument-v1"},
+            ),
+            (
+                "instrument_versions",
+                {"ABC": _CallbackText("instrument-v1")},
+            ),
+            (
+                "capability_snapshot_ids",
+                {"ABC": _CallbackText("capability-v1")},
+            ),
+        )
+        for field, value in cases:
+            with self.subTest(field=field):
+                _CallbackText.calls.clear()
+                with self.assertRaisesRegex(TypeError, "exact text"):
+                    _snapshot(**{field: value})
+                self.assertEqual(_CallbackText.calls, [])
+
+    def test_instrument_identity_subclass_is_rejected_before_attribute_dispatch(self):
+        hostile = object.__new__(_CallbackInstrumentIdentity)
+        _CallbackInstrumentIdentity.calls.clear()
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact InstrumentVersionIdentity, tuple or list",
+        ):
+            _snapshot(financial_instruments={"ABC": hostile})
+
+        self.assertEqual(_CallbackInstrumentIdentity.calls, [])
+
+    def test_financial_instrument_identity_is_detached_from_later_mutation(self):
+        instrument_id = "00000000-0000-0000-0000-000000000001"
+        source = InstrumentVersionIdentity(instrument_id, 1)
+        snapshot = _snapshot(financial_instruments={"ABC": source})
+        stored = dict(snapshot.financial_instruments)["ABC"]
+
+        self.assertIsNot(stored, source)
+        object.__setattr__(source, "version", 99)
+        self.assertEqual(object.__getattribute__(stored, "version"), 1)
+        self.assertEqual(
+            object.__getattribute__(stored, "instrument_id"),
+            instrument_id,
+        )
+
+    def test_exact_list_instrument_identity_is_snapshotted_before_later_mutation(self):
+        instrument_id = "00000000-0000-0000-0000-000000000002"
+        source = [instrument_id, 2]
+        snapshot = _snapshot(financial_instruments={"ABC": source})
+        source[1] = 99
+        stored = dict(snapshot.financial_instruments)["ABC"]
+
+        self.assertEqual(object.__getattribute__(stored, "version"), 2)
+        self.assertEqual(
+            object.__getattribute__(stored, "instrument_id"),
+            instrument_id,
+        )
+
 
     def test_account_state_version_int_subclass_is_rejected_before_comparison(self):
         hostile = _CallbackInt(0)

@@ -34,7 +34,7 @@ class LifecycleValuationProjectionError(ValueError):
     """Frozen lifecycle evidence cannot be represented by WP-32 valuation."""
 
 
-_MAPPING_POLICY_ID = "LIFECYCLE_TO_WP32_COST_BUCKETS_V1"
+_MAPPING_POLICY_ID = "LIFECYCLE_TO_WP32_COST_BUCKETS_V2"
 _MAPPING_PROXY_TYPE = type(MappingProxyType({}))
 _BUCKET_ORDER = ("execution", "financing", "funding", "borrow", "fx")
 _KIND_TO_BUCKET = {
@@ -42,6 +42,7 @@ _KIND_TO_BUCKET = {
     "EXCHANGE_FEE": "execution",
     "SPREAD": "execution",
     "SLIPPAGE": "execution",
+    "MARKET_IMPACT": "execution",
     "TRANSACTION_TAX": "execution",
     "FINANCING": "financing",
     "CARRY": "financing",

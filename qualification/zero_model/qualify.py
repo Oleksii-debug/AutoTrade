@@ -9,11 +9,13 @@ and economically reportable.  It does not claim economic edge or live authority.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from decimal import Decimal
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import platform
 import socket
@@ -31,21 +33,44 @@ from mvp.autotrade_mvp.model_gateway import (
     route_model,
 )
 from mvp.autotrade_mvp.pipeline import run_multi_episode, run_vertical_slice, verify_replay
+from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
 
 
 FIXED_NOW = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)
 PRICES = ("100", "101", "102", "103")
+AUTONOMOUS_PRICES = ("100", "101", "103", "102", "100", "98", "100", "103") * 15
+AUTONOMOUS_NOW = "2026-10-03T00:00:00Z"
+_QUALIFIER_RUNTIME_PATH = Path(__file__).resolve()
+_SOURCE_ROOT = _QUALIFIER_RUNTIME_PATH.parents[2]
+_QUALIFIER_SOURCE_PATH = "qualification/zero_model/qualify.py"
 
 
 class UnavailableModelInventory:
-    """Sentinel iterable that fails if ZERO mode tries to inspect model inventory."""
+    """Fail on all ordinary container inspection in ZERO mode."""
 
     def __init__(self) -> None:
         self.touched = False
 
-    def __iter__(self):
+    def _reject_access(self):
         self.touched = True
         raise RuntimeError("ZERO mode must not inspect unavailable model inventory")
+
+    def __iter__(self):
+        self._reject_access()
+
+    def __len__(self):
+        self._reject_access()
+
+    def __bool__(self):
+        self._reject_access()
+
+    def __getitem__(self, index):
+        del index
+        self._reject_access()
+
+    def __contains__(self, item):
+        del item
+        self._reject_access()
 
 
 @contextmanager
@@ -59,27 +84,81 @@ def _deny_network_access():
         operation = "socket"
         if args:
             operation = getattr(args[0], "__name__", operation)
-        attempts.append(operation)
-        raise RuntimeError(
-            "zero-model qualification attempted network access"
-        )
+        attempts.append(str(operation))
+        raise RuntimeError("zero-model qualification attempted network access")
 
-    targets = (
+    targets = [
+        patch.object(socket.socket, "__init__", blocked),
         patch.object(socket.socket, "connect", blocked),
         patch.object(socket.socket, "connect_ex", blocked),
+        patch.object(socket.socket, "sendto", blocked),
+        patch.object(socket.socket, "send", blocked),
+        patch.object(socket.socket, "sendall", blocked),
         patch.object(socket, "create_connection", blocked),
         patch.object(socket, "getaddrinfo", blocked),
         patch.object(socket, "gethostbyname", blocked),
         patch.object(socket, "gethostbyname_ex", blocked),
         patch.object(socket, "gethostbyaddr", blocked),
-    )
-    with targets[0], targets[1], targets[2], targets[3], targets[4], targets[5], targets[6]:
+    ]
+    for name in (
+        "sendmsg",
+        "sendfile",
+        "recv",
+        "recv_into",
+        "recvfrom",
+        "recvfrom_into",
+        "recvmsg",
+        "recvmsg_into",
+        "accept",
+    ):
+        if hasattr(socket.socket, name):
+            targets.append(patch.object(socket.socket, name, blocked))
+    for name in ("socketpair", "fromfd"):
+        if hasattr(socket, name):
+            targets.append(patch.object(socket, name, blocked))
+
+    with ExitStack() as stack:
+        for target in targets:
+            stack.enter_context(target)
         yield attempts
 
 
+def _network_denied(
+    function,
+    _deny_guard=_deny_network_access,
+    _deny_guard_code=object.__getattribute__(_deny_network_access, "__code__"),
+    _get=object.__getattribute__,
+):
+    """Wrap the whole qualifier in a fail-closed Python network fence."""
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        if _get(_deny_guard, "__code__") is not _deny_guard_code:
+            raise RuntimeError(
+                "zero-model qualification network guard executable changed after binding"
+            )
+        with _deny_guard() as network_attempts:
+            evidence = function(*args, **kwargs)
+        if network_attempts:
+            raise RuntimeError(
+                "zero-model qualification observed a blocked network attempt"
+            )
+        claims = evidence.get("claims")
+        if type(claims) is not dict:
+            raise RuntimeError("zero-model qualification evidence is missing claims")
+        evidence["network_guard"] = {
+            "python_socket_io_blocked": True,
+            "network_attempt_count": 0,
+        }
+        claims["network_or_model_call_performed"] = False
+        return evidence
+
+    return wrapped
+
+
 def _require_source_sha(value: str) -> str:
-    if not isinstance(value, str):
-        raise TypeError("source SHA must be text")
+    if type(value) is not str:
+        raise TypeError("source SHA must be exact text")
     if (
         len(value) not in {40, 64}
         or value != value.strip()
@@ -92,19 +171,113 @@ def _require_source_sha(value: str) -> str:
     return value
 
 
-def _observed_source_sha() -> str:
-    """Read source identity from the actual Git checkout, not caller metadata."""
+def _trusted_git_candidate_paths() -> tuple[Path, ...]:
+    """Return fail-closed OS-managed Git locations without consulting PATH."""
 
+    if os.name == "nt":
+        return (
+            Path(r"C:\Program Files\Git\cmd\git.exe"),
+            Path(r"C:\Program Files\Git\bin\git.exe"),
+        )
+    return (Path("/usr/bin/git"), Path("/bin/git"))
+
+
+def _trusted_git_executable() -> str:
+    """Resolve Git independently of caller PATH and source-checkout content."""
+
+    source_root = _SOURCE_ROOT.resolve(strict=True)
+    for candidate in _trusted_git_candidate_paths():
+        try:
+            executable = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if not executable.is_file():
+            continue
+        try:
+            executable.relative_to(source_root)
+        except ValueError:
+            return os.fspath(executable)
+        raise RuntimeError("trusted Git executable must not originate from source checkout")
+    raise RuntimeError("trusted Git executable is unavailable at an OS-managed location")
+
+
+def _trusted_git_environment() -> dict[str, str]:
+    """Drop caller-selected repository/config/PATH authority from Git inspection."""
+
+    environment = {
+        key: value
+        for key in ("SYSTEMROOT", "WINDIR", "COMSPEC")
+        if (value := os.environ.get(key))
+    }
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
+    environment["GIT_CONFIG_GLOBAL"] = os.devnull
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    environment["LC_ALL"] = "C"
+    environment["LANG"] = "C"
+    return environment
+
+
+def _git(*args: str) -> subprocess.CompletedProcess[str]:
+    executable = _trusted_git_executable()
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+        return subprocess.run(
+            [executable, *args],
+            cwd=_SOURCE_ROOT,
             check=True,
             capture_output=True,
             text=True,
+            timeout=10,
+            env=_trusted_git_environment(),
         )
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise RuntimeError("cannot resolve observed Git source identity") from error
-    return _require_source_sha(result.stdout.strip())
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError("cannot inspect qualification Git checkout") from error
+
+
+def _git_bytes(*args: str) -> subprocess.CompletedProcess[bytes]:
+    executable = _trusted_git_executable()
+    try:
+        return subprocess.run(
+            [executable, *args],
+            cwd=_SOURCE_ROOT,
+            check=True,
+            capture_output=True,
+            text=False,
+            timeout=10,
+            env=_trusted_git_environment(),
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError("cannot read exact qualification Git object") from error
+
+
+def _observed_source_sha() -> str:
+    """Read source identity from the exact checkout that owns this qualifier."""
+
+    try:
+        top_level = Path(_git("rev-parse", "--show-toplevel").stdout.strip()).resolve(
+            strict=True
+        )
+        source_root = _SOURCE_ROOT.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError("cannot verify qualification Git source root") from error
+    if top_level != source_root:
+        raise RuntimeError("qualification source root is not the exact Git top-level")
+    return _require_source_sha(_git("rev-parse", "HEAD").stdout.strip())
+
+
+def _require_clean_checkout() -> None:
+    status = _git(
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    ).stdout
+    if status:
+        raise RuntimeError(
+            "qualification Git checkout has tracked or untracked source changes"
+        )
 
 
 def _require_exact_checkout(expected_source_sha: str) -> str:
@@ -114,11 +287,41 @@ def _require_exact_checkout(expected_source_sha: str) -> str:
         raise RuntimeError(
             "qualification source identity does not match actual Git checkout"
         )
+    _require_clean_checkout()
     return observed
 
 
-def _qualifier_sha256() -> str:
-    return "sha256:" + sha256(Path(__file__).read_bytes()).hexdigest()
+def _runtime_qualifier_bytes() -> bytes:
+    """Read the exact source file that owns this loaded qualification module."""
+
+    try:
+        runtime_path = _QUALIFIER_RUNTIME_PATH.resolve(strict=True)
+        expected_path = (_SOURCE_ROOT / _QUALIFIER_SOURCE_PATH).resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError("cannot resolve runtime qualifier source path") from error
+    if runtime_path != expected_path:
+        raise RuntimeError(
+            "runtime qualifier source path is not the canonical checkout path"
+        )
+    try:
+        return runtime_path.read_bytes()
+    except OSError as error:
+        raise RuntimeError("cannot read runtime qualifier source bytes") from error
+
+
+def _qualifier_sha256(source_sha: str) -> str:
+    source_sha = _require_source_sha(source_sha)
+    raw = _git_bytes(
+        "cat-file",
+        "blob",
+        f"{source_sha}:{_QUALIFIER_SOURCE_PATH}",
+    ).stdout
+    runtime_raw = _runtime_qualifier_bytes()
+    if runtime_raw != raw:
+        raise RuntimeError(
+            "runtime qualifier bytes do not match exact Git source blob"
+        )
+    return "sha256:" + sha256(raw).hexdigest()
 
 
 def _outage_routes() -> dict[str, object]:
@@ -184,28 +387,11 @@ def _outage_routes() -> dict[str, object]:
     }
 
 
+@_network_denied
 def qualify(source_sha: str) -> dict[str, object]:
     source_sha = _require_exact_checkout(source_sha)
-    qualifier_sha256 = _qualifier_sha256()
+    qualifier_sha256 = _qualifier_sha256(source_sha)
 
-    with _deny_network_access() as network_attempts:
-        evidence = _qualify_offline(source_sha, qualifier_sha256)
-    if network_attempts:
-        raise RuntimeError(
-            "zero-model qualification observed a blocked network attempt"
-        )
-    evidence["network_guard"] = {
-        "python_socket_io_blocked": True,
-        "network_attempt_count": 0,
-    }
-    evidence["claims"]["network_or_model_call_performed"] = False
-    return evidence
-
-
-def _qualify_offline(
-    source_sha: str,
-    qualifier_sha256: str,
-) -> dict[str, object]:
     request = ModelRequest(
         request_id="zero-model-qualification",
         allowed_model_ids=("unavailable-local", "unavailable-remote"),
@@ -310,6 +496,146 @@ def _qualify_offline(
             if first_report.economic_edge_claim != "UNPROVEN_SIMULATION_ONLY":
                 raise RuntimeError("zero-model campaign manufactured an economic-edge claim")
 
+        autonomous_prices = list(AUTONOMOUS_PRICES)
+        with (
+            tempfile.TemporaryDirectory(prefix="autotrade-section16-continuous-") as continuous_directory,
+            tempfile.TemporaryDirectory(prefix="autotrade-section16-restarted-") as restarted_directory,
+        ):
+            continuous = run_autonomous_simulation(
+                autonomous_prices,
+                continuous_directory,
+                run_id="section16-zero-model-qualification",
+                now=AUTONOMOUS_NOW,
+            )
+            paused = run_autonomous_simulation(
+                autonomous_prices,
+                restarted_directory,
+                run_id="section16-zero-model-qualification",
+                now=AUTONOMOUS_NOW,
+                stop_after_episodes=41,
+            )
+            resumed = run_autonomous_simulation(
+                autonomous_prices,
+                restarted_directory,
+                run_id="section16-zero-model-qualification",
+                now=AUTONOMOUS_NOW,
+            )
+            replay = run_autonomous_simulation(
+                autonomous_prices,
+                restarted_directory,
+                run_id="section16-zero-model-qualification",
+                now=AUTONOMOUS_NOW,
+            )
+
+            if continuous["status"] != "COMPLETED" or resumed["status"] != "COMPLETED":
+                raise RuntimeError("canonical autonomous ZERO loop did not complete")
+            if paused["status"] != "PAUSED" or paused["completed_episodes"] != 41:
+                raise RuntimeError("canonical autonomous ZERO loop did not produce the frozen pause cut")
+            if continuous["completed_episodes"] != len(autonomous_prices):
+                raise RuntimeError("canonical autonomous ZERO loop did not consume the complete population")
+            if continuous["mode"] != "ZERO" or resumed["mode"] != "ZERO" or replay["mode"] != "ZERO":
+                raise RuntimeError("canonical autonomous loop escaped ZERO mode")
+            if (
+                resumed["decisions"] != continuous["decisions"]
+                or resumed["cash"] != continuous["cash"]
+                or resumed["position"] != continuous["position"]
+            ):
+                raise RuntimeError("pause/resume changed canonical autonomous economics or decisions")
+            if (
+                paused["new_outbound_requests"] + resumed["new_outbound_requests"]
+                != continuous["new_outbound_requests"]
+            ):
+                raise RuntimeError("pause/resume duplicated or lost canonical outbound requests")
+            if replay["new_outbound_requests"] != 0:
+                raise RuntimeError("completed autonomous replay emitted a duplicate outbound request")
+            if replay["decisions"] != continuous["decisions"]:
+                raise RuntimeError("completed autonomous replay changed decisions")
+            if any(
+                result["economic_edge_status"] != "INCONCLUSIVE"
+                for result in (continuous, resumed, replay)
+            ):
+                raise RuntimeError("canonical autonomous qualification manufactured economic edge")
+
+        with tempfile.TemporaryDirectory(prefix="autotrade-section16-partial-fill-") as partial_directory:
+            partial_fill = run_autonomous_simulation(
+                list(AUTONOMOUS_PRICES[:8]),
+                partial_directory,
+                run_id="section16-partial-fill-qualification",
+                now=AUTONOMOUS_NOW,
+                execution_profile="TWO_EQUAL_PARTIALS",
+                target_quantity="2",
+            )
+            partial_fill_replay = run_autonomous_simulation(
+                list(AUTONOMOUS_PRICES[:8]),
+                partial_directory,
+                run_id="section16-partial-fill-qualification",
+                now=AUTONOMOUS_NOW,
+                execution_profile="TWO_EQUAL_PARTIALS",
+                target_quantity="2",
+            )
+            if partial_fill["status"] != "COMPLETED":
+                raise RuntimeError("canonical partial-fill ZERO loop did not complete")
+            if partial_fill["mode"] != "ZERO":
+                raise RuntimeError("canonical partial-fill loop escaped ZERO mode")
+            if partial_fill["new_outbound_requests"] <= 0:
+                raise RuntimeError("canonical partial-fill loop did not exercise financial submission")
+            if partial_fill_replay["new_outbound_requests"] != 0:
+                raise RuntimeError("partial-fill replay emitted a duplicate outbound request")
+            if partial_fill_replay["decisions"] != partial_fill["decisions"]:
+                raise RuntimeError("partial-fill replay changed canonical decisions")
+            if partial_fill["economic_edge_status"] != "INCONCLUSIVE":
+                raise RuntimeError("partial-fill qualification manufactured economic edge")
+
+        with tempfile.TemporaryDirectory(prefix="autotrade-section16-unknown-") as unknown_directory:
+            unknown_first = run_autonomous_simulation(
+                list(AUTONOMOUS_PRICES[:8]),
+                unknown_directory,
+                run_id="section16-unknown-qualification",
+                now=AUTONOMOUS_NOW,
+                fault_at_episode=3,
+            )
+            unknown_reentry = run_autonomous_simulation(
+                list(AUTONOMOUS_PRICES[:8]),
+                unknown_directory,
+                run_id="section16-unknown-qualification",
+                now=AUTONOMOUS_NOW,
+                fault_at_episode=3,
+            )
+            if unknown_first["status"] != "UNKNOWN":
+                raise RuntimeError("lost-response fault did not enter sticky UNKNOWN")
+            if unknown_first["new_outbound_requests"] != 1:
+                raise RuntimeError("lost-response qualification did not exercise exactly one send")
+            if unknown_reentry["status"] != "UNKNOWN":
+                raise RuntimeError("UNKNOWN state was not preserved across re-entry")
+            if unknown_reentry["new_outbound_requests"] != 0:
+                raise RuntimeError("UNKNOWN re-entry spontaneously resent financial intent")
+
+        with tempfile.TemporaryDirectory(prefix="autotrade-section16-emergency-") as emergency_directory:
+            emergency = run_autonomous_simulation(
+                list(AUTONOMOUS_PRICES[:8]),
+                emergency_directory,
+                run_id="section16-emergency-qualification",
+                now=AUTONOMOUS_NOW,
+                emergency_at_episode=4,
+            )
+            emergency_replay = run_autonomous_simulation(
+                list(AUTONOMOUS_PRICES[:8]),
+                emergency_directory,
+                run_id="section16-emergency-qualification",
+                now=AUTONOMOUS_NOW,
+                emergency_at_episode=4,
+            )
+            if emergency["status"] != "COMPLETED" or emergency["completed_episodes"] != 8:
+                raise RuntimeError("emergency mode did not preserve deterministic loop completion")
+            if emergency["new_outbound_requests"] != 1:
+                raise RuntimeError("emergency mode did not stop subsequent new orders")
+            if emergency_replay["new_outbound_requests"] != 0:
+                raise RuntimeError("emergency replay emitted a duplicate outbound request")
+            if emergency["economic_edge_status"] != "INCONCLUSIVE":
+                raise RuntimeError("emergency qualification manufactured economic edge")
+
+        source_sha = _require_exact_checkout(source_sha)
+
         return {
             "qualification": "WP-62_ZERO_MODEL_FOUNDATION",
             "execution_platform": {
@@ -320,6 +646,7 @@ def _qualify_offline(
             "qualification_schema_version": "1.0.0",
             "source_sha": source_sha,
             "observed_source_sha": source_sha,
+            "source_checkout_clean": True,
             "qualifier_sha256": qualifier_sha256,
             "model_route": {
                 "status": route.status.value,
@@ -340,6 +667,50 @@ def _qualify_offline(
                 for name, decision in outage_routes.items()
             },
             "model_cost_total": str(model_cost_total),
+            "canonical_autonomous_zero_loop": {
+                "continuous_status": continuous["status"],
+                "paused_status": paused["status"],
+                "resumed_status": resumed["status"],
+                "replay_status": replay["status"],
+                "mode": continuous["mode"],
+                "episodes": continuous["completed_episodes"],
+                "pause_cut": paused["completed_episodes"],
+                "continuous_outbound_requests": continuous["new_outbound_requests"],
+                "pause_resume_outbound_requests": (
+                    paused["new_outbound_requests"] + resumed["new_outbound_requests"]
+                ),
+                "replay_outbound_requests": replay["new_outbound_requests"],
+                "same_decisions_after_resume": resumed["decisions"] == continuous["decisions"],
+                "same_economics_after_resume": (
+                    resumed["cash"] == continuous["cash"]
+                    and resumed["position"] == continuous["position"]
+                ),
+                "economic_edge_status": continuous["economic_edge_status"],
+            },
+            "canonical_unknown_no_resend": {
+                "initial_status": unknown_first["status"],
+                "reentry_status": unknown_reentry["status"],
+                "initial_outbound_requests": unknown_first["new_outbound_requests"],
+                "reentry_outbound_requests": unknown_reentry["new_outbound_requests"],
+            },
+            "canonical_emergency_zero_loop": {
+                "status": emergency["status"],
+                "episodes": emergency["completed_episodes"],
+                "outbound_requests": emergency["new_outbound_requests"],
+                "replay_outbound_requests": emergency_replay["new_outbound_requests"],
+                "economic_edge_status": emergency["economic_edge_status"],
+            },
+            "canonical_partial_fill_zero_loop": {
+                "status": partial_fill["status"],
+                "mode": partial_fill["mode"],
+                "new_outbound_requests": partial_fill["new_outbound_requests"],
+                "replay_outbound_requests": partial_fill_replay["new_outbound_requests"],
+                "same_decisions_after_replay": (
+                    partial_fill_replay["decisions"] == partial_fill["decisions"]
+                ),
+                "economic_edge_status": partial_fill["economic_edge_status"],
+                "execution_profile": "TWO_EQUAL_PARTIALS",
+            },
             "deterministic_financial_slice": {
                 "first_status": first.status,
                 "restart_status": second.status,

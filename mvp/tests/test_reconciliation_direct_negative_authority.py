@@ -1,6 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from uuid import NAMESPACE_URL, uuid5
 
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.reconciliation_journal import (
@@ -21,16 +22,21 @@ class ReconciliationDirectNegativeAuthorityTests(unittest.TestCase):
         outcome: str,
     ) -> str:
         account_id = "paper-account"
+        provider_environment = (
+            "TESTNET" if environment == "PAPER" else "MAINNET"
+        ) if provider_id == "BYBIT" else None
         aggregate_id = _reconciliation_aggregate_id(
             reconciliation_id=reconciliation_id,
             provider_id=provider_id,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         )
         payload = {
             "provider_id": provider_id,
             "account_id": account_id,
             "environment": environment,
+            "provider_environment": provider_environment,
             "submission_resolutions": [
                 {
                     "attempt_id": "attempt-" + reconciliation_id,
@@ -40,7 +46,7 @@ class ReconciliationDirectNegativeAuthorityTests(unittest.TestCase):
                 }
             ],
         }
-        event_id = reconciliation_id + "-event"
+        event_id = str(uuid5(NAMESPACE_URL, "plan6-negative-fixture:" + reconciliation_id))
         store.append_event(
             {
                 "event_id": event_id,
@@ -78,6 +84,9 @@ class ReconciliationDirectNegativeAuthorityTests(unittest.TestCase):
             provider_id=provider_id,
             account_id="paper-account",
             environment=environment,
+            provider_environment=(
+                "TESTNET" if environment == "PAPER" else "MAINNET"
+            ) if provider_id == "BYBIT" else None,
         )
 
     def test_direct_loader_rejects_legacy_real_provider_proven_absent(self):

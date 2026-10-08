@@ -302,6 +302,46 @@ class WindowsUpdateIntentTests(unittest.TestCase):
             False,
         )
 
+    def test_persisted_restart_entry_point_blocks_exact_pending_effect(self):
+        intent = self.first()
+        update.publish_windows_update_step_intent(intent, path=self.path)
+        cp = update.WindowsUpdateCheckpoint(plan_sha256=SOURCE_PLAN_DIGEST)
+        result = update.assess_windows_update_restart_with_persisted_intent(
+            self.plan,
+            cp,
+            trust=self.trust,
+            intent_path=self.path,
+            observed_windows_package_sha256="sha256:" + "c"*64,
+            observed_journal_schema_version=1,
+        )
+        self.assertEqual(result.disposition, "BLOCKED_UNKNOWN_STATE")
+
+    def test_persisted_restart_fails_closed_on_missing_intent(self):
+        cp = update.WindowsUpdateCheckpoint(plan_sha256=SOURCE_PLAN_DIGEST)
+        with self.assertRaises(update.WindowsUpdateError):
+            update.assess_windows_update_restart_with_persisted_intent(
+                self.plan,
+                cp,
+                trust=self.trust,
+                intent_path=self.path,
+                observed_windows_package_sha256="sha256:" + "c"*64,
+                observed_journal_schema_version=1,
+            )
+
+    def test_persisted_restart_fails_closed_on_corrupted_intent(self):
+        update.publish_windows_update_step_intent(self.first(), path=self.path)
+        self.path.write_text('{"claimed":"PASS"}', encoding="utf-8")
+        cp = update.WindowsUpdateCheckpoint(plan_sha256=SOURCE_PLAN_DIGEST)
+        with self.assertRaises(update.WindowsUpdateError):
+            update.assess_windows_update_restart_with_persisted_intent(
+                self.plan,
+                cp,
+                trust=self.trust,
+                intent_path=self.path,
+                observed_windows_package_sha256="sha256:" + "c"*64,
+                observed_journal_schema_version=1,
+            )
+
     def test_no_generic_action_can_be_disguised_as_canonical_step(self):
         with self.assertRaisesRegex(update.WindowsUpdateError, "noncanonical step"):
             update.WindowsUpdateStepIntent(

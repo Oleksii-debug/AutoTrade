@@ -121,7 +121,7 @@ def _rewrite_existing_publish_evidence(path, evidence):
     directory entry; it cannot redirect binder bytes through a substituted
     symlink or hardlink into another authority-owned file.
     """
-    if type(path) is not Path or type(evidence) is not dict:
+    if type(path) is not type(Path()) or type(evidence) is not dict:
         raise TypeError('publish evidence rewrite requires exact Path and dict')
     payload = (
         json.dumps(evidence, indent=2, sort_keys=True, ensure_ascii=False) + '\n'
@@ -508,7 +508,7 @@ def _require_webview2_archive_rights(
     version,
     content_hash,
 ):
-    if type(product_root) is not Path or type(archive_path) is not Path:
+    if type(product_root) is not type(Path()) or type(archive_path) is not type(Path()):
         raise TypeError('WebView2 rights verification requires exact Path values')
     if type(version) is not str or type(content_hash) is not str:
         raise TypeError('WebView2 rights identity must be exact str values')

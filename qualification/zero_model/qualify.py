@@ -276,7 +276,8 @@ def _require_clean_checkout() -> None:
     ).stdout
     if status:
         raise RuntimeError(
-            "qualification Git checkout has tracked or untracked source changes"
+            "qualification Git checkout has tracked or untracked source changes: "
+            + repr(status[:1024])
         )
 
 

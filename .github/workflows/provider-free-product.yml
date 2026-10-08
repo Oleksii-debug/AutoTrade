@@ -75,7 +75,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --locked-mode
+      - run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --locked-mode -r win-x64
       - run: dotnet publish src/AutoTrade.Desktop/AutoTrade.Desktop.csproj -c Release -r win-x64 --self-contained true --no-restore -p:SourceRevisionId=${{ env.AUTOTRADE_SOURCE_SHA }} -p:ContinuousIntegrationBuild=true -o artifacts/desktop
       - run: python tools/write_ci_evidence.py --suite provider-free-desktop-publish --command "locked self-contained win-x64 Desktop publish" --output artifacts/desktop/desktop-build-evidence.json
       - name: Bind Desktop PASS evidence to exact publish payload

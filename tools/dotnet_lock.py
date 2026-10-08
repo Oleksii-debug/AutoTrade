@@ -5,6 +5,7 @@ import binascii
 import json
 import re
 import shlex
+import subprocess
 from pathlib import Path, PurePosixPath
 import xml.etree.ElementTree as ET
 
@@ -350,6 +351,41 @@ def _restore_local_override_names(tree: ET.ElementTree) -> tuple[str, ...]:
     )
 
 
+def _is_untracked_generated_nuget_import(root: Path, path: Path) -> bool:
+    """Exclude only disposable, untracked NuGet obj sidecars from SOURCE scanning.
+
+    A restored NuGet *.nuget.g.props/targets is generated after locked restore;
+    it is not repository-controlled dependency input. Tracked files, symlinks,
+    arbitrary obj imports, and uncertain Git states remain fail-closed.
+    The actual restored package archive is still checked by the rights gate.
+    """
+    rel = path.relative_to(root)
+    parts = rel.parts
+    if len(parts) != 4 or parts[0] != 'src' or parts[2] != 'obj':
+        return False
+    project_dir = root / 'src' / parts[1]
+    project = project_dir / (parts[1] + '.csproj')
+    if not project.is_file() or path.name not in {
+        project.name + '.nuget.g.props',
+        project.name + '.nuget.g.targets',
+    }:
+        return False
+    if path.is_symlink() or path.parent.is_symlink() or project_dir.is_symlink():
+        return False
+    if not (root / '.git').exists():
+        return False
+    try:
+        tracked = subprocess.run(
+            ['git', 'ls-files', '--error-unmatch', '--', rel.as_posix()],
+            cwd=root, capture_output=True, check=False, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    # Exit 1 is Git's precise untracked-file answer; 0 is tracked and
+    # every other exit (including 128) is a failure, not an exemption.
+    return tracked.returncode == 1
+
+
 def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
     """Reject release dependency declarations hidden in imported MSBuild files.
 
@@ -363,7 +399,10 @@ def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
         candidates.update(root.glob(pattern))
         source_root = root / 'src'
         if source_root.is_dir():
-            candidates.update(source_root.rglob(pattern))
+            candidates.update(
+                path for path in source_root.rglob(pattern)
+                if not _is_untracked_generated_nuget_import(root, path)
+            )
 
     blockers: list[str] = []
 

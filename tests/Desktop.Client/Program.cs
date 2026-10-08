@@ -1664,7 +1664,7 @@ internal static class Program
                 const System.Reflection.BindingFlags flags =
                     System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
                 window = (MainWindow)Activator.CreateInstance(typeof(MainWindow), flags, null,
-                    new object[] { new DisconnectedEmergencyHostClient() }, null)!;
+                    new object?[] { new DisconnectedEmergencyHostClient(), null, null }, null)!;
                 var apply = typeof(MainWindow).GetMethod("ApplyHostStatus", flags)!;
                 var latest = typeof(MainWindow).GetField("_lastKnownConnectedStatus", flags)!;
                 var current = typeof(MainWindow).GetField("_lastKnownCurrentStatus", flags)!;
@@ -1740,7 +1740,7 @@ internal static class Program
                     typeof(MainWindow),
                     flags,
                     null,
-                    new object?[] { client, null },
+                    new object?[] { client, null, null },
                     null)!;
                 var refresh =
                     typeof(MainWindow).GetMethod("RefreshHostStatusAsync", flags)!;
@@ -1829,7 +1829,7 @@ internal static class Program
                     System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
                 InspectingStatusHostClient client = new();
                 window = (MainWindow)Activator.CreateInstance(
-                    typeof(MainWindow), flags, null, new object?[] { client, null }, null)!;
+                    typeof(MainWindow), flags, null, new object?[] { client, null, null }, null)!;
                 var timer = (System.Windows.Threading.DispatcherTimer)typeof(MainWindow)
                     .GetField("_hostRefreshTimer", flags)!.GetValue(window)!;
 
@@ -1866,7 +1866,7 @@ internal static class Program
                     System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
                 InspectingStatusHostClient client = new();
                 window = (MainWindow)Activator.CreateInstance(
-                    typeof(MainWindow), flags, null, new object?[] { client, null }, null)!;
+                    typeof(MainWindow), flags, null, new object?[] { client, null, null }, null)!;
                 var button =
                     (System.Windows.Controls.Button)window.FindName("RefreshStatusButton");
                 client.OnGetStatus = () => Check.True(
@@ -1901,7 +1901,7 @@ internal static class Program
                 int transportCalls = 0;
                 InspectingStatusHostClient client = new();
                 window = (MainWindow)Activator.CreateInstance(
-                    typeof(MainWindow), flags, null, new object?[] { client, null }, null)!;
+                    typeof(MainWindow), flags, null, new object?[] { client, null, null }, null)!;
                 var refresh = typeof(MainWindow).GetMethod("RefreshHostStatusAsync", flags)!;
                 var announcement =
                     (System.Windows.Controls.TextBlock)window.FindName("HostStatusAnnouncement");

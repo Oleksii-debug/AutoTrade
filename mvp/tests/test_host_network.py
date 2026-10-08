@@ -13,6 +13,7 @@ from mvp.autotrade_mvp.host_network import (
     AuthenticatedHostApplication,
     AuthenticatedHostServer,
     HostPrincipal,
+    SnapshotTemporarilyUnavailable,
     header_principal_resolver,
     public_session_reference,
 )
@@ -193,6 +194,26 @@ class HostNetworkTests(unittest.TestCase):
             payload["permission_summary"]["session"],
             public_session_reference(self.owner.token),
         )
+        self.assertNotIn(self.owner.token, response.body.decode("utf-8"))
+
+    def test_changing_snapshot_is_secret_free_retryable_unavailable(self):
+        def unavailable(_durable, _principal):
+            raise SnapshotTemporarilyUnavailable("secret-provider-token-DO-NOT-LEAK")
+
+        self.app._snapshot_provider = unavailable
+        response = self.app.dispatch(
+            method="GET",
+            target="/api/v1/state",
+            headers=self.headers(),
+        )
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            self.body(response),
+            {"error": "SNAPSHOT_BUSY", "retryable": True},
+        )
+        self.assertIn(("Cache-Control", "no-store"), response.headers)
+        self.assertIn(("Retry-After", "1"), response.headers)
+        self.assertNotIn("secret-provider-token", response.body.decode("utf-8"))
         self.assertNotIn(self.owner.token, response.body.decode("utf-8"))
 
     def test_snapshot_role_cannot_exceed_authenticated_session_role(self):

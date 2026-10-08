@@ -24,7 +24,7 @@ class ReconciliationDirectNegativeAuthorityTests(unittest.TestCase):
         account_id = "paper-account"
         provider_environment = (
             "TESTNET" if environment == "PAPER" else "MAINNET"
-        ) if provider_id == "BYBIT" else None
+        ) if provider_id == "BYBIT" else environment
         aggregate_id = _reconciliation_aggregate_id(
             reconciliation_id=reconciliation_id,
             provider_id=provider_id,
@@ -136,6 +136,7 @@ class ReconciliationDirectNegativeAuthorityTests(unittest.TestCase):
                     provider_id="BYBIT",
                     account_id="paper-account",
                     environment="PAPER",
+                    provider_environment="TESTNET",
                 )
 
     def test_direct_loader_keeps_simulated_paper_exception(self):

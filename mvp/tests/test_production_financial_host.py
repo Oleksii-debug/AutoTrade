@@ -66,6 +66,7 @@ class ProductionFinancialHostTests(unittest.TestCase):
             provider_id=provider_id,
             account_id=runtime.config.account_id,
             environment=runtime.config.environment,
+            provider_environment="TESTNET" if provider_id == "BYBIT" else None,
         )
         record_reconciliation_checkpoint(
             runtime.journal,
@@ -80,8 +81,35 @@ class ProductionFinancialHostTests(unittest.TestCase):
             provider_id=provider_id,
             account_id=runtime.config.account_id,
             environment=runtime.config.environment,
+            provider_environment="TESTNET" if provider_id == "BYBIT" else None,
         )
         self.assertIs(recovery.state, HostState.READY)
+
+    def test_bybit_readiness_requires_matching_explicit_provider_environment(self):
+        with TemporaryDirectory() as directory:
+            runtime = compose_financial_authority(self._host(directory))
+            recovery = runtime.recovery_controller
+            for scope, expected_error in (
+                (None, "BYBIT reconciliation requires explicit provider_environment"),
+                ("MAINNET", "provider_environment does not match runtime environment"),
+            ):
+                with self.subTest(provider_environment=scope):
+                    with self.assertRaisesRegex(ValueError, expected_error):
+                        recovery.record_reconciliation_checkpoint(
+                            reconciliation_id="synthetic-scope-negative",
+                            provider_id="BYBIT",
+                            account_id=runtime.config.account_id,
+                            environment=runtime.config.environment,
+                            provider_environment=scope,
+                        )
+                    self.assertIs(recovery.state, HostState.RECOVERING)
+                    self.assertFalse(recovery.provider_reconciled)
+            self.assertEqual(
+                JournalStore.load_events_by_aggregate_type(
+                    runtime.journal, "account_reconciliation"
+                ),
+                [],
+            )
 
     def test_exposed_config_mutation_cannot_retarget_financial_scope(self):
         with TemporaryDirectory() as directory:

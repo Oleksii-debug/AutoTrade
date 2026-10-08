@@ -276,13 +276,11 @@ class JournalBackedHostCommandStore:
             raise TypeError("command must be a mapping")
         command_id = self._required_text(command, "command_id")
         idempotency_key = command.get("idempotency_key")
-        if (
-            type(idempotency_key) is not str
-            or not 1 <= len(idempotency_key) <= 128
-        ):
-            raise ValueError(
-                "idempotency_key must contain 1 to 128 characters"
-            )
+        if type(idempotency_key) is not str:
+            # Reject hostile str subclasses before any custom len()/callbacks.
+            raise ValueError("idempotency_key must be a non-empty string")
+        if not 1 <= len(idempotency_key) <= 128:
+            raise ValueError("idempotency_key must contain 1 to 128 characters")
         actor = self._required_text(command, "actor")
         session = self._required_text(command, "session")
         account_id = command.get("account_id")

@@ -201,7 +201,6 @@ class TrustedChronologyCutTests(unittest.TestCase):
             completed_at="2026-10-03T14:00:01Z",
             signed_at="2026-10-03T14:00:02Z",
             unresolved_limits=tuple(unresolved_limits),
-            schema_version="1.0.0",
             verification_method="RSA_PKCS1V15_SHA256",
             attestation_json="{}",
             signature_b64="AA==",
@@ -1221,7 +1220,7 @@ class TrustedChronologyCutTests(unittest.TestCase):
                 ):
                     chronology._validated_aggregate((events[0], accepted_event))
             finally:
-                runtime.stop()
+                runtime.close()
 
     def test_taxonomy_classifies_cut_as_nonfinancial_qualification_evidence(self):
         descriptor = require_journal_aggregate_descriptor("trusted_chronology")

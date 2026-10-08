@@ -512,6 +512,39 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 projects=[project],
             )
 
+    def test_sidecar_mismatch_exposes_bounded_hash_evidence_and_still_rejects(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            packages = _write_restored_package(root)
+            sidecar = packages / "example.package" / "1.2.3" / "example.package.1.2.3.nupkg.sha512"
+            foreign_hash = base64.b64encode(bytes(range(64))).decode("ascii")
+            self.assertNotEqual(foreign_hash, _HASH)
+            sidecar.write_text(foreign_hash, encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "content hash mismatch") as raised:
+                verify_restored_package_rights(packages, root=root, projects=[project])
+            message = str(raised.exception)
+            self.assertIn("locked_sha512=" + _HASH, message)
+            self.assertIn("sidecar_sha512=" + foreign_hash, message)
+            self.assertIn("payload_sha512=" + _HASH, message)
+            self.assertEqual(sidecar.read_text(encoding="ascii"), foreign_hash)
+
+    def test_noncanonical_sidecar_never_reflects_raw_untrusted_text(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            packages = _write_restored_package(root)
+            sidecar = packages / "example.package" / "1.2.3" / "example.package.1.2.3.nupkg.sha512"
+            sidecar.write_text("HOSTILE\nVALUE", encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "content hash mismatch") as raised:
+                verify_restored_package_rights(packages, root=root, projects=[project])
+            message = str(raised.exception)
+            self.assertIn("sidecar_sha512=INVALID", message)
+            self.assertNotIn("HOSTILE", message)
+            self.assertIn("payload_sha512=" + _HASH, message)
+
     def test_restored_nupkg_payload_must_match_lock_hash(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

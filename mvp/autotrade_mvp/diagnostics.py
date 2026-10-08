@@ -378,3 +378,26 @@ def build_diagnostic_snapshot(state_dir: str | Path) -> DiagnosticSnapshot:
         pending_outbox_sample_count=len(pending_sample),
         pending_outbox_sample_truncated=len(pending_sample) == 1000,
     )
+
+
+def build_operator_diagnostic_text(
+    *,
+    ui_snapshot: object,
+    recovery: object,
+    signals: object,
+    evidence: DiagnosticSnapshot | None = None,
+) -> str:
+    """Expose the canonical, read-only NVDA diagnostics through this module.
+
+    The typed reducer is imported lazily to preserve the existing evidence
+    diagnostic import path and avoid creating a second reporting authority.
+    This function never logs, persists, sends, or grants financial permission.
+    """
+    from .operator_observability import build_operator_observability
+
+    return build_operator_observability(
+        ui_snapshot=ui_snapshot,
+        recovery=recovery,
+        signals=signals,
+        evidence=evidence,
+    ).to_text()

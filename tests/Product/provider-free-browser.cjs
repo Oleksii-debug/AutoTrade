@@ -446,7 +446,7 @@ async function exerciseCanonicalPageNavigation(page) {
   });
   await page.waitForFunction(() =>
     document.querySelector("#page-navigation-status")?.textContent.includes("Unknown section."));
-  assert.equal(await page.locator('#page-navigation-status').getAttribute("role"), "status");
+  assert.equal(await page.locator('#polite-status').getAttribute("role"), "status");
   assert.equal(await page.locator("#state-version").innerText(), before,
     "unrecognized page routes do not rewrite host state");
   await page.locator('nav a[href="#risk"]').focus();

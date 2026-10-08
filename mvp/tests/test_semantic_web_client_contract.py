@@ -49,7 +49,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
             self.assertIn(required, html)
         self.assertIn("function renderProjection(bodyId, record, emptyMessage, {preserveSelection = true} = {})", js)
         self.assertIn("function renderPermissionSummary(permissionSummary, {preserveSelection = true} = {})", js)
-        self.assertIn("renderPermissionSummary(parsed.permissionSummary)", js)
+        self.assertIn("renderPermissionSummary(parsed.permissionSummary, {preserveSelection: !displayContextChanged})", js)
         self.assertIn('renderProjection(\n      "portfolio-body"', js)
         self.assertIn('renderProjection(\n      "risk-body"', js)
         self.assertIn('renderProjection(\n      "strategy-body"', js)
@@ -118,7 +118,8 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("row.children[1].textContent = stateVersionText", js)
         self.assertIn("const stateVersionText = stateVersion.toString()", js)
         self.assertIn("row.children[2].textContent = kind", js)
-        self.assertIn("row.children[3].textContent = projectionText(payload)", js)
+        self.assertIn("const payloadText = projectionText(payload)", js)
+        self.assertIn("row.children[3].textContent = payloadText", js)
         event = js[js.index("function renderHostEvent"):js.index("function resetNotificationsForScope")]
         self.assertIn('const rowHeader = document.createElement("th")', event)
         self.assertIn('rowHeader.scope = "row"', event)
@@ -1236,7 +1237,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
             'body, "Capability " + String(index + 1), capability',
             js,
         )
-        self.assertIn("renderPermissionSummary(parsed.permissionSummary)", js)
+        self.assertIn("renderPermissionSummary(parsed.permissionSummary, {preserveSelection: !displayContextChanged})", js)
         self.assertIn('reapplyTableFilter("permissions-body")', js)
 
 

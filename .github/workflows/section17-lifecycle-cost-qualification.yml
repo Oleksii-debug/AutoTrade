@@ -7,6 +7,8 @@ on:
       - "mvp/autotrade_mvp/lifecycle_cost*.py"
       - "mvp/autotrade_mvp/simulation_session.py"
       - "mvp/tests/test_lifecycle_cost*.py"
+      - "qualification/strategy_economics/**"
+      - "tests/Science/test_strategy_economics_authority.py"
       - ".github/workflows/section17-lifecycle-cost-qualification.yml"
   push:
     branches: [main]
@@ -14,6 +16,8 @@ on:
       - "mvp/autotrade_mvp/lifecycle_cost*.py"
       - "mvp/autotrade_mvp/simulation_session.py"
       - "mvp/tests/test_lifecycle_cost*.py"
+      - "qualification/strategy_economics/**"
+      - "tests/Science/test_strategy_economics_authority.py"
       - ".github/workflows/section17-lifecycle-cost-qualification.yml"
 
 permissions:
@@ -59,6 +63,8 @@ jobs:
           mvp.tests.test_lifecycle_cost_allocation_integration
           mvp.tests.test_lifecycle_cost_instrument_identity
           mvp.tests.test_lifecycle_cost_valuation
+      - name: Run capacity replay and economics authority negative checks
+        run: python -m unittest discover -s tests/Science -p "test_strategy_economics_authority.py" -v
       - name: Write exact-SHA qualified test evidence
         run: >-
           python tools/write_ci_evidence.py

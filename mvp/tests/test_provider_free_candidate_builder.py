@@ -462,5 +462,59 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
                     evaluate(locked, declared)
 
 
+    def test_provider_free_windows_candidate_uses_restored_rights_verified_webview(self):
+        workflow = (
+            candidate.ROOT / '.github/workflows/provider-free-product.yml'
+        ).read_text(encoding='utf-8')
+        self.assertIn(
+            'NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages', workflow
+        )
+        self.assertIn(
+            'dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj '
+            '--locked-mode -r win-x64', workflow
+        )
+        self.assertIn(
+            'python tools/dotnet_package_rights.py --verify-restored '
+            '--packages-root "${{ env.NUGET_PACKAGES }}" '
+            '--project src/AutoTrade.Desktop/AutoTrade.Desktop.csproj',
+            workflow,
+        )
+        self.assertIn(
+            '$archive = Join-Path $env:NUGET_PACKAGES '
+            '"microsoft.web.webview2/$($inputs.webview2_sdk.version)/'
+            'microsoft.web.webview2.$($inputs.webview2_sdk.version).nupkg"',
+            workflow,
+        )
+        self.assertIn(
+            'if (-not (Test-Path -LiteralPath $archive -PathType Leaf))',
+            workflow,
+        )
+        self.assertIn(
+            "Copy-Item -LiteralPath $archive -Destination "
+            "'artifacts/webview.nupkg' -ErrorAction Stop",
+            workflow,
+        )
+        self.assertNotIn(
+            'Invoke-WebRequest $inputs.webview2_sdk.url', workflow
+        )
+
+    def test_candidate_still_rejects_altered_restored_webview_archive(self):
+        lock = json.loads(
+            (candidate.ROOT / 'src/AutoTrade.Desktop/packages.lock.json')
+            .read_text(encoding='utf-8')
+        )
+        frozen = lock['dependencies']['net10.0-windows7.0']['Microsoft.Web.WebView2']
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / 'webview.nupkg'
+            archive.write_bytes(b'altered NuGet archive must fail closed')
+            with self.assertRaisesRegex(
+                ValueError, 'WebView2 archive differs from locked rights identity'
+            ):
+                candidate._require_webview2_archive_rights(
+                    root, archive, version=frozen['resolved'],
+                    content_hash=frozen['contentHash'],
+                )
+
 if __name__ == '__main__':
     unittest.main()

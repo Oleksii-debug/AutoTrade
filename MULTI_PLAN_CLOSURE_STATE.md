@@ -36,7 +36,7 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 | Section | State | Existing evidence / note |
 | ---: | --- | --- |
 | 1 | DONE | legacy Section 6 |
-| 2 | PARTIAL_EXISTING | legacy Section 16; parked PR #1631 |
+| 2 | QUALIFYING / NOT DONE | Plan-2 canonical [PR #1631](https://github.com/Oleksii-debug/AutoTrade/pull/1631), observed exact head `a91db23b5a9f8f3067f0268e645c5fe07a82bd21`; ZERO Ubuntu/Windows [37734877621](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37734877621), baseline [37734877641](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37734877641), Verify [37734877596](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37734877596), provider-free [37734877638](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37734877638) were QUEUED (NOT PASS) at exact-head readback; PR DRAFT/unmerged, main behind/ahead divergence with no changed-path overlap at inspected cut. Existing ZERO tests cover 120-episode pause/restart/replay, no model/network expense, foreign outbox and UNKNOWN fail-closed; test source is not execution PASS. Freeze candidate pending actual applicable qualification; no Plan-2 Section-3 mutation or false terminal DONE. |
 | 3 | PARTIAL_EXISTING | legacy Section 18; substantial PR #1346 ancestry already merged |
 | 4 | PARTIAL_EXISTING | legacy Section 20; PR #1279 source merged |
 | 5 | OPEN | legacy Section 21 |

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from decimal import Decimal
 from types import MappingProxyType
 import unittest
@@ -111,6 +113,41 @@ class OperatorObservabilityTests(unittest.TestCase):
         self.assertEqual(view.mode, "DEGRADED")
         self.assertIn("readiness_not_proven", view.reasons)
         self.assertFalse(view.as_dict()["domains"]["readiness"]["new_exposure_allowed"])
+
+    def test_durable_ready_projection_rejects_foreign_account_and_host(self):
+        from mvp.autotrade_mvp.persistence import JournalStore
+
+        with TemporaryDirectory() as directory:
+            recovery = RecoveryController(
+                owner_store=JournalStore(Path(directory) / "journal.sqlite3"),
+                owner_scope="PAPER:account-fixture",
+            )
+            recovery.start("host-fixture")
+            # Only the scope-binding behaviour is under test. Production
+            # reconciliation issuance is separately qualified by its own suite.
+            recovery.state = HostState.READY
+            recovery.provider_reconciled = True
+            legitimate = build_operator_observability(
+                ui_snapshot=_snapshot(), recovery=recovery, signals=_signals()
+            )
+            self.assertEqual(legitimate.mode, "READY")
+
+            for field, foreign in (
+                ("account_id", "foreign-account"),
+                ("environment", "LIVE"),
+                ("host_id", "foreign-host"),
+            ):
+                forged = _snapshot()
+                forged[field] = foreign
+                with self.subTest(field=field):
+                    projected = build_operator_observability(
+                        ui_snapshot=forged, recovery=recovery, signals=_signals()
+                    )
+                    self.assertEqual(projected.mode, "DEGRADED")
+                    self.assertIn("host_recovery_scope_mismatch", projected.reasons)
+                    self.assertFalse(
+                        projected.as_dict()["domains"]["readiness"]["new_exposure_allowed"]
+                    )
 
     def test_unknown_sends_and_uncertain_external_state_cannot_report_ready(self):
         actual = build_operator_observability(

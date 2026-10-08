@@ -1311,9 +1311,25 @@ def _entry(path: str, digest: str, size: int, kind: str) -> dict[str, Any]:
     }
 
 
-def _artifact_source_files(root: Path) -> list[tuple[Path, str]]:
+def _require_safe_artifact_source_dirs(root: Path) -> None:
+    """Reject symlinked storage ancestors before traversing artifact payloads."""
     if not root.is_dir():
         raise BackupError("Artifact store root is missing")
+    if root.is_symlink():
+        raise BackupError("Artifact store root is unsafe")
+    for relative in (
+        "objects",
+        "objects/sha256",
+        "manifests",
+        "manifests/sha256",
+    ):
+        path = root / relative
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            raise BackupError("Artifact store directory is unsafe")
+
+
+def _artifact_source_files(root: Path) -> list[tuple[Path, str]]:
+    _require_safe_artifact_source_dirs(root)
     files: list[tuple[Path, str]] = []
     objects_root = root / "objects" / "sha256"
     manifests_root = root / "manifests" / "sha256"
@@ -1414,6 +1430,7 @@ def _assert_mutable_sources_unchanged(
 
 
 def _validate_artifact_source(root: Path) -> None:
+    _require_safe_artifact_source_dirs(root)
     manifests_root = root / "manifests" / "sha256"
     objects_root = root / "objects" / "sha256"
     if objects_root.exists():

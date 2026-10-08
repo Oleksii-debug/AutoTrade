@@ -404,7 +404,7 @@ class HostNetworkTests(unittest.TestCase):
         self.assertEqual(wrong_actor.status, 403)
         self.assertEqual(self.app.store.state_version, 0)
 
-        wrong_session = self.command(session="forged")
+        wrong_session = self.command(session="sid-" + "0" * 64)
         denied = self.post(wrong_session)
         self.assertEqual(denied.status, 403)
         self.assertEqual(self.app.store.state_version, 0)

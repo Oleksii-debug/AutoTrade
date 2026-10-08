@@ -21,17 +21,27 @@ class ContractsWorkflowExactHeadTests(unittest.TestCase):
 
     def test_contracts_workflow_publishes_exact_head_evidence(self):
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("python tools/write_ci_evidence.py --suite contracts", text)
+        # The dedicated evidence writer records the exact executed commands,
+        # input versions, and PR/non-PR scope; a generic placeholder would not.
+        self.assertEqual(
+            text.count("python tools/write_contracts_ci_evidence.py --output"),
+            2,
+        )
+        self.assertIn(
+            'python tools/write_contracts_ci_evidence.py --output "artifacts/contracts-${{ runner.os }}.json"',
+            text,
+        )
         self.assertIn("if: github.event_name == 'pull_request'", text)
         self.assertIn("if: github.event_name != 'pull_request'", text)
-        self.assertIn(
-            '--command "json-schema + dotnet + typescript + contract-version-guard"',
-            text,
+        writer = (ROOT / "tools" / "write_contracts_ci_evidence.py").read_text(
+            encoding="utf-8"
         )
-        self.assertIn(
-            '--command "json-schema + dotnet + typescript"',
-            text,
-        )
+        self.assertIn("def build_contracts_evidence()", writer)
+        self.assertIn('"tested_commands"] = verified_commands(event_name)', writer)
+        self.assertIn('"input_versions"] = _input_versions()', writer)
+        self.assertIn('"unresolved_limits"] = list(UNRESOLVED_LIMITS)', writer)
+        self.assertIn('if event_name == "pull_request":', writer)
+        self.assertIn('"GITHUB_BASE_REF"', writer)
         self.assertIn("contracts-evidence-${{ runner.os }}", text)
         self.assertIn("if-no-files-found: error", text)
 

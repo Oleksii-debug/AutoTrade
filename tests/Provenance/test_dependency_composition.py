@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -17,6 +19,32 @@ from tools.check_dependency_composition import (
 
 
 class DependencyCompositionGateTests(unittest.TestCase):
+    def test_direct_script_cli_keeps_dotnet_restore_authority(self):
+        # __package__ is empty when this audit runs as a standalone CLI.
+        # Both modes must produce deterministic JSON instead of NameError.
+        script = Path(__file__).resolve().parents[2] / "tools" / "check_dependency_composition.py"
+        root = script.parents[1]
+        report_mode = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(report_mode.returncode, 0, report_mode.stderr)
+        report = json.loads(report_mode.stdout)
+        self.assertFalse(report["qualified"])
+        self.assertTrue(report["blockers"])
+        strict_mode = subprocess.run(
+            [sys.executable, str(script), "--require-qualified"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(strict_mode.returncode, 1, strict_mode.stderr)
+        self.assertEqual(json.loads(strict_mode.stdout), report)
+
     @classmethod
     def setUpClass(cls):
         cls.report = audit_composition()

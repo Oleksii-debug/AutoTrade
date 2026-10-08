@@ -13,6 +13,7 @@ const env = {...process.env, AUTOTRADE_TEST_DIAGNOSTIC: "1",
   PYTHONPATH: ROOT + path.delimiter + path.join(ROOT, "research")};
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "autotrade-browser-"));
 const data = path.join(scratch, "product state with spaces #");
+let activeData = data;
 let host, browser, observedPage;
 let stage = "launch";
 let passed = false;
@@ -26,6 +27,7 @@ process.on("exit", () => {
 });
 
 async function start(directory, restore) {
+  activeData = directory;
   const args = ["-B", "-m", "mvp.autotrade_mvp.product_runtime", "--data-dir", directory,
     "--port", "0", "--no-browser", "--desktop-child"];
   if (restore) args.push("--restore-backup", restore);
@@ -124,9 +126,9 @@ async function command(page, action, index) {
     {timeout: 240000});
   const phase = await page.locator(`#operations-body tr[data-operation-id="${accepted.operation_id}"]`)
     .locator("td").first().innerText();
-  const diagnostic = path.join(data, "worker-stage-diagnostic.txt");
-  const hostDiagnostic = path.join(data, "host-fault-diagnostic.txt");
-  const operationDiagnostic = path.join(data, "host-operation-stage-diagnostic.txt");
+  const diagnostic = path.join(activeData, "worker-stage-diagnostic.txt");
+  const hostDiagnostic = path.join(activeData, "host-fault-diagnostic.txt");
+  const operationDiagnostic = path.join(activeData, "host-operation-stage-diagnostic.txt");
   assert.equal(phase, "SUCCEEDED", [
     `Operation: ${accepted.operation_id}`,
     fs.existsSync(diagnostic)

@@ -604,20 +604,23 @@ def _autonomous_owned_pending_publications(
         state = JournalStore.outbox_delivery_state(
             store, event["event_id"], topic=topic,
         )
+        # The JournalStore's authenticated single-cut read returns only
+        # validated delivery metadata, not a second caller-visible envelope.
+        # The original canonical journal event remains the ownership authority;
+        # JournalStore has already byte-compared that event to the outbox row.
         if not _autonomous_publication_owned(
-            state,
+            {"payload": event},
             run_id=run_id,
             financial_scope=financial_scope,
         ):
             raise AutonomousRuntimeCheckpointError(
                 "exact ZERO outbox state escaped runtime ownership"
             )
-        envelope = state.get("payload")
-        if type(envelope) is not dict:
+        if state.get("event_id") != event["event_id"]:
             raise AutonomousRuntimeCheckpointError(
-                "ZERO publication payload is not a canonical event envelope"
+                "ZERO publication does not match canonical event identity"
             )
-        expected_topic = _canonical_publication_topic(envelope)
+        expected_topic = _canonical_publication_topic(event)
         if expected_topic is None:
             raise AutonomousRuntimeCheckpointError(
                 "ZERO component event unexpectedly has an outbox publication"

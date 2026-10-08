@@ -628,20 +628,19 @@ def _autonomous_owned_pending_publications(
             raise AutonomousRuntimeCheckpointError(
                 "ZERO owned publication is missing or misrouted"
             ) from error
+        # The protected JournalStore read returns validated delivery metadata,
+        # not an event body; join it to the independently authenticated journal
+        # event rather than inventing or trusting an unverified outbox payload.
+        owned_state = {**state, "payload": event}
         if not _autonomous_publication_owned(
-            state,
+            owned_state,
             run_id=run_id,
             financial_scope=financial_scope,
         ):
             raise AutonomousRuntimeCheckpointError(
                 "exact ZERO outbox state escaped runtime ownership"
             )
-        envelope = state.get("payload")
-        if type(envelope) is not dict:
-            raise AutonomousRuntimeCheckpointError(
-                "ZERO publication payload is not a canonical event envelope"
-            )
-        expected_topic = _canonical_publication_topic(envelope)
+        expected_topic = _canonical_publication_topic(event)
         if expected_topic is None:
             raise AutonomousRuntimeCheckpointError(
                 "ZERO component event unexpectedly has an outbox publication"
@@ -652,7 +651,7 @@ def _autonomous_owned_pending_publications(
             )
         if state["delivered"]:
             continue
-        pending.append(state)
+        pending.append(owned_state)
     return tuple(pending)
 
 

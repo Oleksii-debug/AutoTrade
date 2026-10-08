@@ -80,8 +80,8 @@ def _reconciliation():
         provider_cash={"USD": "900"},
         local_positions={"ABC": "1"},
         provider_positions={"ABC": "1"},
-        local_execution_ids=["exec-1"],
-        provider_fills=[_fill()],
+        local_execution_ids=[],
+        provider_fills=[]
         snapshot_consistency=_snapshot(),
         coverage_start="2026-10-04T00:30:00Z",
         coverage_end="2026-10-04T00:31:00Z",

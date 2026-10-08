@@ -8,7 +8,7 @@ import unittest
 
 from mvp.autotrade_mvp.operator_observability import build_operator_observability
 from mvp.autotrade_mvp.readiness import RuntimeSafetySignals
-from mvp.autotrade_mvp.recovery import HostState, RecoveryController
+from mvp.autotrade_mvp.recovery import HostState, OwnerFence, RecoveryController
 
 
 def _signals(**overrides):
@@ -62,6 +62,9 @@ def _snapshot():
 def _recovery(state):
     result = RecoveryController()
     result.state = state
+    if state is HostState.READY:
+        result.owner = OwnerFence("host-fixture", 1)
+        result.provider_reconciled = True
     return result
 
 
@@ -97,6 +100,16 @@ class OperatorObservabilityTests(unittest.TestCase):
                     ui_snapshot=_snapshot(), recovery=_recovery(state), signals=_signals()
                 )
                 self.assertEqual(actual.mode, mode)
+
+    def test_forged_ready_without_reconciliation_owner_stays_degraded(self):
+        recovery = RecoveryController()
+        recovery.state = HostState.READY
+        view = build_operator_observability(
+            ui_snapshot=_snapshot(), recovery=recovery, signals=_signals()
+        )
+        self.assertEqual(view.mode, "DEGRADED")
+        self.assertIn("readiness_not_proven", view.reasons)
+        self.assertFalse(view.as_dict()["domains"]["readiness"]["new_exposure_allowed"])
 
     def test_unknown_sends_and_uncertain_external_state_cannot_report_ready(self):
         actual = build_operator_observability(

@@ -32,6 +32,12 @@ from mvp.autotrade_mvp.reconciliation import (
     SubmissionResolution,
 )
 from mvp.autotrade_mvp.recovery import RecoveryController
+from mvp.autotrade_mvp.recovery_takeover import (
+    _bind_controller_owner,
+    execute_durable_takeover,
+)
+from mvp.autotrade_mvp.windows_secrets import ProtectedCredentialVault
+from mvp.tests.test_recovery_takeover import DeterministicProtector
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
 from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
@@ -295,6 +301,222 @@ class BackupRestoreTests(unittest.TestCase):
         )
         _artifact_store(artifacts)
         return state, artifacts
+
+    def test_late_order_intent_during_journal_snapshot_blocks_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            original = backup_module._backup_sqlite
+
+            def append_after_sqlite(source, destination):
+                result = original(source, destination)
+                new_intent = state / "order-intents" / "late-intent.json"
+                new_intent.parent.mkdir(parents=True, exist_ok=True)
+                new_intent.write_text("{}", encoding="utf-8")
+                return result
+
+            with patch(
+                "mvp.autotrade_mvp.backup._backup_sqlite",
+                side_effect=append_after_sqlite,
+            ):
+                with self.assertRaisesRegex(BackupError, "inventory changed"):
+                    create_backup(state, artifacts, target)
+            self.assertFalse(target.exists())
+            self.assertEqual(list(root.glob(".autotrade-backup-*")), [])
+
+    def test_late_artifact_during_journal_snapshot_blocks_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            original = backup_module._backup_sqlite
+
+            def publish_new_artifact(source, destination):
+                result = original(source, destination)
+                payload = b"post-journal-immutable-artifact"
+                digest = sha256(payload).hexdigest()
+                obj = artifacts / "objects" / "sha256" / digest[:2] / digest
+                obj.parent.mkdir(parents=True, exist_ok=True)
+                obj.write_bytes(payload)
+                manifest = (
+                    artifacts / "manifests" / "sha256"
+                    / digest[:2] / f"{digest}.json"
+                )
+                manifest.parent.mkdir(parents=True, exist_ok=True)
+                manifest.write_text(json.dumps({
+                    "schema_version": 1,
+                    "algorithm": "sha256",
+                    "digest": digest,
+                    "size_bytes": len(payload),
+                    "media_type": "application/octet-stream",
+                    "rights_basis": "first-party-test-evidence",
+                }), encoding="utf-8")
+                return result
+
+            with patch(
+                "mvp.autotrade_mvp.backup._backup_sqlite",
+                side_effect=publish_new_artifact,
+            ):
+                with self.assertRaisesRegex(BackupError, "inventory changed"):
+                    create_backup(state, artifacts, target)
+            self.assertFalse(target.exists())
+            self.assertEqual(list(root.glob(".autotrade-backup-*")), [])
+
+    def test_existing_side_file_changes_during_sqlite_snapshot_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            original = backup_module._backup_sqlite
+            mutable = state / "learning-evidence.jsonl"
+            if not mutable.exists():
+                mutable.write_text("original\\n", encoding="utf-8")
+
+            def corrupt_side_file(source, destination):
+                result = original(source, destination)
+                mutable.write_text("mutated-after-snapshot\\n", encoding="utf-8")
+                return result
+
+            with patch(
+                "mvp.autotrade_mvp.backup._backup_sqlite",
+                side_effect=corrupt_side_file,
+            ):
+                with self.assertRaisesRegex(BackupError, "changed across journal snapshot"):
+                    create_backup(state, artifacts, target)
+            self.assertFalse(target.exists())
+
+    def test_new_intent_after_stage_fsync_blocks_atomic_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            original = backup_module._fsync_directory_tree
+
+            def race_after_fsync(stage):
+                original(stage)
+                late = state / "order-intents" / "after-stage.json"
+                late.parent.mkdir(parents=True, exist_ok=True)
+                late.write_text("{}", encoding="utf-8")
+
+            with patch(
+                "mvp.autotrade_mvp.backup._fsync_directory_tree",
+                side_effect=race_after_fsync,
+            ):
+                with self.assertRaisesRegex(BackupError, "inventory changed"):
+                    create_backup(state, artifacts, target)
+            self.assertFalse(target.exists())
+            self.assertEqual(list(root.glob(".autotrade-backup-*")), [])
+
+    def test_source_hash_io_error_is_controlled_backup_failure(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            original = backup_module._sha256_file
+            mutable = state / "learning-evidence.jsonl"
+            if not mutable.exists():
+                mutable.write_text("original\\n", encoding="utf-8")
+
+            def source_io_failure(path):
+                if path == mutable:
+                    raise OSError("injected source read failure")
+                return original(path)
+
+            with patch(
+                "mvp.autotrade_mvp.backup._sha256_file",
+                side_effect=source_io_failure,
+            ):
+                with self.assertRaisesRegex(BackupError, "before journal snapshot"):
+                    create_backup(state, artifacts, target)
+            self.assertFalse(target.exists())
+
+    def test_symlinked_artifact_directory_ancestors_are_never_backed_up(self):
+        # A symlinked storage root or an intermediate digest directory can
+        # appear to contain regular hashed files even when every payload is
+        # actually outside the caller-selected artifact store.
+        for relative in (
+            "",
+            "objects",
+            "objects/sha256",
+            "manifests",
+            "manifests/sha256",
+        ):
+            with self.subTest(relative=relative):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    state, artifacts = self._build_sources(root)
+                    source_directory = artifacts / relative if relative else artifacts
+                    external_directory = root / "external-artifact-storage"
+                    source_directory.rename(external_directory)
+                    try:
+                        source_directory.symlink_to(
+                            external_directory, target_is_directory=True
+                        )
+                    except (OSError, NotImplementedError):
+                        self.skipTest("directory symlink creation is unavailable")
+                    destination = root / "backup"
+                    with self.assertRaisesRegex(BackupError, "unsafe"):
+                        create_backup(state, artifacts, destination)
+                    self.assertFalse(destination.exists())
+                    self.assertEqual(list(root.glob(".autotrade-backup-*")), [])
+
+    def test_symlinked_backup_bundle_components_fail_verification_and_restore(self):
+        for relative in (
+            "state",
+            "artifacts",
+            "backup-manifest.json",
+            "backup-manifest.sha256",
+        ):
+            with self.subTest(relative=relative):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    state, artifacts = self._build_sources(root)
+                    bundle = create_backup(state, artifacts, root / "backup")
+                    original = bundle / relative
+                    external = root / "outside-backup"
+                    is_directory = original.is_dir()
+                    original.rename(external)
+                    try:
+                        original.symlink_to(
+                            external, target_is_directory=is_directory
+                        )
+                    except (OSError, NotImplementedError):
+                        self.skipTest("symlink creation is unavailable")
+                    with self.assertRaisesRegex(BackupIntegrityError, "symlink"):
+                        verify_backup(bundle)
+                    target = root / "restored"
+                    with self.assertRaises(BackupIntegrityError):
+                        restore_backup(bundle, target)
+                    self.assertFalse(target.exists())
+
+    def test_restore_rechecks_symlinks_after_initial_bundle_verification(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            bundle = create_backup(state, artifacts, root / "backup")
+            original_verify = backup_module.verify_backup
+
+            def replace_after_verification(source):
+                manifest = original_verify(source)
+                payload_root = bundle / "artifacts"
+                external = root / "outside-backup"
+                payload_root.rename(external)
+                try:
+                    payload_root.symlink_to(external, target_is_directory=True)
+                except (OSError, NotImplementedError):
+                    self.skipTest("directory symlink creation is unavailable")
+                return manifest
+
+            target = root / "restored"
+            with patch(
+                "mvp.autotrade_mvp.backup.verify_backup",
+                side_effect=replace_after_verification,
+            ):
+                with self.assertRaisesRegex(BackupIntegrityError, "symlink"):
+                    restore_backup(bundle, target)
+            self.assertFalse(target.exists())
+            self.assertEqual(list(root.glob(".autotrade-restore-*")), [])
 
     def test_manifest_paths_reject_windows_and_noncanonical_forms(self):
         self.assertEqual(
@@ -1442,6 +1664,41 @@ class BackupRestoreTests(unittest.TestCase):
                 restore_backup(backup, root / "restored")
             self.assertFalse((root / "restored").exists())
 
+    def _issue_test_takeover(
+        self,
+        controller: RecoveryController,
+        vault_path: Path,
+        *,
+        new_owner_id: str,
+        reconciliation_id: str,
+    ) -> None:
+        """Exercise the real durable takeover issuer with a synthetic credential.
+
+        No fixture may mint an owner epoch directly or bypass sender fencing.
+        """
+        vault = ProtectedCredentialVault(
+            vault_path, protector=DeterministicProtector()
+        )
+        handle = vault.register(
+            handle_id="fixture-trade-handle",
+            owner_identity="fixture-execution",
+            account_id="paper-account",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="TRADE",
+            secret_value="synthetic-non-provider-fixture",
+        )
+        receipt = execute_durable_takeover(
+            controller,
+            new_owner_id=new_owner_id,
+            vault=vault,
+            handle=handle,
+            execution_identity="fixture-execution",
+            reconciliation_id=reconciliation_id,
+            provider_id="SIMULATED",
+        )
+        self.assertEqual(controller.owner, receipt.target_owner)
+
     def _restored_with_owner(
         self,
         root: Path,
@@ -1450,8 +1707,13 @@ class BackupRestoreTests(unittest.TestCase):
         (state / "checkpoint.json").unlink()
         (state / "learning-evidence.jsonl").unlink()
         source_store = JournalStore(state / "journal.sqlite3")
-        source = RecoveryController(owner_store=source_store)
+        source = RecoveryController(
+            owner_store=source_store, owner_scope="PAPER:paper-account"
+        )
         source.start("source-owner")
+        self._record_durable_ready(
+            source, source_store, reconciliation_id="source-takeover"
+        )
         backup = create_backup(state, artifacts, root / "backup")
         restored = restore_backup(backup, root / "restored")
         marker = json.loads(
@@ -1460,8 +1722,23 @@ class BackupRestoreTests(unittest.TestCase):
             )
         )
         restored_store = JournalStore(restored / "state" / "journal.sqlite3")
-        controller = RecoveryController(owner_store=restored_store)
-        controller.start("restored-owner")
+        controller = RecoveryController(
+            owner_store=restored_store, owner_scope="PAPER:paper-account"
+        )
+        owners = controller.durable_owner_chain()
+        self.assertEqual(
+            [(owner.owner_id, owner.epoch) for owner in owners],
+            [("source-owner", 1)],
+        )
+        # Restore only the journal-verified source identity in this isolated
+        # fixture. The next epoch MUST be issued by execute_durable_takeover.
+        _bind_controller_owner(controller, owners[-1], recovering=True)
+        self._issue_test_takeover(
+            controller,
+            root / "first-takeover-vault.json",
+            new_owner_id="restored-owner",
+            reconciliation_id="source-takeover",
+        )
         checkpoint_id = self._record_durable_ready(
             controller, restored_store, reconciliation_id="restore-readiness"
         )
@@ -1585,10 +1862,11 @@ class BackupRestoreTests(unittest.TestCase):
                 new_owner_epoch=2,
                 fenced_at=_after_restore(marker, 1),
             )
-            controller.transfer_owner(
+            self._issue_test_takeover(
+                controller,
+                root / "replacement-takeover-vault.json",
                 new_owner_id="replacement-owner",
-                old_sender_fenced=True,
-                reconciled=True,
+                reconciliation_id="restore-readiness",
             )
             checkpoint_id = self._record_durable_ready(
                 controller,
@@ -1738,10 +2016,11 @@ class BackupRestoreTests(unittest.TestCase):
             )
             self.assertFalse(restore_requires_reconciliation(restored))
 
-            controller.transfer_owner(
+            self._issue_test_takeover(
+                controller,
+                root / "later-takeover-vault.json",
                 new_owner_id="later-owner",
-                old_sender_fenced=True,
-                reconciled=True,
+                reconciliation_id="restore-readiness",
             )
             self.assertTrue(restore_requires_reconciliation(restored))
 

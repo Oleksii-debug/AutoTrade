@@ -138,9 +138,11 @@ def _write_restored_package(root: Path, *, license_text: str = _LICENSE) -> Path
         encoding="ascii",
     )
     (package / "example.package.1.2.3.nupkg").write_bytes(_NUPKG_BYTES)
-    (package / "LICENSE.txt").write_text(license_text, encoding="utf-8")
-    (package / "NOTICE.txt").write_text(_NOTICE, encoding="utf-8")
-    (package / "example.package.nuspec").write_text(_NUSPEC, encoding="utf-8")
+    # Preserve archive-member bytes on Windows, where write_text translates LF to CRLF.
+    # This fixture must model byte-for-byte extracted NuGet files.
+    (package / "LICENSE.txt").write_bytes(license_text.encode("utf-8"))
+    (package / "NOTICE.txt").write_bytes(_NOTICE.encode("utf-8"))
+    (package / "example.package.nuspec").write_bytes(_NUSPEC.encode("utf-8"))
     return packages
 
 

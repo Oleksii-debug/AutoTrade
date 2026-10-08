@@ -1186,7 +1186,7 @@ class DispatchTests(unittest.TestCase):
                     "http_status": 503,
                     "reason": "provider_http_5xx_execution_unknown",
                 },
-                "remain RECONCILE_FIRST",
+                "durable UNKNOWN requires reconciliation-first reason",
             ),
             (
                 "sent-opaque",
@@ -1198,7 +1198,7 @@ class DispatchTests(unittest.TestCase):
                     "response_encoding": "hex",
                     "http_status": 503,
                 },
-                "exact provider response bytes are unavailable",
+                "opaque durable response must remain bounded UNKNOWN",
             ),
         )
         for suffix, terminal_type, terminal_payload, message in cases:

@@ -296,6 +296,135 @@ class BackupRestoreTests(unittest.TestCase):
         _artifact_store(artifacts)
         return state, artifacts
 
+    def test_late_order_intent_during_journal_snapshot_blocks_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            original = backup_module._backup_sqlite
+
+            def append_after_sqlite(source, destination):
+                result = original(source, destination)
+                new_intent = state / "order-intents" / "late-intent.json"
+                new_intent.parent.mkdir(parents=True, exist_ok=True)
+                new_intent.write_text("{}", encoding="utf-8")
+                return result
+
+            with patch(
+                "mvp.autotrade_mvp.backup._backup_sqlite",
+                side_effect=append_after_sqlite,
+            ):
+                with self.assertRaisesRegex(BackupError, "inventory changed"):
+                    create_backup(state, artifacts, target)
+            self.assertFalse(target.exists())
+            self.assertEqual(list(root.glob(".autotrade-backup-*")), [])
+
+    def test_late_artifact_during_journal_snapshot_blocks_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            original = backup_module._backup_sqlite
+
+            def publish_new_artifact(source, destination):
+                result = original(source, destination)
+                payload = b"post-journal-immutable-artifact"
+                digest = sha256(payload).hexdigest()
+                obj = artifacts / "objects" / "sha256" / digest[:2] / digest
+                obj.parent.mkdir(parents=True, exist_ok=True)
+                obj.write_bytes(payload)
+                manifest = (
+                    artifacts / "manifests" / "sha256"
+                    / digest[:2] / f"{digest}.json"
+                )
+                manifest.parent.mkdir(parents=True, exist_ok=True)
+                manifest.write_text(json.dumps({
+                    "schema_version": 1,
+                    "algorithm": "sha256",
+                    "digest": digest,
+                    "size_bytes": len(payload),
+                    "media_type": "application/octet-stream",
+                    "rights_basis": "first-party-test-evidence",
+                }), encoding="utf-8")
+                return result
+
+            with patch(
+                "mvp.autotrade_mvp.backup._backup_sqlite",
+                side_effect=publish_new_artifact,
+            ):
+                with self.assertRaisesRegex(BackupError, "inventory changed"):
+                    create_backup(state, artifacts, target)
+            self.assertFalse(target.exists())
+            self.assertEqual(list(root.glob(".autotrade-backup-*")), [])
+
+    def test_existing_side_file_changes_during_sqlite_snapshot_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            original = backup_module._backup_sqlite
+            mutable = state / "learning-evidence.jsonl"
+            if not mutable.exists():
+                mutable.write_text("original\\n", encoding="utf-8")
+
+            def corrupt_side_file(source, destination):
+                result = original(source, destination)
+                mutable.write_text("mutated-after-snapshot\\n", encoding="utf-8")
+                return result
+
+            with patch(
+                "mvp.autotrade_mvp.backup._backup_sqlite",
+                side_effect=corrupt_side_file,
+            ):
+                with self.assertRaisesRegex(BackupError, "changed across journal snapshot"):
+                    create_backup(state, artifacts, target)
+            self.assertFalse(target.exists())
+
+    def test_new_intent_after_stage_fsync_blocks_atomic_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            original = backup_module._fsync_directory_tree
+
+            def race_after_fsync(stage):
+                original(stage)
+                late = state / "order-intents" / "after-stage.json"
+                late.parent.mkdir(parents=True, exist_ok=True)
+                late.write_text("{}", encoding="utf-8")
+
+            with patch(
+                "mvp.autotrade_mvp.backup._fsync_directory_tree",
+                side_effect=race_after_fsync,
+            ):
+                with self.assertRaisesRegex(BackupError, "inventory changed"):
+                    create_backup(state, artifacts, target)
+            self.assertFalse(target.exists())
+            self.assertEqual(list(root.glob(".autotrade-backup-*")), [])
+
+    def test_source_hash_io_error_is_controlled_backup_failure(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            original = backup_module._sha256_file
+            object_file = next((artifacts / "objects").rglob("*"))
+            while not object_file.is_file():
+                object_file = next((artifacts / "objects").rglob("*"))
+
+            def source_io_failure(path):
+                if path == object_file:
+                    raise OSError("injected source read failure")
+                return original(path)
+
+            with patch(
+                "mvp.autotrade_mvp.backup._sha256_file",
+                side_effect=source_io_failure,
+            ):
+                with self.assertRaisesRegex(BackupError, "before journal snapshot"):
+                    create_backup(state, artifacts, target)
+            self.assertFalse(target.exists())
+
     def test_manifest_paths_reject_windows_and_noncanonical_forms(self):
         self.assertEqual(
             _safe_relative_path("state/journal.sqlite3").as_posix(),

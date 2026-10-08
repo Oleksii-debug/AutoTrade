@@ -227,7 +227,12 @@ class ProductionFinancialHostTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             host = self._host(directory)
             runtime = compose_financial_authority(host)
-            self._mark_ready(runtime)
+            # This test exercises the host lifetime/send lock. BYBIT requires a
+            # separately bound provider environment and deliberately refuses
+            # sender admission when none was issued by this composition.
+            # Select a matching provider-free KRAKEN reconciliation fixture so
+            # the guarded transport reaches the in-flight lifetime barrier.
+            self._mark_ready(runtime, provider_id="KRAKEN")
 
             transport_entered = Event()
             release_transport = Event()
@@ -251,8 +256,8 @@ class ProductionFinancialHostTests(unittest.TestCase):
                             attempt_id="attempt-race",
                             intent_id="intent-race",
                             intent_hash="hash-race",
-                            provider="BYBIT",
-                            request={"symbol": "BTCUSDT"},
+                            provider="KRAKEN",
+                            request={"symbol": "BTCUSD"},
                             now="2026-10-04T02:00:02Z",
                             authority_check=lambda _intent_hash, _now: (True, "allowed"),
                             transport_send=transport_send,

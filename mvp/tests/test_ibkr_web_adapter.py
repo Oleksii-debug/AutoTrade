@@ -46,6 +46,7 @@ from mvp.autotrade_mvp.ibkr_web import (
     record_order_submission_result,
 )
 
+from mvp.tests.capability_test_support import fresh_test_admission
 
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 EXECUTION_EVIDENCE_REFS = ("ibkr-execution-evidence:test",)
@@ -128,12 +129,12 @@ def capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
+    return fresh_test_admission(derive_capability_snapshot(
         snapshot_id=str(uuid4()),
         claims=claims,
         observed_at=observed_at,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-    )
+    ))
 
 
 def ibkr_session_observation(

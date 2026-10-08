@@ -18,6 +18,7 @@ from mvp.autotrade_mvp.provider_transport import (
     ProviderTransportScopeError,
 )
 
+from mvp.tests.capability_test_support import fresh_test_admission
 
 NOW = datetime(2026, 10, 6, 0, 0, tzinfo=timezone.utc)
 ENDPOINT = "/v5/asset/delivery-record"
@@ -63,12 +64,12 @@ def option_delivery_capability():
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
+    return fresh_test_admission(derive_capability_snapshot(
         snapshot_id="88888888-8888-4888-8888-888888888888",
         claims=claims,
         observed_at=NOW - timedelta(minutes=1),
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-    )
+    ))
 
 
 def delivery_binding(

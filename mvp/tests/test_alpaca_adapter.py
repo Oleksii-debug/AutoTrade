@@ -49,6 +49,7 @@ from mvp.autotrade_mvp.provider_core import (
     prepare_authenticated_read_query,
 )
 
+from mvp.tests.capability_test_support import fresh_test_admission
 
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
@@ -88,12 +89,12 @@ def capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
+    return fresh_test_admission(derive_capability_snapshot(
         snapshot_id=str(uuid4()),
         claims=claims,
         observed_at=NOW,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-    )
+    ))
 
 
 def bound_activity_response(

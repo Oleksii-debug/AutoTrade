@@ -43,6 +43,7 @@ from mvp.autotrade_mvp.provider_core import (
     prepare_authenticated_read_query,
 )
 
+from mvp.tests.capability_test_support import fresh_test_admission
 
 NOW_DT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 NOW = "2026-09-24T20:00:00Z"
@@ -75,12 +76,12 @@ def futures_read_capability(*, account_id="paper-1"):
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
+    return fresh_test_admission(derive_capability_snapshot(
         snapshot_id=str(uuid4()),
         claims=claims,
         observed_at=observed_at,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-    )
+    ))
 
 
 def futures_position_observation(payload, *, account_id="paper-1", endpoint="/api/history/v3/positions"):
@@ -135,12 +136,12 @@ def futures_write_capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
+    return fresh_test_admission(derive_capability_snapshot(
         snapshot_id=str(uuid4()),
         claims=claims,
         observed_at=NOW_DT,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-    )
+    ))
 
 
 def prepared_futures_request(

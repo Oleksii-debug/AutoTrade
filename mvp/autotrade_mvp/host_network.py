@@ -363,6 +363,10 @@ class AuthenticatedHostApplication:
                     current = self.store.get_operation(operation_id)
                     if current.phase in self.store.TERMINAL_PHASES:
                         result = current
+                    elif current.phase == "UNKNOWN":
+                        # Repeated uncertainty is not a new journal transition.
+                        # A later attempt may still resolve to terminal success.
+                        result = current
                     else:
                         result = self.store.update_operation(
                             operation_id,

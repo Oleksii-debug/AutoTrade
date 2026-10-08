@@ -25,7 +25,10 @@
   const HOST_ACTION_ROLES = Object.freeze({
     BLOCK_NEW_EXPOSURE: new Set(["OWNER", "OPERATOR"]),
     REVOKE_AUTHORITY: new Set(["OWNER"]),
-    SET_AUTHORITY: new Set(["OWNER"])
+    SET_AUTHORITY: new Set(["OWNER"]),
+    START_SIMULATION: new Set(["OWNER"]),
+    RECOVER_SIMULATION: new Set(["OWNER"]),
+    BACKUP_SIMULATION: new Set(["OWNER"])
   });
 
   const TABLE_TOOLS = Object.freeze([
@@ -281,6 +284,10 @@
   function actionCanSubmitInCurrentScope(role, action) {
     if (!roleCanSubmitAction(role, action)) return false;
     if (action === "SET_AUTHORITY" && state.environment === "REPLAY") return false;
+    if (["START_SIMULATION", "RECOVER_SIMULATION", "BACKUP_SIMULATION"].includes(action) &&
+        (state.environment !== "SIMULATION" || state.accountId !== "canonical-sim-account")) {
+      return false;
+    }
     return true;
   }
 

@@ -91,7 +91,7 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 ### Plan 7 — Scientific evidence / performance
 | Section | State | Existing evidence / note |
 | ---: | --- | --- |
-| 1 | QUALIFYING | legacy Section 19; canonical [PR #2327](https://github.com/Oleksii-debug/AutoTrade/pull/2327) exact head `83f2707e265e0c02262ded63dd7f0dadf1a3aa76` (signed gate/input assertion + canonical trust reconstruction); exact-head Ubuntu/Windows science CI `37725134092` QUEUED; baseline `37725134146` PENDING; full Verify `37725134121` PENDING; NOT DONE until terminal checks, merge and post-merge readback |
+| 1 | QUALIFYING | legacy Section 19; canonical [PR #2327](https://github.com/Oleksii-debug/AutoTrade/pull/2327) exact head `29461f150c215b6fac97e5c8955e9d7fa9123174` (signed gate/input assertion + canonical trust reconstruction; stale registered-run negative test repaired after Ubuntu 45/46 run `37725134092`); new Ubuntu/Windows science run `37725855205` QUEUED, baseline/full Verify and reconvergence checks PENDING; NOT DONE until terminal exact-head gates, merge and post-merge readback |
 | 2 | PARTIAL_EXISTING | qualification slice of legacy Section 20 |
 | 3 | PARTIAL_EXISTING | qualification slice of legacy Section 35 |
 | 4 | PARTIAL_EXISTING | strategy economics qualification harness |

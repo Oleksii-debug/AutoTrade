@@ -20,7 +20,11 @@ from autotrade_numeric.exact_decimal import (
 )
 
 from .persistence import JournalStore, canonical_json, payload_digest
-from .provider_response_limits import require_provider_json_depth
+from .provider_response_limits import (
+    HARD_MAX_PROVIDER_RESPONSE_BYTES,
+    require_provider_json_depth,
+    require_provider_response_bytes,
+)
 
 # Journal CAS primitives are the sole atomic send+intent binding authority.
 _CANONICAL_JOURNAL_CURRENT_SEQUENCE = JournalStore.current_journal_sequence
@@ -127,7 +131,6 @@ class ExactJsonTransportResponse:
 
     def __post_init__(self) -> None:
         raw = self.response_bytes
-        _decode_exact_json_bytes(raw)
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -153,12 +156,35 @@ class ExactJsonTransportResponse:
             raise ValueError(
                 "ambiguity_reason is only valid when reconciliation is required"
             )
+        # Post-SEND ambiguous HTTP can be HTML, binary or empty. Preserve the
+        # bounded *exact bytes* for durable UNKNOWN, never mint JSON authority.
+        # 2xx/definitive responses retain the strict JSON contract.
+        if self.requires_reconciliation and (
+            self.http_status is None or not 200 <= self.http_status <= 299
+        ):
+            require_provider_response_bytes(
+                raw, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES, allow_empty=True,
+            )
+        else:
+            _decode_exact_json_bytes(raw)
         _seal_exact_transport_response(self)
+
+    @property
+    def response_encoding(self) -> str:
+        raw, status, requires_reconciliation, _ = (
+            _require_canonical_exact_transport_response(self)
+        )
+        if requires_reconciliation and (status is None or not 200 <= status <= 299):
+            try:
+                _decode_exact_json_bytes(raw)
+            except ValueError:
+                return "hex"
+        return "utf-8-json"
 
     @property
     def response_text(self) -> str:
         raw, _, _, _ = _require_canonical_exact_transport_response(self)
-        return raw.decode("utf-8")
+        return raw.hex() if self.response_encoding == "hex" else raw.decode("utf-8")
 
     @property
     def response_sha256(self) -> str:
@@ -168,6 +194,8 @@ class ExactJsonTransportResponse:
     @property
     def payload(self) -> Any:
         raw, _, _, _ = _require_canonical_exact_transport_response(self)
+        if self.response_encoding != "utf-8-json":
+            raise ValueError("no JSON payload is available for opaque provider response")
         return _decode_exact_json_bytes(raw)
 
 
@@ -269,16 +297,32 @@ class SubmissionResponseBinding:
             )
         if re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None:
             raise ValueError("response_sha256 must be a canonical SHA-256 digest")
-        if type(self.response_bytes) is not bytes or not self.response_bytes:
-            raise ValueError("response_bytes must be non-empty bytes")
+        if type(self.response_encoding) is not str or self.response_encoding not in {
+            "utf-8-json", "hex",
+        }:
+            raise ValueError("durable provider response encoding is invalid")
+        if type(self.response_bytes) is not bytes:
+            raise ValueError("response_bytes must be exact bytes")
+        if self.response_encoding == "utf-8-json":
+            _decode_exact_json_bytes(self.response_bytes)
+        else:
+            if type(self.terminal_state) is not str or self.terminal_state != "UNKNOWN":
+                raise ValueError("opaque response cannot establish definitive SENT")
+            if self.http_status is not None and (
+                type(self.http_status) is not int
+                or 200 <= self.http_status <= 299
+            ):
+                raise ValueError("opaque HTTP success cannot establish provider state")
+            require_provider_response_bytes(
+                self.response_bytes,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
+            )
         if (
             "sha256:" + sha256(self.response_bytes).hexdigest()
             != self.response_sha256
         ):
             raise ValueError("durable provider response digest mismatch")
-        _decode_exact_json_bytes(self.response_bytes)
-        if type(self.response_encoding) is not str or self.response_encoding != "utf-8-json":
-            raise ValueError("durable provider response encoding is invalid")
         if type(self.terminal_state) is not str or self.terminal_state not in {"SENT", "UNKNOWN"}:
             raise ValueError("durable submission terminal state is invalid")
         if self.terminal_state == "UNKNOWN":
@@ -322,6 +366,8 @@ class SubmissionResponseBinding:
 
     @property
     def payload(self) -> Any:
+        if self.response_encoding != "utf-8-json":
+            raise ValueError("no JSON payload is available for opaque provider response")
         return _freeze_json(_decode_exact_json_bytes(self.response_bytes))
 
 
@@ -576,16 +622,29 @@ def load_submission_response_binding(
         raise ValueError("durable terminal submission payload is invalid")
     response_text = sent_payload.get("response_text")
     response_sha256 = sent_payload.get("response_sha256")
+    response_encoding = sent_payload.get("response_encoding")
     if (
-        sent_payload.get("response_encoding") != "utf-8-json"
-        or not isinstance(response_text, str)
-        or not response_text
-        or not isinstance(response_sha256, str)
+        type(response_encoding) is not str
+        or response_encoding not in {"utf-8-json", "hex"}
+        or type(response_text) is not str
+        or (response_encoding == "utf-8-json" and not response_text)
+        or type(response_sha256) is not str
     ):
-        raise ValueError(
-            "durable exact provider response bytes are unavailable"
-        )
-    response_bytes = response_text.encode("utf-8")
+        raise ValueError("durable exact provider response bytes are unavailable")
+    if response_encoding == "hex":
+        if (
+            event_types[2] != "SubmissionUnknown"
+            or len(response_text) > 2 * HARD_MAX_PROVIDER_RESPONSE_BYTES
+        ):
+            raise ValueError("opaque durable response must remain bounded UNKNOWN")
+        try:
+            response_bytes = bytes.fromhex(response_text)
+        except ValueError:
+            raise ValueError("durable opaque response encoding is invalid") from None
+        if response_bytes.hex() != response_text:
+            raise ValueError("durable opaque response encoding is noncanonical")
+    else:
+        response_bytes = response_text.encode("utf-8")
     if "sha256:" + sha256(response_bytes).hexdigest() != response_sha256:
         raise ValueError("durable provider response digest mismatch")
     http_status = sent_payload.get("http_status")
@@ -620,7 +679,7 @@ def load_submission_response_binding(
         submission_scope_hash=scope_hash,
         response_bytes=response_bytes,
         response_sha256=response_sha256,
-        response_encoding="utf-8-json",
+        response_encoding=response_encoding,
         terminal_state="SENT" if event_types[2] == "SubmissionSent" else "UNKNOWN",
         ambiguity_reason=sent_payload.get("reason") if event_types[2] == "SubmissionUnknown" else None,
         retry_disposition=sent_payload.get("retry_disposition") if event_types[2] == "SubmissionUnknown" else None,
@@ -1782,11 +1841,14 @@ class GuardedDispatcher:
                     "client_order_id": client_order_id,
                     "response_text": response.response_text,
                     "response_sha256": response.response_sha256,
-                    "response_encoding": "utf-8-json",
+                    "response_encoding": response.response_encoding,
                 }
                 if response.http_status is not None:
                     sent_payload["http_status"] = response.http_status
-                outcome_response = response.payload
+                outcome_response = (
+                    response.payload if response.response_encoding == "utf-8-json"
+                    else None
+                )
                 terminal_requires_reconciliation = response.requires_reconciliation
                 if terminal_requires_reconciliation:
                     terminal_reason = (

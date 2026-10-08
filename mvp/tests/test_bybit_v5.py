@@ -1608,7 +1608,8 @@ class BybitV5AdapterTests(unittest.TestCase):
                     observation=None,
                     transport_ambiguous=True,
                 )
-        rebound.assert_not_called()
+        # patch.object(..., forged) returns the exact function, not a Mock.
+        # The closed-over callback ledger proves the hostile function was not run.
         self.assertEqual(callbacks, [])
 
     def test_transport_ambiguity_requires_boolean_flag(self):

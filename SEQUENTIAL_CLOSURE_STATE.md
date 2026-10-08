@@ -1,3 +1,26 @@
+# LEGACY MONOLITHIC CLOSURE REGISTRY — SUPERSEDED FOR WORK SELECTION
+
+**Do not use this file to choose the next work front.**
+AutoTrade now uses `PROJECT_PLAN_INDEX.md`, `MULTI_PLAN_PARALLELISM_CONTRACT.md` and `MULTI_PLAN_CLOSURE_STATE.md`.
+
+This file is preserved only as historical/audit evidence for the former ordered 48-Section model.
+
+Key migrated status:
+- former 0 -> Plan 4 / Section 1 DONE
+- former 1 -> Plan 1 / Section 1 DONE
+- former 2 -> Plan 4 / Section 2 internal engineering complete; external final-release remainder -> Plan 9 / Section 1 WAITING_EXTERNAL
+- former 3 -> Plan 3 / Section 1 DONE
+- former 4 -> Plan 3 / Section 2 DONE
+- former 5 -> Plan 1 / Section 2 DONE
+- former 6 -> Plan 2 / Section 1 DONE
+- former 7 -> Plan 3 / Section 3 DONE
+- former 8–14 -> Plan 1 / Sections 3–9 DONE
+- former 15 -> Plan 1 / Section 10 QUALIFYING
+- former 16 -> Plan 2 / Section 2 PARTIAL_EXISTING
+- former 17 -> Plan 1 / Section 11 PARTIAL_EXISTING
+
+---
+
 # Sequential Closure State
 
 This file is the durable GitHub mirror for ordered Section/Subsection closure.

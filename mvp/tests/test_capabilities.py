@@ -166,7 +166,14 @@ class CapabilityFoundationTests(unittest.TestCase):
         )
 
         def verifier(item):
-            if item is newer_account:
+            # The capability boundary snapshots claims before invoking the
+            # verifier. Identify the newer account evidence by its canonical
+            # facts, not by caller-owned Python object identity.
+            if (
+                item.source == "ACCOUNT"
+                and item.observed_at == newer_account.observed_at
+                and item.evidence_ref["sha256"] == newer_account.evidence_ref["sha256"]
+            ):
                 return EvidenceVerification(
                     valid=False,
                     reason="newer capability evidence is unavailable",

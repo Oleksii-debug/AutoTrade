@@ -1477,6 +1477,8 @@ def read_windows_update_step_intent(
 
     try:
         payload = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_pairs)
+    except WindowsUpdateError:
+        raise
     except (ValueError, UnicodeError) as error:
         raise WindowsUpdateError("intent JSON is malformed") from error
     expected_fields = {

@@ -1613,11 +1613,13 @@ def _loop_event(
     )
     if kind == "AutonomousEpisodeCompleted":
         # Deliver existing publications before freezing the completion preimage.
-        for item in store.pending_outbox(limit=1000):
-            store.mark_outbox_delivered(item["outbox_id"], expected_envelope_hash=item["envelope_hash"])
         from .simulation_runtime_checkpoint import (
-            COMPLETION_RECEIPT_FIELD, prepare_autonomous_completion_receipt,
+            COMPLETION_RECEIPT_FIELD,
+            deliver_autonomous_owned_publications,
+            prepare_autonomous_completion_receipt,
         )
+        # Never acknowledge foreign host/financial publications as ZERO output.
+        deliver_autonomous_owned_publications(store, run_id=run_id)
         first = store.load_events(_LOOP_AGGREGATE, run_id)[0]
         protocol = first["payload"]["protocol"]
         receipt = prepare_autonomous_completion_receipt(
@@ -1962,6 +1964,13 @@ def run_autonomous_simulation(
         "clock_order": "SETTLEMENT_AT_EVENT_TIME_THEN_DECISION_PLUS_1US", "run_id": run_id,
         "source_build_identity": _simulation_build_identity(),
         "account": ACCOUNT, "provider": PROVIDER, "environment": ENVIRONMENT,
+        # Bind the canonical ZERO financial scope before its durable start event.
+        # The runtime checkpoint never infers financial ownership from aliases.
+        "financial_scope": {
+            "account_id": ACCOUNT, "provider_id": PROVIDER,
+            "environment": ENVIRONMENT,
+            "instrument_id": INSTRUMENT_ID, "instrument_version": INSTRUMENT,
+        },
         "strategy_parameters": {"fast": 2, "slow": 3},
         "prices": [canonical_decimal_text(v) for v in values], "start_time": timestamp,
         "risk_policy": "canonical-provider-free-risk-v1",
@@ -2333,11 +2342,8 @@ def _recover_autonomous_zero_wire_completion(
         timestamp,
         expected_journal_sequence=checkpoint["journal_sequence"],
     )
-    for item in store.pending_outbox(limit=1000):
-        store.mark_outbox_delivered(
-            item["outbox_id"],
-            expected_envelope_hash=item["envelope_hash"],
-        )
+    from .simulation_runtime_checkpoint import deliver_autonomous_owned_publications
+    deliver_autonomous_owned_publications(store, run_id=run_id)
 
 
 def _recover_autonomous_observed_fill(
@@ -2636,11 +2642,8 @@ def _recover_autonomous_observed_fill(
         result,
         timestamp,
     )
-    for item in store.pending_outbox(limit=1000):
-        store.mark_outbox_delivered(
-            item["outbox_id"],
-            expected_envelope_hash=item["envelope_hash"],
-        )
+    from .simulation_runtime_checkpoint import deliver_autonomous_owned_publications
+    deliver_autonomous_owned_publications(store, run_id=run_id)
 
 
 def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy):
@@ -2906,6 +2909,16 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                                              Decimal("0.000000000000000001"), mode="CEILING")
         frozen_target = parse_bounded_exact_decimal(protocol["target_quantity"])
         proposal = MovingAverageStrategy(**protocol["strategy_parameters"]).decide(values[:episode], frozen_target)
+        # Record the existing provider-free specialist as a diagnostic proposal.
+        # It cannot select exposure: the frozen strategy and financial authorities
+        # alone choose allocation, hard risk, reservation, and guarded dispatch.
+        from .product_agent import decide as decide_zero_agent
+        agent_side = decide_zero_agent(
+            store, protocol, episode=episode, strategy_side=proposal.side,
+            position=position, timestamp=timestamp,
+        )
+        if agent_side != proposal.side:
+            raise ValueError("ZERO agent proposal differs from the frozen strategy")
         target_quantity = frozen_target if proposal.side == "BUY" else Decimal("0") if proposal.side == "SELL" else position
         decision = "BUY" if target_quantity > position else "REDUCE" if target_quantity < position else "HOLD" if proposal.side == "HOLD" else "NO_TRADE"
         emergency = protocol["emergency_at_episode"] is not None and episode >= protocol["emergency_at_episode"]
@@ -3080,8 +3093,8 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
             "reconciliation_event_id": after_checkpoint["event_id"], "protocol_digest": protocol_digest,
             "provider_state": provider.export_state(), "emergency": emergency}
         _loop_event(store, run_id, "AutonomousEpisodeCompleted", str(episode), result, timestamp)
-        for item in store.pending_outbox(limit=1000):
-            store.mark_outbox_delivered(item["outbox_id"], expected_envelope_hash=item["envelope_hash"])
+        from .simulation_runtime_checkpoint import deliver_autonomous_owned_publications
+        deliver_autonomous_owned_publications(store, run_id=run_id)
         completed.append(result)
         # Persist only after the durable episode and every publication in this
         # terminal cut are complete.  A crash before this point leaves the

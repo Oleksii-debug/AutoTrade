@@ -595,24 +595,65 @@ def _autonomous_owned_pending_publications(
 ) -> tuple[dict[str, object], ...]:
     pending: list[dict[str, object]] = []
     financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
-    for event_id in _autonomous_owned_event_ids(store, run_id=run_id):
-        state = JournalStore.outbox_delivery_state(store, event_id)
-        if state is None:
+    owned_ids = _autonomous_owned_event_ids(store, run_id=run_id)
+    # The canonical JournalStore requires an exact topic on every outbox read.
+    # Do not weaken that storage contract or guess another source of authority.
+    # Resolve only exact owned event IDs. Foreign UI or provider backlog may
+    # exceed every bounded global outbox page and must not exhaust this scan.
+    # Keep the JournalStore's exact-topic requirement intact.
+    for event_id in owned_ids:
+        event = JournalStore.get_event(store, event_id)
+        if event is None:
+            raise AutonomousRuntimeCheckpointError(
+                "ZERO owned event vanished from the journal"
+            )
+        topic = _canonical_publication_topic(event)
+        if topic is None:
+            # Non-publishing component rows must not acquire publication
+            # authority through another known product topic.
+            for unexpected_topic in (
+                "autotrade.economic.events",
+                "autotrade.submission.events",
+                "autotrade.reconciliation.events",
+                "autotrade.simulation.events",
+                "financial.admission.ready",
+                "ui.host-events",
+            ):
+                try:
+                    JournalStore.outbox_delivery_state(
+                        store, event_id, topic=unexpected_topic,
+                    )
+                except ValueError as error:
+                    if str(error) != "durable outbox publication is missing for bootstrap event":
+                        raise AutonomousRuntimeCheckpointError(
+                            "ZERO cannot attest an unauthorized publication"
+                        ) from error
+                else:
+                    raise AutonomousRuntimeCheckpointError(
+                        "ZERO component has an unauthorized outbox publication"
+                    )
             continue
+        try:
+            state = JournalStore.outbox_delivery_state(
+                store, event_id, topic=topic,
+            )
+        except ValueError as error:
+            raise AutonomousRuntimeCheckpointError(
+                "ZERO owned publication is missing or misrouted"
+            ) from error
+        # The protected JournalStore read returns validated delivery metadata,
+        # not an event body; join it to the independently authenticated journal
+        # event rather than inventing or trusting an unverified outbox payload.
+        owned_state = {**state, "payload": event}
         if not _autonomous_publication_owned(
-            state,
+            owned_state,
             run_id=run_id,
             financial_scope=financial_scope,
         ):
             raise AutonomousRuntimeCheckpointError(
                 "exact ZERO outbox state escaped runtime ownership"
             )
-        envelope = state.get("payload")
-        if type(envelope) is not dict:
-            raise AutonomousRuntimeCheckpointError(
-                "ZERO publication payload is not a canonical event envelope"
-            )
-        expected_topic = _canonical_publication_topic(envelope)
+        expected_topic = _canonical_publication_topic(event)
         if expected_topic is None:
             raise AutonomousRuntimeCheckpointError(
                 "ZERO component event unexpectedly has an outbox publication"
@@ -623,7 +664,7 @@ def _autonomous_owned_pending_publications(
             )
         if state["delivered"]:
             continue
-        pending.append(state)
+        pending.append(owned_state)
     return tuple(pending)
 
 

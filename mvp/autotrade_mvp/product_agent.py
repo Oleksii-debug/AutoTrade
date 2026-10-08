@@ -47,7 +47,7 @@ def decide(journal, protocol, *, episode, strategy_side, position, timestamp):
         'host_id': 'local-simulation', 'owner_epoch': '1', 'environment': 'SIMULATION',
         'occurred_at': timestamp, 'observed_at': timestamp, 'committed_at': timestamp,
         'correlation_id': event_id, 'causation_id': None, 'payload': data,
-        'payload_hash': payload_digest(data), 'evidence_refs': list(result.evidence_refs)}
+        'payload_hash': payload_digest(data), 'evidence_refs': []}
     existing = journal.get_event(event_id)
     if existing is None:
         journal.append_event(event)

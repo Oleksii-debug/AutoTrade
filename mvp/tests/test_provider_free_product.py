@@ -100,7 +100,10 @@ class ProductClient:
             if status == 200 and result['phase'] in {'SUCCEEDED', 'FAILED', 'UNKNOWN'}:
                 return command_id, result
             time.sleep(.02)
-        raise AssertionError('operation failed to finish')
+        raise AssertionError(
+            'operation failed to finish: last phase='
+            + str(result.get('phase') if isinstance(result, dict) else type(result).__name__)
+        )
 
     def close(self):
         self.runtime.close(); self.worker.join(timeout=10)
@@ -441,7 +444,18 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 self.assertEqual(state['portfolio']['status']['position'], '2')
                 self.assertEqual(len(state['portfolio']['fills']), 6)
                 self.assertEqual([o['state'] for o in state['portfolio']['orders']], ['FILLED'] * 3)
-                self.assertEqual(len(store.load_events_by_aggregate_type('settlement_book')), 12)
+                # Six exact fill obligations; only four provider settlement
+                # receipts are causally available at this simulated clock.
+                # Never pre-apply the last two provider settlements.
+                from collections import Counter
+                settlement_types = Counter(
+                    event['event_type']
+                    for event in store.load_events_by_aggregate_type('settlement_book')
+                )
+                self.assertEqual(settlement_types, {
+                    'SettlementObligationsRegistered': 6,
+                    'SettlementEvidenceApplied': 4,
+                })
                 before = store.current_journal_sequence()
                 _, replay = client.command('START_SIMULATION')
                 self.assertEqual(replay['phase'], 'SUCCEEDED')

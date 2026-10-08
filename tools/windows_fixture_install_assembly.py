@@ -318,3 +318,42 @@ def fixture_uninstall(fixture_root: Path, *, fixture_only: bool) -> dict:
             shutil.rmtree(version)
         return {"disposition": "FIXTURE_PROGRAM_REMOVED", "durable_state_preserved": True,
                 "host_started": False, "trading_authority_granted": False}
+
+
+def main() -> int:
+    """Keyboard/terminal-only TEST interface; no production installer mode."""
+    import argparse
+    parser = argparse.ArgumentParser(description=(
+        "AutoTrade NONEXECUTING installation fixture. "
+        "Never runs Host or authorizes real trading. Not a signed installer."
+    ))
+    parser.add_argument("--root", required=True, type=Path,
+                        help="Absolute existing or new directory named autotrade-fixture-only")
+    parser.add_argument("--fixture-only", action="store_true", required=True,
+                        help="Required acknowledgment of nonexecuting fixture mode")
+    action = parser.add_subparsers(dest="action", required=True)
+    install = action.add_parser("install", help="Clean fixture install or side-by-side update")
+    install.add_argument("--bundle", required=True, type=Path)
+    rollback = action.add_parser("rollback", help="Select a prior verified fixture version")
+    rollback.add_argument("--version", required=True)
+    action.add_parser("uninstall", help="Delete only fixture program files; preserve state")
+    args = parser.parse_args()
+    try:
+        if args.action == "install":
+            result = fixture_install_bundle(
+                args.bundle, args.root, fixture_only=args.fixture_only
+            )
+        elif args.action == "rollback":
+            result = fixture_rollback_version(
+                args.root, args.version, fixture_only=args.fixture_only
+            )
+        else:
+            result = fixture_uninstall(args.root, fixture_only=args.fixture_only)
+    except (OSError, InstallerManifestError, FixtureAssemblyError) as error:
+        parser.exit(status=2, message="AutoTrade fixture FAIL-CLOSED: " + str(error) + "\n")
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

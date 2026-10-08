@@ -425,6 +425,36 @@ class BackupRestoreTests(unittest.TestCase):
                     create_backup(state, artifacts, target)
             self.assertFalse(target.exists())
 
+    def test_symlinked_artifact_directory_ancestors_are_never_backed_up(self):
+        # A symlinked storage root or an intermediate digest directory can
+        # appear to contain regular hashed files even when every payload is
+        # actually outside the caller-selected artifact store.
+        for relative in (
+            "",
+            "objects",
+            "objects/sha256",
+            "manifests",
+            "manifests/sha256",
+        ):
+            with self.subTest(relative=relative):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    state, artifacts = self._build_sources(root)
+                    source_directory = artifacts / relative if relative else artifacts
+                    external_directory = root / "external-artifact-storage"
+                    source_directory.rename(external_directory)
+                    try:
+                        source_directory.symlink_to(
+                            external_directory, target_is_directory=True
+                        )
+                    except (OSError, NotImplementedError):
+                        self.skipTest("directory symlink creation is unavailable")
+                    destination = root / "backup"
+                    with self.assertRaisesRegex(BackupError, "unsafe"):
+                        create_backup(state, artifacts, destination)
+                    self.assertFalse(destination.exists())
+                    self.assertEqual(list(root.glob(".autotrade-backup-*")), [])
+
     def test_manifest_paths_reject_windows_and_noncanonical_forms(self):
         self.assertEqual(
             _safe_relative_path("state/journal.sqlite3").as_posix(),

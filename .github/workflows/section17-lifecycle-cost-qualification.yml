@@ -69,7 +69,7 @@ jobs:
         run: >-
           python tools/write_ci_evidence.py
           --suite section17-lifecycle-cost-qualification
-          --command "python -m unittest -v mvp.tests.test_lifecycle_cost mvp.tests.test_lifecycle_cost_completeness mvp.tests.test_lifecycle_cost_allocation_integration mvp.tests.test_lifecycle_cost_instrument_identity mvp.tests.test_lifecycle_cost_valuation"
+          --command "python -m unittest -v mvp.tests.test_lifecycle_cost mvp.tests.test_lifecycle_cost_completeness mvp.tests.test_lifecycle_cost_allocation_integration mvp.tests.test_lifecycle_cost_instrument_identity mvp.tests.test_lifecycle_cost_valuation && python -m unittest discover -s tests/Science -p test_strategy_economics_authority.py -v"
           --output "artifacts/section17-${{ runner.os }}.json"
       - uses: actions/upload-artifact@v4
         with:

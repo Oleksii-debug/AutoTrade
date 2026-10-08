@@ -726,7 +726,16 @@ def _require_webview2_input_identity(product_root, inputs, nuget_lock):
     return content_hash
 
 
+def _lexical_absolute_work_path(work):
+    # Native retained-handle authority takes absolute lexical paths. Do not use
+    # resolve(): that could silently follow an attacker-controlled junction.
+    if type(work) is not _PATH_TYPE:
+        raise TypeError('candidate work root must be an exact Path')
+    return Path(os.path.abspath(os.fspath(work)))
+
+
 def build_candidate(*, source_root, source_sha, desktop, host, python_archive, webview_archive, work, output):
+    work = _lexical_absolute_work_path(work)
     if work.exists(): raise ValueError('candidate work directory must be new')
     work.mkdir(parents=True)
     payload = work / 'payload'; payload.mkdir()

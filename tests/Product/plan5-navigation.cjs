@@ -60,7 +60,7 @@ async function main() {
       document.querySelector('nav a[href="#risk"]').getAttribute("aria-current") === "location");
     assert.match(await page.locator("#page-navigation-status").innerText(), /Risk and authority/);
     await page.goBack();
-    await page.waitForFunction(() => location.hash === "#main" && !document.querySelector("nav [aria-current]"));
+    await page.waitForFunction(() => location.hash === "#main" && !document.querySelector("nav [aria-current]") && document.activeElement?.id === "main");
     await page.goForward();
     await page.waitForFunction(() => location.hash === "#risk" && document.activeElement.id === "risk-heading");
     await page.goto(origin + "/index.html#history");

@@ -1715,7 +1715,11 @@ def parse_executions(
                     category=query_category,
                     instrument_version=instrument,
                     provider_symbol=symbol,
-                    trade_time=trade_time,
+                    # This consumer requires an exact aware datetime; the
+                    # canonical fill/journal still uses the original UTC text.
+                    trade_time=datetime.fromisoformat(
+                        trade_time.replace("Z", "+00:00")
+                    ),
                 )
             except BybitFeeCurrencyAuthorityError as error:
                 raise ProviderCoreError(str(error)) from error

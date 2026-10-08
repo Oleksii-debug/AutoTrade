@@ -149,18 +149,74 @@ class ExactJsonTransportResponse:
             raise ValueError(
                 "ambiguity_reason is only valid when reconciliation is required"
             )
+        _seal_exact_transport_response(self)
 
     @property
     def response_text(self) -> str:
-        return self.response_bytes.decode("utf-8")
+        raw, _, _, _ = _require_canonical_exact_transport_response(self)
+        return raw.decode("utf-8")
 
     @property
     def response_sha256(self) -> str:
-        return "sha256:" + sha256(self.response_bytes).hexdigest()
+        raw, _, _, _ = _require_canonical_exact_transport_response(self)
+        return "sha256:" + sha256(raw).hexdigest()
 
     @property
     def payload(self) -> Any:
-        return _decode_exact_json_bytes(self.response_bytes)
+        raw, _, _, _ = _require_canonical_exact_transport_response(self)
+        return _decode_exact_json_bytes(raw)
+
+
+# Issued transport response state is held separately from the mutable instance.
+# Frozen dataclasses alone do not resist object.__setattr__ after the wire send.
+_EXACT_RESPONSE_ORIGINAL_SHA256 = sha256
+_EXACT_RESPONSE_ORIGINAL_DECODE = _decode_exact_json_bytes
+_exact_response_issued: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+
+def _seal_exact_transport_response(value: ExactJsonTransportResponse) -> None:
+    if type(value) is not ExactJsonTransportResponse:
+        raise ValueError("exact transport response authority is unavailable")
+    record = vars(value)
+    if frozenset(record) != frozenset(
+        ("response_bytes", "http_status", "requires_reconciliation", "ambiguity_reason")
+    ):
+        raise ValueError("exact transport response authority is unavailable")
+    for key, (ref, _) in tuple(_exact_response_issued.items()):
+        if ref() is None:
+            _exact_response_issued.pop(key, None)
+    identity = id(value)
+    if identity in _exact_response_issued and _exact_response_issued[identity][0]() is not None:
+        raise ValueError("exact transport response authority is unavailable")
+    _exact_response_issued[identity] = (
+        weakref_ref(value),
+        (record["response_bytes"], record["http_status"],
+         record["requires_reconciliation"], record["ambiguity_reason"]),
+    )
+
+
+def _require_canonical_exact_transport_response(
+    value: ExactJsonTransportResponse,
+) -> tuple[bytes, int | None, bool, str | None]:
+    if (sha256 is not _EXACT_RESPONSE_ORIGINAL_SHA256
+            or _decode_exact_json_bytes is not _EXACT_RESPONSE_ORIGINAL_DECODE
+            or type(value) is not ExactJsonTransportResponse):
+        raise ValueError("exact transport response authority is unavailable")
+    registered = _exact_response_issued.get(id(value))
+    if registered is None or registered[0]() is not value:
+        raise ValueError("exact transport response authority is unavailable")
+    state = vars(value)
+    if frozenset(state) != frozenset(
+        ("response_bytes", "http_status", "requires_reconciliation", "ambiguity_reason")
+    ):
+        raise ValueError("exact transport response authority is unavailable")
+    current = (state["response_bytes"], state["http_status"],
+               state["requires_reconciliation"], state["ambiguity_reason"])
+    expected = registered[1]
+    if any(type(actual) is not type(wanted) or actual != wanted
+           for actual, wanted in zip(current, expected)):
+        raise ValueError("exact transport response authority is unavailable")
+    return expected
 
 
 @dataclass(frozen=True)
@@ -1337,6 +1393,7 @@ class GuardedDispatcher:
                 ) from error
             barrier_passed = True
 
+        canonical_response_guard = _require_canonical_exact_transport_response
         try:
             response = transport_send(client_order_id, request_frozen, final_guard)
         except DispatchBlocked as error:
@@ -1455,6 +1512,11 @@ class GuardedDispatcher:
         terminal_reason = "sent_confirmed"
         try:
             if type(response) is ExactJsonTransportResponse:
+                # Transport callbacks cannot rebind the response authority
+                # after the final guard to relabel UNKNOWN as a safe SENT.
+                if _require_canonical_exact_transport_response is not canonical_response_guard:
+                    raise ValueError("exact transport response authority is unavailable")
+                canonical_response_guard(response)
                 # The exact raw bytes + digest are the durable source.
                 # The prior "response" JSON mirror could silently round
                 # decimals to float; persisting Decimal objects directly is

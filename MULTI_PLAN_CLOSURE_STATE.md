@@ -61,7 +61,7 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 | ---: | --- | --- |
 | 1 | DONE | legacy Section 0 |
 | 2 | DONE_INTERNAL_EXTERNAL_REMAINDER_MOVED | legacy Section 2 internal source/integration complete; final external facts moved to Plan 9/1 |
-| 3 | PARTIAL_EXISTING | legacy Section 26 |
+| 3 | QUALIFYING | legacy Section 26; canonical [PR #2323](https://github.com/Oleksii-debug/AutoTrade/pull/2323) DRAFT, frozen head `86fe3434f97d00fd53db19eaa7b9e2c3e6ec0b68`. Existing WP-48 implementation reused; exact-head scoped Ubuntu/Windows [37728560554](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37728560554), baseline 37728560558, Verify 37728560586 and provider-free 37728560559 all QUEUED at 2026-10-08 readback, **NOT PASS**. Earlier exact head `7e089287` passed Ubuntu and FAILED Windows (2 release-runtime currentness errors), with targeted canonical native-handle identity repair in this frozen candidate; no unsupported PASS. PR compare to `main@464324eacc423ece0d3a5235dde968dfdf55363c`: diverged 9 ahead/25 behind, mergeable according to GitHub but no exact-head qualification, merge or post-merge readback yet. Keep Section 4 untouched until Section 3 terminal DONE; final external release proof belongs to Plan 9. |
 | 4 | PARTIAL_EXISTING | legacy Section 27; open PR #1282 and current source |
 | 5 | PARTIAL_EXISTING | engineering part of legacy Section 35 |
 | 6 | PARTIAL_EXISTING | provenance/SBOM/signing infrastructure exists but final delivery proof is later |

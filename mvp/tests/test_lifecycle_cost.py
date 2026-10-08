@@ -36,6 +36,7 @@ class LifecycleCostTests(unittest.TestCase):
                 "EXCHANGE_FEE",
                 "SPREAD",
                 "SLIPPAGE",
+                "MARKET_IMPACT",
                 "FX_CONVERSION",
                 "TRANSACTION_TAX",
             }
@@ -129,6 +130,29 @@ class LifecycleCostTests(unittest.TestCase):
         split = split_for_profile(profile)
         self.assertEqual(profile.net_expected_rate, Decimal("0"))
         self.assertEqual(split.cost_rate, Decimal("0"))
+
+    def test_market_impact_is_explicit_cost_and_missing_impact_fails_closed(self):
+        commission = self.component("commission", "COMMISSION", "0.0056")
+        impact = self.component("market-impact", "MARKET_IMPACT", "0.0017")
+        split = split_for_profile(
+            self.profile(
+                components=(commission, impact),
+                required_kinds=("COMMISSION", "MARKET_IMPACT"),
+            )
+        )
+        self.assertEqual(split.turnover_cost_rate, Decimal("0.0073"))
+        self.assertEqual(split.holding_cost_rate, Decimal("0"))
+        self.assertEqual(split.cost_rate, Decimal("0.0073"))
+        self.assertIn(("MARKET_IMPACT", "evidence:market-impact"), split.component_evidence_refs)
+
+        with self.assertRaisesRegex(
+            LifecycleCostError,
+            "missing required kinds: MARKET_IMPACT",
+        ):
+            self.profile(
+                components=(commission,),
+                required_kinds=("COMMISSION", "MARKET_IMPACT"),
+            )
 
     def test_missing_required_cost_family_fails_closed(self):
         with self.assertRaisesRegex(

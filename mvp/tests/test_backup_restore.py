@@ -408,12 +408,12 @@ class BackupRestoreTests(unittest.TestCase):
             state, artifacts = self._build_sources(root)
             target = root / "backup"
             original = backup_module._sha256_file
-            object_file = next((artifacts / "objects").rglob("*"))
-            while not object_file.is_file():
-                object_file = next((artifacts / "objects").rglob("*"))
+            mutable = state / "learning-evidence.jsonl"
+            if not mutable.exists():
+                mutable.write_text("original\\n", encoding="utf-8")
 
             def source_io_failure(path):
-                if path == object_file:
+                if path == mutable:
                     raise OSError("injected source read failure")
                 return original(path)
 

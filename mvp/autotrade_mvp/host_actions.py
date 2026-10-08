@@ -18,6 +18,9 @@ HOST_ACTION_REQUIRED_ROLES: Mapping[str, frozenset[str]] = MappingProxyType(
         "BLOCK_NEW_EXPOSURE": frozenset({"OWNER", "OPERATOR"}),
         "REVOKE_AUTHORITY": frozenset({"OWNER"}),
         "SET_AUTHORITY": frozenset({"OWNER"}),
+        "START_SIMULATION": frozenset({"OWNER", "OPERATOR"}),
+        "RECOVER_SIMULATION": frozenset({"OWNER", "OPERATOR"}),
+        "BACKUP_SIMULATION": frozenset({"OWNER"}),
     }
 )
 

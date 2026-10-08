@@ -16,7 +16,7 @@ from mvp.autotrade_mvp.capabilities import (
     EvidenceVerification,
     derive_capability_snapshot,
 )
-from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
+from mvp.autotrade_mvp.instruments import DeliverableLeg, InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
     Surface,
@@ -73,6 +73,8 @@ def option_registry(
         strike=Decimal("16000"),
         option_right="PUT",
         exercise_style="EUROPEAN",
+        # Synthetic contract metadata, not a provider-backed delivery truth.
+        deliverable=(DeliverableLeg(asset_id="BTC", quantity=Decimal("1")),),
     )
     return InstrumentRegistry(versions=(version,))
 

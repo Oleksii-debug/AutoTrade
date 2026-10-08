@@ -416,6 +416,48 @@ async function exerciseHostOutageFailClosed(page) {
   assert.match(await page.locator("#urgent-status").innerText(), /failed|unavailable|stale/i);
 }
 
+async function exerciseCanonicalPageNavigation(page) {
+  stage = "canonical semantic web navigation and keyboard history";
+  const ids = [
+    "overview", "accounts", "opportunities", "portfolio", "risk",
+    "research", "learning", "models", "history", "settings"
+  ];
+  for (const id of ids) {
+    const anchor = page.locator('nav[aria-label="Primary"] a[href="#' + id + '"]');
+    assert.equal(await anchor.count(), 1, "one canonical link for " + id);
+    assert.equal(await page.locator("#" + id + " h2").count(), 1);
+  }
+  const first = page.locator('nav a[href="#portfolio"]');
+  await first.focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => location.hash === "#portfolio" &&
+    document.activeElement?.id === "portfolio-heading" &&
+    document.querySelector('nav a[href="#portfolio"]')?.getAttribute("aria-current") === "location");
+  assert.match(await page.locator("#page-navigation-status").innerText(), /Portfolio and orders/);
+  await page.goBack();
+  await page.waitForFunction(() => location.hash === "#main" &&
+    document.querySelectorAll('nav [aria-current="location"]').length === 0);
+  await page.goForward();
+  await page.waitForFunction(() => location.hash === "#portfolio" &&
+    document.activeElement?.id === "portfolio-heading");
+  const before = await page.locator("#state-version").innerText();
+  await page.evaluate(() => {
+    location.hash = "#unknown-section";
+  });
+  await page.waitForFunction(() =>
+    document.querySelector("#page-navigation-status")?.textContent.includes("Unknown section."));
+  assert.equal(await page.locator('#page-navigation-status').getAttribute("role"), "status");
+  assert.equal(await page.locator("#state-version").innerText(), before,
+    "unrecognized page routes do not rewrite host state");
+  await page.locator('nav a[href="#risk"]').focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => location.hash === "#risk" &&
+    document.activeElement?.id === "risk-heading");
+  assert.equal(await page.locator("nav [aria-current]").count(), 1);
+  assert.match(await page.locator("#provider-availability").innerText(), /UNAVAILABLE/);
+  assert.match(await page.locator("#provider-availability").innerText(), /ZERO\\/SIMULATION/);
+}
+
 (async () => {
   browser = await chromium.launch({
     ...(process.env.AUTOTRADE_BROWSER_PATH ? {executablePath: process.env.AUTOTRADE_BROWSER_PATH} : {}),
@@ -438,6 +480,7 @@ async function exerciseHostOutageFailClosed(page) {
   assert.equal(await page.evaluate(() => document.activeElement.id), "main");
   assert.equal(await page.locator("#polite-status").getAttribute("role"), "status");
   assert.equal(await page.locator("#urgent-status").getAttribute("role"), "alert");
+  await exerciseCanonicalPageNavigation(page);
   await exerciseSnapshotBusyFailClosed(page);
   await stop();
   await exerciseHostOutageFailClosed(page);

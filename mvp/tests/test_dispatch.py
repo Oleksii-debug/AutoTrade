@@ -1441,6 +1441,8 @@ class DispatchTests(unittest.TestCase):
                 submission_scope_hash="sha256:" + "2" * 64,
                 response_bytes=b'{"ok":true}',
                 response_sha256="sha256:" + "3" * 64,
+                response_encoding="utf-8-json",
+                terminal_state="SENT",
             )
 
     def test_unserializable_provider_response_after_send_becomes_unknown(self):

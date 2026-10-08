@@ -28,6 +28,21 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertEqual(package_refs[0].attrib.get("Version"), "1.0.4258.31")
         self.assertEqual(project.tag, "Project")
 
+    def test_locked_desktop_runtime_identifier_matches_project_and_test_graph(self):
+        project = ET.parse(PROJECT).getroot()
+        self.assertEqual(
+            project.findtext("./PropertyGroup/RuntimeIdentifiers"),
+            "win-x64",
+            "The WebView2 lock must agree with ordinary locked restores and publish.",
+        )
+        lock = json.loads((PROJECT.parent / "packages.lock.json").read_text(encoding="utf-8"))
+        dependency_graphs = set(lock["dependencies"])
+        self.assertEqual(
+            dependency_graphs,
+            {"net10.0-windows7.0", "net10.0-windows7.0/win-x64"},
+            "Reject unqualified RID drift rather than bypass NuGet --locked-mode.",
+        )
+
     def test_primary_webview2_surface_is_real_and_native_safety_remains_independent(self):
         xaml = XAML.read_text(encoding="utf-8")
         code = CODE.read_text(encoding="utf-8")

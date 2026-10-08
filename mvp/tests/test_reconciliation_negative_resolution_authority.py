@@ -225,6 +225,34 @@ class ReconciliationNegativeResolutionAuthorityTests(unittest.TestCase):
                 "UNKNOWN",
             )
 
+    def test_newer_legacy_negative_cannot_override_earlier_safe_checkpoint(self):
+        # Journal order, not provider observation timestamps, selects the head.
+        # A later invalid real-provider absence verdict still fails closed.
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            safe_result, _ = self._diagnostic_result(prove_absence=False)
+            record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="old-safe",
+                result=safe_result,
+                observed_at="2026-10-05T08:11:00Z",
+                host_id="host-old",
+                owner_epoch="1",
+            )
+            self._append_legacy_negative(
+                store, reconciliation_id="newer-unsafe",
+            )
+            with self.assertRaisesRegex(
+                ValueError, "PROVEN_ABSENT.*coverage authority",
+            ):
+                load_latest_reconciliation_checkpoint_for_scope(
+                    store,
+                    provider_id=safe_result.provider_id,
+                    account_id=safe_result.account_id,
+                    environment=safe_result.environment,
+                    provider_environment=safe_result.provider_environment,
+                )
+
     def test_synthetic_paper_provider_keeps_non_provider_test_path(self):
         result, unknown = self._diagnostic_result(provider_id="SIMULATED")
         with TemporaryDirectory() as directory:

@@ -106,6 +106,13 @@ def _assert_same_root_generation(
     publication_store: object,
     private_store: object,
 ) -> None:
+    """Bind publication and trusted reader to the same *full* namespace cut.
+
+    Root-only inode/handle checks miss a replaced manifests/objects/staging
+    directory. Duplicate the retained capabilities before comparing their
+    identity, and release both sets in reverse acquisition order even when
+    qualification fails.
+    """
     if type(publication_store) is not _store.ArtifactStore:
         raise TypeError(
             "publication_store must be the canonical ArtifactStore"
@@ -113,54 +120,20 @@ def _assert_same_root_generation(
     if type(private_store) is not _store.ArtifactStore:
         raise TypeError("private trusted reader must use canonical ArtifactStore")
 
-    if sys.platform == "win32":
-        publication_handle = getattr(
-            publication_store,
-            "_namespace_root_handle",
-            None,
-        )
-        private_handle = getattr(private_store, "_namespace_root_handle", None)
-        if not publication_handle or not private_handle:
-            raise _store.ArtifactIntegrityError(
-                "artifact root generation handles are unavailable"
-            )
-        publication_identity = _guard._windows_handle_information(
-            publication_handle,
-            subject="publication artifact store root",
-        )
-        private_identity = _guard._windows_handle_information(
-            private_handle,
-            subject="trusted artifact store root",
-        )
-        if not _retained._same_windows_identity(
-            publication_identity,
-            private_identity,
-        ):
-            raise _store.ArtifactIntegrityError(
-                "publication store does not match trusted artifact root"
-            )
-        return
-
-    publication_fd = getattr(publication_store, "_namespace_root_fd", None)
-    private_fd = getattr(private_store, "_namespace_root_fd", None)
-    if publication_fd is None or private_fd is None:
-        raise _store.ArtifactIntegrityError(
-            "artifact root generation descriptors are unavailable"
-        )
+    publication_pins = _duplicate_store_generation_pins(publication_store)
     try:
-        publication_identity = _HOST_FSTAT(publication_fd)
-        private_identity = _HOST_FSTAT(private_fd)
-    except OSError as error:
-        raise _store.ArtifactIntegrityError(
-            "artifact root generation cannot be inspected"
-        ) from error
-    if (
-        publication_identity.st_dev != private_identity.st_dev
-        or publication_identity.st_ino != private_identity.st_ino
-    ):
-        raise _store.ArtifactIntegrityError(
-            "publication store does not match trusted artifact root"
-        )
+        private_pins = _duplicate_store_generation_pins(private_store)
+        try:
+            if _pinned_generation(publication_pins) != _pinned_generation(
+                private_pins
+            ):
+                raise _store.ArtifactIntegrityError(
+                    "publication store does not match trusted artifact namespace generation"
+                )
+        finally:
+            _close_generation_pins(private_pins)
+    finally:
+        _close_generation_pins(publication_pins)
 
 
 def _identity_scalars(identity: object, *, subject: str) -> tuple[int, ...]:

@@ -1087,35 +1087,14 @@ def qualify_supply_chain(
                 expected_release_artifact_sha256=evidence.release_artifact_sha256,
             )
             accepted_trust = accepted_review
-            review_identity = (
-                accepted_review.attestation_id,
-                accepted_review.attestation_digest,
-                accepted_review.policy_id,
-                accepted_review.trust_root_id,
+            # The canonical verifier authenticates the entire signed attestation,
+            # including all requirement IDs, in one accepted immutable snapshot.
+            # Re-reading the caller's mutable receipt for a second verification
+            # creates a post-acceptance TOCTOU race and can invalidate the
+            # already accepted trust result without any change in signed bytes.
+            subject_bound = (
+                subject_requirement in accepted_review.requirement_ids
             )
-            accepted_subject = None
-            subject_identity = None
-            if subject_requirement in accepted_review.requirement_ids:
-                accepted_subject = verify_canonical_qualification_attestation(
-                    trust_receipt,
-                    evidence_store=evidence_store,
-                    evidence_root=evidence_root,
-                    expected_source_sha=evidence.release_commit_sha,
-                    expected_domain="SUPPLY_CHAIN",
-                    expected_gate="RELEASE",
-                    expected_package_id="WP-64",
-                    expected_protocol_id="supply-chain-review-v1",
-                    expected_protocol_version="1.0.0",
-                    expected_requirement_id=subject_requirement,
-                    expected_release_artifact_id=evidence.release_artifact_id,
-                    expected_release_artifact_sha256=evidence.release_artifact_sha256,
-                )
-                subject_identity = (
-                    accepted_subject.attestation_id,
-                    accepted_subject.attestation_digest,
-                    accepted_subject.policy_id,
-                    accepted_subject.trust_root_id,
-                )
 
             expected_refs = {
                 (
@@ -1176,10 +1155,7 @@ def qualify_supply_chain(
                 )
                 for ref in accepted_trust.evidence_refs
             }
-            if (
-                subject_identity is None
-                or review_identity != subject_identity
-            ):
+            if not subject_bound:
                 record(
                     "independent_evidence_trust",
                     _FAIL,

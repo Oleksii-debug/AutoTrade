@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from uuid import NAMESPACE_URL, uuid5
 
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.reconciliation import (
@@ -29,6 +30,9 @@ class ReconciliationNegativeResolutionAuthorityTests(unittest.TestCase):
         environment: str = "PAPER",
         prove_absence: bool = True,
     ):
+        provider_environment = (
+            "TESTNET" if environment == "PAPER" else "MAINNET"
+        ) if provider_id == "BYBIT" else None
         unknown = UnknownSubmission.create(
             attempt_id="attempt-negative-authority",
             intent_id="intent-negative-authority",
@@ -37,12 +41,14 @@ class ReconciliationNegativeResolutionAuthorityTests(unittest.TestCase):
             account_id="paper-account",
             environment=environment,
             started_at="2026-10-05T08:00:00Z",
+            provider_environment=provider_environment,
         )
         coverage = tuple(
             CoverageSurfaceEvidence(
                 provider_id=provider_id,
                 account_id="paper-account",
                 environment=environment,
+                provider_environment=provider_environment,
                 surface=surface,
                 coverage_start="2026-10-05T07:55:00Z",
                 coverage_end="2026-10-05T08:10:00Z",
@@ -61,6 +67,7 @@ class ReconciliationNegativeResolutionAuthorityTests(unittest.TestCase):
             provider_id=provider_id,
             account_id="paper-account",
             environment=environment,
+            provider_environment=provider_environment,
             local_cash={},
             provider_cash={},
             local_positions={},
@@ -71,6 +78,7 @@ class ReconciliationNegativeResolutionAuthorityTests(unittest.TestCase):
                 provider_id=provider_id,
                 account_id="paper-account",
                 environment=environment,
+                provider_environment=provider_environment,
                 mode="ATOMIC",
                 query_started_at="2026-10-05T08:00:00Z",
                 query_completed_at="2026-10-05T08:05:00Z",
@@ -107,8 +115,9 @@ class ReconciliationNegativeResolutionAuthorityTests(unittest.TestCase):
             provider_id=result.provider_id,
             account_id=result.account_id,
             environment=result.environment,
+            provider_environment=result.provider_environment,
         )
-        event_id = "legacy-real-provider-proven-absent-" + reconciliation_id
+        event_id = str(uuid5(NAMESPACE_URL, "plan6-negative:" + reconciliation_id))
         store.append_event(
             {
                 "event_id": event_id,
@@ -170,6 +179,7 @@ class ReconciliationNegativeResolutionAuthorityTests(unittest.TestCase):
                     provider_id=result.provider_id,
                     account_id=result.account_id,
                     environment=result.environment,
+                    provider_environment=result.provider_environment,
                     attempt_id=unknown.attempt_id,
                     intent_id=unknown.intent_id,
                     client_order_id=unknown.client_order_id,
@@ -184,6 +194,7 @@ class ReconciliationNegativeResolutionAuthorityTests(unittest.TestCase):
                     provider_id=result.provider_id,
                     account_id=result.account_id,
                     environment=result.environment,
+                    provider_environment=result.provider_environment,
                     host_id="legacy-host",
                     owner_epoch="1",
                 )
@@ -206,6 +217,7 @@ class ReconciliationNegativeResolutionAuthorityTests(unittest.TestCase):
                 provider_id=safe_result.provider_id,
                 account_id=safe_result.account_id,
                 environment=safe_result.environment,
+                provider_environment=safe_result.provider_environment,
             )
             self.assertEqual(current["event_id"], safe["event_id"])
             self.assertEqual(

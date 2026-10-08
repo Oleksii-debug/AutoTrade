@@ -1632,6 +1632,7 @@ function renderOperation(operation) {
     text("active-host", parsed.hostId);
     text("active-account", parsed.accountId);
     text("active-environment", parsed.environment);
+    text("provider-availability", "UNAVAILABLE — the current UiSnapshot exposes no provider-capability authority. Host-supported ZERO/SIMULATION/research workflows do not require provider setup.");
     text(
       "connection-summary",
       "Host: " + parsed.hostId + ". Account: " + parsed.accountId +
@@ -2224,7 +2225,60 @@ function renderOperation(operation) {
       }
     }
   }
+  // The ten canonical page locations are projections of this document, never
+  // browser-held financial, provider or account authority.
+  const PAGE_ROUTES = Object.freeze([
+    "overview", "accounts", "opportunities", "portfolio", "risk",
+    "research", "learning", "models", "history", "settings"
+  ]);
+
+  function bindPageNavigation() {
+    const nav = document.querySelector('nav[aria-label="Primary"]');
+    if (!nav) throw new Error("Canonical primary navigation is missing");
+    const pages = new Map();
+    for (const id of PAGE_ROUTES) {
+      const link = nav.querySelector('a[href="#' + id + '"]');
+      const heading = byId(id + "-heading");
+      const section = byId(id);
+      if (!link || !heading || !section || !section.contains(heading)) {
+        throw new Error("Canonical page navigation is incomplete: " + id);
+      }
+      pages.set(id, {link, heading});
+    }
+    function activate({focusHeading = false} = {}) {
+      // No URL decoding, HTML interpretation, route substitution or Host API call.
+      const hash = window.location.hash;
+      const id = hash === "" ? "overview" : hash.slice(1);
+      const target = hash === "#main" ? null : pages.get(id);
+      for (const page of pages.values()) page.link.removeAttribute("aria-current");
+      if (hash === "#main") {
+        text("page-navigation-status", "Main content. Use headings to move among AutoTrade sections.");
+        return;
+      }
+      if (!target || (hash !== "" && hash !== "#" + id)) {
+        text("page-navigation-status", "Unknown section. Select a valid page from Primary navigation. No command or provider request was issued.");
+        return;
+      }
+      target.link.setAttribute("aria-current", "location");
+      text("page-navigation-status", "Current section: " + target.heading.textContent.trim() + ". Use browser Back and Forward to revisit sections.");
+      if (focusHeading && hash !== "") target.heading.focus({preventScroll: true});
+    }
+    // Ordinary anchors own browser history, URLs, and scroll. This adds only
+    // heading focus and an announced active-section state for keyboard/NVDA.
+    nav.addEventListener("click", (event) => {
+      const link = event.target.closest("a[href]");
+      if (!link || !nav.contains(link)) return;
+      if (link.getAttribute("href") === window.location.hash) {
+        const page = pages.get(window.location.hash.slice(1));
+        if (page) page.heading.focus({preventScroll: true});
+      }
+    });
+    window.addEventListener("hashchange", () => activate({focusHeading: true}));
+    activate({focusHeading: window.location.hash !== ""});
+  }
+
   async function start() {
+    bindPageNavigation();
     bindTableTools();
     bindAuthorityPolicyReviewInvalidation();
     byId("host-command-form").addEventListener("submit", submitCommand);

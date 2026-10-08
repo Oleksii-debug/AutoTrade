@@ -49,7 +49,7 @@ def _plain_map(value: object, *, name: str) -> dict:
     # or an exact JSON dict is admissible. A user Mapping subclass can execute
     # attacker-defined items/get/iter methods before any masking.
     if type(value) is dict:
-        return value
+        return dict(value)
     if type(value) is MappingProxyType:
         return dict(value)
     raise TypeError(f"{name} must be an exact Host mapping")

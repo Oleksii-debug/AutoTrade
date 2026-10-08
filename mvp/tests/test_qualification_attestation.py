@@ -161,6 +161,10 @@ def attestation(trust_root, **overrides):
 
 
 def verify(receipt, store, trust_policy, *, evidence_root=None, **overrides):
+    # Do not touch caller-controlled subclass properties before the production
+    # exact-type ingress guard is reached.  The test helper must be inert too.
+    if type(trust_policy) is not QualificationTrustPolicy:
+        raise TypeError("policy must be QualificationTrustPolicy")
     values = dict(
         expected_policy_id=trust_policy.policy_id,
         expected_policy_version=trust_policy.policy_version,

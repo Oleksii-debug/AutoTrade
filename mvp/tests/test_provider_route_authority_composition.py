@@ -6,6 +6,12 @@ from mvp.autotrade_mvp import financial_send_authority, production_host
 from mvp.autotrade_mvp.authority import AuthorityService
 from mvp.autotrade_mvp.capabilities import CapabilityRegistry
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
+from mvp.autotrade_mvp.durable_financial_bybit_sender import (
+    DurableFinanciallyBoundBybitOrderSender,
+)
+from mvp.autotrade_mvp.durable_financial_request_binding import (
+    DurableFinancialRequestBindingRegistry,
+)
 from mvp.autotrade_mvp.financial_send_authority import (
     FinancialSendAuthorityError,
     FinanciallyBoundBybitOrderSender,
@@ -271,6 +277,7 @@ class SelectedRouteAuthorityCompositionTests(unittest.TestCase):
             sender = build_production_bybit_order_sender(
                 runtime,
                 financial_issuer=issuer,
+                financial_binding_registry=DurableFinancialRequestBindingRegistry(journal),
                 **transport_inputs,
                 credential_handle=PersistentCredentialHandle(
                     handle_id="cred-route-bybit",
@@ -285,8 +292,10 @@ class SelectedRouteAuthorityCompositionTests(unittest.TestCase):
                 clock_millis=lambda: 1_700_000_000_000,
                 clock_utc=lambda: NOW,
             )
-            self.assertIs(type(sender), FinanciallyBoundBybitOrderSender)
-            lower = sender._FinanciallyBoundBybitOrderSender__sender
+            self.assertIs(type(sender), DurableFinanciallyBoundBybitOrderSender)
+            bound = sender._DurableFinanciallyBoundBybitOrderSender__sender
+            self.assertIs(type(bound), FinanciallyBoundBybitOrderSender)
+            lower = bound._FinanciallyBoundBybitOrderSender__sender
             transport = lower._ProductionBybitOrderSender__transport
             self.assertEqual(
                 transport.capability_snapshot_id,
@@ -329,6 +338,7 @@ class SelectedRouteAuthorityCompositionTests(unittest.TestCase):
                 build_production_bybit_order_sender(
                     runtime,
                     financial_issuer=issuer,
+                    financial_binding_registry=DurableFinancialRequestBindingRegistry(journal),
                     provider_environment=route.candidate.provider_environment,
                     capability_snapshot_id=route.capability_snapshot_id,
                     capability_registry=CapabilityRegistry(),

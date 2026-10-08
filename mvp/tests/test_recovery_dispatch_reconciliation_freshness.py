@@ -26,6 +26,7 @@ class RecoveryDispatchReconciliationFreshnessTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="acct",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         record_reconciliation_checkpoint(
             journal,
@@ -40,6 +41,7 @@ class RecoveryDispatchReconciliationFreshnessTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="acct",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         self.assertIs(recovery.state, HostState.READY)
 
@@ -56,6 +58,7 @@ class RecoveryDispatchReconciliationFreshnessTests(unittest.TestCase):
                 journal,
                 environment="PAPER",
                 account_id="acct",
+                bybit_provider_environment="TESTNET",
             )
             self._mark_ready(
                 recovery,

@@ -89,6 +89,37 @@ class ProviderFinancialScopeTests(unittest.TestCase):
             entity_policy_id="linear_order_v1",
         )
 
+    def test_bybit_financial_scope_rejects_crossed_paper_and_live_domains(self):
+        for environment, provider_environment in (
+            ("PAPER", "MAINNET"),
+            ("LIVE", "TESTNET"),
+            ("LIVE", "DEMO"),
+        ):
+            with self.subTest(environment=environment, provider_environment=provider_environment):
+                with self.assertRaises(ProviderDomainError):
+                    ProviderFinancialScope(
+                        provider_id="BYBIT",
+                        runtime_environment=environment,
+                        provider_environment=provider_environment,
+                        entity_policy_id="LINEAR_ORDER_V1",
+                    )
+
+    def test_bybit_financial_scope_accepts_canonical_separate_domains(self):
+        for environment, provider_environment in (
+            ("PAPER", "TESTNET"),
+            ("PAPER", "DEMO"),
+            ("LIVE", "MAINNET"),
+        ):
+            with self.subTest(environment=environment, provider_environment=provider_environment):
+                scope = ProviderFinancialScope(
+                    provider_id="BYBIT",
+                    runtime_environment=environment,
+                    provider_environment=provider_environment,
+                    entity_policy_id="LINEAR_ORDER_V1",
+                )
+                self.assertEqual(scope.runtime_environment, environment)
+                self.assertEqual(scope.provider_environment, provider_environment)
+
     def test_non_builtin_or_invalid_tokens_fail_closed(self):
         class Text(str):
             pass

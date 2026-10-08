@@ -1,0 +1,36 @@
+name: Plan 3 backup and restore qualification
+
+on:
+  pull_request:
+    paths:
+      - 'mvp/autotrade_mvp/backup.py'
+      - 'mvp/autotrade_mvp/simulation_runtime_checkpoint.py'
+      - 'mvp/tests/test_backup_restore.py'
+      - 'mvp/tests/test_simulation_runtime_checkpoint.py'
+      - '.github/workflows/plan3-backup-qualification.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup-restore:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fail-closed backup/restore, atomic publication, corruption and recovery tests
+        run: |
+          python -m unittest -v mvp.tests.test_backup_restore mvp.tests.test_simulation_runtime_checkpoint
+
+      - name: Diagnose manifest drift without changing authority or claiming PASS
+        if: always()
+        run: |
+          python tools/build_provenance_manifest.py --write
+          git diff -- provenance/release-dependency-manifest.json

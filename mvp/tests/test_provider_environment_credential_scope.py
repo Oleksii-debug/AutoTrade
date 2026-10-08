@@ -149,7 +149,7 @@ class ProviderEnvironmentCredentialScopeTests(unittest.TestCase):
         with self.assertRaises(SecretVaultError):
             ProtectedCredentialVault.validate_reattachment_manifest(legacy)
 
-    def test_security_boundary_preserves_domain_across_register_lease_rotate_and_revoke(self):
+    def test_security_boundary_preserves_domain_across_register_lease_rotation_guard_and_revoke(self):
         boundary = SecurityBoundary(
             allowed_origins={"https://localhost"},
             credential_vault=self.vault,
@@ -201,26 +201,41 @@ class ProviderEnvironmentCredentialScopeTests(unittest.TestCase):
             ):
                 self.fail("wrong provider domain must not lease plaintext")
 
-        rotated = boundary.rotate_secret(
+        # The SecurityBoundary cannot mint an unsafe TRADE credential successor:
+        # a verified sender-fence/reconciliation handover is required first.
+        with self.assertRaisesRegex(PermissionError, "sender-fence.*reconciliation handover"):
+            boundary.rotate_secret(
+                session.token,
+                origin="https://localhost",
+                handle_id=handle.handle_id,
+                owner_identity="windows-user-1",
+                new_secret_value="scoped-secret-v2",
+            )
+        self.assertEqual(
+            boundary.describe_handle(handle.handle_id)["provider_environment"],
+            "TESTNET",
+        )
+        # The rejected rotation must not invalidate or silently replace the original handle.
+        with boundary.lease_for_execution(
+            session.token,
+            origin="https://localhost",
+            handle=handle,
+            execution_identity="windows-user-1",
+            account_id="paper-1",
+            provider="BYBIT",
+            environment="PAPER",
+            purpose="TRADE",
+            provider_environment="TESTNET",
+        ) as plaintext:
+            self.assertEqual(plaintext, "scoped-secret")
+        boundary.revoke_secret(
             session.token,
             origin="https://localhost",
             handle_id=handle.handle_id,
             owner_identity="windows-user-1",
-            new_secret_value="scoped-secret-v2",
-        )
-        self.assertEqual(rotated.provider_environment, "TESTNET")
-        self.assertEqual(
-            boundary.describe_handle(rotated.handle_id)["provider_environment"],
-            "TESTNET",
-        )
-        boundary.revoke_secret(
-            session.token,
-            origin="https://localhost",
-            handle_id=rotated.handle_id,
-            owner_identity="windows-user-1",
         )
         with self.assertRaises(PermissionError):
-            boundary.describe_handle(rotated.handle_id)
+            boundary.describe_handle(handle.handle_id)
 
     def test_security_boundary_cannot_guess_bybit_provider_domain(self):
         boundary = SecurityBoundary(

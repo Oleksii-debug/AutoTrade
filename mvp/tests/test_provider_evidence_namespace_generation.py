@@ -10,6 +10,7 @@ from autotrade_runtime.artifacts import (
     trusted_authenticated_reader,
 )
 import autotrade_runtime.artifacts._root_authority as root_authority
+import autotrade_runtime.artifacts._root_authority_failure_fix as root_failure_fix
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.order_projection import OrderProjectionConflict
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -25,8 +26,8 @@ class ProviderEvidenceGenerationComparisonTests(unittest.TestCase):
             private_pins = (201, 202, 203, 204)
             with (
                 patch.object(
-                    root_authority,
-                    "_duplicate_store_generation_pins",
+                    root_failure_fix,
+                    "_duplicate_exact_store_generation_pins",
                     side_effect=(publication_pins, private_pins),
                 ) as duplicate_generation,
                 patch.object(
@@ -99,7 +100,7 @@ class ProviderEvidenceNamespaceGenerationTests(unittest.TestCase):
             try:
                 with self.assertRaisesRegex(
                     ArtifactIntegrityError,
-                    "publication store does not match trusted artifact namespace generation",
+                    r"publication store does not match trusted artifact (root|namespace generation)",
                 ):
                     trusted_authenticated_reader(
                         root,

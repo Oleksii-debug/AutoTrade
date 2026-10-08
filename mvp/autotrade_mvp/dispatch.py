@@ -11,6 +11,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5, uuid4
+from weakref import ref as weakref_ref
 
 from autotrade_numeric.exact_decimal import (
     ExactDecimalError,
@@ -19,7 +20,15 @@ from autotrade_numeric.exact_decimal import (
 )
 
 from .persistence import JournalStore, canonical_json, payload_digest
-from .provider_response_limits import require_provider_json_depth
+from .provider_response_limits import (
+    HARD_MAX_PROVIDER_RESPONSE_BYTES,
+    require_provider_json_depth,
+    require_provider_response_bytes,
+)
+
+# Journal CAS primitives are the sole atomic send+intent binding authority.
+_CANONICAL_JOURNAL_CURRENT_SEQUENCE = JournalStore.current_journal_sequence
+_CANONICAL_JOURNAL_COMMIT_COMMAND = JournalStore.commit_command
 
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
@@ -122,7 +131,6 @@ class ExactJsonTransportResponse:
 
     def __post_init__(self) -> None:
         raw = self.response_bytes
-        _decode_exact_json_bytes(raw)
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -148,18 +156,105 @@ class ExactJsonTransportResponse:
             raise ValueError(
                 "ambiguity_reason is only valid when reconciliation is required"
             )
+        # Post-SEND ambiguous HTTP can be HTML, binary or empty. Preserve the
+        # bounded *exact bytes* for durable UNKNOWN, never mint JSON authority.
+        # 2xx/definitive responses retain the strict JSON contract.
+        if self.requires_reconciliation and (
+            self.http_status is None or not 200 <= self.http_status <= 299
+        ):
+            require_provider_response_bytes(
+                raw, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES, allow_empty=True,
+            )
+        else:
+            _decode_exact_json_bytes(raw)
+        _seal_exact_transport_response(self)
+
+    @property
+    def response_encoding(self) -> str:
+        raw, status, requires_reconciliation, _ = (
+            _require_canonical_exact_transport_response(self)
+        )
+        if requires_reconciliation and (status is None or not 200 <= status <= 299):
+            try:
+                _decode_exact_json_bytes(raw)
+            except ValueError:
+                if not raw:
+                    return "hex"
+                try:
+                    raw.decode("utf-8", errors="strict")
+                except UnicodeDecodeError:
+                    return "hex"
+                return "utf-8-opaque"
+        return "utf-8-json"
 
     @property
     def response_text(self) -> str:
-        return self.response_bytes.decode("utf-8")
+        raw, _, _, _ = _require_canonical_exact_transport_response(self)
+        return raw.hex() if self.response_encoding == "hex" else raw.decode("utf-8")
 
     @property
     def response_sha256(self) -> str:
-        return "sha256:" + sha256(self.response_bytes).hexdigest()
+        raw, _, _, _ = _require_canonical_exact_transport_response(self)
+        return "sha256:" + sha256(raw).hexdigest()
 
     @property
     def payload(self) -> Any:
-        return _decode_exact_json_bytes(self.response_bytes)
+        raw, _, _, _ = _require_canonical_exact_transport_response(self)
+        if self.response_encoding != "utf-8-json":
+            raise ValueError("no JSON payload is available for opaque provider response")
+        return _decode_exact_json_bytes(raw)
+
+
+# Issued transport response state is held separately from the mutable instance.
+# Frozen dataclasses alone do not resist object.__setattr__ after the wire send.
+_EXACT_RESPONSE_ORIGINAL_SHA256 = sha256
+_EXACT_RESPONSE_ORIGINAL_DECODE = _decode_exact_json_bytes
+_exact_response_issued: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+
+def _seal_exact_transport_response(value: ExactJsonTransportResponse) -> None:
+    if type(value) is not ExactJsonTransportResponse:
+        raise ValueError("exact transport response authority is unavailable")
+    record = vars(value)
+    if frozenset(record) != frozenset(
+        ("response_bytes", "http_status", "requires_reconciliation", "ambiguity_reason")
+    ):
+        raise ValueError("exact transport response authority is unavailable")
+    for key, (ref, _) in tuple(_exact_response_issued.items()):
+        if ref() is None:
+            _exact_response_issued.pop(key, None)
+    identity = id(value)
+    if identity in _exact_response_issued and _exact_response_issued[identity][0]() is not None:
+        raise ValueError("exact transport response authority is unavailable")
+    _exact_response_issued[identity] = (
+        weakref_ref(value),
+        (record["response_bytes"], record["http_status"],
+         record["requires_reconciliation"], record["ambiguity_reason"]),
+    )
+
+
+def _require_canonical_exact_transport_response(
+    value: ExactJsonTransportResponse,
+) -> tuple[bytes, int | None, bool, str | None]:
+    if (sha256 is not _EXACT_RESPONSE_ORIGINAL_SHA256
+            or _decode_exact_json_bytes is not _EXACT_RESPONSE_ORIGINAL_DECODE
+            or type(value) is not ExactJsonTransportResponse):
+        raise ValueError("exact transport response authority is unavailable")
+    registered = _exact_response_issued.get(id(value))
+    if registered is None or registered[0]() is not value:
+        raise ValueError("exact transport response authority is unavailable")
+    state = vars(value)
+    if frozenset(state) != frozenset(
+        ("response_bytes", "http_status", "requires_reconciliation", "ambiguity_reason")
+    ):
+        raise ValueError("exact transport response authority is unavailable")
+    current = (state["response_bytes"], state["http_status"],
+               state["requires_reconciliation"], state["ambiguity_reason"])
+    expected = registered[1]
+    if any(type(actual) is not type(wanted) or actual != wanted
+           for actual, wanted in zip(current, expected)):
+        raise ValueError("exact transport response authority is unavailable")
+    return expected
 
 
 @dataclass(frozen=True)
@@ -179,6 +274,10 @@ class SubmissionResponseBinding:
     submission_scope_hash: str
     response_bytes: bytes
     response_sha256: str
+    response_encoding: str
+    terminal_state: str
+    ambiguity_reason: str | None = None
+    retry_disposition: str | None = None
     http_status: int | None = None
     _factory_token: object = field(default=None, repr=False, compare=False)
 
@@ -194,7 +293,7 @@ class SubmissionResponseBinding:
             (self.client_order_id, "client_order_id"),
             (self.account_id, "account_id"),
         ):
-            if not isinstance(value, str) or not value.strip():
+            if type(value) is not str or not value.strip():
                 raise ValueError(f"{name} is required")
         if re.fullmatch(r"sha256:[0-9a-f]{64}", self.request_hash) is None:
             raise ValueError("request_hash must be a canonical SHA-256 digest")
@@ -204,14 +303,40 @@ class SubmissionResponseBinding:
             )
         if re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None:
             raise ValueError("response_sha256 must be a canonical SHA-256 digest")
-        if type(self.response_bytes) is not bytes or not self.response_bytes:
-            raise ValueError("response_bytes must be non-empty bytes")
+        if type(self.response_encoding) is not str or self.response_encoding not in {
+            "utf-8-json", "hex", "utf-8-opaque",
+        }:
+            raise ValueError("durable provider response encoding is invalid")
+        if type(self.response_bytes) is not bytes:
+            raise ValueError("response_bytes must be exact bytes")
+        if self.response_encoding == "utf-8-json":
+            _decode_exact_json_bytes(self.response_bytes)
+        else:
+            if type(self.terminal_state) is not str or self.terminal_state != "UNKNOWN":
+                raise ValueError("opaque response cannot establish definitive SENT")
+            if self.http_status is not None and (
+                type(self.http_status) is not int
+                or 200 <= self.http_status <= 299
+            ):
+                raise ValueError("opaque HTTP success cannot establish provider state")
+            require_provider_response_bytes(
+                self.response_bytes,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
+            )
         if (
             "sha256:" + sha256(self.response_bytes).hexdigest()
             != self.response_sha256
         ):
             raise ValueError("durable provider response digest mismatch")
-        _decode_exact_json_bytes(self.response_bytes)
+        if type(self.terminal_state) is not str or self.terminal_state not in {"SENT", "UNKNOWN"}:
+            raise ValueError("durable submission terminal state is invalid")
+        if self.terminal_state == "UNKNOWN":
+            if (type(self.ambiguity_reason) is not str or not self.ambiguity_reason.strip()
+                    or self.retry_disposition != "RECONCILE_FIRST"):
+                raise ValueError("durable UNKNOWN requires reconciliation-first reason")
+        elif self.ambiguity_reason is not None or self.retry_disposition is not None:
+            raise ValueError("definitive SENT cannot carry UNKNOWN disposition")
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -247,6 +372,8 @@ class SubmissionResponseBinding:
 
     @property
     def payload(self) -> Any:
+        if self.response_encoding != "utf-8-json":
+            raise ValueError("no JSON payload is available for opaque provider response")
         return _freeze_json(_decode_exact_json_bytes(self.response_bytes))
 
 
@@ -297,21 +424,134 @@ def submission_attempt_aggregate_id(
     """Return the canonical durable aggregate identity for one send attempt."""
 
     normalized_environment = (
-        environment.strip().upper() if isinstance(environment, str) else ""
+        environment.strip().upper() if type(environment) is str else ""
     )
     if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
         raise ValueError(
             "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
         )
-    if not isinstance(account_id, str) or not account_id.strip():
+    if type(account_id) is not str or not account_id.strip():
         raise ValueError("account_id is required")
-    if not isinstance(attempt_id, str) or not attempt_id.strip():
+    if type(attempt_id) is not str or not attempt_id.strip():
         raise ValueError("attempt_id is required")
     return "submission-attempt:" + _identity_digest(
         normalized_environment,
         account_id.strip(),
         attempt_id.strip(),
     )
+
+
+def submission_intent_aggregate_id(
+    *,
+    provider: str,
+    environment: str,
+    account_id: str,
+    intent_id: str,
+) -> str:
+    """Return one durable financial-send identity for one economic intent."""
+
+    if type(provider) is not str or not provider.strip():
+        raise ValueError("provider is required")
+    normalized_environment = (
+        environment.strip().upper() if type(environment) is str else ""
+    )
+    if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
+    if type(account_id) is not str or not account_id.strip():
+        raise ValueError("account_id is required")
+    if type(intent_id) is not str or not intent_id.strip():
+        raise ValueError("intent_id is required")
+    return "submission-intent:" + _identity_digest(
+        provider.strip().lower(),
+        normalized_environment,
+        account_id.strip(),
+        intent_id.strip(),
+    )
+
+
+def _legacy_submission_intent_attempt(
+    store: JournalStore,
+    *,
+    provider: str,
+    environment: str,
+    account_id: str,
+    intent_id: str,
+    intent_hash: str,
+    request_hash: str,
+    client_order_id: str,
+    submission_scope_hash: str,
+) -> str | None:
+    """Resolve pre-fence durable intent history without trusting provider dedupe.
+
+    Older journal generations can contain submission attempts created before the
+    submission_intent aggregate existed. A fresh attempt for that same economic
+    intent must not cross the provider-send boundary merely because the upgrade
+    introduced a new local attempt_id.
+    """
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for event in JournalStore.load_events_by_aggregate_type(
+        store, "submission_attempt"
+    ):
+        aggregate_id = event.get("aggregate_id")
+        if not isinstance(aggregate_id, str) or not aggregate_id:
+            raise RuntimeError("durable submission attempt aggregate is invalid")
+        grouped.setdefault(aggregate_id, []).append(event)
+
+    expected = {
+        "provider": provider,
+        "environment": environment,
+        "account_id": account_id,
+        "intent_id": intent_id,
+        "intent_hash": intent_hash,
+        "request_hash": request_hash,
+        "client_order_id": client_order_id,
+        "submission_scope_hash": submission_scope_hash,
+    }
+    candidates: list[str] = []
+    for events in grouped.values():
+        first = events[0]
+        if first.get("event_type") != "SubmissionPrepared":
+            raise RuntimeError("durable submission attempt does not start prepared")
+        payload = first.get("payload")
+        if not isinstance(payload, dict):
+            raise RuntimeError("durable submission prepared payload is invalid")
+        historical_provider = payload.get("provider")
+        if (
+            not isinstance(historical_provider, str)
+            or historical_provider.strip().lower() != provider.strip().lower()
+            or payload.get("environment") != environment
+            or payload.get("account_id") != account_id
+            or payload.get("intent_id") != intent_id
+        ):
+            continue
+        if any(payload.get(key) != value for key, value in expected.items()):
+            raise ValueError(
+                "intent_id conflicts with historical submission content"
+            )
+        attempt_id = payload.get("attempt_id")
+        if not isinstance(attempt_id, str) or not attempt_id:
+            raise RuntimeError("historical submission attempt identity is invalid")
+        last_type = events[-1].get("event_type")
+        if last_type == "SubmissionBlocked":
+            continue
+        if last_type not in {
+            "SubmissionPrepared",
+            "SubmissionSending",
+            "SubmissionSent",
+            "SubmissionUnknown",
+        }:
+            raise RuntimeError(
+                "historical submission attempt has unsupported terminal state"
+            )
+        candidates.append(attempt_id)
+
+    unique = sorted(set(candidates))
+    if len(unique) > 1:
+        raise RuntimeError(
+            "multiple durable non-blocked submission attempts exist for one economic intent"
+        )
+    return unique[0] if unique else None
 
 
 def _canonical_journal_authority_snapshot(
@@ -383,21 +623,48 @@ def load_submission_response_binding(
     payload = prepared.get("payload")
     if not isinstance(payload, dict):
         raise ValueError("durable SubmissionPrepared payload is invalid")
+    sending_payload = sending.get("payload")
+    if not isinstance(sending_payload, dict):
+        raise ValueError("durable SubmissionSending payload is invalid")
     sent_payload = sent.get("payload")
     if not isinstance(sent_payload, dict):
         raise ValueError("durable terminal submission payload is invalid")
+    # A response can only be attributed to the economic intent that crossed
+    # the durable send barrier. Malformed/mismatched historical rows fail
+    # closed; they must not mint a valid exact-response binding.
+    client_order_id = payload.get("client_order_id")
+    if (
+        type(client_order_id) is not str
+        or not client_order_id
+        or sending_payload.get("client_order_id") != client_order_id
+        or sent_payload.get("client_order_id") != client_order_id
+    ):
+        raise ValueError("client_order_id continuity mismatch")
     response_text = sent_payload.get("response_text")
     response_sha256 = sent_payload.get("response_sha256")
+    response_encoding = sent_payload.get("response_encoding")
     if (
-        sent_payload.get("response_encoding") != "utf-8-json"
-        or not isinstance(response_text, str)
-        or not response_text
-        or not isinstance(response_sha256, str)
+        type(response_encoding) is not str
+        or response_encoding not in {"utf-8-json", "hex", "utf-8-opaque"}
+        or type(response_text) is not str
+        or (response_encoding != "hex" and not response_text)
+        or type(response_sha256) is not str
     ):
-        raise ValueError(
-            "durable exact provider response bytes are unavailable"
-        )
-    response_bytes = response_text.encode("utf-8")
+        raise ValueError("durable exact provider response bytes are unavailable")
+    if response_encoding == "hex":
+        if (
+            event_types[2] != "SubmissionUnknown"
+            or len(response_text) > 2 * HARD_MAX_PROVIDER_RESPONSE_BYTES
+        ):
+            raise ValueError("opaque durable response must remain bounded UNKNOWN")
+        try:
+            response_bytes = bytes.fromhex(response_text)
+        except ValueError:
+            raise ValueError("durable opaque response encoding is invalid") from None
+        if response_bytes.hex() != response_text:
+            raise ValueError("durable opaque response encoding is noncanonical")
+    else:
+        response_bytes = response_text.encode("utf-8")
     if "sha256:" + sha256(response_bytes).hexdigest() != response_sha256:
         raise ValueError("durable provider response digest mismatch")
     http_status = sent_payload.get("http_status")
@@ -432,9 +699,227 @@ def load_submission_response_binding(
         submission_scope_hash=scope_hash,
         response_bytes=response_bytes,
         response_sha256=response_sha256,
+        response_encoding=response_encoding,
+        terminal_state="SENT" if event_types[2] == "SubmissionSent" else "UNKNOWN",
+        ambiguity_reason=sent_payload.get("reason") if event_types[2] == "SubmissionUnknown" else None,
+        retry_disposition=sent_payload.get("retry_disposition") if event_types[2] == "SubmissionUnknown" else None,
         http_status=http_status,
         _factory_token=_SUBMISSION_RESPONSE_BINDING_TOKEN,
     )
+
+
+def _install_submission_response_binding_authority(loader):
+    """Retain durable response-binding issuance authority outside caller state."""
+
+    binding_type = SubmissionResponseBinding
+    binding_token = _SUBMISSION_RESPONSE_BINDING_TOKEN
+    error_type = ValueError
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_range = range
+    canonical_enumerate = enumerate
+    canonical_isinstance = isinstance
+    canonical_str = str
+    canonical_int = int
+    canonical_bool = bool
+    canonical_bytes = bytes
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    canonical_getattr = getattr
+    mapping_proxy_type = MappingProxyType
+    canonical_weakref_ref = weakref_ref
+    canonical_loader = loader
+    loader_code = loader.__code__
+    canonical_journal_snapshot = _canonical_journal_authority_snapshot
+    journal_snapshot_code = canonical_journal_snapshot.__code__
+    canonical_attempt_id = submission_attempt_aggregate_id
+    attempt_id_code = canonical_attempt_id.__code__
+    canonical_decode = _decode_exact_json_bytes
+    decode_code = canonical_decode.__code__
+    canonical_freeze = _freeze_json
+    freeze_code = canonical_freeze.__code__
+    canonical_instant = _instant
+    instant_code = canonical_instant.__code__
+    canonical_json_function = canonical_json
+    canonical_sha256 = sha256
+    canonical_json_module = json
+    canonical_re_module = re
+    canonical_journal_type = JournalStore
+    canonical_journal_load_events = JournalStore.load_events
+    canonical_journal_decode_row = JournalStore._decode_event_row
+    canonical_journal_connect = JournalStore._connect
+    canonical_journal_require_text = JournalStore._require_text
+    canonical_journal_store_identity = JournalStore.store_identity
+    canonical_journal_schema_version = JournalStore.SCHEMA_VERSION
+    canonical_response_bytes_guard = require_provider_response_bytes
+    canonical_response_depth_guard = require_provider_json_depth
+    canonical_response_size_limit = HARD_MAX_PROVIDER_RESPONSE_BYTES
+
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
+    field_names = (
+        "attempt_id",
+        "aggregate_id",
+        "provider",
+        "request_hash",
+        "client_order_id",
+        "environment",
+        "account_id",
+        "prepared_at",
+        "sent_at",
+        "submission_scope",
+        "submission_scope_hash",
+        "response_bytes",
+        "response_sha256",
+        "response_encoding",
+        "terminal_state",
+        "ambiguity_reason",
+        "retry_disposition",
+        "http_status",
+        "_factory_token",
+    )
+
+    def authority_changed():
+        raise error_type("submission response binding authority is unavailable")
+
+    def implementation_changed():
+        if (
+            SubmissionResponseBinding is not binding_type
+            or _SUBMISSION_RESPONSE_BINDING_TOKEN is not binding_token
+            or ValueError is not error_type
+            or type is not canonical_type
+            or id is not canonical_id
+            or tuple is not canonical_tuple
+            or range is not canonical_range
+            or enumerate is not canonical_enumerate
+            or isinstance is not canonical_isinstance
+            or str is not canonical_str
+            or int is not canonical_int
+            or bool is not canonical_bool
+            or bytes is not canonical_bytes
+            or object is not canonical_object
+            or getattr is not canonical_getattr
+            or MappingProxyType is not mapping_proxy_type
+            or weakref_ref is not canonical_weakref_ref
+            or JournalStore is not canonical_journal_type
+            or JournalStore.load_events is not canonical_journal_load_events
+            or JournalStore._decode_event_row is not canonical_journal_decode_row
+            or JournalStore._connect is not canonical_journal_connect
+            or JournalStore._require_text is not canonical_journal_require_text
+            or JournalStore.store_identity is not canonical_journal_store_identity
+            or JournalStore.SCHEMA_VERSION != canonical_journal_schema_version
+            or require_provider_response_bytes is not canonical_response_bytes_guard
+            or require_provider_json_depth is not canonical_response_depth_guard
+            or HARD_MAX_PROVIDER_RESPONSE_BYTES != canonical_response_size_limit
+            or json is not canonical_json_module
+            or re is not canonical_re_module
+            or sha256 is not canonical_sha256
+            or canonical_json is not canonical_json_function
+            or _canonical_journal_authority_snapshot is not canonical_journal_snapshot
+            or canonical_getattr(canonical_journal_snapshot, "__code__", None)
+            is not journal_snapshot_code
+            or submission_attempt_aggregate_id is not canonical_attempt_id
+            or canonical_getattr(canonical_attempt_id, "__code__", None)
+            is not attempt_id_code
+            or _decode_exact_json_bytes is not canonical_decode
+            or canonical_getattr(canonical_decode, "__code__", None)
+            is not decode_code
+            or _freeze_json is not canonical_freeze
+            or canonical_getattr(canonical_freeze, "__code__", None)
+            is not freeze_code
+            or _instant is not canonical_instant
+            or canonical_getattr(canonical_instant, "__code__", None)
+            is not instant_code
+            or canonical_getattr(canonical_loader, "__code__", None)
+            is not loader_code
+        ):
+            authority_changed()
+
+    def raw_snapshot(value):
+        # The instance dictionary, not a mutable class descriptor, is the
+        # recorded journal-issued state. Reject injected or missing fields.
+        state = object_getattribute(value, "__dict__")
+        if canonical_type(state) is not dict or frozenset(state) != frozenset(field_names):
+            authority_changed()
+        return canonical_tuple(state[name] for name in field_names)
+
+    def prune():
+        for object_id, (value_ref, _snapshot) in canonical_tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def register(value):
+        implementation_changed()
+        if canonical_type(value) is not binding_type:
+            authority_changed()
+        current = raw_snapshot(value)
+        if current[-1] is not binding_token:
+            authority_changed()
+        if canonical_type(current[9]) is not mapping_proxy_type:
+            authority_changed()
+        if canonical_type(current[11]) is not canonical_bytes:
+            authority_changed()
+        prune()
+        object_id = canonical_id(value)
+        previous = states.get(object_id)
+        if previous is not None and previous[0]() is not None:
+            authority_changed()
+        states[object_id] = (canonical_weakref_ref(value), current)
+
+    def require_canonical_submission_response_binding(value):
+        implementation_changed()
+        if canonical_type(value) is not binding_type:
+            authority_changed()
+        prune()
+        state = states.get(canonical_id(value))
+        if state is None or state[0]() is not value:
+            authority_changed()
+        expected = state[1]
+        current = raw_snapshot(value)
+        for index in canonical_range(len(field_names)):
+            if index in (9, 11, len(field_names) - 1):
+                if current[index] is not expected[index]:
+                    authority_changed()
+            elif (canonical_type(current[index]) is not canonical_type(expected[index])
+                  or current[index] != expected[index]):
+                authority_changed()
+        return value
+
+    def submission_response_binding_projection(value):
+        require_canonical_submission_response_binding(value)
+        current = raw_snapshot(value)
+        return mapping_proxy_type(
+            {
+                name: current[index]
+                for index, name in canonical_enumerate(field_names[:-1])
+            }
+        )
+
+    def registered_loader(
+        store: JournalStore,
+        *,
+        environment: str,
+        account_id: str,
+        attempt_id: str,
+    ) -> SubmissionResponseBinding:
+        implementation_changed()
+        value = canonical_loader(
+            store,
+            environment=environment,
+            account_id=account_id,
+            attempt_id=attempt_id,
+        )
+        implementation_changed()
+        register(value)
+        return value
+
+    return (
+        registered_loader,
+        require_canonical_submission_response_binding,
+        submission_response_binding_projection,
+    )
+
+
 
 
 def stable_client_order_id(
@@ -446,16 +931,16 @@ def stable_client_order_id(
     max_length: int = 32,
     client_id_format: str = "TOKEN",
 ) -> str:
-    if not isinstance(provider, str) or not provider.strip():
+    if type(provider) is not str or not provider.strip():
         raise ValueError("provider is required")
-    if not isinstance(intent_id, str) or not intent_id.strip():
+    if type(intent_id) is not str or not intent_id.strip():
         raise ValueError("intent_id is required")
-    normalized_environment = environment.strip().upper() if isinstance(environment, str) else ""
+    normalized_environment = environment.strip().upper() if type(environment) is str else ""
     if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
         raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
-    if not isinstance(account_id, str) or not account_id.strip():
+    if type(account_id) is not str or not account_id.strip():
         raise ValueError("account_id is required")
-    if not isinstance(client_id_format, str):
+    if type(client_id_format) is not str:
         raise TypeError("client_id_format must be text")
     normalized_format = client_id_format.strip().upper()
     if normalized_format not in {"TOKEN", "UUID"}:
@@ -485,7 +970,7 @@ def stable_client_order_id(
 
 
 def _instant(value: str) -> datetime:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError("now must be an ISO timestamp")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -597,11 +1082,11 @@ class GuardedDispatcher:
         ) = _canonical_journal_authority_snapshot(store)
         self.store = store
         normalized_environment = (
-            environment.strip().upper() if isinstance(environment, str) else ""
+            environment.strip().upper() if type(environment) is str else ""
         )
         if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
-        if not isinstance(account_id, str) or not account_id.strip():
+        if type(account_id) is not str or not account_id.strip():
             raise ValueError("account_id is required")
         self.environment = normalized_environment
         self.account_id = account_id.strip()
@@ -647,23 +1132,56 @@ class GuardedDispatcher:
         version: int,
         payload: dict[str, Any],
         now: str,
+        expected_journal_sequence: int | None = None,
+        _journal_commit_command: Callable[..., object] | None = None,
+        co_events: list[tuple[dict[str, Any], str]] | None = None,
     ):
         store = self._journal_store_authority()
-        return JournalStore.append_event(
-            store,
-            _envelope(
-                scope_key=self.scope_key,
-                aggregate_id=self._aggregate_id(attempt_id),
-                environment=self.environment,
-                attempt_id=attempt_id,
-                event_type=event_type,
-                version=version,
-                payload=payload,
-                now=now,
-                owner_epoch=self.owner_epoch,
-            ),
-            outbox_topic="autotrade.submission.events",
+        envelope = _envelope(
+            scope_key=self.scope_key,
+            aggregate_id=self._aggregate_id(attempt_id),
+            environment=self.environment,
+            attempt_id=attempt_id,
+            event_type=event_type,
+            version=version,
+            payload=payload,
+            now=now,
+            owner_epoch=self.owner_epoch,
         )
+        if expected_journal_sequence is None:
+            if co_events:
+                raise ValueError("co_events require the journal-cut send barrier")
+            return JournalStore.append_event(
+                store,
+                envelope,
+                outbox_topic="autotrade.submission.events",
+            )
+        commit_command = (
+            _CANONICAL_JOURNAL_COMMIT_COMMAND
+            if _journal_commit_command is None
+            else _journal_commit_command
+        )
+        _, inserted, appended = commit_command(
+            store,
+            command_id=envelope["event_id"],
+            actor=f"dispatcher:{self.scope_key}",
+            environment=self.environment,
+            idempotency_key=f"send-barrier:{envelope['event_id']}",
+            request={
+                "event": envelope,
+                "journal_sequence": expected_journal_sequence,
+            },
+            result={"event_id": envelope["event_id"]},
+            state_version=expected_journal_sequence,
+            events=[
+                (envelope, "autotrade.submission.events"),
+                *(co_events or []),
+            ],
+            expected_journal_sequence=expected_journal_sequence,
+        )
+        if not inserted:
+            raise DispatchBlocked("send_barrier_already_committed")
+        return appended[0]
 
     @staticmethod
     def _outcome_from_terminal(event: dict[str, Any], client_order_id: str) -> DispatchOutcome:
@@ -832,13 +1350,15 @@ class GuardedDispatcher:
         sender_check: SenderCheck | None = None,
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
+        journal_current_sequence = _CANONICAL_JOURNAL_CURRENT_SEQUENCE
+        journal_commit_command = _CANONICAL_JOURNAL_COMMIT_COMMAND
         for value, name in (
             (attempt_id, "attempt_id"),
             (intent_id, "intent_id"),
             (intent_hash, "intent_hash"),
             (provider, "provider"),
         ):
-            if not isinstance(value, str) or not value.strip():
+            if type(value) is not str or not value.strip():
                 raise ValueError(f"{name} is required")
         if not isinstance(request, Mapping):
             raise TypeError("request must be a mapping")
@@ -867,6 +1387,13 @@ class GuardedDispatcher:
             client_id_format=client_id_format,
         )
 
+        intent_aggregate_id = submission_intent_aggregate_id(
+            provider=provider,
+            environment=self.environment,
+            account_id=self.account_id,
+            intent_id=intent_id,
+        )
+
         existing = self._events(attempt_id)
         if existing:
             prepared = existing[0]["payload"]
@@ -885,6 +1412,78 @@ class GuardedDispatcher:
                 raise ValueError("attempt_id conflicts with existing submission content")
             return self._recover_existing(
                 attempt_id=attempt_id,
+                client_order_id=client_order_id,
+                now=now,
+            )
+
+        # A stable provider client ID is necessary but not sufficient: provider
+        # duplicate-ID behavior cannot be the authority for money movement. The
+        # canonical intent aggregate makes the first durable send owner unique
+        # across process restarts and across fresh attempt_id values.
+        store = self._journal_store_authority()
+        intent_events = JournalStore.load_events(
+            store,
+            "submission_intent",
+            intent_aggregate_id,
+        )
+        if intent_events:
+            if (
+                len(intent_events) != 1
+                or intent_events[0].get("event_type") != "SubmissionIntentBound"
+            ):
+                raise RuntimeError("durable submission intent binding is invalid")
+            binding = intent_events[0].get("payload")
+            if not isinstance(binding, dict):
+                raise RuntimeError("durable submission intent binding payload is invalid")
+            expected_binding = {
+                "provider": provider,
+                "environment": self.environment,
+                "account_id": self.account_id,
+                "intent_id": intent_id,
+                "intent_hash": intent_hash,
+                "request_hash": request_hash,
+                "client_order_id": client_order_id,
+                "submission_scope_hash": submission_scope_hash,
+            }
+            if any(binding.get(key) != value for key, value in expected_binding.items()):
+                raise ValueError("intent_id conflicts with existing submission content")
+            canonical_attempt_id = binding.get("attempt_id")
+            if not isinstance(canonical_attempt_id, str) or not canonical_attempt_id:
+                raise RuntimeError("durable submission intent owner is invalid")
+            canonical_events = self._events(canonical_attempt_id)
+            if not canonical_events:
+                raise RuntimeError("submission intent binding lost its canonical attempt")
+            canonical_last = canonical_events[-1]
+            if canonical_last["event_type"] in {"SubmissionSent", "SubmissionUnknown"}:
+                return self._outcome_from_terminal(canonical_last, client_order_id)
+            # SubmissionIntentBound and SubmissionSending are committed in the
+            # same SQLite transaction below. Seeing the binding therefore means
+            # an irreversible send may already be in flight; never send again.
+            if canonical_last["event_type"] == "SubmissionSending":
+                return DispatchOutcome(
+                    "UNKNOWN",
+                    client_order_id,
+                    None,
+                    "intent_send_already_committed",
+                )
+            raise RuntimeError(
+                "submission intent binding has no irreversible send evidence"
+            )
+
+        legacy_attempt_id = _legacy_submission_intent_attempt(
+            store,
+            provider=provider,
+            environment=self.environment,
+            account_id=self.account_id,
+            intent_id=intent_id,
+            intent_hash=intent_hash,
+            request_hash=request_hash,
+            client_order_id=client_order_id,
+            submission_scope_hash=submission_scope_hash,
+        )
+        if legacy_attempt_id is not None:
+            return self._recover_existing(
+                attempt_id=legacy_attempt_id,
                 client_order_id=client_order_id,
                 now=now,
             )
@@ -992,6 +1591,8 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked("final_barrier_clock_moved_backwards")
+            # Fixed journal cut before untrusted sender/authority callbacks.
+            barrier_journal_sequence = journal_current_sequence(self._journal_store_authority())
             if self.environment in {"PAPER", "LIVE"} and sender_check is None:
                 barrier_reason = "sender_fence_required"
                 self._append(
@@ -1088,6 +1689,29 @@ class GuardedDispatcher:
                     pass
                 raise DispatchBlocked(barrier_reason)
             try:
+                intent_binding = _envelope(
+                    scope_key=self.scope_key,
+                    aggregate_id=intent_aggregate_id,
+                    environment=self.environment,
+                    attempt_id=attempt_id,
+                    event_type="SubmissionIntentBound",
+                    version=1,
+                    payload={
+                        "attempt_id": attempt_id,
+                        "provider": provider,
+                        "environment": self.environment,
+                        "account_id": self.account_id,
+                        "intent_id": intent_id,
+                        "intent_hash": intent_hash,
+                        "request_hash": request_hash,
+                        "client_order_id": client_order_id,
+                        "submission_scope_hash": submission_scope_hash,
+                        "bound_at": _instant(barrier_now).isoformat().replace("+00:00", "Z"),
+                    },
+                    now=barrier_now,
+                    owner_epoch=self.owner_epoch,
+                )
+                intent_binding["aggregate_type"] = "submission_intent"
                 self._append(
                     attempt_id=attempt_id,
                     event_type="SubmissionSending",
@@ -1099,14 +1723,16 @@ class GuardedDispatcher:
                         "reason": "final_send_barrier_passed",
                     },
                     now=barrier_now,
+                    expected_journal_sequence=barrier_journal_sequence,
+                    _journal_commit_command=journal_commit_command,
+                    co_events=[
+                        (intent_binding, "autotrade.submission.intent.events"),
+                    ],
                 )
             except ValueError as error:
-                # A concurrent recovery may have terminalized the Prepared
-                # attempt as zero-wire BLOCKED after its lease expired. Never
-                # let a stale final_guard cross that durable fence.
+                reason = "journal_changed_during_final_send_validation"
                 latest = self._events(attempt_id)
                 if latest and latest[-1]["event_type"] == "SubmissionPrepared":
-                    reason = "submission_changed_during_final_send_validation"
                     self._append(
                         attempt_id=attempt_id,
                         event_type="SubmissionBlocked",
@@ -1117,11 +1743,10 @@ class GuardedDispatcher:
                         },
                         now=barrier_now,
                     )
-                raise DispatchBlocked(
-                    "submission_changed_during_final_send_validation"
-                ) from error
+                raise DispatchBlocked(reason) from error
             barrier_passed = True
 
+        canonical_response_guard = _require_canonical_exact_transport_response
         try:
             response = transport_send(client_order_id, request_frozen, final_guard)
         except DispatchBlocked as error:
@@ -1240,6 +1865,11 @@ class GuardedDispatcher:
         terminal_reason = "sent_confirmed"
         try:
             if type(response) is ExactJsonTransportResponse:
+                # Transport callbacks cannot rebind the response authority
+                # after the final guard to relabel UNKNOWN as a safe SENT.
+                if _require_canonical_exact_transport_response is not canonical_response_guard:
+                    raise ValueError("exact transport response authority is unavailable")
+                canonical_response_guard(response)
                 # The exact raw bytes + digest are the durable source.
                 # The prior "response" JSON mirror could silently round
                 # decimals to float; persisting Decimal objects directly is
@@ -1249,11 +1879,14 @@ class GuardedDispatcher:
                     "client_order_id": client_order_id,
                     "response_text": response.response_text,
                     "response_sha256": response.response_sha256,
-                    "response_encoding": "utf-8-json",
+                    "response_encoding": response.response_encoding,
                 }
                 if response.http_status is not None:
                     sent_payload["http_status"] = response.http_status
-                outcome_response = response.payload
+                outcome_response = (
+                    response.payload if response.response_encoding == "utf-8-json"
+                    else None
+                )
                 terminal_requires_reconciliation = response.requires_reconciliation
                 if terminal_requires_reconciliation:
                     terminal_reason = (
@@ -1324,3 +1957,15 @@ class GuardedDispatcher:
             outcome_response,
             "sent_confirmed",
         )
+
+
+# Install journal-owned response binding only after every dependent helper,
+# including _instant, has been defined. Imported modules see the final sealed API.
+(
+    load_submission_response_binding,
+    require_canonical_submission_response_binding,
+    submission_response_binding_projection,
+) = _install_submission_response_binding_authority(
+    load_submission_response_binding
+)
+del _install_submission_response_binding_authority

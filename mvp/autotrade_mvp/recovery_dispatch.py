@@ -247,6 +247,25 @@ def activate_recovery_takeover_target(
     return target
 
 
+def _bybit_environment(value: str | None, runtime: str) -> str | None:
+    """Require explicit Bybit provider environment; never infer from PAPER/LIVE.
+
+    It is rechecked against the owner-bound durable reconciliation checkpoint.
+    Absence preserves fail-closed BYBIT behavior.
+    """
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise TypeError("Bybit provider environment must be exact text")
+    normalized = value.strip().upper()
+    if normalized not in {"MAINNET", "TESTNET", "DEMO"}:
+        raise ValueError("unsupported Bybit provider environment")
+    expected_runtime = "LIVE" if normalized == "MAINNET" else "PAPER"
+    if runtime != expected_runtime:
+        raise ValueError("Bybit provider environment conflicts with runtime")
+    return normalized
+
+
 class RecoveryIssuedDispatcher:
     """Opaque owner-bound facade over the canonical GuardedDispatcher."""
 
@@ -270,6 +289,7 @@ class RecoveryIssuedDispatcher:
         "__owner",
         "__environment",
         "__account_id",
+        "__bybit_provider_environment",
     )
 
     def __init_subclass__(cls, **_kwargs) -> None:
@@ -284,6 +304,7 @@ class RecoveryIssuedDispatcher:
         account_id: str,
         owner: OwnerFence,
         prepared_lease_seconds: int,
+        bybit_provider_environment: str | None = None,
         issuance_token: object | None = None,
     ) -> None:
         if type(self) is not RecoveryIssuedDispatcher or issuance_token is not _ISSUANCE_TOKEN:
@@ -303,6 +324,9 @@ class RecoveryIssuedDispatcher:
         _require_executable_authority()
         normalized_environment, normalized_account, _ = _scope(
             environment, account_id
+        )
+        normalized_bybit_environment = _bybit_environment(
+            bybit_provider_environment, normalized_environment
         )
         source = vars(recovery).get(_TAKEOVER_SOURCE_ATTR)
         if source is not None:
@@ -346,6 +370,7 @@ class RecoveryIssuedDispatcher:
         self.__owner = owner
         self.__environment = normalized_environment
         self.__account_id = normalized_account
+        self.__bybit_provider_environment = normalized_bybit_environment
         self.__dispatcher = GuardedDispatcher(
             store,
             environment=normalized_environment,
@@ -391,6 +416,13 @@ class RecoveryIssuedDispatcher:
             or self.__account_id != self.__account_id.strip()
         ):
             raise PermissionError("issued dispatcher account authority changed")
+        try:
+            if _bybit_environment(
+                self.__bybit_provider_environment, self.__environment
+            ) != self.__bybit_provider_environment:
+                raise PermissionError("issued Bybit provider environment changed")
+        except (TypeError, ValueError) as error:
+            raise PermissionError("issued Bybit provider environment is invalid") from error
         source = vars(self.__recovery).get(_TAKEOVER_SOURCE_ATTR)
         if source is not None:
             if type(source) is not OwnerFence:
@@ -484,6 +516,10 @@ class RecoveryIssuedDispatcher:
             provider_id=provider.strip().upper(),
             account_id=self.__account_id,
             environment=self.__environment,
+            provider_environment=(
+                self.__bybit_provider_environment
+                if provider.strip().upper() == "BYBIT" else None
+            ),
         )
         if checkpoint is None:
             raise PermissionError(
@@ -617,6 +653,7 @@ def build_recovery_issued_dispatcher(
     environment: str,
     account_id: str,
     prepared_lease_seconds: int = 60,
+    bybit_provider_environment: str | None = None,
 ) -> RecoveryIssuedDispatcher:
     """Mint one dispatcher from the exact current durable recovery owner.
 
@@ -677,5 +714,6 @@ def build_recovery_issued_dispatcher(
         account_id=normalized_account,
         owner=owner,
         prepared_lease_seconds=prepared_lease_seconds,
+        bybit_provider_environment=bybit_provider_environment,
         issuance_token=_ISSUANCE_TOKEN,
     )

@@ -7,6 +7,7 @@ not depend on sampled logs and they never authorize financial actions.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from math import isfinite
 import json
 import re
 from pathlib import Path
@@ -180,7 +181,7 @@ def redact_diagnostic_value(value: Any) -> Any:
         if type(item) in (bool, int, type(None)):
             return item
         if type(item) is float:
-            if not __import__("math").isfinite(item):
+            if not isfinite(item):
                 raise ValueError("nonfinite diagnostic metric is forbidden")
             return item
         raise TypeError("diagnostic structured values require exact JSON primitives")

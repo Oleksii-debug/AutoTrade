@@ -1,5 +1,7 @@
 from tempfile import TemporaryDirectory
 import unittest
+
+import mvp.autotrade_mvp.dispatch as dispatch_module
 from unittest.mock import patch
 from uuid import UUID
 
@@ -10,6 +12,8 @@ from mvp.autotrade_mvp.dispatch import (
     GuardedDispatcher,
     SubmissionResponseBinding,
     load_submission_response_binding,
+    require_canonical_submission_response_binding,
+    submission_response_binding_projection,
     require_canonical_submission_response_binding,
     submission_response_binding_projection,
     stable_client_order_id,
@@ -1252,6 +1256,74 @@ class DispatchTests(unittest.TestCase):
                         account_id="acct",
                         attempt_id=attempt_id,
                     )
+
+    def test_submission_response_binding_verifier_rejects_shadowing_before_callback(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            dispatcher.dispatch(
+                attempt_id="binding-shadow-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(b'{"ok":true}'),
+                )[1],
+                submission_scope={
+                    "endpoint": "/orders",
+                    "capability_snapshot_ids": ["cap-1"],
+                    "instrument_versions": ["BTCUSD:v1"],
+                },
+            )
+            binding = load_submission_response_binding(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-shadow-a1",
+            )
+            callbacks = []
+
+            def forged(*_args, **_kwargs):
+                callbacks.append(True)
+                return None
+
+            for name in (
+                "type",
+                "id",
+                "tuple",
+                "range",
+                "enumerate",
+                "isinstance",
+                "object",
+                "getattr",
+                "MappingProxyType",
+                "weakref_ref",
+                "SubmissionResponseBinding",
+                "JournalStore",
+                "ValueError",
+            ):
+                with self.subTest(name=name):
+                    with patch.object(
+                        dispatch_module,
+                        name,
+                        forged,
+                        create=True,
+                    ):
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "binding authority is unavailable",
+                        ):
+                            require_canonical_submission_response_binding(binding)
+                    self.assertEqual(callbacks, [])
 
     def test_mapping_response_cannot_mint_exact_durable_response_provenance(self):
         with TemporaryDirectory() as directory:

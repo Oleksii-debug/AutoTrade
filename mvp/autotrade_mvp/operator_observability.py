@@ -149,11 +149,14 @@ def build_operator_observability(
     if not snapshot["connection_freshness"]:
         raise ValueError("Host freshness projection is missing")
     ui_reasons = _codes(snapshot["reason_codes"], name="UiSnapshot reason_codes")
-    if type(recovery.state) is not HostState:
+    state_before = recovery.state
+    if type(state_before) is not HostState:
         raise ValueError("recovery state is not a canonical HostState")
-    if type(recovery.reason_codes) is not set:
-        raise ValueError("recovery reason codes are noncanonical")
-    recovery_reasons = _codes(recovery.reason_codes, name="recovery reason_codes")
+    if type(recovery.reason_codes) is not set or type(recovery.unresolved_attempts) is not set:
+        raise ValueError("recovery diagnostic source is noncanonical")
+    reason_codes_before = frozenset(recovery.reason_codes)
+    unresolved_before = len(recovery.unresolved_attempts)
+    recovery_reasons = _codes(reason_codes_before, name="recovery reason_codes")
     readiness = evaluate_readiness(signals)
     readiness_reasons = _codes(readiness.blockers, name="readiness blockers")
     warnings = _codes(readiness.warnings, name="readiness warnings")
@@ -187,7 +190,7 @@ def build_operator_observability(
         },
         "recovery": {
             "status": recovery.state.value,
-            "unresolved_attempt_count": len(recovery.unresolved_attempts),
+            "unresolved_attempt_count": unresolved_before,
         },
         "risk": {"status": "SOURCE_PRESENT", "financial_mode": "READ_ONLY"},
         "reservations": {"count": reservations, "source": "HOST_RISK" if reservations is not None else "UNAVAILABLE"},
@@ -202,6 +205,14 @@ def build_operator_observability(
             "science_pass": False,
         },
     }
+    if (
+        recovery.state is not state_before
+        or frozenset(recovery.reason_codes) != reason_codes_before
+        or len(recovery.unresolved_attempts) != unresolved_before
+    ):
+        # A diagnostic read cannot silently bridge a recovery transition.
+        # A later read may produce a new projection; no financial retry occurs.
+        raise ValueError("recovery state changed during diagnostic read")
     return OperatorObservabilitySnapshot(
         mode=mode,
         reasons=tuple(sorted(reasons)),

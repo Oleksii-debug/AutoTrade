@@ -62,6 +62,8 @@ jobs:
 
   windows-candidate:
     runs-on: windows-2025
+    env:
+      NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
     steps:
       - uses: actions/checkout@v4
         with:
@@ -76,6 +78,7 @@ jobs:
         with:
           node-version: '24'
       - run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --locked-mode -r win-x64
+      - run: python tools/dotnet_package_rights.py --verify-restored --packages-root "${{ env.NUGET_PACKAGES }}" --project src/AutoTrade.Desktop/AutoTrade.Desktop.csproj
       - run: dotnet publish src/AutoTrade.Desktop/AutoTrade.Desktop.csproj -c Release -r win-x64 --self-contained true --no-restore -p:SourceRevisionId=${{ env.AUTOTRADE_SOURCE_SHA }} -p:ContinuousIntegrationBuild=true -o artifacts/desktop
       - run: python tools/write_ci_evidence.py --suite provider-free-desktop-publish --command "locked self-contained win-x64 Desktop publish" --output artifacts/desktop/desktop-build-evidence.json
       - name: Bind Desktop PASS evidence to exact publish payload
@@ -88,12 +91,14 @@ jobs:
         run: >-
           python -c "from pathlib import Path; from tools.build_provider_free_candidate import bind_publish_evidence; bind_publish_evidence(Path('artifacts/host'), executable='AutoTrade.Host.exe', evidence_name='host-build-evidence.json')"
       - run: dotnet run --project tests/Host.Process/Host.Process.csproj -c Release
-      - name: Download exact candidate runtime inputs
+      - name: Stage rights-verified locked WebView2 SDK and exact Python input
         shell: pwsh
         run: |
           $inputs = Get-Content -Raw -LiteralPath 'packaging/windows/provider-free-inputs.json' | ConvertFrom-Json
           Invoke-WebRequest $inputs.python.url -OutFile artifacts/python.zip
-          Invoke-WebRequest $inputs.webview2_sdk.url -OutFile artifacts/webview.nupkg
+          $archive = Join-Path $env:NUGET_PACKAGES "microsoft.web.webview2/$($inputs.webview2_sdk.version)/microsoft.web.webview2.$($inputs.webview2_sdk.version).nupkg"
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw 'Locked WebView2 SDK archive is missing after rights-verified restore' }
+          Copy-Item -LiteralPath $archive -Destination 'artifacts/webview.nupkg' -ErrorAction Stop
       - name: Compose through canonical source staging and bundle builder
         run: python -m tools.build_provider_free_candidate --source-sha ${{ env.AUTOTRADE_SOURCE_SHA }} --desktop-publish artifacts/desktop --host-publish artifacts/host --python-archive artifacts/python.zip --webview-archive artifacts/webview.nupkg --work artifacts/candidate-work --output artifacts/AutoTrade-ZERO-win-x64.zip
       - run: npm ci --ignore-scripts

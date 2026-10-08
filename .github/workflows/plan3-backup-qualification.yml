@@ -25,7 +25,7 @@ jobs:
           python-version: '3.12'
       - name: Fail-closed backup/restore, atomic publication, corruption and recovery tests
         run: |
-          python -m unittest -v mvp.tests.test_backup_restore
+          python -m unittest -v mvp.tests.test_backup_restore mvp.tests.test_simulation_runtime_checkpoint
 
       - name: Diagnose manifest drift without changing authority or claiming PASS
         if: always()

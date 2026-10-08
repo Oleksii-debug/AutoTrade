@@ -192,6 +192,21 @@ def resolve_simulation_action(journal, action, payload):
         'event_id': event['event_id'], 'action': action, 'result': result},))
 
 
+def _inspect_completed_worker(root):
+    """Wait briefly for a coherent read after the child has durably exited."""
+    import time
+    from .simulation_status import SimulationStateChanging, inspect_canonical_simulation
+
+    for attempt in range(20):
+        try:
+            return inspect_canonical_simulation(root)
+        except SimulationStateChanging:
+            if attempt == 19:
+                raise
+            time.sleep(0.1)
+    raise AssertionError('unreachable coherent read retry state')
+
+
 def execute_simulation_action(journal, action, payload, accepted_at):
     from .simulation_session import run_autonomous_simulation
     from .backup import create_backup, verify_backup
@@ -216,7 +231,6 @@ def execute_simulation_action(journal, action, payload, accepted_at):
         import subprocess
         import os
         import sys
-        from .simulation_status import inspect_canonical_simulation
         def diagnostic(stage, detail=''):
             if os.environ.get('AUTOTRADE_TEST_DIAGNOSTIC') == '1':
                 (root.parent / 'worker-stage-diagnostic.txt').write_text(
@@ -248,7 +262,7 @@ def execute_simulation_action(journal, action, payload, accepted_at):
         # validated durable projection. This prevents a stale/forged success
         # payload from certifying cash, position, protocol identity or edge.
         diagnostic('inspection_started')
-        inspected = inspect_canonical_simulation(root)
+        inspected = _inspect_completed_worker(root)
         diagnostic('inspection_returned')
         if type(inspected) is not dict:
             raise ValueError('simulation worker produced no canonical durable state')
@@ -300,4 +314,14 @@ def execute_simulation_action(journal, action, payload, accepted_at):
     )
     if action != 'BACKUP_SIMULATION':
         diagnostic('receipt_committed')
-    return resolve_simulation_action(journal, action, payload)
+    if action != 'BACKUP_SIMULATION':
+        diagnostic('resolve_started')
+    try:
+        resolved = resolve_simulation_action(journal, action, payload)
+    except Exception as error:
+        if action != 'BACKUP_SIMULATION':
+            diagnostic('resolve_error', type(error).__name__)
+        raise
+    if action != 'BACKUP_SIMULATION':
+        diagnostic('resolve_returned', 'none' if resolved is None else 'ready')
+    return resolved

@@ -14,7 +14,7 @@ from tempfile import TemporaryDirectory
 from threading import Thread
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from mvp.autotrade_mvp.product_runtime import (
@@ -30,8 +30,9 @@ from mvp.autotrade_mvp.windows_host_session import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.authority import AuthorityService
-from mvp.autotrade_mvp.product_worker import _host_emergency_pause_required
-from mvp.autotrade_mvp.simulation_commands import _protocol, resolve_simulation_action
+from mvp.autotrade_mvp.product_worker import _host_emergency_pause_required, _run_after_snapshot_reader
+from research.autotrade_research.artifacts.resource_lock import ResourceLockBusyError
+from mvp.autotrade_mvp.simulation_commands import _inspect_completed_worker, _protocol, resolve_simulation_action
 from mvp.autotrade_mvp.simulation_session import ACCOUNT, ENVIRONMENT, PROVIDER, INSTRUMENT
 from mvp.autotrade_mvp.simulation_status import SimulationStateChanging
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
@@ -109,6 +110,33 @@ class ProductClient:
 
 
 class ProviderFreeProductAcceptance(unittest.TestCase):
+    def test_worker_waits_for_transient_snapshot_reader_only(self):
+        run = Mock(side_effect=[ResourceLockBusyError('busy'), 'completed'])
+        with patch('time.sleep') as sleep:
+            self.assertEqual(_run_after_snapshot_reader(run), 'completed')
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(0.1)
+
+        with patch('time.sleep') as sleep:
+            with self.assertRaisesRegex(ValueError, 'other failure'):
+                _run_after_snapshot_reader(Mock(side_effect=ValueError('other failure')))
+        sleep.assert_not_called()
+
+    def test_completed_worker_retries_only_transient_snapshot_contention(self):
+        result = object()
+        with patch('mvp.autotrade_mvp.simulation_status.inspect_canonical_simulation',
+                   side_effect=[SimulationStateChanging('busy'), result]) as inspect, patch('time.sleep') as sleep:
+            self.assertIs(_inspect_completed_worker(Path('unused')), result)
+        self.assertEqual(inspect.call_count, 2)
+        sleep.assert_called_once_with(0.1)
+
+        with patch('mvp.autotrade_mvp.simulation_status.inspect_canonical_simulation',
+                   side_effect=SimulationStateChanging('busy')) as inspect, patch('time.sleep') as sleep:
+            with self.assertRaises(SimulationStateChanging):
+                _inspect_completed_worker(Path('unused'))
+        self.assertEqual(inspect.call_count, 20)
+        self.assertEqual(sleep.call_count, 19)
+
     def test_owned_desktop_child_uses_direct_ephemeral_session_handoff(self):
         from mvp.autotrade_mvp import product_runtime
 

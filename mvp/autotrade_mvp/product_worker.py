@@ -4,6 +4,7 @@ import json
 import os
 from threading import Thread
 from pathlib import Path
+from research.autotrade_research.artifacts.resource_lock import ResourceLockBusyError
 from .authority import AuthorityService
 from .persistence import JournalStore, payload_digest
 from .simulation_runtime_checkpoint import autonomous_protocol_digest
@@ -40,6 +41,19 @@ _HOST_TERMINAL_PHASES = frozenset({'SUCCEEDED', 'FAILED', 'CANCELLED'})
 _HOST_OPERATION_PHASES = frozenset({
     'QUEUED', 'RUNNING', 'WAITING_EXTERNAL', 'UNKNOWN', *_HOST_TERMINAL_PHASES,
 })
+
+
+def _run_after_snapshot_reader(run):
+    """A UI snapshot may briefly own the simulation lock before a child starts."""
+    import time
+    for attempt in range(100):
+        try:
+            return run()
+        except ResourceLockBusyError:
+            if attempt == 99:
+                raise
+            time.sleep(0.1)
+    raise AssertionError('unreachable simulation lock retry state')
 
 
 def _host_emergency_pause_required(store):
@@ -132,12 +146,13 @@ def main():
         # Finish any retained financial observation, then pause before the next
         # market observation/admission when canonical emergency truth requires it.
         return _host_emergency_pause_required(store)
-    result = run_autonomous_simulation(protocol['prices'], root, run_id=protocol['run_id'],
+    result = _run_after_snapshot_reader(lambda: run_autonomous_simulation(
+        protocol['prices'], root, run_id=protocol['run_id'],
         now=protocol['start_time'], stop_after_episodes=args.stop,
         fault_at_episode=protocol['fault_at_episode'], emergency_at_episode=protocol['emergency_at_episode'],
         execution_profile=protocol.get('execution_profile', 'IMMEDIATE'),
         target_quantity=protocol.get('target_quantity', '1'),
-        should_pause=pause_requested)
+        should_pause=pause_requested))
     print(json.dumps({k: v for k, v in result.items() if k != 'decisions'}))
     return 2 if result['status'] == 'UNKNOWN' else 0
 

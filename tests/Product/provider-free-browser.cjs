@@ -70,8 +70,12 @@ saved=CompositeReplayCheckpoint.from_canonical_json(checkpoint_path(root).read_t
 cut,components=_stable_runtime_components(store,protocol=protocol,completed=completed)
 scope,_,_=_runtime_scope_snapshot(store,run_id=protocol['run_id'])
 identity=hashlib.sha256(str(store.store_identity).encode()).hexdigest()
+bootstrap=json.loads((root.parent/'bootstrap-checkpoint-diagnostic.json').read_text())
 print(json.dumps({'match':saved.runtime_cut_id==cut,'scope':scope['state_digest'],
-    'identity':identity,'completed':len(completed)}))
+    'identity':identity,'completed':len(completed),
+    'bootstrap_scope_match':bootstrap['scope']==scope['state_digest'],
+    'bootstrap_identity_match':bootstrap['identity']==identity,
+    'bootstrap_cut_match':bootstrap['cut']==cut}))
 `, path.join(directory, "state")], {cwd: ROOT, env, encoding: "utf8", timeout: 30000});
   assert.equal(result.status, 0, "Checkpoint signature inspection failed: " + result.stderr);
   return JSON.parse(result.stdout);
@@ -475,6 +479,9 @@ async function exerciseHostOutageFailClosed(page) {
   const checkpointAfterStop = checkpointSignature(data);
   console.log(JSON.stringify({checkpoint_drift: {
     at_open_match: checkpointAtOpen.match,
+    bootstrap_scope_match: checkpointAtOpen.bootstrap_scope_match,
+    bootstrap_identity_match: checkpointAtOpen.bootstrap_identity_match,
+    bootstrap_cut_match: checkpointAtOpen.bootstrap_cut_match,
     before_stop_match: checkpointBeforeStop.match,
     after_stop_match: checkpointAfterStop.match,
     scope_changed_before_stop: checkpointAtOpen.scope !== checkpointBeforeStop.scope,

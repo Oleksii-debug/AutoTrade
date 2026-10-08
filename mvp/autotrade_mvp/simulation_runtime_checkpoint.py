@@ -991,6 +991,16 @@ def persist_autonomous_runtime_checkpoint(
         authority_key_identity=authority_key_identity,
         completed=completed,
     )
+    if os.environ.get("AUTOTRADE_TEST_DIAGNOSTIC") == "1" and len(completed) == 1:
+        scope, _, _ = _runtime_scope_snapshot(store, run_id=protocol["run_id"])
+        diagnostic = {
+            "scope": scope["state_digest"],
+            "identity": sha256(str(store.store_identity).encode("utf-8")).hexdigest(),
+            "cut": checkpoint.runtime_cut_id,
+        }
+        (Path(root).parent / "bootstrap-checkpoint-diagnostic.json").write_text(
+            json.dumps(diagnostic, sort_keys=True), encoding="utf-8"
+        )
     destination = checkpoint_path(root)
     data = checkpoint.to_canonical_json().encode("utf-8")
     if os.name == "nt":

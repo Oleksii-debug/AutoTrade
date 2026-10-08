@@ -680,7 +680,26 @@ def _require_webview2_input_identity(product_root, inputs, nuget_lock):
             'resolved': item['resolved'],
             'content_hash_sha512_base64': item['contentHash'],
         })
-    if len(lock_rows) != 1:
+    # The locked Desktop RID restore records both the framework and win-x64
+    # graph. They are two targets for ONE pinned artifact, not two packages.
+    # Reject missing, hostile, or divergent targets rather than suppressing the
+    # lock/provenance checks to make Windows packaging pass.
+    lock_by_target = {row['target']: row for row in lock_rows}
+    allowed_targets = {
+        'net10.0-windows7.0',
+        'net10.0-windows7.0/win-x64',
+    }
+    if (
+        not lock_rows
+        or len(lock_by_target) != len(lock_rows)
+        or 'net10.0-windows7.0' not in lock_by_target
+        or not set(lock_by_target).issubset(allowed_targets)
+        or len({
+            (row['type'], row['requested'], row['resolved'],
+             row['content_hash_sha512_base64'])
+            for row in lock_rows
+        }) != 1
+    ):
         raise ValueError(
             'provider-free WebView2 lock identity is not singular'
         )
@@ -703,26 +722,39 @@ def _require_webview2_input_identity(product_root, inputs, nuget_lock):
         if type(item) is dict
         and item.get('name') == 'Microsoft.Web.WebView2'
     ]
-    if len(manifest_rows) != 1:
+    # One exact provenance record is required PER locked target; a RID cannot
+    # be silently omitted and duplicate/foreign target entries fail closed.
+    if len(manifest_rows) != len(lock_rows):
         raise ValueError(
             'provider-free WebView2 release provenance is not singular'
         )
-    lock_row = lock_rows[0]
-    manifest_row = manifest_rows[0]
-    expected_manifest = {
-        'project': 'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj',
-        'target': lock_row['target'],
-        'name': 'Microsoft.Web.WebView2',
-        'type': lock_row['type'],
-        'version': version,
-        'content_hash_sha512_base64': content_hash,
-        'dependencies': [],
-        'requested': lock_row['requested'],
-    }
-    if manifest_row != expected_manifest:
+    manifest_by_target = {}
+    for manifest_row in manifest_rows:
+        target = manifest_row.get('target')
+        if type(target) is not str or target in manifest_by_target:
+            raise ValueError(
+                'provider-free WebView2 release provenance is not singular'
+            )
+        manifest_by_target[target] = manifest_row
+    if set(manifest_by_target) != set(lock_by_target):
         raise ValueError(
-            'provider-free WebView2 lock differs from release provenance'
+            'provider-free WebView2 release provenance targets mismatch'
         )
+    for target, lock_row in lock_by_target.items():
+        expected_manifest = {
+            'project': 'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj',
+            'target': target,
+            'name': 'Microsoft.Web.WebView2',
+            'type': lock_row['type'],
+            'version': version,
+            'content_hash_sha512_base64': content_hash,
+            'dependencies': [],
+            'requested': lock_row['requested'],
+        }
+        if manifest_by_target[target] != expected_manifest:
+            raise ValueError(
+                'provider-free WebView2 lock differs from release provenance'
+            )
     return content_hash
 
 

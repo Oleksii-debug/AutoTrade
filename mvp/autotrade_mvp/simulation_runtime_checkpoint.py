@@ -598,15 +598,9 @@ def _autonomous_owned_pending_publications(
     owned_ids = _autonomous_owned_event_ids(store, run_id=run_id)
     # The canonical JournalStore requires an exact topic on every outbox read.
     # Do not weaken that storage contract or guess another source of authority.
-    pending_count = JournalStore.pending_outbox_count(store)
-    if pending_count > 1000:
-        raise AutonomousRuntimeCheckpointError(
-            "ZERO cannot attest foreign publications with an excessive backlog"
-        )
-    foreign_publications = {
-        item["event_id"]
-        for item in JournalStore.pending_outbox(store, limit=max(1, pending_count))
-    }
+    # Resolve only exact owned event IDs. Foreign UI or provider backlog may
+    # exceed every bounded global outbox page and must not exhaust this scan.
+    # Keep the JournalStore's exact-topic requirement intact.
     for event_id in owned_ids:
         event = JournalStore.get_event(store, event_id)
         if event is None:
@@ -615,10 +609,29 @@ def _autonomous_owned_pending_publications(
             )
         topic = _canonical_publication_topic(event)
         if topic is None:
-            if event_id in foreign_publications:
-                raise AutonomousRuntimeCheckpointError(
-                    "ZERO component event has an unauthorized outbox publication"
-                )
+            # Non-publishing component rows must not acquire publication
+            # authority through another known product topic.
+            for unexpected_topic in (
+                "autotrade.economic.events",
+                "autotrade.submission.events",
+                "autotrade.reconciliation.events",
+                "autotrade.simulation.events",
+                "financial.admission.ready",
+                "ui.host-events",
+            ):
+                try:
+                    JournalStore.outbox_delivery_state(
+                        store, event_id, topic=unexpected_topic,
+                    )
+                except ValueError as error:
+                    if str(error) != "durable outbox publication is missing for bootstrap event":
+                        raise AutonomousRuntimeCheckpointError(
+                            "ZERO cannot attest an unauthorized publication"
+                        ) from error
+                else:
+                    raise AutonomousRuntimeCheckpointError(
+                        "ZERO component has an unauthorized outbox publication"
+                    )
             continue
         try:
             state = JournalStore.outbox_delivery_state(

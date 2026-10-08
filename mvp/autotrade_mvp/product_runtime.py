@@ -336,14 +336,19 @@ def build_product(data_dir, *, port=0, desktop_session_sink=None):
 
 def restore_product_backup(backup_dir, data_dir):
     from tempfile import TemporaryDirectory
+    from autotrade_runtime.artifacts import ArtifactStore
+    from autotrade_runtime.strict_json import strict_json_loads
     from .backup import (
         BackupError,
+        _copy_file_durable,
         _fsync_directory,
         _fsync_directory_tree,
+        _sha256_file,
+        _validate_runtime_artifact_manifest,
         restore_backup,
     )
 
-    destination_root = Path(data_dir)
+    destination_root = Path(data_dir).resolve()
     if destination_root.exists():
         raise BackupError('Restore destination already exists')
     destination_root.parent.mkdir(parents=True, exist_ok=True)
@@ -362,7 +367,67 @@ def restore_product_backup(backup_dir, data_dir):
         if source.exists():
             if artifact_destination.exists():
                 raise BackupError('restored artifact layout conflicts')
-            source.rename(artifact_destination)
+            runtime_manifests = sorted((source / 'manifests').glob('*.json'))
+            if runtime_manifests:
+                if list((source / 'manifests' / 'sha256').rglob('*.json')):
+                    raise BackupError('mixed artifact layouts require explicit migration')
+                # The authenticated runtime manifest binds its object-prefix
+                # directory generation. Copied bytes have a new generation, so
+                # reissue manifests from verified backup bytes in this unpublished
+                # restore tree. The original remains in scratch until completion.
+                original = Path(scratch) / 'source-artifacts'
+                source.rename(original)
+                restored_artifacts = ArtifactStore(artifact_destination)
+                for old_path in runtime_manifests:
+                    old_path = original / 'manifests' / old_path.name
+                    _validate_runtime_artifact_manifest(original, old_path)
+                    manifest = strict_json_loads(old_path.read_text(encoding='utf-8'))
+                    digest = manifest['sha256'][7:]
+                    raw = (
+                        original / 'objects' / 'sha256' / digest[:2] / digest
+                    ).read_bytes()
+                    new_manifest = restored_artifacts.publish_bytes(
+                        artifact_id=manifest['artifact_id'],
+                        data=raw,
+                        media_type=manifest['media_type'],
+                        rights=manifest['rights'],
+                        source_refs=manifest['source_refs'],
+                        metadata=manifest['metadata'],
+                    )
+                    if new_manifest['sha256'] != manifest['sha256']:
+                        raise BackupError('restored artifact content identity changed')
+                    verified_manifest, verified_raw = (
+                        restored_artifacts.read_authenticated_snapshot(
+                            manifest['artifact_id']
+                        )
+                    )
+                    if (
+                        verified_manifest['sha256'] != manifest['sha256']
+                        or verified_raw != raw
+                    ):
+                        raise BackupError('restored artifact reconstitution failed')
+                # ArtifactStore retains directory handles for namespace safety.
+                # Release them before Windows atomically publishes the restore.
+                del restored_artifacts
+                import gc
+                gc.collect()
+                for old_object in sorted((original / 'objects' / 'sha256').rglob('*')):
+                    if not old_object.is_file():
+                        continue
+                    digest = old_object.name
+                    if _sha256_file(old_object) != digest:
+                        raise BackupError('restored orphan artifact digest changed')
+                    new_object = (
+                        artifact_destination / 'objects' / 'sha256'
+                        / digest[:2] / digest
+                    )
+                    if new_object.exists():
+                        if _sha256_file(new_object) != digest:
+                            raise BackupError('restored artifact object conflicts')
+                    else:
+                        _copy_file_durable(old_object, new_object)
+            else:
+                source.rename(artifact_destination)
         _fsync_directory_tree(root)
         os.replace(root, destination_root)
         _fsync_directory(destination_root.parent)

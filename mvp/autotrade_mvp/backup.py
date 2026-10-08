@@ -18,6 +18,7 @@ import shutil
 import sqlite3
 import tempfile
 from typing import Any, Sequence
+from uuid import UUID
 
 from .diagnostics import build_diagnostic_snapshot
 from .persistence import JournalStore, payload_digest
@@ -1193,6 +1194,13 @@ def _expected_kind(path: str) -> str:
         and parts[3] == parts[4][:-5][:2]
     ):
         return "artifact-manifest"
+    if len(parts) == 3 and parts[:2] == ("artifacts", "manifests") and parts[2].endswith(".json"):
+        try:
+            artifact_id = parts[2][:-5]
+            if str(UUID(artifact_id)) == artifact_id:
+                return "runtime-artifact-manifest"
+        except ValueError:
+            pass
     raise BackupIntegrityError(f"Backup payload path is outside the canonical inventory: {path}")
 
 
@@ -1328,6 +1336,39 @@ def _require_safe_artifact_source_dirs(root: Path) -> None:
             raise BackupError("Artifact store directory is unsafe")
 
 
+def _validate_runtime_artifact_manifest(root: Path, path: Path) -> None:
+    """Verify the current UUID-manifest ArtifactStore layout and its object."""
+    from autotrade_runtime.artifacts.store import (
+        ArtifactStore as RuntimeArtifactStore,
+        ArtifactIntegrityError,
+        _verify_manifest_integrity,
+    )
+    from autotrade_runtime.strict_json import strict_json_loads
+
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_nlink != 1:
+            raise BackupIntegrityError("Runtime artifact manifest is not a unique regular file")
+        manifest = strict_json_loads(path.read_text(encoding="utf-8"))
+        if type(manifest) is not dict:
+            raise BackupIntegrityError("Runtime artifact manifest is not an object")
+        _verify_manifest_integrity(manifest, required=True)
+        RuntimeArtifactStore._validate_manifest_contract(manifest, authenticated=True)
+        if path.name != manifest["artifact_id"] + ".json":
+            raise BackupIntegrityError("Runtime artifact manifest identity differs from path")
+        digest = manifest["sha256"].removeprefix("sha256:")
+        object_path = root / "objects" / "sha256" / digest[:2] / digest
+        if (
+            object_path.is_symlink()
+            or not object_path.is_file()
+            or object_path.stat().st_nlink != 1
+            or object_path.stat().st_size != manifest["bytes"]
+            or _sha256_file(object_path) != digest
+        ):
+            raise BackupIntegrityError("Runtime artifact object is missing or corrupt")
+    except (OSError, UnicodeError, ValueError, KeyError, ArtifactIntegrityError) as error:
+        raise BackupIntegrityError("Runtime artifact manifest or object is invalid") from error
+
+
 def _artifact_source_files(root: Path) -> list[tuple[Path, str]]:
     _require_safe_artifact_source_dirs(root)
     files: list[tuple[Path, str]] = []
@@ -1341,6 +1382,9 @@ def _artifact_source_files(root: Path) -> list[tuple[Path, str]]:
         for path in sorted(manifests_root.rglob("*.json")):
             if path.is_file():
                 files.append((path, "artifact-manifest"))
+    for path in sorted((root / "manifests").glob("*.json")):
+        _validate_runtime_artifact_manifest(root, path)
+        files.append((path, "runtime-artifact-manifest"))
     return files
 
 
@@ -1431,6 +1475,8 @@ def _assert_mutable_sources_unchanged(
 
 def _validate_artifact_source(root: Path) -> None:
     _require_safe_artifact_source_dirs(root)
+    for path in sorted((root / "manifests").glob("*.json")):
+        _validate_runtime_artifact_manifest(root, path)
     manifests_root = root / "manifests" / "sha256"
     objects_root = root / "objects" / "sha256"
     if objects_root.exists():
@@ -1959,6 +2005,12 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
         object_path = root / _safe_relative_path(object_relative)
         if _sha256_file(object_path) != digest or object_path.stat().st_size != declared_size:
             raise BackupIntegrityError("Backed-up artifact manifest does not match its object")
+
+    for item in entries:
+        if item["kind"] == "runtime-artifact-manifest":
+            _validate_runtime_artifact_manifest(
+                root / "artifacts", root / _safe_relative_path(item["path"])
+            )
 
     return manifest
 

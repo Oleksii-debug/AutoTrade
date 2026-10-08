@@ -649,13 +649,11 @@ class AuthenticatedHostApplication:
 
             if method == "POST" and path == "/api/v1/commands":
                 command = self._parse_body(body, normalized_headers)
-                # Compare supplied identity to the authenticated principal before
-                # schema diagnosis; forged identity must never become a 400 oracle.
-                if "actor" in command and command["actor"] != principal.actor:
-                    raise PermissionError("Command actor is not authenticated")
-                if "session" in command and command["session"] != principal.session:
-                    raise PermissionError("Command session is not authenticated")
                 _validate_ui_command_contract(command)
+                if command.get("actor") != principal.actor:
+                    raise PermissionError("Command actor is not authenticated")
+                if command.get("session") != principal.session:
+                    raise PermissionError("Command session is not authenticated")
                 origin_token = _REQUEST_ORIGIN.set(self.public_origin)
                 bearer_token = _AUTHENTICATED_SESSION_TOKEN.set(principal.token)
                 reference_token = _AUTHENTICATED_SESSION_REFERENCE.set(

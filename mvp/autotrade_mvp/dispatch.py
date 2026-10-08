@@ -746,6 +746,15 @@ def _install_submission_response_binding_authority(loader):
     canonical_json_module = json
     canonical_re_module = re
     canonical_journal_type = JournalStore
+    canonical_journal_load_events = JournalStore.load_events
+    canonical_journal_decode_row = JournalStore._decode_event_row
+    canonical_journal_connect = JournalStore._connect
+    canonical_journal_require_text = JournalStore._require_text
+    canonical_journal_store_identity = JournalStore.store_identity
+    canonical_journal_schema_version = JournalStore.SCHEMA_VERSION
+    canonical_response_bytes_guard = require_provider_response_bytes
+    canonical_response_depth_guard = require_provider_json_depth
+    canonical_response_size_limit = HARD_MAX_PROVIDER_RESPONSE_BYTES
 
     states: dict[int, tuple[object, tuple[object, ...]]] = {}
     field_names = (
@@ -793,6 +802,15 @@ def _install_submission_response_binding_authority(loader):
             or MappingProxyType is not mapping_proxy_type
             or weakref_ref is not canonical_weakref_ref
             or JournalStore is not canonical_journal_type
+            or JournalStore.load_events is not canonical_journal_load_events
+            or JournalStore._decode_event_row is not canonical_journal_decode_row
+            or JournalStore._connect is not canonical_journal_connect
+            or JournalStore._require_text is not canonical_journal_require_text
+            or JournalStore.store_identity is not canonical_journal_store_identity
+            or JournalStore.SCHEMA_VERSION != canonical_journal_schema_version
+            or require_provider_response_bytes is not canonical_response_bytes_guard
+            or require_provider_json_depth is not canonical_response_depth_guard
+            or HARD_MAX_PROVIDER_RESPONSE_BYTES != canonical_response_size_limit
             or json is not canonical_json_module
             or re is not canonical_re_module
             or sha256 is not canonical_sha256

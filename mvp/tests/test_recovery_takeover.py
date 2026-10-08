@@ -285,7 +285,7 @@ class DurableRecoveryTakeoverTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             PermissionError,
-            "Existing durable owner requires explicit takeover evidence",
+            "Durable owner already exists; independently authorized takeover is required",
         ):
             restarted.start("host-a")
 

@@ -1127,7 +1127,7 @@ class AlpacaAdapterTests(unittest.TestCase):
             account_id="paper-account",
         )
         attempt, prepared, observation = self._durable_submission_observation(
-            {
+            payload={
                 "id": str(uuid4()),
                 "client_order_id": client_id,
             },
@@ -1159,7 +1159,7 @@ class AlpacaAdapterTests(unittest.TestCase):
             account_id="paper-account",
         )
         attempt, prepared, observation = self._durable_submission_observation(
-            {
+            payload={
                 "id": str(uuid4()),
                 "client_order_id": client_id,
             },
@@ -1189,7 +1189,7 @@ class AlpacaAdapterTests(unittest.TestCase):
             account_id="paper-account",
         )
         attempt, prepared, observation = self._durable_submission_observation(
-            {
+            payload={
                 "id": str(uuid4()),
                 "client_order_id": client_id,
             },
@@ -1221,7 +1221,7 @@ class AlpacaAdapterTests(unittest.TestCase):
             account_id="paper-account",
         )
         attempt, prepared, observation = self._durable_submission_observation(
-            {
+            payload={
                 "id": str(uuid4()),
                 "client_order_id": client_id,
             },

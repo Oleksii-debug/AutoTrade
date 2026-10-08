@@ -786,7 +786,7 @@ def build_candidate(*, source_root, source_sha, desktop, host, python_archive, w
     extract_pinned(
         webview_archive,
         payload / 'notices/webview2-sdk-package',
-        webview_content_hash,
+        inputs['webview2_sdk']['archive_sha512_base64'],
         digest_algorithm='sha512-base64',
     )
     for required in ('python.exe', 'python312.dll', 'python312.zip', 'python312._pth', 'LICENSE.txt'):

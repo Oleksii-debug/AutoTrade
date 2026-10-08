@@ -556,8 +556,8 @@ def _autonomous_owned_event_ids(
     store: JournalStore,
     *,
     run_id: str,
-) -> tuple[tuple[str, str], ...]:
-    """Resolve exact ZERO event/topic bindings without an unbounded outbox scan."""
+) -> tuple[tuple[str, str, dict[str, object]], ...]:
+    """Resolve exact ZERO event/topic/envelope bindings without an outbox scan."""
 
     events = list(
         JournalStore.load_events(
@@ -585,11 +585,15 @@ def _autonomous_owned_event_ids(
         raise AutonomousRuntimeCheckpointError(
             "ZERO runtime event identities are not unique"
         )
-    result: list[tuple[str, str]] = []
+    result: list[tuple[str, str, dict[str, object]]] = []
     for event in events:
         topic = _canonical_publication_topic(event)
         if topic is not None:
-            result.append((event["event_id"], topic))
+            if type(event) is not dict:
+                raise AutonomousRuntimeCheckpointError(
+                    "ZERO event envelope must be an exact canonical dict"
+                )
+            result.append((event["event_id"], topic, event))
     return tuple(result)
 
 
@@ -600,24 +604,22 @@ def _autonomous_owned_pending_publications(
 ) -> tuple[dict[str, object], ...]:
     pending: list[dict[str, object]] = []
     financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
-    for event_id, topic in _autonomous_owned_event_ids(store, run_id=run_id):
+    for event_id, topic, envelope in _autonomous_owned_event_ids(store, run_id=run_id):
         # A publication is selected by its canonical topic, never by an
         # implicit or caller-selected topic. Missing required rows fail closed.
         state = JournalStore.outbox_delivery_state(
             store, event_id, topic=topic
         )
+        # The authenticated outbox view exposes publication metadata only.
+        # Its read already checked that the bytes match this immutable
+        # journal event, so evaluate ownership on the canonical event itself.
         if not _autonomous_publication_owned(
-            state,
+            {"payload": envelope},
             run_id=run_id,
             financial_scope=financial_scope,
         ):
             raise AutonomousRuntimeCheckpointError(
                 "exact ZERO outbox state escaped runtime ownership"
-            )
-        envelope = state.get("payload")
-        if type(envelope) is not dict:
-            raise AutonomousRuntimeCheckpointError(
-                "ZERO publication payload is not a canonical event envelope"
             )
         expected_topic = _canonical_publication_topic(envelope)
         if expected_topic is None:

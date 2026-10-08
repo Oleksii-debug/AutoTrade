@@ -8,6 +8,7 @@ policies instead of trusting an arbitrary staging directory.
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack, contextmanager
 from hashlib import sha256
 import json
 import os
@@ -17,6 +18,10 @@ import re
 import sys
 import zipfile
 
+from autotrade_foundation.windows_namespace import (
+    retain_windows_parent_namespace,
+    retain_windows_regular_file,
+)
 from research.autotrade_research.artifacts.durable_publish import (
     DurablePublishLockError,
     atomic_write_bytes_with_sha256_sidecar,
@@ -26,6 +31,8 @@ from research.autotrade_research.artifacts.durable_publish import (
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_WINDOWS_SPLIT_PATH_DESCRIPTOR_IDENTITY = os.name == "nt"
 _WINDOWS_RESERVED_BASENAMES = {
     "CON", "PRN", "AUX", "NUL",
     *(f"COM{index}" for index in range(1, 10)),
@@ -38,7 +45,7 @@ class InstallerManifestError(ValueError):
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise InstallerManifestError(f"{name} is required")
     return value.strip()
 
@@ -78,6 +85,15 @@ def _safe_relative(value: object) -> str:
 
 def _windows_path_key(relative: str) -> str:
     return relative.casefold()
+
+
+def _lexical_path_key(path: Path, *, name: str) -> str:
+    """Freeze one caller-selected path without following mutable filesystem links."""
+
+    if type(path) is not type(Path()):
+        raise InstallerManifestError(f"{name} must be an exact platform Path")
+    absolute = os.path.abspath(os.fspath(path))
+    return os.path.normcase(absolute) if os.name == "nt" else absolute
 
 
 def _digest(value: object, *, name: str) -> str:
@@ -263,8 +279,71 @@ def _verify_composition(
     }
 
 
+@contextmanager
 def _open_stable_regular_file(path: Path, *, name: str):
-    """Open one immutable-by-identity verification snapshot without path re-open."""
+    """Open one retained verification snapshot without mutable Windows pathname authority."""
+
+    if sys.platform == "win32":
+        candidate = Path(os.path.abspath(os.fspath(path)))
+        authority_stack = ExitStack()
+        try:
+            parent_authority = authority_stack.enter_context(
+                retain_windows_parent_namespace(
+                    candidate,
+                    create=False,
+                )
+            )
+            descriptor = authority_stack.enter_context(
+                retain_windows_regular_file(
+                    parent_authority,
+                    target_name=candidate.name,
+                    subject=name,
+                )
+            )
+            stream = authority_stack.enter_context(
+                os.fdopen(descriptor, "rb", closefd=False)
+            )
+            _assert_open_file_identity(candidate, stream, name=name)
+        except BaseException as error:
+            try:
+                authority_stack.close()
+            except BaseException as cleanup_failure:
+                try:
+                    error.add_note(
+                        "retained Windows namespace cleanup also failed: "
+                        f"{type(cleanup_failure).__name__}: {cleanup_failure}"
+                    )
+                except BaseException:
+                    pass
+            if isinstance(error, InstallerManifestError):
+                raise
+            if isinstance(error, (OSError, RuntimeError, TypeError)):
+                raise InstallerManifestError(
+                    f"{name} retained Windows namespace authority failed"
+                ) from error
+            raise
+        try:
+            yield stream
+        except BaseException as error:
+            try:
+                authority_stack.close()
+            except BaseException as cleanup_failure:
+                try:
+                    error.add_note(
+                        "retained Windows namespace cleanup also failed: "
+                        f"{type(cleanup_failure).__name__}: {cleanup_failure}"
+                    )
+                except BaseException:
+                    pass
+            raise
+        else:
+            try:
+                authority_stack.close()
+            except BaseException as cleanup_failure:
+                raise InstallerManifestError(
+                    f"{name} retained Windows namespace cleanup failed"
+                ) from cleanup_failure
+        return
 
     try:
         stream = path.open("rb")
@@ -272,10 +351,18 @@ def _open_stable_regular_file(path: Path, *, name: str):
         raise InstallerManifestError(f"{name} must be an existing regular file") from error
     try:
         _assert_open_file_identity(path, stream, name=name)
-    except BaseException:
+        yield stream
+    finally:
         stream.close()
-        raise
-    return stream
+
+
+def _has_windows_reparse_point(observed: os.stat_result) -> bool:
+    """Fail closed when a no-follow Windows stat identifies a reparse-backed file."""
+
+    attributes = getattr(observed, "st_file_attributes", 0)
+    if isinstance(attributes, bool) or not isinstance(attributes, int):
+        raise InstallerManifestError("release bundle Windows file attributes are invalid")
+    return bool(attributes & _WINDOWS_REPARSE_POINT)
 
 
 def _assert_open_file_identity(
@@ -291,9 +378,14 @@ def _assert_open_file_identity(
         raise InstallerManifestError(
             f"{name} identity cannot be verified"
         ) from error
+    if _has_windows_reparse_point(opened) or _has_windows_reparse_point(current):
+        raise InstallerManifestError(f"{name} must not be a Windows reparse point")
     if not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(current.st_mode):
         raise InstallerManifestError(f"{name} must be a regular non-symlink file")
-    if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+    if (
+        not _WINDOWS_SPLIT_PATH_DESCRIPTOR_IDENTITY
+        and (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+    ):
         raise InstallerManifestError(f"{name} changed during verification")
     if opened.st_nlink > 1 or current.st_nlink > 1:
         raise InstallerManifestError(f"{name} must not have hard-link aliases")
@@ -583,20 +675,9 @@ def build_installer_input_manifest(
     runtime_mode: str,
     runtime_prerequisite: str | None = None,
 ) -> dict[str, object]:
-    verified = verify_release_bundle(bundle)
-    bundle_resolved = bundle.resolve(strict=False)
-    output_resolved = output.resolve(strict=False)
-    digest_path = output.with_suffix(output.suffix + ".sha256")
-    digest_resolved = digest_path.resolve(strict=False)
-    if output_resolved == bundle_resolved:
-        raise InstallerManifestError(
-            "installer manifest output must not overwrite verified release bundle"
-        )
-    if digest_resolved == bundle_resolved:
-        raise InstallerManifestError(
-            "installer manifest digest output must not overwrite verified release bundle"
-        )
-
+    # Freeze caller-controlled installer policy scalars before reading the release
+    # artifact.  A str subclass can override strip()/upper(); it must never gain
+    # executable authority after bundle verification and before durable publication.
     framework = _text(target_framework, name="target_framework")
     mode = _text(runtime_mode, name="runtime_mode").upper()
     if mode not in {"SELF_CONTAINED", "FRAMEWORK_DEPENDENT"}:
@@ -612,6 +693,35 @@ def build_installer_input_manifest(
     elif runtime_prerequisite is not None:
         raise InstallerManifestError(
             "self-contained runtime cannot claim external runtime prerequisite"
+        )
+
+    bundle_key = _lexical_path_key(bundle, name="release bundle")
+    output_key = _lexical_path_key(output, name="installer manifest output")
+    digest_path = output.with_suffix(output.suffix + ".sha256")
+    digest_key = _lexical_path_key(
+        digest_path,
+        name="installer manifest digest output",
+    )
+    if output_key == bundle_key:
+        raise InstallerManifestError(
+            "installer manifest output must not overwrite verified release bundle"
+        )
+    if digest_key == bundle_key:
+        raise InstallerManifestError(
+            "installer manifest digest output must not overwrite verified release bundle"
+        )
+
+    verified = verify_release_bundle(bundle)
+    bundle_resolved = bundle.resolve(strict=False)
+    output_resolved = output.resolve(strict=False)
+    digest_resolved = digest_path.resolve(strict=False)
+    if output_resolved == bundle_resolved:
+        raise InstallerManifestError(
+            "installer manifest output must not overwrite verified release bundle"
+        )
+    if digest_resolved == bundle_resolved:
+        raise InstallerManifestError(
+            "installer manifest digest output must not overwrite verified release bundle"
         )
 
     manifest = {

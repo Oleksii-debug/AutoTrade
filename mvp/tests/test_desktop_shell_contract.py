@@ -466,7 +466,7 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn('src/**/*.xaml', workflow)
         self.assertIn("desktop-build:", workflow)
-        self.assertIn("runs-on: windows-latest", workflow)
+        self.assertIn("runs-on: windows-2025", workflow)
         self.assertIn(
             "dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj",
             workflow,

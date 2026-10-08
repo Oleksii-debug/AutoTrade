@@ -101,6 +101,37 @@ class LifecycleCostValuationBridgeTests(unittest.TestCase):
         for ref in projection.cost_evidence_refs.values():
             self.assertRegex(ref, r"^sha256:[0-9a-f]{64}$")
 
+    def test_after_cost_diagnostic_bound_charges_all_conservative_costs(self):
+        projection = _project(_profile())
+        self.assertEqual(projection.cost_rate, Decimal("0.0056"))
+        self.assertEqual(
+            projection.diagnostic_after_cost_lower_bound(Decimal("0.0040")),
+            Decimal("-0.0016"),
+        )
+        self.assertEqual(
+            projection.diagnostic_after_cost_lower_bound(Decimal("-0.0030")),
+            Decimal("-0.0086"),
+        )
+        self.assertEqual(
+            projection.diagnostic_after_cost_lower_bound(Decimal("0.0150")),
+            Decimal("0.0094"),
+        )
+        # A positive numerical result never proves an economic edge.
+
+    def test_after_cost_diagnostic_rejects_noncanonical_or_tampered_inputs(self):
+        projection = _project(_profile())
+        for gross in ("0.03", 0.03, Decimal("NaN"), Decimal("Infinity")):
+            with self.subTest(gross=repr(gross)):
+                with self.assertRaises((TypeError, LifecycleValuationProjectionError)):
+                    projection.diagnostic_after_cost_lower_bound(gross)
+        altered = _project(_profile())
+        object.__setattr__(altered, "cost_rate", Decimal("0"))
+        with self.assertRaisesRegex(
+            LifecycleValuationProjectionError,
+            "cost total was changed",
+        ):
+            altered.diagnostic_after_cost_lower_bound(Decimal("0.01"))
+
     def test_market_impact_requires_frozen_evidence_and_is_charged_separately(self):
         base = _profile()
         requirements = LifecycleCostRequirements(

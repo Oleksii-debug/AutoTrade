@@ -20,7 +20,13 @@ import json
 from types import MappingProxyType
 from typing import Mapping
 
-from .exact_decimal import ExactDecimalError, canonical_decimal_text, exact_sum
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    exact_subtract,
+    exact_sum,
+    parse_bounded_exact_decimal,
+)
 from .lifecycle_cost import (
     AllocationCostSplit,
     LifecycleCostError,
@@ -303,6 +309,37 @@ class LifecycleValuationProjection:
             "cost_evidence_refs",
             MappingProxyType(dict(self.cost_evidence_refs)),
         )
+
+
+    def diagnostic_after_cost_lower_bound(self, gross_lower_bound: Decimal) -> Decimal:
+        """Subtract every conservatively budgeted cost from a caller's gross bound.
+
+        Only arithmetic within this already-frozen instrument/horizon cut is
+        asserted. The gross bound and its distribution are NOT independently
+        verified here. This result cannot issue profitability, scientific
+        qualification, a risk exception, or any order permission.
+        """
+        if type(self) is not LifecycleValuationProjection:
+            raise TypeError("projection must be exact LifecycleValuationProjection")
+        if type(gross_lower_bound) is not Decimal:
+            raise TypeError("gross_lower_bound must be exact Decimal")
+        if not gross_lower_bound.is_finite():
+            raise LifecycleValuationProjectionError(
+                "gross lower bound must be finite"
+            )
+        if _sum(self.cost_rate_components.values()) != self.cost_rate:
+            raise LifecycleValuationProjectionError(
+                "valuation projection cost total was changed after freezing"
+            )
+        try:
+            gross = parse_bounded_exact_decimal(
+                canonical_decimal_text(gross_lower_bound)
+            )
+            return exact_subtract(gross, self.cost_rate)
+        except (ExactDecimalError, ValueError) as error:
+            raise LifecycleValuationProjectionError(
+                "gross bound or after-cost arithmetic exceeds exact-decimal limits"
+            ) from error
 
 
 def project_lifecycle_cost_to_valuation(

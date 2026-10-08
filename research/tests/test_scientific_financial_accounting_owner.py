@@ -196,7 +196,7 @@ def _checkpoint_and_cut(
         result=result,
         observed_at="2026-09-24T19:00:00Z",
         host_id="test-host",
-        owner_epoch="epoch-1",
+        owner_epoch="1",
     )
     cut = capture_current_scientific_financial_cut(
         store,
@@ -350,7 +350,7 @@ class ScientificFinancialAccountingOwnerTests(unittest.TestCase):
                 result=_bybit_reconciliation("DEMO"),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             cut = capture_current_scientific_financial_cut(
                 store,
@@ -743,7 +743,7 @@ class ScientificFinancialAccountingOwnerTests(unittest.TestCase):
                 result=_reconciliation(),
                 observed_at="2026-09-24T19:01:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
 
             decision = evaluate_gates_with_scientific_financial_accounting_owner(

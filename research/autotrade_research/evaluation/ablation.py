@@ -1248,11 +1248,15 @@ def _canonical_database_path_binding(
     """Bind one exact SQLite pathname without claiming physical-file identity."""
 
     state = object.__getattribute__(value, "__dict__")
-    if type(state) is not dict or "path" not in state:
+    # ScientificRegistry froze its database path under the private _path
+    # attribute. Reading the public property would admit monkeypatching and
+    # dispatch caller code at this provenance boundary.
+    backing_key = "_path" if type(value) is ScientificRegistry else "path"
+    if type(state) is not dict or backing_key not in state:
         raise ProtocolViolation(
             f"ablation qualification {label} database path is unavailable"
         )
-    path = state["path"]
+    path = state[backing_key]
     if type(path) is not _path_type:
         raise ProtocolViolation(
             f"ablation qualification {label} database path is not canonical"

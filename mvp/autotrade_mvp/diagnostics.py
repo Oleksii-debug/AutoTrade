@@ -31,7 +31,11 @@ _REDACTION_MARKERS = (
 
 
 def _normalized_key(value: object) -> str:
-    return "".join(character for character in str(value).lower() if character.isalnum())
+    # Keys must be exact built-in strings. Never call hostile __str__ callbacks
+    # before applying the credential redaction boundary.
+    if type(value) is not str:
+        raise ValueError("diagnostic keys must be exact strings")
+    return "".join(character for character in value.lower() if character.isalnum())
 
 
 def _is_sensitive_key(value: object) -> bool:
@@ -139,23 +143,49 @@ def _redact_embedded_secret_text(value: str) -> str:
 
 
 def redact_diagnostic_value(value: Any) -> Any:
-    """Recursively redact credential-shaped keys and embedded secret text."""
+    """Mask credentials before logs or user output with a bounded exact-JSON walk.
 
-    if isinstance(value, str):
-        return _redact_embedded_secret_text(value)
-    if isinstance(value, dict):
-        result = {}
-        for key, child in value.items():
-            if _is_sensitive_key(key):
-                result[key] = "[REDACTED]"
-            else:
-                result[key] = redact_diagnostic_value(child)
-        return result
-    if isinstance(value, list):
-        return [redact_diagnostic_value(child) for child in value]
-    if isinstance(value, tuple):
-        return [redact_diagnostic_value(child) for child in value]
-    return value
+    Never invoke methods of arbitrary Mapping, str, list or tuple subclasses.
+    Reject unsupported/executable objects rather than trying to serialize
+    them. Existing caller-owned values remain unchanged.
+    """
+
+    remaining = [10000]
+
+    def scrub(item: Any, depth: int) -> Any:
+        remaining[0] -= 1
+        if remaining[0] < 0 or depth > 32:
+            raise ValueError("diagnostic redaction resource budget exceeded")
+        if type(item) is str:
+            if len(item) > 131072:
+                raise ValueError("diagnostic text resource budget exceeded")
+            return _redact_embedded_secret_text(item)
+        if type(item) is dict:
+            if len(item) > 1000:
+                raise ValueError("diagnostic object resource budget exceeded")
+            result = {}
+            for key, child in item.items():
+                if type(key) is not str:
+                    raise ValueError("diagnostic object keys must be exact strings")
+                result[key] = (
+                    "[REDACTED]"
+                    if _is_sensitive_key(key)
+                    else scrub(child, depth + 1)
+                )
+            return result
+        if type(item) is list:
+            return [scrub(child, depth + 1) for child in item]
+        if type(item) is tuple:
+            return [scrub(child, depth + 1) for child in item]
+        if type(item) in (bool, int, type(None)):
+            return item
+        if type(item) is float:
+            if not __import__("math").isfinite(item):
+                raise ValueError("nonfinite diagnostic metric is forbidden")
+            return item
+        raise TypeError("diagnostic structured values require exact JSON primitives")
+
+    return scrub(value, 0)
 
 
 @dataclass(frozen=True)

@@ -148,6 +148,37 @@ class DotnetPackageRightsTests(unittest.TestCase):
     def test_repository_locked_graph_has_exact_rights_coverage(self):
         self.assertEqual(package_rights_blockers(ROOT), [])
 
+    def test_desktop_locked_win_x64_restore_requires_exact_rid_and_order(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            generic_project = _write_project(root)
+            desktop_dir = root / "src" / "AutoTrade.Desktop"
+            generic_project.parent.rename(desktop_dir)
+            project = desktop_dir / "AutoTrade.Desktop.csproj"
+            (desktop_dir / "App.csproj").rename(project)
+            _write_policy(root)
+            _write_rights_workflow(root, [project])
+            workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
+            original = workflow.read_text(encoding="utf-8")
+            relative = project.relative_to(root).as_posix()
+            exact = f"dotnet restore {relative} --locked-mode"
+            windows = f"dotnet restore {relative} -r win-x64 --locked-mode"
+            self.assertIn(exact, original)
+            workflow.write_text(original.replace(exact, windows), encoding="utf-8")
+            self.assertEqual(package_rights_blockers(root), [])
+            for invalid in (
+                f"dotnet restore {relative} -r linux-x64 --locked-mode",
+                f"dotnet restore {relative} -r win-x64",
+            ):
+                with self.subTest(invalid=invalid):
+                    workflow.write_text(
+                        original.replace(exact, invalid), encoding="utf-8"
+                    )
+                    self.assertIn(
+                        f"DOTNET_PACKAGE_RIGHTS_VERIFY_ORDER_INVALID:{relative}",
+                        package_rights_blockers(root),
+                    )
+
     def test_missing_rights_record_blocks_locked_package(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

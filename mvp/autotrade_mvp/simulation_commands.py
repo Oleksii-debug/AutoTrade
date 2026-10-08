@@ -247,7 +247,15 @@ def execute_simulation_action(journal, action, payload, accepted_at):
             completed = subprocess.run(
                 command, stdin=subprocess.DEVNULL, capture_output=True, timeout=300
             )
-            diagnostic('worker_exited', str(completed.returncode))
+            if completed.returncode and os.environ.get('AUTOTRADE_TEST_DIAGNOSTIC') == '1':
+                import re
+                stderr = completed.stderr.decode('utf-8', errors='replace')
+                types = re.findall(r'(?m)^([A-Za-z_][\w.]*(?:Error|Exception)):', stderr)
+                frames = re.findall(r'(?m)^\s*File "[^"]+", line \d+, in ([A-Za-z_]\w*)', stderr)
+                detail = f'{completed.returncode}:{types[-1].rsplit(".", 1)[-1] if types else "UNKNOWN"}:{frames[-1] if frames else "UNKNOWN"}'
+                diagnostic('worker_exited', detail)
+            else:
+                diagnostic('worker_exited', str(completed.returncode))
         except (OSError, subprocess.SubprocessError) as error:
             # Process-launch failure and timeout are recoverable execution
             # uncertainty, not permission to strand a durable Host operation in

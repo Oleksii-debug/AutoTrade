@@ -287,7 +287,22 @@ class AuthenticatedHostApplication:
                     continue
                 try:
                     result = self.store.execute_authority_operation(operation_id)
-                except (TypeError, ValueError, OverflowError):
+                except (TypeError, ValueError, OverflowError) as error:
+                    # Browser qualification only: retain the failing boundary
+                    # without recording exception text, paths, or credentials.
+                    import os
+                    if os.environ.get("AUTOTRADE_TEST_DIAGNOSTIC") == "1":
+                        from pathlib import Path
+                        frame = error.__traceback__
+                        while frame is not None and frame.tb_next is not None:
+                            frame = frame.tb_next
+                        Path(self.store._journal.path).parent.parent.joinpath(
+                            "host-fault-diagnostic.txt"
+                        ).write_text(
+                            type(error).__name__ + ":" +
+                            (frame.tb_frame.f_code.co_name if frame is not None else "UNKNOWN"),
+                            encoding="utf-8",
+                        )
                     current = self.store.get_operation(operation_id)
                     if (
                         current.phase in self.store.TERMINAL_PHASES

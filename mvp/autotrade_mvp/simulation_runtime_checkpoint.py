@@ -993,9 +993,18 @@ def persist_autonomous_runtime_checkpoint(
     )
     if os.environ.get("AUTOTRADE_TEST_DIAGNOSTIC") == "1" and len(completed) == 1:
         scope, _, _ = _runtime_scope_snapshot(store, run_id=protocol["run_id"])
+        identity = store.store_identity
         diagnostic = {
             "scope": scope["state_digest"],
-            "identity": sha256(str(store.store_identity).encode("utf-8")).hexdigest(),
+            "identity": sha256(str(identity).encode("utf-8")).hexdigest(),
+            "identity_fields": {
+                field: sha256(str(getattr(identity, field)).encode("utf-8")).hexdigest()
+                for field in (
+                    "canonical_path", "filesystem_device", "filesystem_inode",
+                    "identity_source", "windows_volume_serial", "windows_file_index_high",
+                    "windows_file_index_low",
+                )
+            },
             "cut": checkpoint.runtime_cut_id,
         }
         (Path(root).parent / "bootstrap-checkpoint-diagnostic.json").write_text(

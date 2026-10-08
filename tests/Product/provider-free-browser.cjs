@@ -71,10 +71,13 @@ cut,components=_stable_runtime_components(store,protocol=protocol,completed=comp
 scope,_,_=_runtime_scope_snapshot(store,run_id=protocol['run_id'])
 identity=hashlib.sha256(str(store.store_identity).encode()).hexdigest()
 bootstrap=json.loads((root.parent/'bootstrap-checkpoint-diagnostic.json').read_text())
+field_matches={name: expected==hashlib.sha256(str(getattr(store.store_identity,name)).encode()).hexdigest()
+    for name,expected in bootstrap['identity_fields'].items()}
 print(json.dumps({'match':saved.runtime_cut_id==cut,'scope':scope['state_digest'],
     'identity':identity,'completed':len(completed),
     'bootstrap_scope_match':bootstrap['scope']==scope['state_digest'],
     'bootstrap_identity_match':bootstrap['identity']==identity,
+    'bootstrap_identity_field_matches':field_matches,
     'bootstrap_cut_match':bootstrap['cut']==cut}))
 `, path.join(directory, "state")], {cwd: ROOT, env, encoding: "utf8", timeout: 30000});
   assert.equal(result.status, 0, "Checkpoint signature inspection failed: " + result.stderr);
@@ -113,8 +116,13 @@ async function command(page, action, index) {
   const phase = await page.locator("#operations-body tr[data-operation-id]").last()
     .locator("td").first().innerText();
   const diagnostic = path.join(data, "worker-stage-diagnostic.txt");
-  assert.equal(phase, "SUCCEEDED", fs.existsSync(diagnostic)
-    ? `Worker stage: ${fs.readFileSync(diagnostic, "utf8")}` : "No worker stage diagnostic");
+  const hostDiagnostic = path.join(data, "host-fault-diagnostic.txt");
+  assert.equal(phase, "SUCCEEDED", [
+    fs.existsSync(diagnostic)
+      ? `Worker stage: ${fs.readFileSync(diagnostic, "utf8")}` : "No worker stage diagnostic",
+    fs.existsSync(hostDiagnostic)
+      ? `Host fault: ${fs.readFileSync(hostDiagnostic, "utf8")}` : "No host fault diagnostic",
+  ].join("; "));
   await page.keyboard.press("Shift+Tab");
   assert.equal(
     await page.evaluate(() => document.activeElement.id),
@@ -481,6 +489,7 @@ async function exerciseHostOutageFailClosed(page) {
     at_open_match: checkpointAtOpen.match,
     bootstrap_scope_match: checkpointAtOpen.bootstrap_scope_match,
     bootstrap_identity_match: checkpointAtOpen.bootstrap_identity_match,
+    bootstrap_identity_field_matches: checkpointAtOpen.bootstrap_identity_field_matches,
     bootstrap_cut_match: checkpointAtOpen.bootstrap_cut_match,
     before_stop_match: checkpointBeforeStop.match,
     after_stop_match: checkpointAfterStop.match,

@@ -117,6 +117,12 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         sleep.assert_called_once_with(0.1)
 
+        preflight = Mock(side_effect=[SimulationStateChanging('busy'), 'completed'])
+        with patch('time.sleep') as sleep:
+            self.assertEqual(_run_after_snapshot_reader(preflight), 'completed')
+        self.assertEqual(preflight.call_count, 2)
+        sleep.assert_called_once_with(0.1)
+
         with patch('time.sleep') as sleep:
             with self.assertRaisesRegex(ValueError, 'other failure'):
                 _run_after_snapshot_reader(Mock(side_effect=ValueError('other failure')))

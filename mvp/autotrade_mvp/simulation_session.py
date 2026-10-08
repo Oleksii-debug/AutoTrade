@@ -2909,6 +2909,16 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                                              Decimal("0.000000000000000001"), mode="CEILING")
         frozen_target = parse_bounded_exact_decimal(protocol["target_quantity"])
         proposal = MovingAverageStrategy(**protocol["strategy_parameters"]).decide(values[:episode], frozen_target)
+        # Record the existing provider-free specialist as a diagnostic proposal.
+        # It cannot select exposure: the frozen strategy and financial authorities
+        # alone choose allocation, hard risk, reservation, and guarded dispatch.
+        from .product_agent import decide as decide_zero_agent
+        agent_side = decide_zero_agent(
+            store, protocol, episode=episode, strategy_side=proposal.side,
+            position=position, timestamp=timestamp,
+        )
+        if agent_side != proposal.side:
+            raise ValueError("ZERO agent proposal differs from the frozen strategy")
         target_quantity = frozen_target if proposal.side == "BUY" else Decimal("0") if proposal.side == "SELL" else position
         decision = "BUY" if target_quantity > position else "REDUCE" if target_quantity < position else "HOLD" if proposal.side == "HOLD" else "NO_TRADE"
         emergency = protocol["emergency_at_episode"] is not None and episode >= protocol["emergency_at_episode"]

@@ -56,3 +56,30 @@ jobs:
           name: plan3-production-host-${{ runner.os }}-${{ github.sha }}
           path: plan3-host-evidence.json
           if-no-files-found: error
+
+  native-host-process:
+    name: native Host.Process (windows-2025)
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.100'
+      - name: Compile and execute canonical native Host process contract and fail-closed startup
+        run: dotnet run --project tests/Host.Process/Host.Process.csproj --configuration Release
+      - name: Emit exact-SHA native Host evidence (no provider financial authority)
+        env:
+          AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python tools/write_ci_evidence.py --suite plan3-native-host-process-section6 --command "Host.Process fail-closed startup tests" --output plan3-native-host-evidence.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan3-native-host-${{ runner.os }}-${{ github.sha }}
+          path: plan3-native-host-evidence.json
+          if-no-files-found: error

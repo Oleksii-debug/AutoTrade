@@ -22,11 +22,16 @@ on:
       - '.github/workflows/plan5-terminal-component.yml'
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 env:
   AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
 
 jobs:
   source-security-accessibility-update:
@@ -60,6 +65,13 @@ jobs:
             mvp.tests.test_windows_update \
             mvp.tests.test_runtime_locality_packaging \
             mvp.tests.test_provider_free_candidate_builder -v
+      - name: Emit exact-head source/negative evidence after successful execution
+        run: python tools/write_ci_evidence.py --suite plan5-terminal-source-and-recovery --command "source accessibility + Desktop contract + package/update/rollback adversarial tests" --output artifacts/plan5-terminal-source.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan5-terminal-source-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/plan5-terminal-source.json
+          if-no-files-found: error
       - name: No final-release or live-provider assertion
         run: echo 'SOURCE COMPONENT TESTS ONLY; physical NVDA, real provider and signed final release NOT CLAIMED'
 
@@ -91,6 +103,13 @@ jobs:
       - name: Real headless keyboard-only navigation, focus, history, outage and fail-closed checks
         working-directory: tests/Product
         run: node plan5-navigation.cjs
+      - name: Emit exact-head browser navigation evidence
+        run: python tools/write_ci_evidence.py --suite plan5-terminal-keyboard-browser --command "Playwright chromium real keyboard + hash history + unknown route + Host outage" --output artifacts/plan5-terminal-browser.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan5-terminal-browser-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/plan5-terminal-browser.json
+          if-no-files-found: error
 
   windows-desktop-native-emergency:
     runs-on: windows-2025
@@ -119,6 +138,13 @@ jobs:
         run: |
           dotnet restore tests/Desktop.Client/Desktop.Client.csproj --locked-mode
           dotnet run --project tests/Desktop.Client/Desktop.Client.csproj -c Release --no-restore
+      - name: Emit exact-head Windows Desktop native recovery evidence
+        run: python tools/write_ci_evidence.py --suite plan5-terminal-desktop-native --command "locked Desktop WPF build + native emergency + restart + policy negative tests" --output artifacts/plan5-terminal-desktop.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan5-terminal-desktop-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/plan5-terminal-desktop.json
+          if-no-files-found: error
 
   component-gate:
     runs-on: ubuntu-22.04

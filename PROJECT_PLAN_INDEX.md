@@ -14,31 +14,31 @@ Plan 9 is the final dependency-aware release/NVDA/M2 plan with an optional later
 
 ## Plans
 
-1. Фінансове ядро, портфель, ризик та економіка
+1. Перший план — Фінансове ядро, портфель, ризик та економіка
 https://docs.google.com/document/d/1-QU64I32cFepZwYcxINwRuYIe9ptRSBA5xVqCtquC1s/edit
 
-2. Агент, дослідження, навчання та моделі
+2. Другий план — Агент, дослідження, навчання та моделі
 https://docs.google.com/document/d/1EWWvsf4uLhRU881lr8z15rndBiox9VqIry0GeY_3JHU/edit
 
-3. Runtime, відновлення, backup, Host та observability
+3. Третій план — Runtime, відновлення, backup, Host та observability
 https://docs.google.com/document/d/1UBKbVuUQf7CIieqNiEfn144t_CvWXkWPstthLYdTM7Y/edit
 
-4. Довіра, безпека, хронологія та supply chain
+4. Четвертий план — Довіра, безпека, хронологія та supply chain
 https://docs.google.com/document/d/1byiGz1q8f4GpBeTiMUwS6TiN6hTqoXclkIxTFM19NUQ/edit
 
-5. Web, Windows Desktop, accessibility та packaging
+5. П’ятий план — Web, Windows Desktop, accessibility та packaging
 https://docs.google.com/document/d/1D-O-uLOe9DfddFkZA3d_icjKPmsR0qwImm14mGJ7imk/edit
 
-6. Providers, account/capability contracts та adapters
+6. Шостий план — Providers, account/capability contracts та adapters
 https://docs.google.com/document/d/1mG2hK9mVdu73JkZmbUDEazE9RW162bj3VjFXUUzqCDI/edit
 
-7. Наукова кваліфікація, evidence та performance
+7. Сьомий план — Наукова кваліфікація, evidence та performance
 https://docs.google.com/document/d/1Di1lglr6A_NRw2I3hvKy2vXF3WiV2eLSlpbjW4TlQQ4/edit
 
-8. Provider-free M1 whole-product convergence
+8. Восьмий план — Provider-free M1 whole-product convergence
 https://docs.google.com/document/d/1pebBXU4mdFMnFpCC7cc1fStkpV1vnUNr4U4EppOKqns/edit
 
-9. External qualification, signed release, NVDA та M2
+9. Дев’ятий план — External qualification, signed release, NVDA та M2
 https://docs.google.com/document/d/1sbCFL7NeCK5AfUvZFkGJ2FbOGBAAfHqPcj5-99j9qFw/edit
 
 ## Worker selection

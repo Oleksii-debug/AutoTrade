@@ -82,6 +82,14 @@ def install_network_deny(stack: ExitStack) -> None:
     if hasattr(socket.socket, "sendmsg"):
         stack.enter_context(patch.object(socket.socket, "sendmsg", deny_network))
     stack.enter_context(patch.object(socket, "create_connection", deny_network))
+    # DNS lookups can transmit queries before any guarded socket.connect call.
+    # Keep the offline guarantee fail-closed even for resolver-only code paths.
+    for resolver in (
+        "getaddrinfo", "gethostbyname", "gethostbyname_ex",
+        "gethostbyaddr", "getnameinfo", "getfqdn",
+    ):
+        if hasattr(socket, resolver):
+            stack.enter_context(patch.object(socket, resolver, deny_network))
 
 
 def main() -> int:

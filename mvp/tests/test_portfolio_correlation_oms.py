@@ -25,7 +25,7 @@ def _oms(directory: str) -> DurableOrderBookProjection:
         account_id="acct:1",
         environment="SIMULATION",
         host_id="host-1",
-        owner_epoch="epoch-1",
+        owner_epoch="1",
     )
 
 
@@ -67,7 +67,7 @@ def test_empty_oms_scope_mismatch_cannot_hide_proposal_open_exposure_domain(
             account_id=account_id,
             environment=environment,
             host_id="host-1",
-            owner_epoch="epoch-1",
+            owner_epoch="1",
         )
         proposal, evidence, resolver, policy = _passing_inputs()
 
@@ -92,7 +92,7 @@ def test_oms_class_property_spoof_does_not_hide_mismatched_account_scope():
             account_id="acct:other",
             environment="SIMULATION",
             host_id="host-1",
-            owner_epoch="epoch-1",
+            owner_epoch="1",
         )
         proposal, evidence, resolver, policy = _passing_inputs()
         callbacks = []
@@ -129,7 +129,7 @@ def test_proposal_class_property_spoof_cannot_fake_matching_oms_scope():
             account_id="acct:other",
             environment="SIMULATION",
             host_id="host-1",
-            owner_epoch="epoch-1",
+            owner_epoch="1",
         )
         proposal, evidence, resolver, policy = _passing_inputs()
         callbacks = []

@@ -66,7 +66,7 @@ jobs:
         run: >-
           python tools/write_ci_evidence.py
           --suite section15-portfolio-qualification
-          --command "python -m pytest -q -ra section15 portfolio test modules"
+          --command "python -m pytest -q -ra mvp/tests/test_allocation_evidence.py mvp/tests/test_allocation_payload_provenance.py mvp/tests/test_allocation_valuation.py mvp/tests/test_authority_allocation_snapshot_ingress.py mvp/tests/test_portfolio_correlation.py mvp/tests/test_portfolio_correlation_allocation_integrity.py mvp/tests/test_portfolio_correlation_oms.py mvp/tests/test_portfolio_correlation_resolver_ingress.py"
           --output "artifacts/section15-${{ runner.os }}.json"
       - uses: actions/upload-artifact@v4
         with:

@@ -45,6 +45,29 @@ class Plan6FamilyContractTests(unittest.TestCase):
                 with self.subTest(asset=asset_class, provider=provider_id, family=product_family):
                     self.assertIn(product_family, _EXPECTED_FAMILIES[provider_id])
 
+    def test_existing_bybit_instrument_metadata_detaches_without_losing_scope(self):
+        # Regression: already validated, immutable metadata must round-trip
+        # through the canonical registry without weakening the public ingress.
+        from types import MappingProxyType
+        from mvp.autotrade_mvp.instruments import InstrumentRegistry
+        from mvp.tests.test_bybit_fee_currency_authority import linear_instrument
+
+        source = linear_instrument()
+        self.assertIs(type(source.metadata_evidence[0]), MappingProxyType)
+        self.assertIs(type(source.funding_schedule), MappingProxyType)
+        registered = InstrumentRegistry(versions=(source,)).exact(
+            f"{source.instrument_id}@{source.version}"
+        )
+        self.assertIsNot(source, registered)
+        self.assertEqual(
+            dict(registered.metadata_evidence[0]),
+            dict(source.metadata_evidence[0]),
+        )
+        self.assertEqual(
+            dict(registered.funding_schedule),
+            dict(source.funding_schedule),
+        )
+
     def test_unregistered_provider_fails_closed(self):
         for provider in ("UNKNOWN_BROKER", "", "BYBIT/OTHER"):
             with self.subTest(provider=provider):

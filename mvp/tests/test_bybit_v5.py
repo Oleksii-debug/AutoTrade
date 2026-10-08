@@ -1767,11 +1767,13 @@ class BybitV5AdapterTests(unittest.TestCase):
         def forged_uuid5(_namespace, _name):
             raise AssertionError("mutated uuid5 code executed")
 
-        with patch.object(
-            bybit_v5_module.uuid5,
-            "__code__",
-            forged_uuid5.__code__,
-        ):
+        # unittest.mock.patch.object tries delattr on function.__code__ after
+        # a successful patch (the descriptor is not owned by __dict__).
+        # That raises TypeError and leaves a process-wide poisoned uuid5.
+        # Restore the exact original code unconditionally.
+        original_code = bybit_v5_module.uuid5.__code__
+        try:
+            bybit_v5_module.uuid5.__code__ = forged_uuid5.__code__
             with self.assertRaisesRegex(
                 ProviderCoreError,
                 "submission response parser authority changed",
@@ -1781,6 +1783,8 @@ class BybitV5AdapterTests(unittest.TestCase):
                     prepared_request=prepared,
                     observation=observation,
                 )
+        finally:
+            bybit_v5_module.uuid5.__code__ = original_code
 
     def test_submission_consumer_rejects_subclass_before_virtual_callback(self):
         attempt, prepared, _observation = self._durable_write_observation(

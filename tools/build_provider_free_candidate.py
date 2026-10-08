@@ -12,6 +12,7 @@ from hashlib import sha256, sha512
 import json
 import os
 from pathlib import Path, PurePosixPath
+_PATH_TYPE = type(Path("."))
 import stat
 import zipfile
 import xml.etree.ElementTree as ET
@@ -75,7 +76,7 @@ def _write_new_payload_json(path, value):
 
 
 def _capture_publish(publish):
-    if type(publish) is not Path:
+    if type(publish) is not _PATH_TYPE:
         raise TypeError('publish root must be an exact Path')
     captured = {}
     for relative, _, content in _collect(publish):
@@ -121,7 +122,7 @@ def _rewrite_existing_publish_evidence(path, evidence):
     directory entry; it cannot redirect binder bytes through a substituted
     symlink or hardlink into another authority-owned file.
     """
-    if type(path) is not Path or type(evidence) is not dict:
+    if type(path) is not _PATH_TYPE or type(evidence) is not dict:
         raise TypeError('publish evidence rewrite requires exact Path and dict')
     payload = (
         json.dumps(evidence, indent=2, sort_keys=True, ensure_ascii=False) + '\n'
@@ -280,7 +281,7 @@ def stage_source(source_root, source_sha, destination, composition_path):
                     for part in parts:
                         descriptor = parents.enter_context(_retained_posix_relative_directory(descriptor, (part,), create=True))
     _stage_source_controlled_components(staging=destination, composition_path=composition_path,
-        source_root=source_root, descriptors=descriptors, expected_source_sha=source_sha)
+        source_root=source_root, descriptors=descriptors)
     _write_new_payload_bytes(destination / 'SOURCE_REVISION', (source_sha + '\n').encode())
     return selected
 
@@ -508,7 +509,7 @@ def _require_webview2_archive_rights(
     version,
     content_hash,
 ):
-    if type(product_root) is not Path or type(archive_path) is not Path:
+    if type(product_root) is not _PATH_TYPE or type(archive_path) is not _PATH_TYPE:
         raise TypeError('WebView2 rights verification requires exact Path values')
     if type(version) is not str or type(content_hash) is not str:
         raise TypeError('WebView2 rights identity must be exact str values')

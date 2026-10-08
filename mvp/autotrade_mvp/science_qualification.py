@@ -40,6 +40,53 @@ _REQUIRED_GATES = (
 
 GateEvidenceVerifier = Callable[["QualificationGate"], bool]
 
+def _gate_assertion_requirement(gate: "QualificationGate") -> str:
+    """Return the signed identity of one complete scientific gate assertion."""
+
+    canonical = json.dumps(
+        {
+            "gate_id": gate.gate_id,
+            "status": gate.status,
+            "evidence_hashes": list(gate.evidence_hashes),
+            "candidate_hash": gate.candidate_hash,
+            "frozen_protocol_hash": gate.frozen_protocol_hash,
+            "input_snapshot_hash": gate.input_snapshot_hash,
+            "reason_codes": list(gate.reason_codes),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    digest = sha256(canonical.encode("utf-8")).hexdigest()
+    return f"gate-assertion/{gate.gate_id}/sha256:{digest}"
+
+
+def _input_assertion_requirement(
+    evidence: "ScientificQualificationInput",
+) -> str:
+    """Return the signed identity of caller-controlled scientific assertions."""
+
+    canonical = json.dumps(
+        {
+            "candidate_hash": evidence.candidate_hash,
+            "frozen_protocol_hash": evidence.frozen_protocol_hash,
+            "input_snapshot_hash": evidence.input_snapshot_hash,
+            "economic_claim": evidence.economic_claim,
+            "holdout_used_for_tuning": evidence.holdout_used_for_tuning,
+            "future_information_used_for_routing": (
+                evidence.future_information_used_for_routing
+            ),
+            "population_coverage_hash": evidence.population_coverage_hash,
+            "source_sha": evidence.source_sha,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    digest = sha256(canonical.encode("utf-8")).hexdigest()
+    return f"science-input/sha256:{digest}"
+
+
 _QUALIFICATION_DOMAIN = "SCIENCE"
 _QUALIFICATION_GATE = "ECONOMIC_EDGE"
 _QUALIFICATION_PACKAGE = "WP-56"
@@ -156,9 +203,11 @@ def _required_signed_bindings(
 ) -> frozenset[str]:
     bindings = {
         _QUALIFICATION_REQUIREMENT,
+        _input_assertion_requirement(evidence),
         f"candidate/{evidence.candidate_hash}",
         f"input/{evidence.input_snapshot_hash}",
         *(f"gate/{gate_id}" for gate_id in _REQUIRED_GATES),
+        *(_gate_assertion_requirement(gate) for gate in evidence.gates),
     }
     if evidence.population_coverage_hash is not None:
         bindings.add(f"population/{evidence.population_coverage_hash}")
@@ -284,6 +333,7 @@ def qualify_scientific_learning(
         verified = (
             trust_status == "PASS"
             and f"gate/{gate_id}" in signed_requirement_set
+            and _gate_assertion_requirement(gate) in signed_requirement_set
             and all(digest in signed_digest_set for digest in gate.evidence_hashes)
         )
         if not verified:

@@ -2253,6 +2253,7 @@ function renderOperation(operation) {
       for (const page of pages.values()) page.link.removeAttribute("aria-current");
       if (hash === "#main") {
         text("page-navigation-status", "Main content. Use headings to move among AutoTrade sections.");
+        if (focusHeading) byId("main").focus({preventScroll: true});
         return;
       }
       if (!target || (hash !== "" && hash !== "#" + id)) {
@@ -2261,7 +2262,7 @@ function renderOperation(operation) {
       }
       target.link.setAttribute("aria-current", "location");
       text("page-navigation-status", "Current section: " + target.heading.textContent.trim() + ". Use browser Back and Forward to revisit sections.");
-      if (focusHeading && hash !== "") target.heading.focus({preventScroll: true});
+      if (focusHeading) target.heading.focus({preventScroll: true});
     }
     // Ordinary anchors own browser history, URLs, and scroll. This adds only
     // heading focus and an announced active-section state for keyboard/NVDA.

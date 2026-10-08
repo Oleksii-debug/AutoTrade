@@ -7,6 +7,7 @@ from __future__ import annotations
 import socket
 import unittest
 from contextlib import ExitStack
+from tempfile import TemporaryFile
 
 from tools.plan6_offline_sections import deny_network, install_network_deny
 
@@ -39,6 +40,25 @@ class OfflineSocketBoundaryTests(unittest.TestCase):
                     with self.subTest(method=method):
                         with self.assertRaisesRegex(RuntimeError, "PLAN6_OFFLINE_NETWORK_DENIED"):
                             getattr(sock, method)(b"fixture-only")
+
+    def test_socket_sendfile_is_denied_before_kernel_egress(self) -> None:
+        # socket.sendfile can use os.sendfile rather than socket.send/sendall.
+        # No provider or remote endpoint is involved; use a local file only.
+        with TemporaryFile() as fixture:
+            fixture.write(b"fixture-only")
+            fixture.seek(0)
+            with ExitStack() as guard:
+                install_network_deny(guard)
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    with self.assertRaisesRegex(RuntimeError, "PLAN6_OFFLINE_NETWORK_DENIED"):
+                        sock.sendfile(fixture)
+
+    def test_guard_restores_sendfile(self) -> None:
+        original = socket.socket.sendfile
+        with ExitStack() as guard:
+            install_network_deny(guard)
+            self.assertIs(socket.socket.sendfile, deny_network)
+        self.assertIs(socket.socket.sendfile, original)
 
     def test_guard_restores_send_and_sendall(self) -> None:
         before_send = socket.socket.send

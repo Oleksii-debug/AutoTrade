@@ -1,0 +1,59 @@
+name: Plan 3 production host qualification
+
+on:
+  pull_request:
+    paths:
+      - 'mvp/autotrade_mvp/production_host.py'
+      - 'mvp/autotrade_mvp/production_financial_host.py'
+      - 'mvp/autotrade_mvp/host_network.py'
+      - 'mvp/autotrade_mvp/product_runtime.py'
+      - 'mvp/tests/test_production_host*.py'
+      - 'mvp/tests/test_production_financial_host*.py'
+      - 'mvp/tests/test_host_network.py'
+      - 'src/AutoTrade.Host/**'
+      - 'tests/Host.Process/**'
+      - '.github/workflows/plan3-host-qualification.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-host:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Qualify canonical lifecycle, instance/split-brain fences, recovery and authenticated Host
+        run: >-
+          python -m unittest -v
+          mvp.tests.test_production_host
+          mvp.tests.test_production_host_config
+          mvp.tests.test_production_host_readiness
+          mvp.tests.test_production_host_runtime_occurrence
+          mvp.tests.test_production_financial_host
+          mvp.tests.test_production_financial_host_authority_bindings
+          mvp.tests.test_host_network
+  dotnet-host:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.100'
+      - name: Locked restore of canonical Host process test composition
+        run: dotnet restore tests/Host.Process/Host.Process.csproj --locked-mode
+      - name: Build canonical Host and launch-gate contracts
+        run: dotnet build tests/Host.Process/Host.Process.csproj --configuration Release --no-restore
+      - name: Prove blocked listener without financial authority and exact startup verdict
+        run: dotnet run --project tests/Host.Process/Host.Process.csproj --configuration Release --no-restore

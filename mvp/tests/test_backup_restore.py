@@ -32,6 +32,12 @@ from mvp.autotrade_mvp.reconciliation import (
     SubmissionResolution,
 )
 from mvp.autotrade_mvp.recovery import RecoveryController
+from mvp.autotrade_mvp.recovery_takeover import (
+    _bind_controller_owner,
+    execute_durable_takeover,
+)
+from mvp.autotrade_mvp.windows_secrets import ProtectedCredentialVault
+from mvp.tests.test_recovery_takeover import DeterministicProtector
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
 from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
@@ -1658,6 +1664,41 @@ class BackupRestoreTests(unittest.TestCase):
                 restore_backup(backup, root / "restored")
             self.assertFalse((root / "restored").exists())
 
+    def _issue_test_takeover(
+        self,
+        controller: RecoveryController,
+        vault_path: Path,
+        *,
+        new_owner_id: str,
+        reconciliation_id: str,
+    ) -> None:
+        """Exercise the real durable takeover issuer with a synthetic credential.
+
+        No fixture may mint an owner epoch directly or bypass sender fencing.
+        """
+        vault = ProtectedCredentialVault(
+            vault_path, protector=DeterministicProtector()
+        )
+        handle = vault.register(
+            handle_id="fixture-trade-handle",
+            owner_identity="fixture-execution",
+            account_id="paper-account",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="TRADE",
+            secret_value="synthetic-non-provider-fixture",
+        )
+        receipt = execute_durable_takeover(
+            controller,
+            new_owner_id=new_owner_id,
+            vault=vault,
+            handle=handle,
+            execution_identity="fixture-execution",
+            reconciliation_id=reconciliation_id,
+            provider_id="SIMULATED",
+        )
+        self.assertEqual(controller.owner, receipt.target_owner)
+
     def _restored_with_owner(
         self,
         root: Path,
@@ -1666,8 +1707,13 @@ class BackupRestoreTests(unittest.TestCase):
         (state / "checkpoint.json").unlink()
         (state / "learning-evidence.jsonl").unlink()
         source_store = JournalStore(state / "journal.sqlite3")
-        source = RecoveryController(owner_store=source_store)
+        source = RecoveryController(
+            owner_store=source_store, owner_scope="PAPER:paper-account"
+        )
         source.start("source-owner")
+        self._record_durable_ready(
+            source, source_store, reconciliation_id="source-takeover"
+        )
         backup = create_backup(state, artifacts, root / "backup")
         restored = restore_backup(backup, root / "restored")
         marker = json.loads(
@@ -1676,8 +1722,23 @@ class BackupRestoreTests(unittest.TestCase):
             )
         )
         restored_store = JournalStore(restored / "state" / "journal.sqlite3")
-        controller = RecoveryController(owner_store=restored_store)
-        controller.start("restored-owner")
+        controller = RecoveryController(
+            owner_store=restored_store, owner_scope="PAPER:paper-account"
+        )
+        owners = controller.durable_owner_chain()
+        self.assertEqual(
+            [(owner.owner_id, owner.epoch) for owner in owners],
+            [("source-owner", 1)],
+        )
+        # Restore only the journal-verified source identity in this isolated
+        # fixture. The next epoch MUST be issued by execute_durable_takeover.
+        _bind_controller_owner(controller, owners[-1], recovering=True)
+        self._issue_test_takeover(
+            controller,
+            root / "first-takeover-vault.json",
+            new_owner_id="restored-owner",
+            reconciliation_id="source-takeover",
+        )
         checkpoint_id = self._record_durable_ready(
             controller, restored_store, reconciliation_id="restore-readiness"
         )
@@ -1801,10 +1862,11 @@ class BackupRestoreTests(unittest.TestCase):
                 new_owner_epoch=2,
                 fenced_at=_after_restore(marker, 1),
             )
-            controller.transfer_owner(
+            self._issue_test_takeover(
+                controller,
+                root / "replacement-takeover-vault.json",
                 new_owner_id="replacement-owner",
-                old_sender_fenced=True,
-                reconciled=True,
+                reconciliation_id="restore-readiness",
             )
             checkpoint_id = self._record_durable_ready(
                 controller,
@@ -1954,10 +2016,11 @@ class BackupRestoreTests(unittest.TestCase):
             )
             self.assertFalse(restore_requires_reconciliation(restored))
 
-            controller.transfer_owner(
+            self._issue_test_takeover(
+                controller,
+                root / "later-takeover-vault.json",
                 new_owner_id="later-owner",
-                old_sender_fenced=True,
-                reconciled=True,
+                reconciliation_id="restore-readiness",
             )
             self.assertTrue(restore_requires_reconciliation(restored))
 

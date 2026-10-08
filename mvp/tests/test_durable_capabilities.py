@@ -28,6 +28,8 @@ def claim(
     observed_at: datetime,
     provider_id: str = "simulated",
     provider_environment: str | None = None,
+    permission_scopes: frozenset[str] = frozenset({"ORDER.READ", "ORDER.WRITE"}),
+    data_entitlements: frozenset[str] = frozenset({"QUOTE"}),
 ) -> CapabilityClaim:
     return CapabilityClaim(
         source=source,
@@ -41,11 +43,11 @@ def claim(
         expires_at=observed_at + timedelta(minutes=10),
         supported_order_types=frozenset({"LIMIT"}),
         time_in_force=frozenset({"DAY"}),
-        permission_scopes=frozenset({"ORDER.READ", "ORDER.WRITE"}),
+        permission_scopes=permission_scopes,
         position_mode="NET",
         native_protection=frozenset({"STOP_LOSS"}),
         rate_limit_policy_id="paper-rate-v1",
-        data_entitlements=frozenset({"QUOTE"}),
+        data_entitlements=data_entitlements,
         evidence_ref={
             "artifact_id": {
                 "DOCUMENTED": "11111111-1111-4111-8111-111111111111",
@@ -70,6 +72,8 @@ def verified(
     *,
     provider_id: str = "simulated",
     provider_environment: str | None = None,
+    permission_scopes: frozenset[str] = frozenset({"ORDER.READ", "ORDER.WRITE"}),
+    data_entitlements: frozenset[str] = frozenset({"QUOTE"}),
 ):
     return fresh_test_admission(
         derive_capability_snapshot(
@@ -80,6 +84,8 @@ def verified(
                     observed_at=observed_at,
                     provider_id=provider_id,
                     provider_environment=provider_environment,
+                    permission_scopes=permission_scopes,
+                    data_entitlements=data_entitlements,
                 )
                 for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
             ),

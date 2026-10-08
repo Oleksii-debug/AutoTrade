@@ -2351,6 +2351,7 @@ def coverage_evidence(
     pagination_complete: bool,
     consistency_horizon_satisfied: bool,
     qualified_exclusion_semantics: bool = False,
+    provider_environment: str | None = None,
 ) -> CoverageSurfaceEvidence:
     """Create diagnostic Bybit coverage without minting absence authority.
 
@@ -2385,6 +2386,7 @@ def coverage_evidence(
         provider_id="BYBIT",
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         surface=normalized,
         coverage_start=coverage_start,
         coverage_end=coverage_end,

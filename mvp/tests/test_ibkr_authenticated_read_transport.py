@@ -254,6 +254,7 @@ class IbkrWebAuthenticatedReadTransportTests(unittest.TestCase):
             b'"established":true,"competing":false}}}'
         )
         handle = PersistentCredentialHandle(
+            handle_id="fixture-ibkr-paper-read",
             account_id="paper-account",
             provider="IBKR",
             environment="PAPER",
@@ -307,6 +308,7 @@ class IbkrWebAuthenticatedReadTransportTests(unittest.TestCase):
         resolver = _SecretResolver(on_enter=supersede)
         wire = _Wire(b'{"accounts":["paper-account"]}')
         handle = PersistentCredentialHandle(
+            handle_id="fixture-ibkr-paper-read",
             account_id="paper-account",
             provider="IBKR",
             environment="PAPER",

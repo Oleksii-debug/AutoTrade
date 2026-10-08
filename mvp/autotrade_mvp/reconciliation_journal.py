@@ -581,7 +581,11 @@ def load_latest_reconciliation_checkpoint_for_scope(
             or payload.get("provider_environment", scope) != provider_scope
         ):
             continue
-        _require_negative_resolution_authority(payload)
+        # A superseded legacy negative verdict has no current financial
+        # authority. Validate chronology for every matching row, but enforce
+        # the provider absence Q boundary on the latest durable scope head.
+        # An invalid latest head still fails closed; older history cannot
+        # poison a newer valid UNKNOWN checkpoint during restart.
         aggregate_version = event.get("aggregate_version")
         if type(aggregate_version) is not int or aggregate_version <= 0:
             raise ValueError(
@@ -603,6 +607,8 @@ def load_latest_reconciliation_checkpoint_for_scope(
         latest_sequence = journal_sequence
         latest = event
 
+    if latest is not None:
+        _require_negative_resolution_authority(latest["payload"])
     return latest
 
 

@@ -350,7 +350,7 @@ class AuthenticatedReadHttpRequestTests(unittest.TestCase):
         self.assertEqual(response.http_status, 200)
         self.assertEqual(
             response.body,
-            b'{"success":{"value":{"connected":true}}',
+            b'{"success":{"value":{"connected":true}}}',
         )
         self.assertEqual(len(opener.requests), 1)
         outbound, timeout = opener.requests[0]

@@ -58,6 +58,21 @@ class ProviderFinancialScope:
         )
         if runtime_environment not in _RUNTIME_ENVIRONMENTS:
             raise ProviderDomainError("runtime_environment is unsupported")
+        # A directly constructed financial scope must not bypass the same
+        # provider-domain split enforced by route normalization. In particular,
+        # PAPER TESTNET/DEMO and LIVE MAINNET are distinct financial authorities.
+        # Enforce this before any account evidence or provider I/O is admitted.
+        if provider_id == "BYBIT":
+            if runtime_environment == "PAPER" and provider_environment not in {
+                "TESTNET", "DEMO"
+            }:
+                raise ProviderDomainError(
+                    "BYBIT PAPER financial scope requires TESTNET or DEMO"
+                )
+            if runtime_environment == "LIVE" and provider_environment != "MAINNET":
+                raise ProviderDomainError(
+                    "BYBIT LIVE financial scope requires MAINNET"
+                )
         object.__setattr__(self, "provider_id", provider_id)
         object.__setattr__(self, "runtime_environment", runtime_environment)
         object.__setattr__(self, "provider_environment", provider_environment)

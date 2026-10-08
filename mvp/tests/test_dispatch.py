@@ -775,6 +775,7 @@ class DispatchTests(unittest.TestCase):
                 SubmissionResponseBinding,
                 "terminal_state",
                 property(lambda _binding: "UNKNOWN"),
+                create=True,  # required: dataclass field has no class-level descriptor
             ):
                 descriptor_spoofed = submission_response_binding_projection(binding)
                 self.assertEqual(descriptor_spoofed["terminal_state"], "SENT")
@@ -1185,7 +1186,7 @@ class DispatchTests(unittest.TestCase):
                     "http_status": 503,
                     "reason": "provider_http_5xx_execution_unknown",
                 },
-                "remain RECONCILE_FIRST",
+                "durable UNKNOWN requires reconciliation-first reason",
             ),
             (
                 "sent-opaque",
@@ -1197,7 +1198,7 @@ class DispatchTests(unittest.TestCase):
                     "response_encoding": "hex",
                     "http_status": 503,
                 },
-                "exact provider response bytes are unavailable",
+                "opaque durable response must remain bounded UNKNOWN",
             ),
         )
         for suffix, terminal_type, terminal_payload, message in cases:
@@ -1252,6 +1253,74 @@ class DispatchTests(unittest.TestCase):
                         account_id="acct",
                         attempt_id=attempt_id,
                     )
+
+    def test_submission_response_binding_verifier_rejects_shadowing_before_callback(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            dispatcher.dispatch(
+                attempt_id="binding-shadow-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(b'{"ok":true}'),
+                )[1],
+                submission_scope={
+                    "endpoint": "/orders",
+                    "capability_snapshot_ids": ["cap-1"],
+                    "instrument_versions": ["BTCUSD:v1"],
+                },
+            )
+            binding = load_submission_response_binding(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-shadow-a1",
+            )
+            callbacks = []
+
+            def forged(*_args, **_kwargs):
+                callbacks.append(True)
+                return None
+
+            for name in (
+                "type",
+                "id",
+                "tuple",
+                "range",
+                "enumerate",
+                "isinstance",
+                "object",
+                "getattr",
+                "MappingProxyType",
+                "weakref_ref",
+                "SubmissionResponseBinding",
+                "JournalStore",
+                "ValueError",
+            ):
+                with self.subTest(name=name):
+                    with patch.object(
+                        dispatch_module,
+                        name,
+                        forged,
+                        create=True,
+                    ):
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "binding authority is unavailable",
+                        ):
+                            require_canonical_submission_response_binding(binding)
+                    self.assertEqual(callbacks, [])
 
     def test_mapping_response_cannot_mint_exact_durable_response_provenance(self):
         with TemporaryDirectory() as directory:
@@ -1372,6 +1441,8 @@ class DispatchTests(unittest.TestCase):
                 submission_scope_hash="sha256:" + "2" * 64,
                 response_bytes=b'{"ok":true}',
                 response_sha256="sha256:" + "3" * 64,
+                response_encoding="utf-8-json",
+                terminal_state="SENT",
             )
 
     def test_unserializable_provider_response_after_send_becomes_unknown(self):
@@ -1613,7 +1684,7 @@ class DispatchTests(unittest.TestCase):
                     ["SubmissionPrepared", "SubmissionBlocked"],
                 )
 
-    def test_owner_transfer_during_provider_wait_blocks_stale_sender(self):
+    def test_unauthorized_takeover_and_lease_expiry_during_provider_wait_block_sender(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)
             recovery = RecoveryController(
@@ -1633,11 +1704,18 @@ class DispatchTests(unittest.TestCase):
 
             def transport(_client_id, _request, final_guard):
                 nonlocal outbound
-                recovery.transfer_owner(
-                    new_owner_id="host-b",
-                    old_sender_fenced=True,
-                    reconciled=True,
-                )
+                # A durable owner cannot be transferred by caller booleans.
+                # Reject that shortcut, then expire the lease before the
+                # final send barrier to demonstrate stale-sender fencing.
+                with self.assertRaisesRegex(
+                    PermissionError, "independently issued takeover evidence",
+                ):
+                    recovery.transfer_owner(
+                        new_owner_id="host-b",
+                        old_sender_fenced=True,
+                        reconciled=True,
+                    )
+                recovery.on_lease_expired()
                 final_guard()
                 outbound += 1
                 return {"provider_order_id": "must-not-happen"}

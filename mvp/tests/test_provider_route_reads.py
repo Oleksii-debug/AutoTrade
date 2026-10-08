@@ -90,6 +90,8 @@ class ProviderRouteReadTests(unittest.TestCase):
                 NOW - timedelta(minutes=1),
                 provider_id="BYBIT",
                 provider_environment="TESTNET",
+                permission_scopes=frozenset({"ORDER.READ", "ORDER.WRITE", "ACCOUNT.READ"}),
+                data_entitlements=frozenset({"QUOTE", "BALANCES"}),
             )
         )
         evidence_root = Path(directory) / "evidence"

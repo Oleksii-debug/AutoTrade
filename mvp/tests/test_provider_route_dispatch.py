@@ -134,7 +134,7 @@ def successor_spot_q(*, old_qualification_id: str, ordinal: int = 41):
 
 class ProviderRouteDispatchTests(unittest.TestCase):
     def setup_route(self, directory: str):
-        journal = JournalStore(Path(directory) / "journal.sqlite3")
+        journal = JournalStore((Path(directory) / "journal.sqlite3").resolve(strict=False))
         capabilities = DurableCapabilityRegistry(journal)
         capabilities.add(
             verified(

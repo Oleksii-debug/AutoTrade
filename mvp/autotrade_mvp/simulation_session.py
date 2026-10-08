@@ -1618,7 +1618,7 @@ def _loop_event(
             deliver_autonomous_owned_publications,
             prepare_autonomous_completion_receipt,
         )
-        # Never acknowledge foreign host/financial publications as ZERO output.
+        # Never acknowledge foreign Host or financial outbox publications.
         deliver_autonomous_owned_publications(store, run_id=run_id)
         first = store.load_events(_LOOP_AGGREGATE, run_id)[0]
         protocol = first["payload"]["protocol"]
@@ -1964,13 +1964,7 @@ def run_autonomous_simulation(
         "clock_order": "SETTLEMENT_AT_EVENT_TIME_THEN_DECISION_PLUS_1US", "run_id": run_id,
         "source_build_identity": _simulation_build_identity(),
         "account": ACCOUNT, "provider": PROVIDER, "environment": ENVIRONMENT,
-        # Bind the canonical ZERO financial scope before its durable start event.
-        # The runtime checkpoint never infers financial ownership from aliases.
-        "financial_scope": {
-            "account_id": ACCOUNT, "provider_id": PROVIDER,
-            "environment": ENVIRONMENT,
-            "instrument_id": INSTRUMENT_ID, "instrument_version": INSTRUMENT,
-        },
+        "financial_scope": _simulation_protocol_document(fault_after_send=False)["financial_scope"],
         "strategy_parameters": {"fast": 2, "slow": 3},
         "prices": [canonical_decimal_text(v) for v in values], "start_time": timestamp,
         "risk_policy": "canonical-provider-free-risk-v1",
@@ -2909,9 +2903,8 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                                              Decimal("0.000000000000000001"), mode="CEILING")
         frozen_target = parse_bounded_exact_decimal(protocol["target_quantity"])
         proposal = MovingAverageStrategy(**protocol["strategy_parameters"]).decide(values[:episode], frozen_target)
-        # Record the existing provider-free specialist as a diagnostic proposal.
-        # It cannot select exposure: the frozen strategy and financial authorities
-        # alone choose allocation, hard risk, reservation, and guarded dispatch.
+        # The existing agent specialist provides a durable diagnostic only.
+        # Allocation, hard risk and guarded dispatch retain financial authority.
         from .product_agent import decide as decide_zero_agent
         agent_side = decide_zero_agent(
             store, protocol, episode=episode, strategy_side=proposal.side,

@@ -552,12 +552,12 @@ def _canonical_publication_topic(envelope: Mapping[str, object]) -> str | None:
     return _COMPONENT_PUBLICATION_TOPICS[aggregate_type]
 
 
-def _autonomous_owned_event_ids(
+def _autonomous_owned_publication_events(
     store: JournalStore,
     *,
     run_id: str,
-) -> tuple[str, ...]:
-    """Resolve exact ZERO publication candidates without a bounded outbox scan."""
+) -> tuple[dict[str, object], ...]:
+    """Identify exact ZERO-owned events and canonical routes without bounded scans."""
 
     events = list(
         JournalStore.load_events(
@@ -585,7 +585,7 @@ def _autonomous_owned_event_ids(
         raise AutonomousRuntimeCheckpointError(
             "ZERO runtime event identities are not unique"
         )
-    return event_ids
+    return tuple(events)
 
 
 def _autonomous_owned_pending_publications(
@@ -595,22 +595,14 @@ def _autonomous_owned_pending_publications(
 ) -> tuple[dict[str, object], ...]:
     pending: list[dict[str, object]] = []
     financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
-    owned_ids = _autonomous_owned_event_ids(store, run_id=run_id)
-    # The canonical JournalStore requires an exact topic on every outbox read.
-    # Do not weaken that storage contract or guess another source of authority.
-    # Resolve only exact owned event IDs. Foreign UI or provider backlog may
-    # exceed every bounded global outbox page and must not exhaust this scan.
-    # Keep the JournalStore's exact-topic requirement intact.
-    for event_id in owned_ids:
-        event = JournalStore.get_event(store, event_id)
-        if event is None:
-            raise AutonomousRuntimeCheckpointError(
-                "ZERO owned event vanished from the journal"
-            )
+    # The canonical Plan-3 event inventory provides authenticated exact events,
+    # never a globally bounded or foreign-host outbox scan.
+    for event in _autonomous_owned_publication_events(store, run_id=run_id):
+        event_id = event["event_id"]
         topic = _canonical_publication_topic(event)
         if topic is None:
-            # Non-publishing component rows must not acquire publication
-            # authority through another known product topic.
+            # A non-publishing ZERO component cannot borrow an outbox topic.
+            # Keep the existing strict JournalStore topic-required API.
             for unexpected_topic in (
                 "autotrade.economic.events",
                 "autotrade.submission.events",
@@ -641,9 +633,8 @@ def _autonomous_owned_pending_publications(
             raise AutonomousRuntimeCheckpointError(
                 "ZERO owned publication is missing or misrouted"
             ) from error
-        # The protected JournalStore read returns validated delivery metadata,
-        # not an event body; join it to the independently authenticated journal
-        # event rather than inventing or trusting an unverified outbox payload.
+        # Join the validated outbox metadata to the original authenticated
+        # journal event: no second owner, payload, route or delivery authority.
         owned_state = {**state, "payload": event}
         if not _autonomous_publication_owned(
             owned_state,
@@ -653,12 +644,11 @@ def _autonomous_owned_pending_publications(
             raise AutonomousRuntimeCheckpointError(
                 "exact ZERO outbox state escaped runtime ownership"
             )
-        expected_topic = _canonical_publication_topic(event)
-        if expected_topic is None:
+        if state.get("event_id") != event_id:
             raise AutonomousRuntimeCheckpointError(
-                "ZERO component event unexpectedly has an outbox publication"
+                "ZERO publication does not match canonical event identity"
             )
-        if state.get("topic") != expected_topic:
+        if state.get("topic") != topic:
             raise AutonomousRuntimeCheckpointError(
                 "ZERO publication routing topic is not canonical"
             )
@@ -666,7 +656,6 @@ def _autonomous_owned_pending_publications(
             continue
         pending.append(owned_state)
     return tuple(pending)
-
 
 def deliver_autonomous_owned_publications(
     store: JournalStore,

@@ -1311,9 +1311,25 @@ def _entry(path: str, digest: str, size: int, kind: str) -> dict[str, Any]:
     }
 
 
-def _artifact_source_files(root: Path) -> list[tuple[Path, str]]:
+def _require_safe_artifact_source_dirs(root: Path) -> None:
+    """Reject symlinked storage ancestors before traversing artifact payloads."""
     if not root.is_dir():
         raise BackupError("Artifact store root is missing")
+    if root.is_symlink():
+        raise BackupError("Artifact store root is unsafe")
+    for relative in (
+        "objects",
+        "objects/sha256",
+        "manifests",
+        "manifests/sha256",
+    ):
+        path = root / relative
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            raise BackupError("Artifact store directory is unsafe")
+
+
+def _artifact_source_files(root: Path) -> list[tuple[Path, str]]:
+    _require_safe_artifact_source_dirs(root)
     files: list[tuple[Path, str]] = []
     objects_root = root / "objects" / "sha256"
     manifests_root = root / "manifests" / "sha256"
@@ -1328,7 +1344,93 @@ def _artifact_source_files(root: Path) -> list[tuple[Path, str]]:
     return files
 
 
+def _mutable_source_inventory(
+    state: Path, artifacts: Path
+) -> tuple[tuple[Path, str, str], ...]:
+    """Enumerate the one canonical non-SQLite backup cut, without following links.
+
+    The autonomous checkpoint is checked separately against its JournalStore
+    generation, and its source-local signing key is never included.
+    """
+    candidates: list[tuple[Path, str, str]] = []
+    for name in ("checkpoint.json", "learning-evidence.jsonl"):
+        source = state / name
+        if source.exists() or source.is_symlink():
+            candidates.append((source, f"state/{name}", "runtime-state"))
+    intents = state / "order-intents"
+    if intents.is_symlink() or (intents.exists() and not intents.is_dir()):
+        raise BackupError("Order-intent source directory is unsafe")
+    if intents.exists():
+        for source in sorted(intents.rglob("*.json")):
+            candidates.append(
+                (source, f"state/{source.relative_to(state).as_posix()}", "order-intent")
+            )
+    for source, kind in _artifact_source_files(artifacts):
+        candidates.append(
+            (source, f"artifacts/{source.relative_to(artifacts).as_posix()}", kind)
+        )
+    candidates.sort(key=lambda item: item[1])
+    paths = [relative for _source, relative, _kind in candidates]
+    if len(paths) != len(set(paths)):
+        raise BackupError("Duplicate path in backup source inventory")
+    for source, _relative, _kind in candidates:
+        if source.is_symlink() or not source.is_file():
+            raise BackupError(f"Backup source is not a regular file: {source.name}")
+    return tuple(candidates)
+
+
+def _snapshot_mutable_sources(
+    state: Path, artifacts: Path
+) -> tuple[tuple[Path, str, str, str], ...]:
+    """Bind all mutable side files before starting the SQLite snapshot."""
+    snapshot: list[tuple[Path, str, str, str]] = []
+    for source, relative, kind in _mutable_source_inventory(state, artifacts):
+        try:
+            before = _sha256_file(source)
+            after = _sha256_file(source)
+        except OSError as error:
+            raise BackupError(
+                f"Backup source changed before journal snapshot: {source.name}"
+            ) from error
+        if (
+            before != after
+            or source.is_symlink()
+            or not source.is_file()
+        ):
+            raise BackupError(
+                f"Backup source changed before journal snapshot: {source.name}"
+            )
+        snapshot.append((source, relative, kind, after))
+    return tuple(snapshot)
+
+
+def _assert_mutable_sources_unchanged(
+    state: Path,
+    artifacts: Path,
+    snapshot: tuple[tuple[Path, str, str, str], ...],
+) -> None:
+    """Reject added/removed/retyped or byte-mutated side files at commit gates."""
+    current = _mutable_source_inventory(state, artifacts)
+    if tuple((source, path, kind) for source, path, kind in current) != tuple(
+        (source, path, kind) for source, path, kind, _digest in snapshot
+    ):
+        raise BackupError("Backup source inventory changed during capture")
+    for source, _path, _kind, expected_digest in snapshot:
+        try:
+            if (
+                source.is_symlink()
+                or not source.is_file()
+                or _sha256_file(source) != expected_digest
+            ):
+                raise BackupError(f"Backup source changed before commit: {source.name}")
+        except OSError as error:
+            raise BackupError(
+                f"Backup source changed before commit: {source.name}"
+            ) from error
+
+
 def _validate_artifact_source(root: Path) -> None:
+    _require_safe_artifact_source_dirs(root)
     manifests_root = root / "manifests" / "sha256"
     objects_root = root / "objects" / "sha256"
     if objects_root.exists():
@@ -1485,6 +1587,9 @@ def create_backup(
                 "Autonomous runtime checkpoint source journal identity is unavailable"
             ) from error
 
+    # Bind the full mutable path/kind/byte inventory before the SQLite cut.
+    # Revalidate it after staging and immediately before atomic publication.
+    mutable_source_snapshot = _snapshot_mutable_sources(state, artifacts)
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".autotrade-backup-", dir=target.parent))
     entries: list[dict[str, Any]] = []
@@ -1513,42 +1618,32 @@ def create_backup(
             )
         )
 
-        for source in [
-            state / "checkpoint.json",
-            state / "learning-evidence.jsonl",
-        ]:
-            if source.exists():
-                relative = Path("state") / source.name
-                digest, size = _copy_stable_file(source, stage / relative)
-                entries.append(_entry(relative.as_posix(), digest, size, "runtime-state"))
-                source_rechecks.append((source, digest))
+        # Copy precisely the pre-journal inventory, not a post-snapshot
+        # enumeration that could silently omit files created by another writer.
+        for source, relative, kind, expected_digest in mutable_source_snapshot:
+            digest, size = _copy_stable_file(source, stage / relative)
+            if digest != expected_digest:
+                raise BackupError(
+                    f"Backup source changed across journal snapshot: {source.name}"
+                )
+            entries.append(_entry(relative, digest, size, kind))
+            source_rechecks.append((source, expected_digest))
 
-        # A whole-runtime checkpoint is sealed to the source JournalStore
-        # generation and to a local authority key. Preserve only its exact
-        # bytes as quarantined restore evidence. Never publish those bytes to
-        # the restored live checkpoint path and never copy the local authority
-        # key into a portable backup. A restored generation must issue fresh
-        # checkpoint authority after recovery/reconciliation has established
-        # the new durable generation.
+        # Preserve the autonomous checkpoint only as quarantined evidence.
+        # This special evidence is not part of the ordinary mutable inventory.
         runtime_checkpoint_evidence = "ABSENT"
         runtime_checkpoint_present_after_journal = (
             runtime_checkpoint_source.exists()
             or runtime_checkpoint_source.is_symlink()
         )
-        if (
-            runtime_checkpoint_present_after_journal
-            != runtime_checkpoint_present_at_cut
-        ):
+        if runtime_checkpoint_present_after_journal != runtime_checkpoint_present_at_cut:
             raise BackupError(
                 "Autonomous runtime checkpoint inventory changed across journal snapshot"
             )
         if runtime_checkpoint_present_at_cut:
-            evidence_relative = _safe_relative_path(
-                _RUNTIME_CHECKPOINT_EVIDENCE_PATH
-            )
+            evidence_relative = _safe_relative_path(_RUNTIME_CHECKPOINT_EVIDENCE_PATH)
             digest, size = _copy_stable_file(
-                runtime_checkpoint_source,
-                stage / evidence_relative,
+                runtime_checkpoint_source, stage / evidence_relative
             )
             if digest != runtime_checkpoint_digest_at_cut:
                 raise BackupError(
@@ -1559,16 +1654,28 @@ def create_backup(
                     "Autonomous runtime checkpoint source journal identity is missing"
                 )
             try:
-                checkpoint_document = (
-                    stage / evidence_relative
-                ).read_text(encoding="utf-8")
-                snapshot_store = JournalStore(journal_target)
-                verify_autonomous_runtime_checkpoint_backup_evidence(
-                    state,
-                    snapshot_store,
-                    source_store_identity=runtime_checkpoint_source_store_identity,
-                    checkpoint_document=checkpoint_document,
+                checkpoint_document = (stage / evidence_relative).read_text(
+                    encoding="utf-8"
                 )
+                # JournalStore initialization enables WAL and can rewrite the
+                # database header. Validate on a disposable exact SQLite copy,
+                # never on the immutable staged backup journal whose digest was
+                # already recorded above.
+                with tempfile.TemporaryDirectory(
+                    prefix=".autotrade-checkpoint-verification-",
+                    dir=target.parent,
+                ) as verification_directory:
+                    verification_journal = (
+                        Path(verification_directory) / "journal.sqlite3"
+                    )
+                    _copy_file_durable(journal_target, verification_journal)
+                    snapshot_store = JournalStore(verification_journal)
+                    verify_autonomous_runtime_checkpoint_backup_evidence(
+                        state,
+                        snapshot_store,
+                        source_store_identity=runtime_checkpoint_source_store_identity,
+                        checkpoint_document=checkpoint_document,
+                    )
             except (
                 AutonomousRuntimeCheckpointError,
                 OSError,
@@ -1590,23 +1697,11 @@ def create_backup(
             source_rechecks.append((runtime_checkpoint_source, digest))
             runtime_checkpoint_evidence = "QUARANTINED"
 
-        intents_root = state / "order-intents"
-        if intents_root.exists():
-            for source in sorted(intents_root.rglob("*.json")):
-                relative = Path("state") / source.relative_to(state)
-                digest, size = _copy_stable_file(source, stage / relative)
-                entries.append(_entry(relative.as_posix(), digest, size, "order-intent"))
-                source_rechecks.append((source, digest))
-
-        for source, kind in _artifact_source_files(artifacts):
-            relative = Path("artifacts") / source.relative_to(artifacts)
-            digest, size = _copy_stable_file(source, stage / relative)
-            entries.append(_entry(relative.as_posix(), digest, size, kind))
-            source_rechecks.append((source, digest))
-
         for source, expected_digest in source_rechecks:
             if not source.is_file() or _sha256_file(source) != expected_digest:
                 raise BackupError("Source changed before backup commit")
+
+        _assert_mutable_sources_unchanged(state, artifacts, mutable_source_snapshot)
 
         checkpoint_present = (stage / "state" / "checkpoint.json").is_file()
         learning_evidence_present = (
@@ -1637,6 +1732,7 @@ def create_backup(
         )
         verify_backup(stage)
         _fsync_directory_tree(stage)
+        _assert_mutable_sources_unchanged(state, artifacts, mutable_source_snapshot)
         # Close the final publication window too.  A checkpoint created,
         # removed, or advanced after staging validation must abort this attempt;
         # a later backup can capture the new causal generation coherently.
@@ -1685,12 +1781,26 @@ def create_backup(
         raise
 
 
+def _regular_backup_entry(root: Path, relative: Path) -> Path:
+    """Never follow a symlink inside an untrusted backup bundle."""
+    if root.is_symlink() or not root.is_dir():
+        raise BackupIntegrityError("Backup root is missing or unsafe")
+    candidate = root
+    for part in relative.parts:
+        candidate = candidate / part
+        if candidate.is_symlink():
+            raise BackupIntegrityError("Backup tree contains unsafe symlink")
+    if not candidate.is_file():
+        raise BackupIntegrityError("Backup payload is missing or not regular")
+    return candidate
+
+
 def verify_backup(backup_root: str | Path) -> dict[str, Any]:
     """Verify the backup manifest, every payload byte and compatibility gates."""
 
     root = Path(backup_root)
-    manifest_path = root / MANIFEST_NAME
-    digest_path = root / MANIFEST_DIGEST_NAME
+    manifest_path = _regular_backup_entry(root, Path(MANIFEST_NAME))
+    digest_path = _regular_backup_entry(root, Path(MANIFEST_DIGEST_NAME))
     try:
         manifest_bytes = manifest_path.read_bytes()
         expected_manifest_digest = digest_path.read_text(encoding="ascii").strip()
@@ -1734,9 +1844,7 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
                 f"Backup payload kind does not match canonical path: {normalized}"
             )
         expected_paths.add(normalized)
-        path = root / relative
-        if path.is_symlink() or not path.is_file():
-            raise BackupIntegrityError(f"Backup payload is missing: {normalized}")
+        path = _regular_backup_entry(root, relative)
         digest = item["sha256"]
         if (
             not isinstance(digest, str)
@@ -1870,7 +1978,7 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
     try:
         for item in manifest["files"]:
             relative = _safe_relative_path(item["path"])
-            source = backup / relative
+            source = _regular_backup_entry(backup, relative)
             target = stage / relative
             _copy_file_durable(source, target)
             if _sha256_file(target) != item["sha256"].removeprefix("sha256:"):

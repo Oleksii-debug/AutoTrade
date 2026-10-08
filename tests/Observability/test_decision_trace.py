@@ -163,7 +163,7 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             )
 
             self.assertFalse(store.verify())
-            with self.assertRaisesRegex(ValueError, "Corrupt decision trace store"):
+            with self.assertRaisesRegex(ValueError, "Decision trace chain is corrupt"):
                 store.records()
 
     def test_noncanonical_jsonl_bytes_fail_verification(self):
@@ -454,6 +454,37 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
                 "decision-attacker",
             )
 
+    def test_descriptor_reader_accepts_same_inode_with_cross_api_ctime_variance(self):
+        # Some Windows filesystems expose different creation-time resolution
+        # through stat(path) and fstat(fd); no alias or mutation occurred.
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            self.assertTrue(store.append(evidence_trace("decision-ctime-variance")))
+            original_fstat = os.fstat
+
+            class DescriptorStat:
+                def __init__(self, value):
+                    self._stat = value
+
+                def __getattr__(self, name):
+                    if name == "st_ctime_ns":
+                        return self._stat.st_ctime_ns + 1000000000
+                    return getattr(self._stat, name)
+
+            with patch.object(
+                decision_trace_module.os,
+                "fstat",
+                side_effect=lambda fd: DescriptorStat(original_fstat(fd)),
+            ):
+                content = decision_trace_module._read_trace_text_descriptor_bound(
+                    path
+                )
+            self.assertEqual(
+                json.loads(content.strip())["trace_id"],
+                "decision-ctime-variance",
+            )
+
     def test_reader_rejects_symlink_alias_instead_of_following_trace(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -636,7 +667,7 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             store = DecisionTraceStore(path)
             item = evidence_trace()
             item["attributes"]["diagnostic_score"] = float("nan")
-            with self.assertRaisesRegex(ValueError, "JSON compliant"):
+            with self.assertRaisesRegex(ValueError, "strict JSON resource domain"):
                 store.append(item)
             self.assertFalse(path.exists())
 

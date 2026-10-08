@@ -419,7 +419,11 @@ def restore_product_backup(backup_dir, data_dir):
                 metadata=manifest['metadata'],
             )
 
-    destination_root = Path(data_dir)
+    # The Host reopens this directory through build_product(), which resolves
+    # its path before constructing JournalStore. Sign the restored checkpoint
+    # under that same final spelling, including on Windows where a temporary
+    # directory's lexical case may differ from its resolved filesystem case.
+    destination_root = Path(data_dir).resolve()
     if destination_root.exists():
         raise BackupError('Restore destination already exists')
     destination_root.parent.mkdir(parents=True, exist_ok=True)

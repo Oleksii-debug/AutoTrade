@@ -485,6 +485,10 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             backup = data / 'backups' / backup_id
             verify_backup(backup)
             restored = Path(directory) / 'restored'
+            if os.name == 'nt':
+                # Exercise the same lexical case drift as the packaged Windows
+                # runner; the Host later reopens the restored path resolved.
+                restored = Path(str(restored).swapcase())
             restore_product_backup(backup, restored)
             self.assertTrue(restore_requires_reconciliation(restored))
             client = ProductClient(restored)

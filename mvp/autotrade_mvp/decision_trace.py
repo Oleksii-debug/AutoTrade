@@ -376,10 +376,13 @@ def _read_trace_text_descriptor_bound(path: Path) -> str | None:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
             raise ValueError("Corrupt decision trace store: unsafe path alias")
+        # Compare path/file-descriptor identity and size here. Windows path
+        # stat and descriptor fstat may report different creation-time
+        # generations for the same file; compare temporal generations only
+        # within matching syscall families below.
         if (
             _trace_entry_identity(initial) != _trace_entry_identity(opened)
-            or _trace_generation_identity(initial)
-            != _trace_generation_identity(opened)
+            or initial.st_size != opened.st_size
         ):
             raise ValueError(
                 "Corrupt decision trace store: path changed before descriptor read"
@@ -411,9 +414,10 @@ def _read_trace_text_descriptor_bound(path: Path) -> str | None:
             or _trace_entry_identity(opened) != _trace_entry_identity(after)
             or _trace_generation_identity(opened)
             != _trace_generation_identity(after)
-            or _trace_entry_identity(opened) != _trace_entry_identity(current)
-            or _trace_generation_identity(opened)
+            or _trace_entry_identity(initial) != _trace_entry_identity(current)
+            or _trace_generation_identity(initial)
             != _trace_generation_identity(current)
+            or _trace_entry_identity(opened) != _trace_entry_identity(current)
             or copied != expected_bytes
         ):
             raise ValueError(

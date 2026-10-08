@@ -71,6 +71,16 @@ class Plan3CrossComponentQualificationTests(unittest.TestCase):
             self.assertEqual(after.mode, "READY")
             self.assertNotIn("never-publish", str(after.as_dict()))
 
+            # A valid reconciliation for one account must not let an unrelated
+            # authenticated Host snapshot advertise that account as READY.
+            foreign = dict(ui)
+            foreign["account_id"] = "foreign-account"
+            wrong_scope = build_operator_observability(
+                ui_snapshot=foreign, recovery=recovery, signals=_signals()
+            )
+            self.assertNotEqual(wrong_scope.mode, "READY")
+            self.assertIn("host_recovery_scope_mismatch", wrong_scope.reasons)
+
             # A new process observes the durable prior epoch. Merely constructing
             # a fresh controller must never produce a second sender authority.
             restarted = RecoveryController(

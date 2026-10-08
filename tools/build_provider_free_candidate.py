@@ -648,18 +648,21 @@ def _require_webview2_input_identity(product_root, inputs, nuget_lock):
         or type(nuget_lock.get('dependencies')) is not dict
     ):
         raise ValueError('provider-free NuGet lock schema is unsupported')
+    # The locked ordinary and win-x64 RID graphs are distinct NuGet targets
+    # that must carry the SAME reviewed WebView2 archive identity. Neither
+    # target may silently disappear or introduce a second version/hash.
+    expected_targets = (
+        'net10.0-windows7.0',
+        'net10.0-windows7.0/win-x64',
+    )
+    if set(nuget_lock['dependencies']) != set(expected_targets):
+        raise ValueError('provider-free WebView2 NuGet target graph differs')
     lock_rows = []
-    for target, target_dependencies in nuget_lock['dependencies'].items():
-        if (
-            type(target) is not str
-            or not target
-            or target != target.strip()
-            or type(target_dependencies) is not dict
-        ):
+    for target in expected_targets:
+        target_dependencies = nuget_lock['dependencies'][target]
+        if type(target_dependencies) is not dict:
             raise ValueError('provider-free NuGet lock target is invalid')
         item = target_dependencies.get('Microsoft.Web.WebView2')
-        if item is None:
-            continue
         if (
             type(item) is not dict
             or set(item) != {'type', 'requested', 'resolved', 'contentHash'}
@@ -680,10 +683,8 @@ def _require_webview2_input_identity(product_root, inputs, nuget_lock):
             'resolved': item['resolved'],
             'content_hash_sha512_base64': item['contentHash'],
         })
-    if len(lock_rows) != 1:
-        raise ValueError(
-            'provider-free WebView2 lock identity is not singular'
-        )
+    if lock_rows[0]['requested'] != lock_rows[1]['requested']:
+        raise ValueError('provider-free WebView2 RID request identity differs')
 
     manifest_path = product_root / 'provenance/release-dependency-manifest.json'
     manifest = strict_json_bytes(
@@ -703,23 +704,24 @@ def _require_webview2_input_identity(product_root, inputs, nuget_lock):
         if type(item) is dict
         and item.get('name') == 'Microsoft.Web.WebView2'
     ]
-    if len(manifest_rows) != 1:
+    if len(manifest_rows) != len(expected_targets):
         raise ValueError(
-            'provider-free WebView2 release provenance is not singular'
+            'provider-free WebView2 release provenance target set differs'
         )
-    lock_row = lock_rows[0]
-    manifest_row = manifest_rows[0]
-    expected_manifest = {
-        'project': 'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj',
-        'target': lock_row['target'],
-        'name': 'Microsoft.Web.WebView2',
-        'type': lock_row['type'],
-        'version': version,
-        'content_hash_sha512_base64': content_hash,
-        'dependencies': [],
-        'requested': lock_row['requested'],
-    }
-    if manifest_row != expected_manifest:
+    expected_manifest_rows = [
+        {
+            'project': 'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj',
+            'target': lock_row['target'],
+            'name': 'Microsoft.Web.WebView2',
+            'type': lock_row['type'],
+            'version': version,
+            'content_hash_sha512_base64': content_hash,
+            'dependencies': [],
+            'requested': lock_row['requested'],
+        }
+        for lock_row in lock_rows
+    ]
+    if sorted(manifest_rows, key=lambda row: str(row.get('target'))) != expected_manifest_rows:
         raise ValueError(
             'provider-free WebView2 lock differs from release provenance'
         )

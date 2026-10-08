@@ -81,7 +81,8 @@ class Plan5TerminalSourceContractTests(unittest.TestCase):
         self.assertIn("class AuthenticatedEmergencyHostClient", (DESKTOP / "AuthenticatedEmergencyHostClient.cs").read_text(encoding="utf-8"))
         owned = (DESKTOP / "OwnedProviderFreeRuntime.cs").read_text(encoding="utf-8")
         self.assertIn("127.0.0.1", owned)
-        self.assertIn('api/v1/session', owned)
+        self.assertTrue('new Uri(origin, "api/v1/session")' in owned or
+                        "new Uri(origin, HostApiRoutes.PairLocalSession)" in owned)
         self.assertNotIn("NavigateToString(", src)
 
     def test_existing_packaging_and_recovery_authorities_are_reused(self):

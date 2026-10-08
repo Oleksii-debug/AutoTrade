@@ -78,5 +78,39 @@ class OfflineSocketBoundaryTests(unittest.TestCase):
         self.assertIs(socket.socket.sendto, before)
 
 
+    def test_dns_resolution_paths_fail_closed_without_network(self) -> None:
+        # DNS may contact a resolver before socket.connect, so synthetic
+        # hostname lookups themselves must be blocked inside offline suites.
+        resolver_inputs = {
+            "getaddrinfo": ("offline.example.invalid", 443),
+            "gethostbyname": ("offline.example.invalid",),
+            "gethostbyname_ex": ("offline.example.invalid",),
+            "gethostbyaddr": ("127.0.0.1",),
+            "getnameinfo": (("127.0.0.1", 443), 0),
+            "getfqdn": ("offline.example.invalid",),
+        }
+        with ExitStack() as guard:
+            install_network_deny(guard)
+            for name, inputs in resolver_inputs.items():
+                if not hasattr(socket, name):
+                    continue
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(RuntimeError, "PLAN6_OFFLINE_NETWORK_DENIED"):
+                        getattr(socket, name)(*inputs)
+
+    def test_dns_resolver_functions_are_restored_after_guard(self) -> None:
+        names = ("getaddrinfo", "gethostbyname", "gethostbyname_ex",
+                 "gethostbyaddr", "getnameinfo", "getfqdn")
+        originals = {name: getattr(socket, name) for name in names if hasattr(socket, name)}
+        with ExitStack() as guard:
+            install_network_deny(guard)
+            for name in originals:
+                with self.subTest(name=name):
+                    self.assertIs(getattr(socket, name), deny_network)
+        for name, original in originals.items():
+            with self.subTest(name=name):
+                self.assertIs(getattr(socket, name), original)
+
+
 if __name__ == "__main__":
     unittest.main()

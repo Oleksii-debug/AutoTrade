@@ -219,14 +219,18 @@ def test_order_snapshot_open_quantity_descriptor_spoof_cannot_hide_open_order():
             new=property(forged_open_quantity, retain_real_quantity),
             create=True,
         ):
-            with pytest.raises(
-                CorrelationConcentrationError,
-                match="canonical OMS has unvalued open exposure",
-            ):
+            with pytest.raises((CorrelationConcentrationError, OrderProjectionConflict)) as caught:
                 require_correlation_safe_proposal_with_oms(
                     proposal, evidence, resolver, policy, oms=oms
                 )
-
+        # The durable journal/replay seal may reject descriptor tampering
+        # before the downstream correlation guard sees the order. Both routes
+        # must fail closed; neither may read the forged descriptor.
+        assert (
+            "canonical OMS has unvalued open exposure" in str(caught.value)
+            if isinstance(caught.value, CorrelationConcentrationError)
+            else "order projection journal snapshot differs from replay" in str(caught.value)
+        )
         assert calls == []
 
 
@@ -250,15 +254,15 @@ def test_order_snapshot_identifier_descriptor_spoof_cannot_change_exposure_ident
             new=property(forged_identifier, retain_real_identifier),
             create=True,
         ):
-            with pytest.raises(
-                CorrelationConcentrationError,
-                match="canonical OMS has unvalued open exposure",
-            ) as caught:
+            with pytest.raises((CorrelationConcentrationError, OrderProjectionConflict)) as caught:
                 require_correlation_safe_proposal_with_oms(
                     proposal, evidence, resolver, policy, oms=oms
                 )
-
-        assert "open-order-1" in str(caught.value)
+        if isinstance(caught.value, CorrelationConcentrationError):
+            assert "canonical OMS has unvalued open exposure" in str(caught.value)
+            assert "open-order-1" in str(caught.value)
+        else:
+            assert "order projection journal snapshot differs from replay" in str(caught.value)
         assert "forged-hidden-order" not in str(caught.value)
         assert calls == []
 
@@ -391,9 +395,20 @@ def test_in_place_oms_authority_verifier_code_mutation_fails_closed():
 
         original_code = correlation_oms._REQUIRE_OMS_AUTHORITY.__code__
 
-        def forged_authority(_oms):
-            return None
+        # The sealed verifier is a closure with four cells. Build a matching
+        # closure so the test actually reaches the executable-integrity gate
+        # instead of failing at Python's incompatible __code__ assignment.
+        def forged_authority_factory():
+            a = b = c = d = None
 
+            def forged_authority(_oms):
+                _ = (a, b, c, d)
+                return None
+
+            return forged_authority
+
+        forged_authority = forged_authority_factory()
+        assert len(original_code.co_freevars) == len(forged_authority.__code__.co_freevars)
         correlation_oms._REQUIRE_OMS_AUTHORITY.__code__ = forged_authority.__code__
         try:
             with pytest.raises(
@@ -523,7 +538,7 @@ def test_in_place_open_exposure_helper_code_mutation_fails_closed():
         try:
             with pytest.raises(
                 CorrelationConcentrationError,
-                match="OMS open-exposure resolver executable changed after binding",
+                match="canonical OMS open-exposure helper executable changed after binding",
             ):
                 require_correlation_safe_proposal_with_oms(
                     proposal,

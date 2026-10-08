@@ -10,7 +10,7 @@ https://drive.google.com/drive/folders/1c4iSaT9hxgGbEzROpsGkedpZzVlzllsc
 
 Plans 1–7 are independent engineering plans with no priority order.
 Plan 8 is provider-free M1 whole-product convergence.
-Plan 9 is the final dependency-aware external/provider/release/NVDA/M2 plan.
+Plan 9 is the final dependency-aware release/NVDA/M2 plan with an optional later external-provider activation track.
 
 ## Plans
 
@@ -51,11 +51,11 @@ For Plans 1–7:
 - plans may start and finish in any order;
 - existing PR/branch/source must be REUSE -> REPAIR -> CONVERGE before creating duplicate scope.
 
-Plan 6 is architecturally independent but OWNER-DEFERRED. This reorganization does not reauthorize provider work.
+Plan 6 is independent and ACTIONABLE offline without provider/account credentials. Use existing code, public specs and fixtures; real account/PAPER/LIVE activation is deferred to the optional Plan-9 provider track.
 
 Plan 8 begins terminal M1 convergence only after Plans 1,2,3,4,5,7 have terminal outputs required for M1. Plan 6 is not an M1 dependency.
 
-Plan 9 uses per-Section dependencies. WAITING_UPSTREAM, WAITING_EXTERNAL and WAITING_OWNER are skipped without false DONE; take the first ACTIONABLE Section whose named gates are satisfied.
+Plan 9 uses per-Section dependencies. Provider Sections 2–6 are optional parked external activation and do not block a provider-free release. WAITING/PARKED Sections are skipped without false DONE; take the first ACTIONABLE Section whose named gates are satisfied.
 
 ## Migrated accepted work
 
@@ -69,3 +69,7 @@ Legacy Section 16 -> Plan 2 / Section 2, PARTIAL_EXISTING on PR #1631.
 Legacy Section 17 -> Plan 1 / Section 11, PARTIAL_EXISTING on PR #1628.
 
 Detailed 0–47 mapping: LEGACY_48_TO_MULTIPLAN_COVERAGE.md.
+
+## Canonical UI decision — 2026-10-08
+
+The canonical AutoTrade interface is the browser-like semantic Web UI (`web/src`) with page/section navigation, headings/landmarks, forms, tables, live status and keyboard/NVDA-first behavior. The Windows Desktop surface embeds this same Web artifact and adds only host integration/native emergency fallback; it must not fork a second navigation model.

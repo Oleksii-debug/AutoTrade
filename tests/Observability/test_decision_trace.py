@@ -447,12 +447,26 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "chain is corrupt"):
                     store.records()
 
-            self.assertTrue(swapped)
-            self.assertTrue(original_backup.exists())
-            self.assertEqual(
-                json.loads(path.read_text(encoding="utf-8"))["trace_id"],
-                "decision-attacker",
-            )
+            if os.name == "nt":
+                # NT retained read handle denies DELETE sharing before
+                # validation. A raced replacement must be rejected *before*
+                # the attacker can rename the original leaf.
+                self.assertFalse(swapped)
+                self.assertTrue(path.exists())
+                self.assertFalse(original_backup.exists())
+                self.assertTrue(attacker_path.exists())
+                self.assertEqual(
+                    json.loads(path.read_text(encoding="utf-8"))["trace_id"],
+                    "decision-original",
+                )
+            else:
+                # POSIX detects the changed generation after path-based check.
+                self.assertTrue(swapped)
+                self.assertTrue(original_backup.exists())
+                self.assertEqual(
+                    json.loads(path.read_text(encoding="utf-8"))["trace_id"],
+                    "decision-attacker",
+                )
 
     def test_reader_rejects_symlink_alias_instead_of_following_trace(self):
         with TemporaryDirectory() as directory:

@@ -13,6 +13,7 @@ from typing import Any
 from ._generated_common_scalars import is_valid_common_scalar
 from .exact_decimal import (
     ExactDecimalError,
+    exact_sum,
     exact_subtract,
     parse_canonical_decimal_text,
 )
@@ -45,6 +46,11 @@ def _has_exact_text_keys(value: Any) -> bool:
     """Inspect exact dict keys without invoking caller-owned key methods."""
 
     return type(value) is dict and all(type(key) is str for key in value)
+
+
+def _is_zero_mode(status: dict[str, Any]) -> bool:
+    mode = status.get("mode")
+    return type(mode) is str and mode == "ZERO"
 
 
 def _reservation_resource_text(value: Any) -> str:
@@ -88,6 +94,8 @@ def _canonical_sequence_value(
     if mapping is None:
         return default
     value = mapping.get(key)
+    if type(value) is int and value >= 0:
+        return str(value)
     return value if is_valid_common_scalar("Sequence", value) else default
 
 
@@ -102,6 +110,9 @@ def _canonical_economic_report_is_readable(
     *,
     status: dict[str, Any],
 ) -> bool:
+    if (_is_zero_mode(status) and type(report.get("evidence_class")) is str
+            and report["evidence_class"] == "SIMULATION"):
+        return _canonical_zero_economic_report_is_readable(report, status=status)
     status_journal_sequence = status.get("journal_sequence")
     report_journal_sequence = report.get("journal_sequence")
     if report.get("reconciled") is not True:
@@ -206,8 +217,94 @@ def _canonical_economic_report_is_readable(
     return True
 
 
+def _canonical_zero_economic_report_is_readable(
+    report: dict[str, Any], *, status: dict[str, Any]
+) -> bool:
+    """Validate the current autonomous ZERO report against one journal cut."""
+    environment = status.get("environment")
+    report_environment = report.get("environment")
+    edge = report.get("economic_edge_status")
+    if (
+        report.get("reconciled") is not True
+        or report.get("financial_equality_verified") is not True
+        or type(edge) is not str or edge != "INCONCLUSIVE"
+        or status.get("replay_verified") is not True
+        or type(environment) is not str or environment != "SIMULATION"
+        or type(report_environment) is not str or report_environment != environment
+        or type(status.get("journal_sequence")) is not int
+        or status["journal_sequence"] < 0
+        or type(report.get("journal_sequence")) is not int
+        or report["journal_sequence"] != status["journal_sequence"]
+    ):
+        return False
+    buckets = report.get("cash_buckets")
+    if (not _has_exact_text_keys(buckets)
+            or type(buckets.get("currency")) is not str
+            or buckets["currency"] != "USD"):
+        return False
+    for report_key, status_key in (
+        ("initial_equity", "initial_cash"),
+        ("cash", "cash"),
+        ("ending_position", "position"),
+    ):
+        report_value = report.get(report_key)
+        status_value = status.get(status_key)
+        if (type(report_value) is not str or type(status_value) is not str
+                or report_value != status_value):
+            return False
+    try:
+        values = {
+            key: parse_canonical_decimal_text(report.get(key))
+            for key in (
+                "initial_equity", "cash", "ending_position", "final_equity",
+                "net_pnl", "realized_pnl", "unrealized_pnl", "total_fees",
+                "turnover", "open_cost_basis",
+            )
+        }
+        cash = {
+            key: parse_canonical_decimal_text(buckets.get(key))
+            for key in (
+                "account_cash", "settled_cash", "unsettled_receivable",
+                "unsettled_payable", "reserved_cash", "available_cash",
+            )
+        }
+        if (
+            values["cash"] != cash["account_cash"]
+            or values["net_pnl"] != exact_subtract(
+                values["final_equity"], values["initial_equity"]
+            )
+            or values["net_pnl"] != exact_subtract(
+                exact_sum((values["realized_pnl"], values["unrealized_pnl"])),
+                values["total_fees"],
+            )
+            or cash["account_cash"] != exact_subtract(
+                exact_sum((cash["settled_cash"], cash["unsettled_receivable"])),
+                cash["unsettled_payable"],
+            )
+            or cash["available_cash"] != max(0, exact_subtract(
+                exact_subtract(cash["settled_cash"], cash["unsettled_payable"]),
+                cash["reserved_cash"],
+            ))
+        ):
+            return False
+    except ExactDecimalError:
+        return False
+    return (
+        values["total_fees"] >= 0
+        and values["turnover"] >= 0
+        and values["open_cost_basis"] >= 0
+        and all(cash[key] >= 0 for key in (
+            "settled_cash", "unsettled_receivable", "unsettled_payable", "reserved_cash",
+        ))
+    )
+
+
 def _canonical_evidence_count(status: dict[str, Any]) -> str:
     evidence_count = status.get("evidence_count")
+    if _is_zero_mode(status):
+        completed = status.get("completed_episodes")
+        if type(evidence_count) is int and type(completed) is int and evidence_count == completed and completed >= 0:
+            return str(evidence_count)
     if (
         type(evidence_count) is int
         and evidence_count >= 0
@@ -487,6 +584,7 @@ def format_accessible_status(
                 and (
                     state_format != "canonical_journal"
                     or status.get("reconciled") is True
+                    or (_is_zero_mode(status) and status.get("replay_verified") is True)
                 )
             )
             lines.extend(
@@ -527,6 +625,10 @@ def format_accessible_status(
                         f"Unrealized profit or loss: {_canonical_decimal_value(economic_report, 'unrealized_pnl')}",
                     ]
                 )
+                if state_format == "canonical_journal" and _is_zero_mode(status):
+                    lines.append(
+                        f"Реально доступні кошти: {_canonical_decimal_value(cash_buckets, 'available_cash')}"
+                    )
 
     lines.append("Economic edge: unproven")
     return "\n".join(lines)

@@ -455,8 +455,24 @@ def die(*a,**kw):
     original(*a,**kw)
     os._exit(73)
 s.commit_order_fill_with_reservation_consumption=die
-s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_time'],
-                            target_quantity=p['target_quantity'],partial_fills=True)
+try:
+    s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_time'],
+                                target_quantity=p['target_quantity'],partial_fills=True)
+except Exception:
+    # Report only component names, never checkpoint material or credentials.
+    try:
+        from mvp.autotrade_mvp.simulation_runtime_checkpoint import _stable_runtime_components,checkpoint_path
+        from mvp.autotrade_mvp.replay import CompositeReplayCheckpoint
+        completed=[event['payload'] for event in JournalStore.load_events(
+            JournalStore(root/'journal.sqlite3'),'canonical_autonomous_simulation',p['run_id'])
+            if event['event_type']=='AutonomousEpisodeCompleted']
+        saved=CompositeReplayCheckpoint.from_canonical_json(checkpoint_path(root).read_text())
+        _,current=_stable_runtime_components(JournalStore(root/'journal.sqlite3'),protocol=p,completed=completed)
+        print('checkpoint_component_mismatch=' + ','.join(
+            key for key in current if saved.runtime_components.get(key)!=current[key]),file=sys.stderr)
+    except Exception as diagnostic:
+        print('checkpoint_diagnostic_unavailable=' + type(diagnostic).__name__,file=sys.stderr)
+    raise
 `, path.join(data, "state")], {cwd: ROOT, env, encoding: "utf8", timeout: 30000});
   assert.equal(crash.status, 73, crash.stderr);
   await page.goto(await start(data));

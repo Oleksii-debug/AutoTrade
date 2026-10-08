@@ -213,7 +213,13 @@ session.run_autonomous_simulation(["100", "101", "103", "90", "110", "120", "121
                 context.traps[Inexact] = context.traps[Rounded] = True
                 actual = run(partial, PRICES, execution_profile=PROFILE)
             self.assertEqual((actual["cash"], actual["position"]), (expected["cash"], expected["position"]))
-            self.assertEqual(get_economic_report(partial), get_economic_report(full))
+            partial_report = get_economic_report(partial)
+            full_report = get_economic_report(full)
+            self.assertNotEqual(partial_report["journal_sequence"], full_report["journal_sequence"])
+            self.assertEqual(
+                {key: value for key, value in partial_report.items() if key != "journal_sequence"},
+                {key: value for key, value in full_report.items() if key != "journal_sequence"},
+            )
 
     def test_policy_registration_uses_frozen_time_and_matches_after_restart(self):
         original_register = session.AuthorityService.register_policy

@@ -37,6 +37,12 @@ class IntegratedCapitalReportTests(unittest.TestCase):
             self.assertEqual(report["net_pnl"], "-13.193")
             self.assertTrue(report["financial_equality_verified"])
             self.assertIn("Реально доступні кошти: 46.897", text)
+            inflated = {**report, "cash_buckets": {**report["cash_buckets"], "available_cash": "999"}}
+            self.assertNotIn("Реально доступні кошти:", format_accessible_status(status, inflated))
+            stale_report = {**report, "journal_sequence": report["journal_sequence"] - 1}
+            stale_text = format_accessible_status(status, stale_report)
+            self.assertIn("Economic reconciliation: not confirmed", stale_text)
+            self.assertNotIn("Реально доступні кошти: 46.897", stale_text)
             self.assertEqual(store.whole_store_state_cut(), before)
             with localcontext() as context:
                 context.prec = 2

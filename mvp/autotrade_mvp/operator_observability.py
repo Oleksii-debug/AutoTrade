@@ -24,10 +24,21 @@ _MAX_ITEMS = 10_000
 _PUBLIC_CODE_CHARACTERS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-."
 )
-_SENSITIVE_CODE_MARKERS = (
-    "secret", "token", "password", "credential", "apikey",
-    "authorization", "cookie", "privatekey", "sessionid",
-)
+_KNOWN_REASON_CODES = frozenset({
+    "SIMULATION_ONLY", "ECONOMIC_EDGE_UNPROVEN",
+    "clock_requalification_required", "clock_untrusted",
+    "durable_journal_unavailable", "lease_expired_no_failover",
+    "legacy_submission_identity_unrecoverable", "provider_uncertainty",
+    "startup_reconciliation_required", "stopped",
+    "clock_skew_exceeded", "emergency_disk_reserve_unavailable",
+    "emergency_execution_path_unqualified", "external_uncertainty_unresolved",
+    "journal_not_writable", "market_data_stale",
+    "new_exposure_protection_path_unqualified", "old_sender_not_fenced",
+    "provider_native_protection_absent", "provider_not_authenticated",
+    "provider_reconciliation_incomplete", "reconciliation_lag_exceeded",
+    "recovery_in_progress", "schema_incompatible",
+    "sender_ownership_unproven", "unknown_sends_present",
+})
 
 
 def _public_code(value: object, *, name: str) -> str:
@@ -37,11 +48,11 @@ def _public_code(value: object, *, name: str) -> str:
         or not 1 <= len(value) <= 64
         or value[0] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
         or any(ch not in _PUBLIC_CODE_CHARACTERS for ch in value)
-        or any(marker in value.lower().replace("_", "").replace("-", "")
-               for marker in _SENSITIVE_CODE_MARKERS)
     ):
         raise ValueError(f"{name} must be an exact nonsecret bounded status code")
-    return value
+    # Do not reflect unknown caller-supplied values, even when they resemble
+    # valid machine codes: a bearer key can be alphanumeric without markers.
+    return value if value in _KNOWN_REASON_CODES else "unrecognized_reason_code"
 
 
 def _plain_map(value: object, *, name: str) -> dict:

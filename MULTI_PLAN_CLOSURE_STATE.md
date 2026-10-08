@@ -50,7 +50,7 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 | 1 | DONE | legacy Section 3 |
 | 2 | DONE | legacy Section 4 |
 | 3 | DONE | legacy Section 7 |
-| 4 | PARTIAL_EXISTING | legacy Section 24 |
+| 4 | QUALIFYING | legacy Section 24; canonical finisher PR #2324 at `ba7962e0457a4807014fb4d20c5a110019568506`; source/negative fixtures repaired after red scoped run; exact-head Plan 3 recovery qualification [37725170968](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37725170968) QUEUED (NOT PASS); no DONE until two-OS qualification and main integration/readback |
 | 5 | OPEN | legacy Section 25 |
 | 6 | PARTIAL_EXISTING | legacy Section 28 |
 | 7 | OPEN | legacy Section 29 |

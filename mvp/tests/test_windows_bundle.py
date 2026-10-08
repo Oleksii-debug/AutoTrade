@@ -29,31 +29,34 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
         )
 
     def test_exact_diagnostic_pem_marker_literals_do_not_block_but_keys_do(self):
-        source = (
-            Path(__file__).resolve().parents[2]
-            / "mvp"
-            / "autotrade_mvp"
-            / "decision_trace.py"
-        ).read_bytes()
-        relative = "mvp/autotrade_mvp/decision_trace.py"
-        # Reuse exact harmless source declaration without weakening the
-        # scanner for genuine keys or unrelated staged source.
-        _reject_sensitive_content(relative, source)
-        with self.assertRaisesRegex(BundleError, "private-key material"):
-            _reject_sensitive_content(
-                relative,
-                source + b"\n-----BEGIN PRIVATE KEY-----\nsecret-payload\n",
-            )
-        with self.assertRaisesRegex(BundleError, "private-key material"):
-            _reject_sensitive_content("other/source.py", source)
-        with self.assertRaisesRegex(BundleError, "private-key material"):
-            _reject_sensitive_content(
-                relative,
-                source.replace(
-                    b'    "-----BEGIN PRIVATE KEY-----",',
-                    b'    "-----BEGIN PRIVATE KEY-----", # modified declaration',
-                ),
-            )
+        # Both canonical redactors declare PEM marker strings as data to
+        # recognize and remove. This exception is exact-path and exact-bytes:
+        # any extra marker, altered declaration or foreign path fails closed.
+        for module_name in ("decision_trace.py", "diagnostics.py"):
+            with self.subTest(module=module_name):
+                source = (
+                    Path(__file__).resolve().parents[2]
+                    / "mvp"
+                    / "autotrade_mvp"
+                    / module_name
+                ).read_bytes()
+                relative = f"mvp/autotrade_mvp/{module_name}"
+                _reject_sensitive_content(relative, source)
+                with self.assertRaisesRegex(BundleError, "private-key material"):
+                    _reject_sensitive_content(
+                        relative,
+                        source + b"\n-----BEGIN PRIVATE KEY-----\nsecret-payload\n",
+                    )
+                with self.assertRaisesRegex(BundleError, "private-key material"):
+                    _reject_sensitive_content("other/source.py", source)
+                with self.assertRaisesRegex(BundleError, "private-key material"):
+                    _reject_sensitive_content(
+                        relative,
+                        source.replace(
+                            b'    "-----BEGIN PRIVATE KEY-----",',
+                            b'    "-----BEGIN PRIVATE KEY-----", # modified declaration',
+                        ),
+                    )
 
     def _symlink_or_skip(self, link: Path, target: Path):
         try:

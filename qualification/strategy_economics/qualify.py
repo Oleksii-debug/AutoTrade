@@ -15,11 +15,17 @@ import json
 from threading import Lock
 import weakref
 
+from mvp.autotrade_mvp.exact_decimal import canonical_decimal_text
 from mvp.autotrade_mvp.instruments import InstrumentRegistry
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
     ProviderEconomicCut,
     reverify_provider_economic_cut,
+)
+from qualification.strategy_economics.capacity import (
+    AllocationCapacityEvidence,
+    StrategyCapacityAuthorityError,
+    require_allocation_capacity_evidence,
 )
 from research.autotrade_research.strategies.deterministic import (
     DeterministicProposal,
@@ -39,6 +45,7 @@ _VERIFY_REGISTERED_STRATEGY_RUN = verify_registered_strategy_run
 _INSTRUMENT_REGISTRY_EXACT = InstrumentRegistry.exact
 _INSTRUMENT_REGISTRY_AT = InstrumentRegistry.at
 _REVERIFY_PROVIDER_ECONOMIC_CUT = reverify_provider_economic_cut
+_CANONICAL_DECIMAL_TEXT = canonical_decimal_text
 
 # A retained Python function still resolves its module globals at call time.
 # Snapshot the replay primitives installed with the verifier so a later module
@@ -208,6 +215,7 @@ class StrategyEconomicsAuthorityAssessment:
     unresolved_owners: tuple[str, ...]
     registered_run_receipt_digest: str | None = None
     provider_economic_cut_digest: str | None = None
+    capacity_replay_digest: str | None = None
     _token: InitVar[object | None] = None
 
     def __post_init__(self, _token: object | None) -> None:
@@ -236,7 +244,11 @@ class StrategyEconomicsAuthorityAssessment:
             )
         object.__setattr__(self, "verified_owners", verified)
         object.__setattr__(self, "unresolved_owners", unresolved)
-        for name in ("registered_run_receipt_digest", "provider_economic_cut_digest"):
+        for name in (
+            "registered_run_receipt_digest",
+            "provider_economic_cut_digest",
+            "capacity_replay_digest",
+        ):
             value = getattr(self, name)
             if value is not None:
                 _exact_text(value, name=name)
@@ -244,7 +256,7 @@ class StrategyEconomicsAuthorityAssessment:
     @property
     def digest(self) -> str:
         payload = {
-            "schema_version": "wp33-strategy-economics-authority.v2",
+            "schema_version": "wp33-strategy-economics-authority.v3",
             "status": self.status,
             "binding_fingerprint": self.binding_fingerprint,
             "bound_proposal_fingerprint": self.bound_proposal_fingerprint,
@@ -254,6 +266,7 @@ class StrategyEconomicsAuthorityAssessment:
             "unresolved_owners": list(self.unresolved_owners),
             "registered_run_receipt_digest": self.registered_run_receipt_digest,
             "provider_economic_cut_digest": self.provider_economic_cut_digest,
+            "capacity_replay_digest": self.capacity_replay_digest,
         }
         rendered = json.dumps(
             payload, sort_keys=True, separators=(",", ":"),
@@ -268,7 +281,7 @@ def _issued_seal(value: StrategyEconomicsAuthorityAssessment) -> tuple[object, .
         value.instrument_version, value.instrument_provider_id,
         value.verified_owners, value.unresolved_owners,
         value.registered_run_receipt_digest, value.provider_economic_cut_digest,
-        value.digest,
+        value.capacity_replay_digest, value.digest,
     )
 
 
@@ -319,6 +332,7 @@ def assess_strategy_economics_authority(
     provider_economic_book: DurableProviderEconomicBook | None = None,
     provider_economic_cut: ProviderEconomicCut | None = None,
     expected_visibility_journal_sequence: int | None = None,
+    capacity_evidence: AllocationCapacityEvidence | None = None,
     additional_required_owners: tuple[str, ...] = (),
 ) -> StrategyEconomicsAuthorityAssessment:
     """Reverify deterministic provenance/durable facts and preserve owner gaps."""
@@ -399,6 +413,90 @@ def assess_strategy_economics_authority(
         for item in economics_binding.required_evidence_dimensions
     )
 
+    capacity_digest: str | None = None
+    if capacity_evidence is not None:
+        try:
+            capacity = require_allocation_capacity_evidence(capacity_evidence)
+        except (TypeError, StrategyCapacityAuthorityError) as error:
+            raise StrategyEconomicsAuthorityError(
+                "capacity evidence failed canonical issuance verification"
+            ) from error
+        checks = (
+            (
+                capacity.instrument_version,
+                economics_binding.instrument_version,
+                "capacity evidence instrument does not match economics",
+            ),
+            (
+                capacity.strategy_fingerprint,
+                economics_binding.strategy_fingerprint,
+                "capacity evidence strategy fingerprint does not match economics",
+            ),
+            (
+                capacity.strategy_configuration_fingerprint,
+                economics_binding.strategy_configuration_fingerprint,
+                "capacity evidence strategy configuration does not match economics",
+            ),
+            (
+                capacity.symbol,
+                proposal.symbol,
+                "capacity evidence symbol does not match proposal",
+            ),
+            (
+                capacity.action,
+                proposal.action,
+                "capacity evidence action does not match proposal",
+            ),
+            (
+                capacity.decision_time,
+                _utc_text(proposal.decision_time),
+                "capacity evidence decision time does not match proposal",
+            ),
+            (
+                capacity.information_cutoff,
+                _utc_text(economics_binding.information_cutoff),
+                "capacity evidence cutoff does not match economics",
+            ),
+            (
+                capacity.horizon_seconds,
+                economics_binding.horizon_seconds,
+                "capacity evidence horizon does not match economics",
+            ),
+        )
+        for left, right, message in checks:
+            if left != right:
+                raise StrategyEconomicsAuthorityError(message)
+        if capacity.digest != economics_binding.capacity_assessment_sha256:
+            raise StrategyEconomicsAuthorityError(
+                "capacity evidence digest does not match economics binding"
+            )
+        if capacity.max_feasible_quantity != _CANONICAL_DECIMAL_TEXT(
+            economics_binding.max_feasible_quantity
+        ):
+            raise StrategyEconomicsAuthorityError(
+                "capacity evidence quantity does not match economics binding"
+            )
+        if capacity.lot_size != _CANONICAL_DECIMAL_TEXT(
+            economics_binding.lot_size
+        ):
+            raise StrategyEconomicsAuthorityError(
+                "capacity evidence lot size does not match economics binding"
+            )
+        dimension_evidence = dict(economics_binding.dimension_evidence)
+        if (
+            "CAPACITY" in economics_binding.required_evidence_dimensions
+            or "CAPACITY" in dimension_evidence
+        ) and dimension_evidence.get("CAPACITY") != capacity.digest:
+            raise StrategyEconomicsAuthorityError(
+                "CAPACITY dimension does not name canonical capacity evidence"
+            )
+        # Replaying the canonical allocator proves calculation consistency,
+        # not that the caller-selected AllocationPolicy is the product-selected
+        # capacity owner. Preserve the terminal owner gap until that independent
+        # policy/evidence authority is composed.
+        verified.add("capacity_replay_consistency")
+        capacity_digest = capacity.digest
+
     values = (
         provider_economic_book,
         provider_economic_cut,
@@ -446,6 +544,7 @@ def assess_strategy_economics_authority(
         unresolved_owners=tuple(sorted(unresolved)),
         registered_run_receipt_digest=receipt_digest,
         provider_economic_cut_digest=cut_digest,
+        capacity_replay_digest=capacity_digest,
         _token=_ISSUE_TOKEN,
     )
     return _register_issued(assessment, _token=_ISSUE_TOKEN)

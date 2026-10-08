@@ -55,6 +55,28 @@ async function stop() {
   }
 }
 
+function checkpointSignature(directory) {
+  const result = spawnSync(python, ["-B", "-c", `
+import hashlib,json,sys
+from pathlib import Path
+from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.simulation_commands import _protocol
+from mvp.autotrade_mvp.simulation_runtime_checkpoint import _runtime_scope_snapshot,_stable_runtime_components,checkpoint_path
+from mvp.autotrade_mvp.replay import CompositeReplayCheckpoint
+root=Path(sys.argv[1]);store=JournalStore(root/'journal.sqlite3');protocol=_protocol(store)
+completed=[event['payload'] for event in store.load_events('canonical_autonomous_simulation',protocol['run_id'])
+    if event['event_type']=='AutonomousEpisodeCompleted']
+saved=CompositeReplayCheckpoint.from_canonical_json(checkpoint_path(root).read_text())
+cut,components=_stable_runtime_components(store,protocol=protocol,completed=completed)
+scope,_,_=_runtime_scope_snapshot(store,run_id=protocol['run_id'])
+identity=hashlib.sha256(str(store.store_identity).encode()).hexdigest()
+print(json.dumps({'match':saved.runtime_cut_id==cut,'scope':scope['state_digest'],
+    'identity':identity,'completed':len(completed)}))
+`, path.join(directory, "state")], {cwd: ROOT, env, encoding: "utf8", timeout: 30000});
+  assert.equal(result.status, 0, "Checkpoint signature inspection failed: " + result.stderr);
+  return JSON.parse(result.stdout);
+}
+
 async function tabTo(page, id) {
   for (let count = 0; count < 160; count++) {
     if (await page.evaluate(() => document.activeElement.id) === id) return;
@@ -85,7 +107,7 @@ async function command(page, action, index) {
       document.querySelector("#operations-body").lastElementChild?.children[1]?.textContent), before,
     {timeout: 240000});
   const phase = await page.locator("#operations-body tr[data-operation-id]").last()
-    .locator("td").nth(1).innerText();
+    .locator("td").first().innerText();
   const diagnostic = path.join(data, "worker-stage-diagnostic.txt");
   assert.equal(phase, "SUCCEEDED", fs.existsSync(diagnostic)
     ? `Worker stage: ${fs.readFileSync(diagnostic, "utf8")}` : "No worker stage diagnostic");
@@ -438,6 +460,7 @@ async function exerciseHostOutageFailClosed(page) {
   page.on("pageerror", error => errors.push(error.message));
   await page.goto(await start(data));
   await page.waitForFunction(() => !document.querySelector("#submit-command").disabled);
+  const checkpointAtOpen = checkpointSignature(data);
   assert.equal(new URL(page.url()).hash, "");
   assert.match(await page.locator("#jobs-body").innerText(), /DIAGNOSTIC_ONLY/);
   await page.keyboard.press("Tab");
@@ -447,7 +470,20 @@ async function exerciseHostOutageFailClosed(page) {
   assert.equal(await page.locator("#polite-status").getAttribute("role"), "status");
   assert.equal(await page.locator("#urgent-status").getAttribute("role"), "alert");
   await exerciseSnapshotBusyFailClosed(page);
+  const checkpointBeforeStop = checkpointSignature(data);
   await stop();
+  const checkpointAfterStop = checkpointSignature(data);
+  console.log(JSON.stringify({checkpoint_drift: {
+    at_open_match: checkpointAtOpen.match,
+    before_stop_match: checkpointBeforeStop.match,
+    after_stop_match: checkpointAfterStop.match,
+    scope_changed_before_stop: checkpointAtOpen.scope !== checkpointBeforeStop.scope,
+    scope_changed_on_stop: checkpointBeforeStop.scope !== checkpointAfterStop.scope,
+    identity_changed_before_stop: checkpointAtOpen.identity !== checkpointBeforeStop.identity,
+    identity_changed_on_stop: checkpointBeforeStop.identity !== checkpointAfterStop.identity,
+    completed_at_open: checkpointAtOpen.completed,
+    completed_after_stop: checkpointAfterStop.completed,
+  }}));
   await exerciseHostOutageFailClosed(page);
 
   const crash = spawnSync(python, ["-B", "-c", `

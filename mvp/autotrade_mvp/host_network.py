@@ -189,6 +189,10 @@ class SnapshotPrincipal:
     role: str
 
 
+class SnapshotTemporarilyUnavailable(RuntimeError):
+    """Retryable, bounded inconsistency while projecting one durable snapshot."""
+
+
 @dataclass(frozen=True)
 class TransportResponse:
     status: int
@@ -407,6 +411,25 @@ class AuthenticatedHostApplication:
         return principal, session.role
 
     def _snapshot(
+        self,
+        principal: HostPrincipal,
+        authenticated_role: str,
+    ) -> Mapping[str, object]:
+        # An independently committed journal event during projection makes the
+        # assembled view causally inconsistent even if each sub-read succeeds.
+        # Never publish such a view. Four attempts bound writer starvation.
+        for _ in range(4):
+            before = self.store.snapshot()
+            projected = self._snapshot_once(principal, authenticated_role)
+            after = self.store.snapshot()
+            if (
+                before["state_version"] == after["state_version"]
+                and before["event_cursor"] == after["event_cursor"]
+            ):
+                return projected
+        raise SnapshotTemporarilyUnavailable("canonical snapshot changed during projection")
+
+    def _snapshot_once(
         self,
         principal: HostPrincipal,
         authenticated_role: str,
@@ -697,6 +720,12 @@ class AuthenticatedHostApplication:
                 )
 
             return _error(404, "NOT_FOUND")
+        except SnapshotTemporarilyUnavailable:
+            return _json_response(
+                503,
+                {"error": "SNAPSHOT_BUSY", "retryable": True},
+                headers=(("Cache-Control", "no-store"), ("Retry-After", "1")),
+            )
         except EventGap:
             return _json_response(
                 409,

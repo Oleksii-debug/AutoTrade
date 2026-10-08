@@ -1684,7 +1684,7 @@ class DispatchTests(unittest.TestCase):
                     ["SubmissionPrepared", "SubmissionBlocked"],
                 )
 
-    def test_owner_transfer_during_provider_wait_blocks_stale_sender(self):
+    def test_unauthorized_takeover_and_lease_expiry_during_provider_wait_block_sender(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)
             recovery = RecoveryController(
@@ -1704,11 +1704,18 @@ class DispatchTests(unittest.TestCase):
 
             def transport(_client_id, _request, final_guard):
                 nonlocal outbound
-                recovery.transfer_owner(
-                    new_owner_id="host-b",
-                    old_sender_fenced=True,
-                    reconciled=True,
-                )
+                # A durable owner cannot be transferred by caller booleans.
+                # Reject that shortcut, then expire the lease before the
+                # final send barrier to demonstrate stale-sender fencing.
+                with self.assertRaisesRegex(
+                    PermissionError, "independently issued takeover evidence",
+                ):
+                    recovery.transfer_owner(
+                        new_owner_id="host-b",
+                        old_sender_fenced=True,
+                        reconciled=True,
+                    )
+                recovery.on_lease_expired()
                 final_guard()
                 outbound += 1
                 return {"provider_order_id": "must-not-happen"}

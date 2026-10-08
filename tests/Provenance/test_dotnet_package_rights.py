@@ -138,48 +138,15 @@ def _write_restored_package(root: Path, *, license_text: str = _LICENSE) -> Path
         encoding="ascii",
     )
     (package / "example.package.1.2.3.nupkg").write_bytes(_NUPKG_BYTES)
-    # Preserve archive-member bytes on Windows, where write_text translates LF to CRLF.
-    # This fixture must model byte-for-byte extracted NuGet files.
-    (package / "LICENSE.txt").write_bytes(license_text.encode("utf-8"))
-    (package / "NOTICE.txt").write_bytes(_NOTICE.encode("utf-8"))
-    (package / "example.package.nuspec").write_bytes(_NUSPEC.encode("utf-8"))
+    (package / "LICENSE.txt").write_text(license_text, encoding="utf-8")
+    (package / "NOTICE.txt").write_text(_NOTICE, encoding="utf-8")
+    (package / "example.package.nuspec").write_text(_NUSPEC, encoding="utf-8")
     return packages
 
 
 class DotnetPackageRightsTests(unittest.TestCase):
     def test_repository_locked_graph_has_exact_rights_coverage(self):
         self.assertEqual(package_rights_blockers(ROOT), [])
-
-    def test_desktop_locked_win_x64_restore_requires_exact_rid_and_order(self):
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            generic_project = _write_project(root)
-            desktop_dir = root / "src" / "AutoTrade.Desktop"
-            generic_project.parent.rename(desktop_dir)
-            project = desktop_dir / "AutoTrade.Desktop.csproj"
-            (desktop_dir / "App.csproj").rename(project)
-            _write_policy(root)
-            _write_rights_workflow(root, [project])
-            workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
-            original = workflow.read_text(encoding="utf-8")
-            relative = project.relative_to(root).as_posix()
-            exact = f"dotnet restore {relative} --locked-mode"
-            windows = f"dotnet restore {relative} -r win-x64 --locked-mode"
-            self.assertIn(exact, original)
-            workflow.write_text(original.replace(exact, windows), encoding="utf-8")
-            self.assertEqual(package_rights_blockers(root), [])
-            for invalid in (
-                f"dotnet restore {relative} -r linux-x64 --locked-mode",
-                f"dotnet restore {relative} -r win-x64",
-            ):
-                with self.subTest(invalid=invalid):
-                    workflow.write_text(
-                        original.replace(exact, invalid), encoding="utf-8"
-                    )
-                    self.assertIn(
-                        f"DOTNET_PACKAGE_RIGHTS_VERIFY_ORDER_INVALID:{relative}",
-                        package_rights_blockers(root),
-                    )
 
     def test_missing_rights_record_blocks_locked_package(self):
         with TemporaryDirectory() as directory:
@@ -319,13 +286,9 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 "      - run: echo no-op\n",
                 encoding="utf-8",
             )
-            blockers = package_rights_blockers(root)
-            # Neither fake root-level steps nor a missing verifier in jobs
-            # can attest restored-package rights.  Both failures are required.
-            self.assertIn("DOTNET_PACKAGE_RIGHTS_VERIFY_COMMAND_INVALID:5", blockers)
             self.assertIn(
-                "DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_MISSING:src/App/App.csproj",
-                blockers,
+                "DOTNET_PACKAGE_RIGHTS_VERIFY_ORDER_INVALID:src/App/App.csproj",
+                package_rights_blockers(root),
             )
 
 

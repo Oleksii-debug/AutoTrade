@@ -26,7 +26,6 @@ from tools.dotnet_package_rights import _locked_nupkg_root_evidence
 from research.autotrade_research.artifacts.durable_publish import atomic_write_json
 
 ROOT = Path(__file__).resolve().parents[1]
-_PATH_TYPE = type(Path("."))
 SOURCE_PREFIXES = ('mvp/autotrade_mvp/', 'research/autotrade_research/',
                    'autotrade_numeric/', 'autotrade_foundation/')
 REVIEWED_LICENSE_PREFIX = 'provenance/licenses/'
@@ -76,7 +75,7 @@ def _write_new_payload_json(path, value):
 
 
 def _capture_publish(publish):
-    if type(publish) is not _PATH_TYPE:
+    if type(publish) is not Path:
         raise TypeError('publish root must be an exact Path')
     captured = {}
     for relative, _, content in _collect(publish):
@@ -122,7 +121,7 @@ def _rewrite_existing_publish_evidence(path, evidence):
     directory entry; it cannot redirect binder bytes through a substituted
     symlink or hardlink into another authority-owned file.
     """
-    if type(path) is not _PATH_TYPE or type(evidence) is not dict:
+    if type(path) is not Path or type(evidence) is not dict:
         raise TypeError('publish evidence rewrite requires exact Path and dict')
     payload = (
         json.dumps(evidence, indent=2, sort_keys=True, ensure_ascii=False) + '\n'
@@ -281,7 +280,7 @@ def stage_source(source_root, source_sha, destination, composition_path):
                     for part in parts:
                         descriptor = parents.enter_context(_retained_posix_relative_directory(descriptor, (part,), create=True))
     _stage_source_controlled_components(staging=destination, composition_path=composition_path,
-        source_root=source_root, descriptors=descriptors)
+        source_root=source_root, descriptors=descriptors, expected_source_sha=source_sha)
     _write_new_payload_bytes(destination / 'SOURCE_REVISION', (source_sha + '\n').encode())
     return selected
 
@@ -509,7 +508,7 @@ def _require_webview2_archive_rights(
     version,
     content_hash,
 ):
-    if type(product_root) is not _PATH_TYPE or type(archive_path) is not _PATH_TYPE:
+    if type(product_root) is not Path or type(archive_path) is not Path:
         raise TypeError('WebView2 rights verification requires exact Path values')
     if type(version) is not str or type(content_hash) is not str:
         raise TypeError('WebView2 rights identity must be exact str values')
@@ -680,26 +679,7 @@ def _require_webview2_input_identity(product_root, inputs, nuget_lock):
             'resolved': item['resolved'],
             'content_hash_sha512_base64': item['contentHash'],
         })
-    # The locked Desktop RID restore records both the framework and win-x64
-    # graph. They are two targets for ONE pinned artifact, not two packages.
-    # Reject missing, hostile, or divergent targets rather than suppressing the
-    # lock/provenance checks to make Windows packaging pass.
-    lock_by_target = {row['target']: row for row in lock_rows}
-    allowed_targets = {
-        'net10.0-windows7.0',
-        'net10.0-windows7.0/win-x64',
-    }
-    if (
-        not lock_rows
-        or len(lock_by_target) != len(lock_rows)
-        or 'net10.0-windows7.0' not in lock_by_target
-        or not set(lock_by_target).issubset(allowed_targets)
-        or len({
-            (row['type'], row['requested'], row['resolved'],
-             row['content_hash_sha512_base64'])
-            for row in lock_rows
-        }) != 1
-    ):
+    if len(lock_rows) != 1:
         raise ValueError(
             'provider-free WebView2 lock identity is not singular'
         )
@@ -722,52 +702,30 @@ def _require_webview2_input_identity(product_root, inputs, nuget_lock):
         if type(item) is dict
         and item.get('name') == 'Microsoft.Web.WebView2'
     ]
-    # One exact provenance record is required PER locked target; a RID cannot
-    # be silently omitted and duplicate/foreign target entries fail closed.
-    if len(manifest_rows) != len(lock_rows):
+    if len(manifest_rows) != 1:
         raise ValueError(
             'provider-free WebView2 release provenance is not singular'
         )
-    manifest_by_target = {}
-    for manifest_row in manifest_rows:
-        target = manifest_row.get('target')
-        if type(target) is not str or target in manifest_by_target:
-            raise ValueError(
-                'provider-free WebView2 release provenance is not singular'
-            )
-        manifest_by_target[target] = manifest_row
-    if set(manifest_by_target) != set(lock_by_target):
+    lock_row = lock_rows[0]
+    manifest_row = manifest_rows[0]
+    expected_manifest = {
+        'project': 'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj',
+        'target': lock_row['target'],
+        'name': 'Microsoft.Web.WebView2',
+        'type': lock_row['type'],
+        'version': version,
+        'content_hash_sha512_base64': content_hash,
+        'dependencies': [],
+        'requested': lock_row['requested'],
+    }
+    if manifest_row != expected_manifest:
         raise ValueError(
-            'provider-free WebView2 release provenance targets mismatch'
+            'provider-free WebView2 lock differs from release provenance'
         )
-    for target, lock_row in lock_by_target.items():
-        expected_manifest = {
-            'project': 'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj',
-            'target': target,
-            'name': 'Microsoft.Web.WebView2',
-            'type': lock_row['type'],
-            'version': version,
-            'content_hash_sha512_base64': content_hash,
-            'dependencies': [],
-            'requested': lock_row['requested'],
-        }
-        if manifest_by_target[target] != expected_manifest:
-            raise ValueError(
-                'provider-free WebView2 lock differs from release provenance'
-            )
     return content_hash
 
 
-def _lexical_absolute_work_path(work):
-    # Native retained-handle authority takes absolute lexical paths. Do not use
-    # resolve(): that could silently follow an attacker-controlled junction.
-    if type(work) is not _PATH_TYPE:
-        raise TypeError('candidate work root must be an exact Path')
-    return Path(os.path.abspath(os.fspath(work)))
-
-
 def build_candidate(*, source_root, source_sha, desktop, host, python_archive, webview_archive, work, output):
-    work = _lexical_absolute_work_path(work)
     if work.exists(): raise ValueError('candidate work directory must be new')
     work.mkdir(parents=True)
     payload = work / 'payload'; payload.mkdir()

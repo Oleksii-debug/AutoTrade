@@ -5,7 +5,6 @@ import binascii
 import json
 import re
 import shlex
-import subprocess
 from pathlib import Path, PurePosixPath
 import xml.etree.ElementTree as ET
 
@@ -351,37 +350,6 @@ def _restore_local_override_names(tree: ET.ElementTree) -> tuple[str, ...]:
     )
 
 
-def _is_untracked_generated_nuget_source(root: Path, path: Path) -> bool:
-    """Exclude only disposable NuGet-generated obj imports, never source files.
-
-    A checked-in file in obj is still source authority and must be inspected;
-    an inaccessible/broken Git index fails closed by leaving the file in scope.
-    The exception never applies to custom .props/.targets or symlinks.
-    """
-    relative = path.relative_to(root)
-    parts = relative.parts
-    if (
-        not (root / '.git').exists()
-        or path.is_symlink()
-        or 'obj' not in parts
-        or not (
-            path.name.endswith('.csproj.nuget.g.targets')
-            or path.name.endswith('.csproj.nuget.g.props')
-        )
-    ):
-        return False
-    try:
-        tracked = subprocess.run(
-            ['git', '-C', str(root), 'ls-files', '--error-unmatch',
-             '--', relative.as_posix()],
-            capture_output=True,
-            check=False,
-        )
-    except OSError:
-        return False
-    return tracked.returncode == 1
-
-
 def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
     """Reject release dependency declarations hidden in imported MSBuild files.
 
@@ -395,10 +363,7 @@ def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
         candidates.update(root.glob(pattern))
         source_root = root / 'src'
         if source_root.is_dir():
-            candidates.update(
-                path for path in source_root.rglob(pattern)
-                if not _is_untracked_generated_nuget_source(root, path)
-            )
+            candidates.update(source_root.rglob(pattern))
 
     blockers: list[str] = []
 

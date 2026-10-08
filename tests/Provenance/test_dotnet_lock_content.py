@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import json
-import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -1282,84 +1281,6 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             self.assertEqual(
                 dotnet_imported_package_reference_blockers(root),
                 ['DOTNET_MSBUILD_DEPENDENCY_SOURCE_INVALID:Directory.Build.props'],
-            )
-
-
-    def test_untracked_generated_nuget_obj_import_is_not_release_source(self):
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            project = root / 'src' / 'AutoTrade.Desktop' / 'AutoTrade.Desktop.csproj'
-            project.parent.mkdir(parents=True)
-            project.write_text('<Project Sdk="Microsoft.NET.Sdk" />', encoding='utf-8')
-            subprocess.run(
-                ['git', '-C', str(root), 'init', '-q'],
-                check=True, capture_output=True,
-            )
-            obj = project.parent / 'obj'
-            obj.mkdir()
-            for suffix in ('targets', 'props'):
-                generated = obj / f'AutoTrade.Desktop.csproj.nuget.g.{suffix}'
-                generated.write_text(
-                    '<Project><Import Project="injected.targets" /></Project>',
-                    encoding='utf-8',
-                )
-            self.assertEqual(dotnet_imported_package_reference_blockers(root), [])
-
-    def test_tracked_generated_nuget_obj_source_remains_fail_closed(self):
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            project = root / 'src' / 'AutoTrade.Desktop' / 'AutoTrade.Desktop.csproj'
-            project.parent.mkdir(parents=True)
-            project.write_text('<Project Sdk="Microsoft.NET.Sdk" />', encoding='utf-8')
-            subprocess.run(
-                ['git', '-C', str(root), 'init', '-q'],
-                check=True, capture_output=True,
-            )
-            obj = project.parent / 'obj'
-            obj.mkdir()
-            generated = obj / 'AutoTrade.Desktop.csproj.nuget.g.targets'
-            generated.write_text(
-                '<Project><Import Project="../../evil.targets" /></Project>',
-                encoding='utf-8',
-            )
-            subprocess.run(
-                ['git', '-C', str(root), 'add', '-f', '--',
-                 generated.relative_to(root).as_posix()],
-                check=True, capture_output=True,
-            )
-            self.assertEqual(
-                dotnet_imported_package_reference_blockers(root),
-                ['DOTNET_EXPLICIT_MSBUILD_IMPORT_UNSUPPORTED:'
-                 'src/AutoTrade.Desktop/obj/AutoTrade.Desktop.csproj.nuget.g.targets'],
-            )
-
-    def test_untracked_custom_obj_targets_and_missing_git_still_block(self):
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            project = root / 'src' / 'AutoTrade.Desktop' / 'AutoTrade.Desktop.csproj'
-            project.parent.mkdir(parents=True)
-            project.write_text('<Project Sdk="Microsoft.NET.Sdk" />', encoding='utf-8')
-            obj = project.parent / 'obj'
-            obj.mkdir()
-            generated = obj / 'AutoTrade.Desktop.csproj.nuget.g.targets'
-            generated.write_text(
-                '<Project><Import Project="injected.targets" /></Project>',
-                encoding='utf-8',
-            )
-            custom = obj / 'Custom.targets'
-            custom.write_text(
-                '<Project><PackageReference Include="Evil" Version="1.0" />'
-                '</Project>',
-                encoding='utf-8',
-            )
-            self.assertEqual(
-                dotnet_imported_package_reference_blockers(root),
-                [
-                    'DOTNET_EXPLICIT_MSBUILD_IMPORT_UNSUPPORTED:'
-                    'src/AutoTrade.Desktop/obj/AutoTrade.Desktop.csproj.nuget.g.targets',
-                    'DOTNET_IMPORTED_PACKAGE_REFERENCE_UNSUPPORTED:'
-                    'src/AutoTrade.Desktop/obj/Custom.targets',
-                ],
             )
 
 

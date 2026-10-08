@@ -110,15 +110,7 @@ def locked_package_artifacts(
     *,
     projects: list[Path] | None = None,
 ) -> list[dict[str, str]]:
-    selected = (
-        _package_projects(root)
-        if projects is None
-        else sorted(
-            project
-            for project in set(projects)
-            if dotnet_project_package_references(project)
-        )
-    )
+    selected = _package_projects(root) if projects is None else sorted(set(projects))
     graph = dotnet_locked_dependency_graph(root, selected)
     artifacts: dict[tuple[str, str, str], dict[str, str]] = {}
     by_name_version: dict[tuple[str, str], str] = {}
@@ -223,7 +215,7 @@ def package_rights_records(root: Path = ROOT) -> list[dict[str, str]]:
             "content_hash_sha512_base64": str(content_hash),
             "license_id": license_id,
             "license_file": license_file,
-            "expected_license_text_path": expected_path.relative_to(root.resolve()).as_posix(),
+            "expected_license_text_path": expected_path.relative_to(root).as_posix(),
             "notice_file": notice_file,
         }
         key = _artifact_key(record)
@@ -460,19 +452,12 @@ def _workflow_rights_blockers(
             )
             continue
 
-        # A locked Windows Desktop RID restore is required before a win-x64
-        # --no-restore publish. Keep this exception exact; never admit an
-        # arbitrary runtime identifier, unpinned restore or shell wrapper.
-        restore_commands = {f"dotnet restore {relative} --locked-mode"}
-        if relative == "src/AutoTrade.Desktop/AutoTrade.Desktop.csproj":
-            restore_commands.add(
-                f"dotnet restore {relative} -r win-x64 --locked-mode"
-            )
+        restore_command = f"dotnet restore {relative} --locked-mode"
         verify_suffix = f"--project {relative}"
         restore_lines = [
             index
             for index, raw in enumerate(workflow_lines, start=1)
-            if _direct_workflow_run_command(raw) in restore_commands
+            if _direct_workflow_run_command(raw) == restore_command
         ]
         verify_lines = [
             index
@@ -505,7 +490,7 @@ def _workflow_rights_blockers(
         later_restore = any(
             index > verify_lines[0]
             and _workflow_job_name(workflow_lines, index) == verify_job
-            and _direct_workflow_run_command(raw) in restore_commands
+            and _direct_workflow_run_command(raw) == restore_command
             for index, raw in enumerate(workflow_lines, start=1)
         )
         if later_restore:
@@ -591,7 +576,7 @@ def _locked_nupkg_root_evidence(
     are allowed to support a rights decision.
     """
 
-    if type(nupkg_path) is not type(Path()):
+    if type(nupkg_path) is not Path:
         raise TypeError("nupkg_path must be exact Path")
     for value, label in (
         (license_file, "license_file"),

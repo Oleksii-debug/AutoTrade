@@ -8,7 +8,7 @@ from unittest.mock import patch
 import zipfile
 
 import research.autotrade_research.artifacts.durable_publish as durable_publish_module
-from tools.build_windows_bundle import BundleError, _reject_sensitive_content, _windows_path_key, build_bundle
+from tools.build_windows_bundle import BundleError, _windows_path_key, build_bundle
 
 
 SOURCE_SHA = "a" * 40
@@ -27,36 +27,6 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             '{"version":"1.0.0"}\n',
             encoding="utf-8",
         )
-
-    def test_exact_diagnostic_pem_marker_literals_do_not_block_but_keys_do(self):
-        # Both canonical redactors declare PEM marker strings as data to
-        # recognize and remove. This exception is exact-path and exact-bytes:
-        # any extra marker, altered declaration or foreign path fails closed.
-        for module_name in ("decision_trace.py", "diagnostics.py"):
-            with self.subTest(module=module_name):
-                source = (
-                    Path(__file__).resolve().parents[2]
-                    / "mvp"
-                    / "autotrade_mvp"
-                    / module_name
-                ).read_bytes()
-                relative = f"mvp/autotrade_mvp/{module_name}"
-                _reject_sensitive_content(relative, source)
-                with self.assertRaisesRegex(BundleError, "private-key material"):
-                    _reject_sensitive_content(
-                        relative,
-                        source + b"\n-----BEGIN PRIVATE KEY-----\nsecret-payload\n",
-                    )
-                with self.assertRaisesRegex(BundleError, "private-key material"):
-                    _reject_sensitive_content("other/source.py", source)
-                with self.assertRaisesRegex(BundleError, "private-key material"):
-                    _reject_sensitive_content(
-                        relative,
-                        source.replace(
-                            b'    "-----BEGIN PRIVATE KEY-----",',
-                            b'    "-----BEGIN PRIVATE KEY-----", # modified declaration',
-                        ),
-                    )
 
     def _symlink_or_skip(self, link: Path, target: Path):
         try:

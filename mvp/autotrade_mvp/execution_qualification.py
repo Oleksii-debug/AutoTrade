@@ -15,7 +15,7 @@ from hashlib import sha256
 from typing import Literal
 from uuid import UUID
 
-from autotrade_runtime.artifacts import (
+from autotrade_research.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
     trusted_authenticated_reader,
@@ -65,10 +65,11 @@ def _validate_instrument_metadata_authority(
 ) -> None:
     """Authenticate the exact InstrumentVersion facts behind execution rules.
 
-    The installed runtime owns the canonical ArtifactStore authority. Research
-    names are compatibility aliases, but terminal qualification must remain
-    hermetic when the development-only research package is absent. Keep this
-    boundary on the neutral runtime ArtifactStore/reader generation while
+    The instrument registry still has legacy callers under a second package
+    import identity, while this qualified execution boundary intentionally uses
+    the canonical autotrade_research package. Reusing its private exact-type
+    helper across those module identities would reject the canonical store.
+    Keep this boundary on one canonical ArtifactStore/reader generation while
     enforcing the same immutable instrument-metadata contract.
     """
 

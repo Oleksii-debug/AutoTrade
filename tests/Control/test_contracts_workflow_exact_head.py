@@ -21,15 +21,15 @@ class ContractsWorkflowExactHeadTests(unittest.TestCase):
 
     def test_contracts_workflow_publishes_exact_head_evidence(self):
         text = WORKFLOW.read_text(encoding="utf-8")
-        writer = (
-            'run: python tools/write_contracts_ci_evidence.py --output '
-            '"artifacts/contracts-${{ runner.os }}.json"'
-        )
-        self.assertEqual(text.count(writer), 2)
+        self.assertIn("python tools/write_ci_evidence.py --suite contracts", text)
         self.assertIn("if: github.event_name == 'pull_request'", text)
         self.assertIn("if: github.event_name != 'pull_request'", text)
         self.assertIn(
-            "run: python tools/contract_version_guard.py --base-ref origin/${{ github.base_ref }}",
+            '--command "json-schema + dotnet + typescript + contract-version-guard"',
+            text,
+        )
+        self.assertIn(
+            '--command "json-schema + dotnet + typescript"',
             text,
         )
         self.assertIn("contracts-evidence-${{ runner.os }}", text)

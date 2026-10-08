@@ -53,27 +53,6 @@ def write_bound_host_publish(publish, source_sha, *, host_bytes=b'MZ-host',
 
 
 class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
-    def test_candidate_work_root_is_absolute_lexical_and_rejects_wrong_type(self):
-        relative = Path("artifacts") / "candidate-work"
-        captured = candidate._lexical_absolute_work_path(relative)
-        self.assertEqual(captured, Path(os.path.abspath(os.fspath(relative))))
-        self.assertTrue(captured.is_absolute())
-        with self.assertRaises(TypeError):
-            candidate._lexical_absolute_work_path("artifacts/candidate-work")
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            actual = root / "real"
-            actual.mkdir()
-            alias = root / "alias"
-            try:
-                alias.symlink_to(actual, target_is_directory=True)
-            except (OSError, NotImplementedError):
-                # Windows may deny symlink creation; lexical case above is universal.
-                pass
-            else:
-                self.assertEqual(candidate._lexical_absolute_work_path(alias), alias)
-                self.assertNotEqual(candidate._lexical_absolute_work_path(alias), actual)
-
     def test_stage_source_uses_canonical_exact_git_reader(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -400,72 +379,6 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
                 source_sha=source_sha,
                 label='Host',
             )
-
-
-
-    def test_webview2_rid_lock_matches_every_exact_provenance_target(self):
-        import copy
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / 'provenance').mkdir()
-            version = '1.0.4258.31'
-            digest = 'sHVZ2MQrHT1J3q5/6csn0fIP27rzpTO/RRC+wPQDrZheB7T4t2n+vVbY6SdCKr4WRV9s/gmBM3PPMWWJtoDzMg=='
-            inputs = {'webview2_sdk': {
-                'version': version,
-                'url': 'https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/'
-                       + version + '/microsoft.web.webview2.' + version + '.nupkg',
-                'content_hash_sha512_base64': digest,
-            }}
-            targets = ('net10.0-windows7.0', 'net10.0-windows7.0/win-x64')
-            item = {'type': 'Direct', 'requested': '[1.0.4258.31, )',
-                    'resolved': version, 'contentHash': digest}
-            lock = {'version': 1, 'dependencies': {
-                target: {'Microsoft.Web.WebView2': dict(item)} for target in targets
-            }}
-            rows = [{
-                'project': 'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj',
-                'target': target, 'name': 'Microsoft.Web.WebView2',
-                'type': 'Direct', 'version': version,
-                'content_hash_sha512_base64': digest,
-                'dependencies': [], 'requested': item['requested'],
-            } for target in targets]
-            manifest_path = root / 'provenance/release-dependency-manifest.json'
-
-            def verify(rows_arg, lock_arg):
-                manifest_path.write_text(
-                    json.dumps({'dotnet_package_dependencies': rows_arg}),
-                    encoding='utf-8',
-                )
-                return candidate._require_webview2_input_identity(
-                    root, inputs, lock_arg,
-                )
-
-            self.assertEqual(verify(rows, lock), digest)
-            self.assertEqual(verify(rows[:1], {'version': 1, 'dependencies': {
-                targets[0]: {'Microsoft.Web.WebView2': dict(item)}
-            }}), digest)
-            with self.assertRaisesRegex(ValueError, 'provenance is not singular'):
-                verify(rows[:1], lock)
-            with self.assertRaisesRegex(ValueError, 'provenance is not singular'):
-                verify(rows + [rows[1]], lock)
-            wrong_target = copy.deepcopy(rows)
-            wrong_target[1]['target'] = 'net10.0-windows7.0/linux-x64'
-            with self.assertRaisesRegex(ValueError, 'targets mismatch'):
-                verify(wrong_target, lock)
-            wrong_hash = copy.deepcopy(rows)
-            wrong_hash[1]['content_hash_sha512_base64'] = 'A' * len(digest)
-            with self.assertRaisesRegex(ValueError, 'lock differs from release provenance'):
-                verify(wrong_hash, lock)
-            wrong_lock = copy.deepcopy(lock)
-            wrong_lock['dependencies'][targets[1]]['Microsoft.Web.WebView2']['contentHash'] = 'A' * len(digest)
-            with self.assertRaisesRegex(ValueError, 'lock differs from frozen input'):
-                verify(rows, wrong_lock)
-            wrong_lock = copy.deepcopy(lock)
-            wrong_lock['dependencies']['net10.0-windows7.0/linux-x64'] = {
-                'Microsoft.Web.WebView2': dict(item),
-            }
-            with self.assertRaisesRegex(ValueError, 'lock identity is not singular'):
-                verify(rows, wrong_lock)
 
 
 if __name__ == '__main__':

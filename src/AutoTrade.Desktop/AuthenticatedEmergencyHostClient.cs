@@ -778,34 +778,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
             request,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken);
-        if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
-        {
-            JsonElement unavailable = await ReadObjectAsync(
-                response,
-                cancellationToken);
-            bool exactSnapshotBusy =
-                unavailable.EnumerateObject().Count() == 2
-                && unavailable.TryGetProperty("error", out JsonElement error)
-                && error.ValueKind == JsonValueKind.String
-                && string.Equals(
-                    error.GetString(),
-                    "SNAPSHOT_BUSY",
-                    StringComparison.Ordinal)
-                && unavailable.TryGetProperty(
-                    "retryable",
-                    out JsonElement retryable)
-                && retryable.ValueKind == JsonValueKind.True;
-            if (exactSnapshotBusy)
-            {
-                throw new EmergencySnapshotBusyException();
-            }
-
-            response.EnsureSuccessStatusCode();
-        }
-        else
-        {
-            response.EnsureSuccessStatusCode();
-        }
+        await EnsureSuccessOrSnapshotBusyAsync(response, cancellationToken);
 
         JsonElement value = await ReadObjectAsync(response, cancellationToken);
         string returnedId = CanonicalGuid(
@@ -865,7 +838,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
             request,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessOrSnapshotBusyAsync(response, cancellationToken);
 
         JsonElement value = await ReadObjectAsync(response, cancellationToken);
         string hostId = RequiredString(value, "host_id");
@@ -977,6 +950,42 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         request.Headers.Add("X-AutoTrade-Actor", boundSession.Actor);
         request.Headers.CacheControl = new CacheControlHeaderValue { NoStore = true };
         return request;
+    }
+
+    // One exact, non-authorizing decoder for transient canonical Host contention.
+    // A non-canonical 503 never becomes a retryable snapshot or a trading decision.
+    private static async Task EnsureSuccessOrSnapshotBusyAsync(
+        HttpResponseMessage response,
+        CancellationToken cancellationToken)
+    {
+        if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
+        {
+            JsonElement unavailable = await ReadObjectAsync(
+                response,
+                cancellationToken);
+            bool exactSnapshotBusy =
+                unavailable.EnumerateObject().Count() == 2
+                && unavailable.TryGetProperty("error", out JsonElement error)
+                && error.ValueKind == JsonValueKind.String
+                && string.Equals(
+                    error.GetString(),
+                    "SNAPSHOT_BUSY",
+                    StringComparison.Ordinal)
+                && unavailable.TryGetProperty(
+                    "retryable",
+                    out JsonElement retryable)
+                && retryable.ValueKind == JsonValueKind.True;
+            if (exactSnapshotBusy)
+            {
+                throw new EmergencySnapshotBusyException();
+            }
+
+            response.EnsureSuccessStatusCode();
+        }
+        else
+        {
+            response.EnsureSuccessStatusCode();
+        }
     }
 
     private static async Task<JsonElement> ReadObjectAsync(

@@ -236,6 +236,34 @@ class WindowsUpdateIntentTests(unittest.TestCase):
                 self.first(), path=Path("relative.json"),
             )
 
+    def test_canonical_restart_is_blocked_when_pre_effect_intent_is_unresolved(self):
+        cp = update.WindowsUpdateCheckpoint(plan_sha256=SOURCE_PLAN_DIGEST)
+        disposition = update.assess_windows_update_restart(
+            self.plan,
+            cp,
+            trust=self.trust,
+            observed_windows_package_sha256="sha256:" + "c"*64,
+            observed_journal_schema_version=1,
+            pending_intent=self.first(),
+        )
+        self.assertEqual(disposition.disposition, "BLOCKED_UNKNOWN_STATE")
+        self.assertIn("INDEPENDENT_RECONCILIATION", disposition.reasons[0])
+
+    def test_restart_cannot_accept_intent_of_different_checkpoint(self):
+        progressed = update.WindowsUpdateCheckpoint(
+            plan_sha256=SOURCE_PLAN_DIGEST,
+            update_completed_steps=(update._INSTALL_STEPS[0],),
+        )
+        with self.assertRaisesRegex(update.WindowsUpdateError, "differs from restart"):
+            update.assess_windows_update_restart(
+                self.plan,
+                progressed,
+                trust=self.trust,
+                observed_windows_package_sha256="sha256:" + "c"*64,
+                observed_journal_schema_version=1,
+                pending_intent=self.first(),
+            )
+
     def test_no_generic_action_can_be_disguised_as_canonical_step(self):
         with self.assertRaisesRegex(update.WindowsUpdateError, "noncanonical step"):
             update.WindowsUpdateStepIntent(

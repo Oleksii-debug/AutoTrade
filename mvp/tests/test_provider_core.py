@@ -867,6 +867,27 @@ class ProviderCoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderCoreError, "clock skew"):
             guard.require_safe(host_time=NOW, provider_time=NOW + timedelta(seconds=3))
 
+    def test_acknowledgement_is_transport_only_never_execution_fill(self):
+        acknowledged = classify_write_outcome(
+            transport_started=True,
+            provider_acknowledged=True,
+            provider_rejected=False,
+        )
+        self.assertEqual(acknowledged.status, "ACKNOWLEDGED")
+        self.assertFalse(acknowledged.retry_same_economic_action)
+        self.assertFalse(acknowledged.reconciliation_required)
+        # Provider fills require the separate origin-bound execution evidence
+        # and reconciliation path. An ACK exposes neither filled quantity nor
+        # an execution identity and cannot be promoted by this classifier.
+        self.assertFalse(hasattr(acknowledged, "filled_quantity"))
+        self.assertFalse(hasattr(acknowledged, "execution_id"))
+        with self.assertRaisesRegex(ProviderCoreError, "cannot predate transport"):
+            classify_write_outcome(
+                transport_started=False,
+                provider_acknowledged=True,
+                provider_rejected=False,
+            )
+
     def test_ambiguous_write_is_never_blindly_retried(self):
         unknown = classify_write_outcome(
             transport_started=True,

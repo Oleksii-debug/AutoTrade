@@ -68,7 +68,7 @@ def inspect_component_receipts(
         or event_name not in ("pull_request", "workflow_dispatch")
     ):
         raise ValueError("expected component identity is invalid")
-    if type(evidence_dir) is not Path or not evidence_dir.is_dir() or evidence_dir.is_symlink():
+    if type(evidence_dir) is not type(Path()) or not evidence_dir.is_dir() or evidence_dir.is_symlink():
         raise ValueError("CI evidence root must be a regular directory")
     received = []
     for group, (filename, suite, runner) in _EXPECTED.items():

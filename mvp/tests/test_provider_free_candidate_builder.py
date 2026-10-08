@@ -53,6 +53,27 @@ def write_bound_host_publish(publish, source_sha, *, host_bytes=b'MZ-host',
 
 
 class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
+    def test_candidate_work_root_is_absolute_lexical_and_rejects_wrong_type(self):
+        relative = Path("artifacts") / "candidate-work"
+        captured = candidate._lexical_absolute_work_path(relative)
+        self.assertEqual(captured, Path(os.path.abspath(os.fspath(relative))))
+        self.assertTrue(captured.is_absolute())
+        with self.assertRaises(TypeError):
+            candidate._lexical_absolute_work_path("artifacts/candidate-work")
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            actual = root / "real"
+            actual.mkdir()
+            alias = root / "alias"
+            try:
+                alias.symlink_to(actual, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                # Windows may deny symlink creation; lexical case above is universal.
+                pass
+            else:
+                self.assertEqual(candidate._lexical_absolute_work_path(alias), alias)
+                self.assertNotEqual(candidate._lexical_absolute_work_path(alias), actual)
+
     def test_stage_source_uses_canonical_exact_git_reader(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

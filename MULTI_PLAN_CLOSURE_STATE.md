@@ -81,8 +81,8 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 ### Plan 6 — Providers (offline/source engineering; no owner input required)
 | Section | State | Existing evidence / note |
 | ---: | --- | --- |
-| 1 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | legacy Section 38 provider domain/account/capability contracts |
-| 2 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | legacy Section 38 reads/streams/request/signing/reconciliation adapters |
+| 1 | QUALIFYING_OFFLINE / ACTIONABLE_OFFLINE | current source reused; BYBIT direct PAPER/LIVE provider-domain guard + negative tests; PR #2326 head 3143ae44; Linux/Windows exact-head offline suite pending. NOT DONE until CI+integration/readback |
+| 2 | QUALIFYING_OFFLINE / ACTIONABLE_OFFLINE | existing read/signing/dispatch/UNKNOWN/reconciliation adapters reused; ACK-not-fill negative test; PR #2326 head 3143ae44; exact-head offline suite pending. NOT DONE until CI+integration/readback |
 | 3 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | legacy Section 39 provider-family adapters |
 | 4 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | engineering slice of legacy Section 40; real provider financial truth remains Plan 9 |
 | 5 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | provider qualification harness using non-secret fixtures/test vectors |

@@ -2289,6 +2289,12 @@ function renderOperation(operation) {
       }
     });
     window.addEventListener("hashchange", () => activate({focusHeading: true}));
+    // Native fragment scrolling/focus can run after DOMContentLoaded on an
+    // initial deep link. Re-apply the semantic heading focus after load, so a
+    // fresh browser navigation and keyboard history use the same route contract.
+    window.addEventListener("load", () => {
+      if (window.location.hash !== "") activate({focusHeading: true});
+    }, {once: true});
     activate({focusHeading: window.location.hash !== ""});
   }
 

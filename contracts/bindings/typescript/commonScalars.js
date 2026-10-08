@@ -2,7 +2,7 @@
 
 // AUTO-GENERATED from contracts/jsonschema/common.schema.json. DO NOT EDIT.
 // Run python tools/generate_common_scalar_bindings.py to regenerate.
-const CONTRACT_VERSION = "7.0.0";
+const CONTRACT_VERSION = "6.0.0";
 
 const patterns = Object.freeze({
   Decimal: /^(?:0|[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]|-(?:[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]))$(?![\s\S])/,

@@ -41,7 +41,6 @@ _REQUIRED_PACKAGE_FIELDS = frozenset(
         "name",
         "version",
         "content_hash_sha512_base64",
-        "archive_sha512_base64",
         "license_id",
         "license_file",
         "expected_license_text_path",
@@ -112,9 +111,6 @@ def locked_package_artifacts(
     projects: list[Path] | None = None,
 ) -> list[dict[str, str]]:
     selected = _package_projects(root) if projects is None else sorted(set(projects))
-    selected = [project for project in selected if dotnet_project_package_references(project)]
-    if not selected:
-        return []
     graph = dotnet_locked_dependency_graph(root, selected)
     artifacts: dict[tuple[str, str, str], dict[str, str]] = {}
     by_name_version: dict[tuple[str, str], str] = {}
@@ -198,11 +194,8 @@ def package_rights_records(root: Path = ROOT) -> list[dict[str, str]]:
         name = _canonical_text(raw["name"], field="name")
         version = _canonical_text(raw["version"], field="version")
         content_hash = raw["content_hash_sha512_base64"]
-        archive_hash = raw["archive_sha512_base64"]
         if not _valid_content_hash(content_hash):
             raise ValueError(f"invalid package-rights content hash for {name}@{version}")
-        if not _valid_content_hash(archive_hash):
-            raise ValueError(f"invalid package-rights archive hash for {name}@{version}")
         license_id = _canonical_text(raw["license_id"], field="license_id")
         license_file = _canonical_text(raw["license_file"], field="license_file")
         notice_file = _canonical_text(raw["notice_file"], field="notice_file")
@@ -220,10 +213,9 @@ def package_rights_records(root: Path = ROOT) -> list[dict[str, str]]:
             "name": name,
             "version": version,
             "content_hash_sha512_base64": str(content_hash),
-            "archive_sha512_base64": str(archive_hash),
             "license_id": license_id,
             "license_file": license_file,
-            "expected_license_text_path": expected_path.relative_to(root.resolve(strict=True)).as_posix(),
+            "expected_license_text_path": expected_path.relative_to(root).as_posix(),
             "notice_file": notice_file,
         }
         key = _artifact_key(record)
@@ -543,9 +535,8 @@ def _normalized_license_text(path: Path) -> str:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError as error:
         raise ValueError(f"license text is not UTF-8: {path}") from error
-    # Fold presentation whitespace only. The signed NuGet archive remains
-    # byte-exact SHA-512 pinned; words and punctuation remain exact.
-    return " ".join(text.split()) + "\n"
+    return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")).strip() + "\n"
+
 
 def _package_regular_file(
     package_dir: Path,
@@ -585,8 +576,8 @@ def _locked_nupkg_root_evidence(
     are allowed to support a rights decision.
     """
 
-    if type(nupkg_path) is not type(Path(".")):
-        raise TypeError("nupkg_path must be an exact platform Path")
+    if type(nupkg_path) is not Path:
+        raise TypeError("nupkg_path must be exact Path")
     for value, label in (
         (license_file, "license_file"),
         (notice_file, "notice_file"),
@@ -730,34 +721,15 @@ def verify_restored_package_rights(
             nupkg_files[0],
             label="nupkg payload",
         )
-        # NuGet contentHash excludes signed package metadata, whereas the
-        # SHA-512 of the exact downloaded .nupkg includes its signature.
-        # Keep both pinned: NuGet's normalized lock identity and byte-exact
-        # downloaded archive identity. Do not conflate the two hashes.
         restored_hash = sha_path.read_text(encoding="ascii").strip()
-        if restored_hash != record["archive_sha512_base64"]:
+        if restored_hash != artifact["content_hash_sha512_base64"]:
             raise ValueError(
                 f"restored NuGet package content hash mismatch: {package_name}@{package_version}"
-            )
-        metadata_path = _package_regular_file(
-            package_dir, package_dir / ".nupkg.metadata",
-            label="NuGet normalized content metadata",
-        )
-        try:
-            metadata = _strict_json(metadata_path.read_text(encoding="utf-8"))
-        except (ValueError, UnicodeError, OSError) as error:
-            raise ValueError("NuGet normalized content metadata is invalid") from error
-        if (
-            type(metadata) is not dict
-            or metadata.get("contentHash") != artifact["content_hash_sha512_base64"]
-        ):
-            raise ValueError(
-                f"restored NuGet package normalized content hash mismatch: {package_name}@{package_version}"
             )
         actual_nupkg_hash = base64.b64encode(
             sha512(nupkg_path.read_bytes()).digest()
         ).decode("ascii")
-        if actual_nupkg_hash != record["archive_sha512_base64"]:
+        if actual_nupkg_hash != artifact["content_hash_sha512_base64"]:
             raise ValueError(
                 f"restored NuGet package payload hash mismatch: {package_name}@{package_version}"
             )

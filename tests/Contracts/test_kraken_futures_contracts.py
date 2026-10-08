@@ -109,7 +109,7 @@ def durable_observation(payload, *, intent_id: str):
             intent_id=intent_id,
             intent_hash="contract-intent-hash",
             provider="KRAKEN",
-            request=dict(request.body),
+            request=request.body,
             now=NOW,
             authority_check=lambda _hash, _now: (True, "allowed"),
             transport_send=lambda _cid, _request, guard: (

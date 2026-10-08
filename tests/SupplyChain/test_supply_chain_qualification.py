@@ -468,7 +468,7 @@ class SupplyChainQualificationTests(unittest.TestCase):
         receipt, policy = _signed_review(value)
         baseline = qualify_signed(value, receipt=receipt, canonical_policy=policy)
 
-        original_verify = supply_chain_module.verify_canonical_qualification_attestation
+        original_verify = supply_module.verify_canonical_qualification_attestation
 
         def verify_then_mutate(*args, **kwargs):
             accepted = original_verify(*args, **kwargs)
@@ -479,13 +479,13 @@ class SupplyChainQualificationTests(unittest.TestCase):
             )
             object.__setattr__(
                 receipt.attestation,
-                "source_sha",
-                "f" * 40,
+                "content_digest",
+                "sha256:" + "f" * 64,
             )
             return accepted
 
         with patch.object(
-            supply_chain_module,
+            supply_module,
             "verify_canonical_qualification_attestation",
             side_effect=verify_then_mutate,
         ):
@@ -515,10 +515,13 @@ class SupplyChainQualificationTests(unittest.TestCase):
                 for name in base.__dataclass_fields__
             }
         )
-        # Fail closed at evidence construction; untrusted subclasses must
-        # never enter a qualification snapshot.
-        with self.assertRaisesRegex(TypeError, "components must be a tuple of ComponentEvidence"):
-            evidence(comp=hostile)
+        value = evidence(comp=hostile)
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact ComponentEvidence",
+        ):
+            qualify_supply_chain(value)
 
     def test_signer_side_mutation_cannot_change_detached_supply_chain_graph(self):
         value = evidence()

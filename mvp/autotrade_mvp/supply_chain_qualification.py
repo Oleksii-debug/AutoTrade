@@ -1096,12 +1096,20 @@ def qualify_supply_chain(
             accepted_subject = None
             subject_identity = None
             if subject_requirement in accepted_review.requirement_ids:
-                # The first canonical signature check authenticated the *entire*
-                # accepted requirement set. Re-reading the caller's mutable
-                # receipt for a second verification would introduce a TOCTOU
-                # window: a post-acceptance mutation cannot revoke the already
-                # accepted immutable snapshot or supply a new subject.
-                accepted_subject = accepted_review
+                accepted_subject = verify_canonical_qualification_attestation(
+                    trust_receipt,
+                    evidence_store=evidence_store,
+                    evidence_root=evidence_root,
+                    expected_source_sha=evidence.release_commit_sha,
+                    expected_domain="SUPPLY_CHAIN",
+                    expected_gate="RELEASE",
+                    expected_package_id="WP-64",
+                    expected_protocol_id="supply-chain-review-v1",
+                    expected_protocol_version="1.0.0",
+                    expected_requirement_id=subject_requirement,
+                    expected_release_artifact_id=evidence.release_artifact_id,
+                    expected_release_artifact_sha256=evidence.release_artifact_sha256,
+                )
                 subject_identity = (
                     accepted_subject.attestation_id,
                     accepted_subject.attestation_digest,

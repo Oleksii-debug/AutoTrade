@@ -203,11 +203,6 @@ def canonical_operator_payload(
     command = _text(command_id, "command_id")
     account = _text(account_id, "account_id")
     env = _text(environment, "environment")
-    from .simulation_commands import SIMULATION_ACTIONS, canonical_simulation_payload
-    if action_name in SIMULATION_ACTIONS:
-        return canonical_simulation_payload(
-            journal, action_name, raw_payload, command, account, env
-        )
     _service, state, _authority_events, version = _state(journal)
     epoch = state.get("epoch")
     if type(epoch) is not int or epoch < 0:
@@ -385,11 +380,6 @@ def validate_persisted_payload(
     action_name = canonical_host_action(action)
     account = _text(account_id, "account_id")
     env = _text(environment, "environment")
-    from .simulation_commands import SIMULATION_ACTIONS, validate_simulation_payload
-    if action_name in SIMULATION_ACTIONS:
-        return validate_simulation_payload(
-            action_name, payload, payload_hash, account, env
-        )
     if not isinstance(payload, Mapping):
         raise ValueError("persisted authority payload must be an object")
     value = dict(payload)
@@ -747,9 +737,6 @@ def _resolved(
     payload: Mapping[str, object],
     accepted_at: str,
 ) -> AuthorityExecutionResult | None:
-    from .simulation_commands import SIMULATION_ACTIONS, resolve_simulation_action
-    if action in SIMULATION_ACTIONS:
-        return resolve_simulation_action(journal, action, payload)
     events = _events(journal)
     expected_version = _seq(
         payload.get("expected_authority_version"),
@@ -871,9 +858,6 @@ def execute_operator_authority_action(
         account_id,
         environment,
     )
-    from .simulation_commands import SIMULATION_ACTIONS, execute_simulation_action
-    if action_name in SIMULATION_ACTIONS:
-        return execute_simulation_action(journal, action_name, payload, accepted)
     resolved = _resolved(journal, action_name, payload, accepted)
     if resolved is not None:
         return resolved
@@ -1110,9 +1094,6 @@ def observed_authority_operation_effects(
         account_id,
         environment,
     )
-    from .simulation_commands import SIMULATION_ACTIONS, resolve_simulation_action
-    if action_name in SIMULATION_ACTIONS:
-        return resolve_simulation_action(journal, action_name, payload) or AuthorityExecutionResult((), ())
     events = _events(journal)
     expected_version = _seq(
         payload["expected_authority_version"],

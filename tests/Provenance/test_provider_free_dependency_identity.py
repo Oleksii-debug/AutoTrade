@@ -126,7 +126,6 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
                         "name": "Microsoft.Web.WebView2",
                         "version": "1.2.3",
                         "content_hash_sha512_base64": content_hash,
-                        "archive_sha512_base64": content_hash,
                         "license_id": "BSD-3-Clause",
                         "license_file": "LICENSE.txt",
                         "notice_file": "NOTICE.txt",
@@ -141,7 +140,6 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
                 archive,
                 version="1.2.3",
                 content_hash=content_hash,
-                    archive_hash=content_hash,
             )
 
             (root / "provenance/licenses/WebView.LICENSE.txt").write_text(
@@ -156,7 +154,6 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
                     archive,
                     version="1.2.3",
                     content_hash=content_hash,
-                    archive_hash=content_hash,
                 )
 
     def test_webview_archive_rights_reject_wrong_nuspec_identity(self):
@@ -192,7 +189,6 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
                         "name": "Microsoft.Web.WebView2",
                         "version": "1.2.3",
                         "content_hash_sha512_base64": content_hash,
-                        "archive_sha512_base64": content_hash,
                         "license_id": "BSD-3-Clause",
                         "license_file": "LICENSE.txt",
                         "notice_file": "NOTICE.txt",
@@ -208,7 +204,6 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
                     archive,
                     version="1.2.3",
                     content_hash=content_hash,
-                    archive_hash=content_hash,
                 )
 
     def test_sha512_archive_identity_is_verified_before_extraction(self):
@@ -327,7 +322,6 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
                         "microsoft.web.webview2.1.0.4191.47.nupkg"
                     ),
                     "content_hash_sha512_base64": "stale",
-                    "archive_sha512_base64": "stale",
                 }
             }
             nuget_lock = {
@@ -383,7 +377,6 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
                         "microsoft.web.webview2.1.0.4258.31.nupkg"
                     ),
                     "content_hash_sha512_base64": "canonical",
-                    "archive_sha512_base64": "canonical",
                 }
             }
             drifted_lock = {

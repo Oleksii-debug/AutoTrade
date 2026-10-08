@@ -708,7 +708,7 @@ class DeterministicStrategyTests(unittest.TestCase):
             threshold="0.01",
             proposal_quantity="1",
         ).propose(symbol="AAA", decision_time=BASE)
-        with self.assertRaisesRegex(TypeError, "economics must be StrategyEconomicsBinding"):
+        with self.assertRaisesRegex(ValueError, "registered strategy"):
             to_decision_proposal(
                 unregistered,
                 proposal_id="12345678-1234-5678-9234-567812345678",

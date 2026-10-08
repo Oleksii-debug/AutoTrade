@@ -152,8 +152,7 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
         # empty-journal ownership rule remains intact and no order is sent.
         if not journal.load_events_by_aggregate_type('canonical_autonomous_simulation'):
             run_autonomous_simulation(PRICES, state_dir, run_id='provider-free-product',
-                now=START_TIME, stop_after_episodes=1,
-                execution_profile='TWO_EQUAL_PARTIALS',
+                now=START_TIME, stop_after_episodes=1, partial_fills=True,
                 target_quantity='2')
         else:
             _protocol(journal)

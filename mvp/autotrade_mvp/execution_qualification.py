@@ -15,7 +15,7 @@ from hashlib import sha256
 from typing import Literal
 from uuid import UUID
 
-from autotrade_runtime.artifacts import (
+from autotrade_research.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
     trusted_authenticated_reader,

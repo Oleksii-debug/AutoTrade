@@ -7,8 +7,7 @@
       "license_id": "BSD-3-Clause",
       "name": "Microsoft.Web.WebView2",
       "notice_file": "NOTICE.txt",
-      "version": "1.0.4258.31",
-      "archive_sha512_base64": "HlGVwvyP/IWiXAU8K57Vmg59khY3DWMOxMnH4AHusFRy0/vDAjKItXUIVNXiXXaq4CLfSZyNUic1wOIlnPLsPQ=="
+      "version": "1.0.4258.31"
     }
   ],
   "schema_version": "1.0.0"

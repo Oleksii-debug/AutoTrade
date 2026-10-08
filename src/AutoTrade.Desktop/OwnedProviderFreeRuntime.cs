@@ -12,7 +12,6 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
 {
     private readonly Process _process;
     private readonly HttpClient _http;
-    private readonly HttpClient _emergencyHttp;
     private readonly EmergencyHostSession _session;
     private readonly Task _stdoutDrain;
     private readonly Task _stderrDrain;
@@ -30,16 +29,7 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
         _stdoutDrain = stdoutDrain;
         _stderrDrain = stderrDrain;
         DataDirectory = data;
-        // Pairing has already sent a request through http. HttpClient forbids
-        // assigning BaseAddress after first send; use a distinct, preconfigured
-        // emergency-channel transport for authenticated command requests.
-        _emergencyHttp = new(new HttpClientHandler
-        {
-            AllowAutoRedirect = false,
-            UseCookies = false
-        })
-        { Timeout = TimeSpan.FromSeconds(10) };
-        Client = new AuthenticatedEmergencyHostClient(_emergencyHttp, Origin, this,
+        Client = new AuthenticatedEmergencyHostClient(http, Origin, this,
             new WindowsCredentialManagerPendingCommandStore("AutoTrade.ZERO:pending-emergency-command-v1"));
     }
 
@@ -114,7 +104,7 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
                 || launch.AbsolutePath != "/" || launch.Query.Length != 0 || !launch.Fragment.StartsWith("#pair=", StringComparison.Ordinal))
                 throw new InvalidOperationException("Host readiness origin differs from the installed ZERO authority.");
             string code = launch.Fragment[6..];
-            using HttpRequestMessage pair = new(HttpMethod.Post, new Uri(origin, "api/v1/session"));
+            using HttpRequestMessage pair = new(HttpMethod.Post, new Uri(origin, HostApiRoutes.PairLocalSession));
             pair.Headers.Add("Origin", origin.GetLeftPart(UriPartial.Authority));
             pair.Content = new StringContent(JsonSerializer.Serialize(new {pairing_code = code}), Encoding.UTF8, "application/json");
             // The canonical pairing endpoint requires this exact media type.
@@ -145,11 +135,6 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
         Exception? gracefulStopFailure = null;
         try
         {
-            // Close owned HTTP pools before requesting the host's blocking
-            // shutdown. Otherwise an idle keep-alive thread can prevent the
-            // host from draining and cause an artificial 30-second timeout.
-            _emergencyHttp.Dispose();
-            _http.Dispose();
             if (!_process.HasExited)
             {
                 // The owned pipe requests the existing production-host drain. It does
@@ -197,7 +182,6 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
             }
             await Task.WhenAll(_stdoutDrain, _stderrDrain);
             _process.Dispose();
-            _emergencyHttp.Dispose();
             _http.Dispose();
         }
 

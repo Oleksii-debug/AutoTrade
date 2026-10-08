@@ -34,7 +34,6 @@ else:
         dotnet_restore_targets_project,
         dotnet_restore_tokens_are_locked,
         dotnet_restore_workflow_commands,
-        dotnet_restore_workflow_environment_authority_lines,
     )
 
 

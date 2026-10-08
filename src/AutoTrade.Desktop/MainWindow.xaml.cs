@@ -50,20 +50,6 @@ public partial class MainWindow : Window
     {
     }
 
-    // Keep the one-argument test/diagnostic constructor stable while the
-    // production owner may pass an explicit session provider and runtime.
-    internal MainWindow(IEmergencyHostClient hostClient)
-        : this(hostClient, null, null)
-    {
-    }
-
-    internal MainWindow(
-        IEmergencyHostClient hostClient,
-        IEmergencyHostSessionProvider? sessionProvider)
-        : this(hostClient, sessionProvider, null)
-    {
-    }
-
     internal MainWindow(
         IEmergencyHostClient hostClient,
         IEmergencyHostSessionProvider? sessionProvider = null,

@@ -25,10 +25,7 @@
   const HOST_ACTION_ROLES = Object.freeze({
     BLOCK_NEW_EXPOSURE: new Set(["OWNER", "OPERATOR"]),
     REVOKE_AUTHORITY: new Set(["OWNER"]),
-    SET_AUTHORITY: new Set(["OWNER"]),
-    START_SIMULATION: new Set(["OWNER"]),
-    RECOVER_SIMULATION: new Set(["OWNER"]),
-    BACKUP_SIMULATION: new Set(["OWNER"])
+    SET_AUTHORITY: new Set(["OWNER"])
   });
 
   const TABLE_TOOLS = Object.freeze([
@@ -284,10 +281,6 @@
   function actionCanSubmitInCurrentScope(role, action) {
     if (!roleCanSubmitAction(role, action)) return false;
     if (action === "SET_AUTHORITY" && state.environment === "REPLAY") return false;
-    if (["START_SIMULATION", "RECOVER_SIMULATION", "BACKUP_SIMULATION"].includes(action) &&
-        (state.environment !== "SIMULATION" || state.accountId !== "canonical-sim-account")) {
-      return false;
-    }
     return true;
   }
 
@@ -786,9 +779,7 @@
   }
 
   function captureTableSelection(body) {
-    // Non-browser smoke shims legitimately omit Selection; text bookmark
-    // preservation is optional, not required for rendering accessible rows.
-    const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
+    const selection = window.getSelection();
     if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
     const anchor = selectedCellEndpoint(body, selection.anchorNode, selection.anchorOffset);
     const focus = selectedCellEndpoint(body, selection.focusNode, selection.focusOffset);
@@ -2233,23 +2224,6 @@ function renderOperation(operation) {
       }
     }
   }
-  async function pairLocalOwnerFromOneTimeFragment() {
-    const fragment = window.location.hash;
-    if (!fragment.startsWith("#pair=")) return;
-    const pairingCode = fragment.slice("#pair=".length);
-    if (!/^[A-Za-z0-9_-]{32,128}$/.test(pairingCode)) {
-      announce("Local pairing code is invalid. Commands remain unavailable.", true);
-      return;
-    }
-    // A one-time local bootstrap only; never send the bearer to a provider.
-    // Retain the fragment on failure so a reload can retry the same code.
-    await jsonFetch("api/v1/session", {
-      method: "POST",
-      body: JSON.stringify({pairing_code: pairingCode})
-    });
-    window.history.replaceState(null, "", window.location.pathname);
-  }
-
   async function start() {
     bindTableTools();
     bindAuthorityPolicyReviewInvalidation();
@@ -2261,7 +2235,6 @@ function renderOperation(operation) {
     byId("refresh-state").addEventListener("click", refreshStateFromUser);
     setCommandAvailability(false);
     try {
-      await pairLocalOwnerFromOneTimeFragment();
       await refreshSnapshot();
     } catch (error) {
       if (isSnapshotBusy(error)) {

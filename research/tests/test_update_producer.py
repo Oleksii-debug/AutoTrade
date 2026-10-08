@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -323,23 +322,6 @@ class ProducerFixture:
 
 
 class UpdateProducerTests(unittest.TestCase):
-    def setUp(self):
-        # Historical causal-cutoff fixture, not a wall-clock test.
-        # Advance every durable issuance chronologically before Oct 5.
-        tick = 0
-
-        def historical_writer_clock():
-            nonlocal tick
-            tick += 1
-            return DECISION + timedelta(hours=1, microseconds=tick)
-
-        writer_patch = patch(
-            "research.autotrade_research.memory.episodes._utc_now",
-            side_effect=historical_writer_clock,
-        )
-        writer_patch.start()
-        self.addCleanup(writer_patch.stop)
-
     def ready_fixture(self, directory, *, max_step="2"):
         fixture = ProducerFixture(directory)
         fixture.seed_calibration()

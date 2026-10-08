@@ -13,7 +13,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "contracts.yml"
 class ContractsCiEvidenceTests(unittest.TestCase):
     def test_current_contract_input_versions_are_coherent(self):
         versions = contracts_evidence._input_versions()
-        self.assertEqual(versions["contract_version"], "7.0.0")
+        self.assertEqual(versions["contract_version"], "6.0.0")
         self.assertEqual(versions["openapi_version"], versions["contract_version"])
         self.assertEqual(
             versions["fixture_corpus_version"],
@@ -100,7 +100,7 @@ class ContractsCiEvidenceTests(unittest.TestCase):
         ), patch.dict(os.environ, {"GITHUB_BASE_REF": "main"}, clear=False):
             evidence = contracts_evidence.build_contracts_evidence()
 
-        self.assertEqual(evidence["input_versions"]["contract_version"], "7.0.0")
+        self.assertEqual(evidence["input_versions"]["contract_version"], "6.0.0")
         self.assertIn(
             "python tools/contract_version_guard.py --base-ref origin/main",
             evidence["tested_commands"],

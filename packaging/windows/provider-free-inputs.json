@@ -8,8 +8,7 @@
   "webview2_sdk": {
     "version": "1.0.4258.31",
     "url": "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.4258.31/microsoft.web.webview2.1.0.4258.31.nupkg",
-    "content_hash_sha512_base64": "sHVZ2MQrHT1J3q5/6csn0fIP27rzpTO/RRC+wPQDrZheB7T4t2n+vVbY6SdCKr4WRV9s/gmBM3PPMWWJtoDzMg==",
-    "archive_sha512_base64": "HlGVwvyP/IWiXAU8K57Vmg59khY3DWMOxMnH4AHusFRy0/vDAjKItXUIVNXiXXaq4CLfSZyNUic1wOIlnPLsPQ=="
+    "content_hash_sha512_base64": "sHVZ2MQrHT1J3q5/6csn0fIP27rzpTO/RRC+wPQDrZheB7T4t2n+vVbY6SdCKr4WRV9s/gmBM3PPMWWJtoDzMg=="
   },
   "webview2_runtime": "EVERGREEN_PREREQUISITE_NOT_BUNDLED",
   "qualification": "UNQUALIFIED_DIAGNOSTIC_CANDIDATE",

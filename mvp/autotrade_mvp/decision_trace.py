@@ -130,9 +130,13 @@ _EMBEDDED_SECRET_PATTERNS = (
     ),
 )
 
-_PRIVATE_KEY_MARKERS = tuple(
-    "-----BEGIN " + prefix + "PRIVATE KEY-----"
-    for prefix in ("", "ENCRYPTED ", "RSA ", "DSA ", "EC ", "OPENSSH ")
+_PRIVATE_KEY_MARKERS = (
+    "-----BEGIN PRIVATE KEY-----",
+    "-----BEGIN ENCRYPTED PRIVATE KEY-----",
+    "-----BEGIN RSA PRIVATE KEY-----",
+    "-----BEGIN DSA PRIVATE KEY-----",
+    "-----BEGIN EC PRIVATE KEY-----",
+    "-----BEGIN OPENSSH PRIVATE KEY-----",
 )
 
 _URL_QUERY_SENSITIVE_KEYS = _SENSITIVE_KEYS | {
@@ -342,91 +346,8 @@ def _trace_generation_identity(info: os.stat_result) -> tuple[int, int, int, int
     )
 
 
-def _read_trace_text_retained_windows(path: Path) -> str | None:
-    """Read one Windows file using a retained NT parent and non-shareable writer.
-
-    Python's Win32 pathname stat and C-runtime fstat can report different
-    metadata even for the same file. Instead of weakening the path-vs-descriptor
-    check, retain the NT directory namespace and open the leaf relative to its
-    held HANDLE with no WRITE/DELETE sharing. The file handle is the authority.
-    """
-
-    import msvcrt
-    from autotrade_foundation.windows_namespace import (
-        retain_windows_directory_namespace,
-        retain_windows_regular_file,
-        windows_handle_information,
-    )
-
-    try:
-        with retain_windows_directory_namespace(path.parent) as parent:
-            with retain_windows_regular_file(
-                parent,
-                target_name=path.name,
-                subject="decision trace store",
-            ) as descriptor:
-                # Validate the published leaf while its native handle denies
-                # WRITE/DELETE sharing. The validation-to-open swap regression
-                # then fails rather than changing the file between two steps.
-                validate_publication_destination(path)
-                opened = os.fstat(descriptor)
-                handle = msvcrt.get_osfhandle(descriptor)
-                identity = windows_handle_information(
-                    handle,
-                    subject="decision trace store",
-                )
-                if (
-                    not stat.S_ISREG(opened.st_mode)
-                    or opened.st_nlink != 1
-                    or identity.number_of_links != 1
-                    or identity.volume_serial == 0
-                    or (identity.file_index_high == 0 and identity.file_index_low == 0)
-                ):
-                    raise ValueError("Corrupt decision trace store: unsafe path alias")
-
-                expected_bytes = opened.st_size
-                remaining = expected_bytes + 1
-                chunks: list[bytes] = []
-                copied = 0
-                while remaining > 0:
-                    chunk = os.read(descriptor, min(1024 * 1024, remaining))
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                    copied += len(chunk)
-                    remaining -= len(chunk)
-                after = os.fstat(descriptor)
-                identity_after = windows_handle_information(
-                    handle,
-                    subject="decision trace store",
-                )
-                if (
-                    not stat.S_ISREG(after.st_mode)
-                    or after.st_nlink != 1
-                    or identity_after != identity
-                    or _trace_generation_identity(after)
-                    != _trace_generation_identity(opened)
-                    or copied != expected_bytes
-                ):
-                    raise ValueError(
-                        "Corrupt decision trace store: file generation changed during read"
-                    )
-    except FileNotFoundError:
-        return None
-    except (OSError, RuntimeError) as error:
-        raise ValueError("Corrupt decision trace store: unsafe Windows namespace") from error
-
-    try:
-        return b"".join(chunks).decode("utf-8")
-    except UnicodeError as error:
-        raise ValueError("Corrupt decision trace store") from error
-
-
 def _read_trace_text_descriptor_bound(path: Path) -> str | None:
     """Read one stable regular-file generation and reject path swaps."""
-
-    if os.name == "nt":
-        return _read_trace_text_retained_windows(path)
 
     try:
         initial = os.stat(path, follow_symlinks=False)
@@ -460,16 +381,8 @@ def _read_trace_text_descriptor_bound(path: Path) -> str | None:
             or _trace_generation_identity(initial)
             != _trace_generation_identity(opened)
         ):
-            # Field-only mismatch evidence contains no user path, file data or
-            # credentials, and pinpoints platform stat/fstat ABI discrepancies.
-            mismatched = [
-                field for field in ("st_dev", "st_ino", "st_size",
-                                    "st_mtime_ns", "st_ctime_ns", "st_nlink")
-                if getattr(initial, field) != getattr(opened, field)
-            ]
             raise ValueError(
                 "Corrupt decision trace store: path changed before descriptor read"
-                + (" (metadata: " + ",".join(mismatched) + ")" if mismatched else "")
             )
 
         expected_bytes = opened.st_size
@@ -670,13 +583,13 @@ class DecisionTraceStore:
             prepared = _redact(trace)
         except RecursionError as error:
             raise ValueError(
-                "Decision trace is not JSON compliant or exceeds strict JSON resource domain"
+                "Decision trace exceeds strict JSON resource domain"
             ) from error
         try:
             strict_json_loads(canonical_json(prepared))
         except (ValueError, RecursionError) as error:
             raise ValueError(
-                "Decision trace is not JSON compliant or exceeds strict JSON resource domain"
+                "Decision trace exceeds strict JSON resource domain"
             ) from error
         store_owned = {"recorded_at", "previous_hash", "record_hash"} & set(prepared)
         if store_owned:
@@ -720,21 +633,14 @@ class DecisionTraceStore:
             return True
 
     def records(self) -> list[dict[str, Any]]:
-        # An absent parent is a valid empty read, not a reason to create
-        # filesystem state as a side effect of an observation.
-        if not self.path.parent.exists():
-            return []
-        try:
-            with durable_path_lock(self.path):
-                try:
-                    records = self._load()
-                except ValueError as error:
-                    raise ValueError("Decision trace chain is corrupt") from error
-                if records and not self._records_are_valid(records):
-                    raise ValueError("Decision trace chain is corrupt")
-                return records
-        except DurablePublishLockError as error:
-            raise ValueError("Decision trace chain is corrupt") from error
+        with durable_path_lock(self.path):
+            try:
+                records = self._load()
+            except ValueError as error:
+                raise ValueError("Decision trace chain is corrupt") from error
+            if records and not self._records_are_valid(records):
+                raise ValueError("Decision trace chain is corrupt")
+            return records
 
     def reconstruct(
         self,

@@ -3519,7 +3519,7 @@
       }
     }
   ],
-  "contract_version": "7.0.0",
+  "contract_version": "6.0.0",
   "definition_count": 48,
   "scope": "closed-object-shape-subset"
 }

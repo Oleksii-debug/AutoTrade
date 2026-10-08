@@ -274,7 +274,7 @@ class LearningWavePauseTests(unittest.TestCase):
             LearningWavePolicy(policy_id="empty")
 
     def test_noncanonical_float_drawdown_is_rejected(self):
-        with self.assertRaisesRegex(TypeError, "exact Decimal"):
+        with self.assertRaisesRegex(TypeError, "exact decimal"):
             snapshot(drawdown_since_pause=0.01)
 
     def test_backward_market_clock_is_rejected(self):
@@ -794,7 +794,7 @@ class CandidateResolutionTests(unittest.TestCase):
     def test_bound_policy_is_revalidated_at_resolution_use(self):
         wave = candidate_wave(promotion_mode="CONFIRMATION")
         object.__setattr__(wave.policy, "promotion_mode", "AUTO")
-        with self.assertRaisesRegex(ValueError, "candidate policy does not match bound policy hash"):
+        with self.assertRaisesRegex(ValueError, "policy changed"):
             resolve(wave)
 
     def test_inconclusive_status_cannot_hide_failed_hard_gate(self):

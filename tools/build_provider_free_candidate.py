@@ -26,9 +26,8 @@ from tools.dotnet_package_rights import _locked_nupkg_root_evidence
 from research.autotrade_research.artifacts.durable_publish import atomic_write_json
 
 ROOT = Path(__file__).resolve().parents[1]
-_PATH_TYPE = type(Path("."))
 SOURCE_PREFIXES = ('mvp/autotrade_mvp/', 'research/autotrade_research/',
-                   'autotrade_numeric/', 'autotrade_foundation/', 'autotrade_runtime/')
+                   'autotrade_numeric/', 'autotrade_foundation/')
 REVIEWED_LICENSE_PREFIX = 'provenance/licenses/'
 STATIC = ('web/src/index.html', 'web/src/app.js', 'web/src/host-api-routes.js', 'web/src/styles.css',
           'contracts/openapi/host-api.yaml', 'contracts/bindings/python/common_scalars.py',
@@ -76,7 +75,7 @@ def _write_new_payload_json(path, value):
 
 
 def _capture_publish(publish):
-    if type(publish) is not _PATH_TYPE:
+    if type(publish) is not Path:
         raise TypeError('publish root must be an exact Path')
     captured = {}
     for relative, _, content in _collect(publish):
@@ -122,7 +121,7 @@ def _rewrite_existing_publish_evidence(path, evidence):
     directory entry; it cannot redirect binder bytes through a substituted
     symlink or hardlink into another authority-owned file.
     """
-    if type(path) is not _PATH_TYPE or type(evidence) is not dict:
+    if type(path) is not Path or type(evidence) is not dict:
         raise TypeError('publish evidence rewrite requires exact Path and dict')
     payload = (
         json.dumps(evidence, indent=2, sort_keys=True, ensure_ascii=False) + '\n'
@@ -281,7 +280,7 @@ def stage_source(source_root, source_sha, destination, composition_path):
                     for part in parts:
                         descriptor = parents.enter_context(_retained_posix_relative_directory(descriptor, (part,), create=True))
     _stage_source_controlled_components(staging=destination, composition_path=composition_path,
-        source_root=source_root, descriptors=descriptors)
+        source_root=source_root, descriptors=descriptors, expected_source_sha=source_sha)
     _write_new_payload_bytes(destination / 'SOURCE_REVISION', (source_sha + '\n').encode())
     return selected
 
@@ -493,9 +492,14 @@ def _normalized_rights_text(payload, *, label):
         text = payload.decode('utf-8-sig')
     except UnicodeDecodeError as error:
         raise ValueError(label + ' is not UTF-8') from error
-    # Preserve the exact lexical license while tolerating vendor line wrapping.
-    # Archive bytes are independently verified against the pinned full SHA-512.
-    return ' '.join(text.split()) + '\n'
+    return (
+        '\n'.join(
+            line.rstrip()
+            for line in text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+        ).strip()
+        + '\n'
+    )
+
 
 def _require_webview2_archive_rights(
     product_root,
@@ -503,17 +507,16 @@ def _require_webview2_archive_rights(
     *,
     version,
     content_hash,
-    archive_hash,
 ):
-    if type(product_root) is not _PATH_TYPE or type(archive_path) is not _PATH_TYPE:
+    if type(product_root) is not Path or type(archive_path) is not Path:
         raise TypeError('WebView2 rights verification requires exact Path values')
-    if type(version) is not str or type(content_hash) is not str or type(archive_hash) is not str:
+    if type(version) is not str or type(content_hash) is not str:
         raise TypeError('WebView2 rights identity must be exact str values')
     actual_hash = base64.b64encode(
         sha512(archive_path.read_bytes()).digest()
     ).decode('ascii')
-    if actual_hash != archive_hash:
-        raise ValueError('WebView2 archive differs from pinned full-archive identity; expected SHA-512 ' + archive_hash + '; observed SHA-512 ' + actual_hash)
+    if actual_hash != content_hash:
+        raise ValueError('WebView2 archive differs from locked rights identity')
 
     policy = strict_json_bytes(
         (product_root / 'provenance/dotnet-package-rights.json').read_bytes(),
@@ -534,7 +537,6 @@ def _require_webview2_archive_rights(
             and record.get('name') == 'Microsoft.Web.WebView2'
             and record.get('version') == version
             and record.get('content_hash_sha512_base64') == content_hash
-            and record.get('archive_sha512_base64') == archive_hash
         )
     ]
     if len(matches) != 1:
@@ -620,18 +622,15 @@ def _require_webview2_input_identity(product_root, inputs, nuget_lock):
     if type(inputs) is not dict or type(inputs.get('webview2_sdk')) is not dict:
         raise ValueError('provider-free WebView2 input is missing')
     webview = inputs['webview2_sdk']
-    if set(webview) != {'version', 'url', 'content_hash_sha512_base64', 'archive_sha512_base64'}:
+    if set(webview) != {'version', 'url', 'content_hash_sha512_base64'}:
         raise ValueError('provider-free WebView2 input fields mismatch')
     version = webview['version']
     content_hash = webview['content_hash_sha512_base64']
-    archive_hash = webview['archive_sha512_base64']
     url = webview['url']
     if type(version) is not str or not version or version != version.strip():
         raise ValueError('provider-free WebView2 version is invalid')
     if type(content_hash) is not str or not content_hash or content_hash != content_hash.strip():
         raise ValueError('provider-free WebView2 content hash is invalid')
-    if type(archive_hash) is not str or not archive_hash or archive_hash != archive_hash.strip():
-        raise ValueError('provider-free WebView2 full-archive hash is invalid')
     expected_url = (
         'https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/'
         + version.lower()
@@ -680,16 +679,9 @@ def _require_webview2_input_identity(product_root, inputs, nuget_lock):
             'resolved': item['resolved'],
             'content_hash_sha512_base64': item['contentHash'],
         })
-    # A single locked package is present once per TFM/RID target.  These
-    # entries may share an identical content identity without being one row.
-    # Never accept differing package requests or content across targets.
-    if not lock_rows or len({
-        (row['type'], row['requested'], row['resolved'],
-         row['content_hash_sha512_base64'])
-        for row in lock_rows
-    }) != 1:
+    if len(lock_rows) != 1:
         raise ValueError(
-            'provider-free WebView2 lock content identity is not singular'
+            'provider-free WebView2 lock identity is not singular'
         )
 
     manifest_path = product_root / 'provenance/release-dependency-manifest.json'
@@ -710,26 +702,23 @@ def _require_webview2_input_identity(product_root, inputs, nuget_lock):
         if type(item) is dict
         and item.get('name') == 'Microsoft.Web.WebView2'
     ]
-    expected_manifests = [
-        {
-            'project': 'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj',
-            'target': row['target'],
-            'name': 'Microsoft.Web.WebView2',
-            'type': row['type'],
-            'version': version,
-            'content_hash_sha512_base64': content_hash,
-            'dependencies': [],
-            'requested': row['requested'],
-        }
-        for row in lock_rows
-    ]
-    # Match every TFM/RID record, including target identity and multiplicity.
-    # A forged additional row, absent target, or content mismatch fails closed.
-    if (
-        len(manifest_rows) != len(expected_manifests)
-        or sorted(manifest_rows, key=lambda row: str(row.get('target')))
-        != sorted(expected_manifests, key=lambda row: row['target'])
-    ):
+    if len(manifest_rows) != 1:
+        raise ValueError(
+            'provider-free WebView2 release provenance is not singular'
+        )
+    lock_row = lock_rows[0]
+    manifest_row = manifest_rows[0]
+    expected_manifest = {
+        'project': 'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj',
+        'target': lock_row['target'],
+        'name': 'Microsoft.Web.WebView2',
+        'type': lock_row['type'],
+        'version': version,
+        'content_hash_sha512_base64': content_hash,
+        'dependencies': [],
+        'requested': lock_row['requested'],
+    }
+    if manifest_row != expected_manifest:
         raise ValueError(
             'provider-free WebView2 lock differs from release provenance'
         )
@@ -737,7 +726,6 @@ def _require_webview2_input_identity(product_root, inputs, nuget_lock):
 
 
 def build_candidate(*, source_root, source_sha, desktop, host, python_archive, webview_archive, work, output):
-    work = work.resolve()
     if work.exists(): raise ValueError('candidate work directory must be new')
     work.mkdir(parents=True)
     payload = work / 'payload'; payload.mkdir()
@@ -764,7 +752,6 @@ def build_candidate(*, source_root, source_sha, desktop, host, python_archive, w
         webview_archive,
         version=inputs['webview2_sdk']['version'],
         content_hash=webview_content_hash,
-        archive_hash=inputs['webview2_sdk']['archive_sha512_base64'],
     )
 
     desktop_publish_snapshot = _capture_publish(desktop)
@@ -786,7 +773,7 @@ def build_candidate(*, source_root, source_sha, desktop, host, python_archive, w
     extract_pinned(
         webview_archive,
         payload / 'notices/webview2-sdk-package',
-        inputs['webview2_sdk']['archive_sha512_base64'],
+        webview_content_hash,
         digest_algorithm='sha512-base64',
     )
     for required in ('python.exe', 'python312.dll', 'python312.zip', 'python312._pth', 'LICENSE.txt'):

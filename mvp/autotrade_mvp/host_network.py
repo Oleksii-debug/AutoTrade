@@ -16,7 +16,7 @@ import ipaddress
 import json
 import re
 import ssl
-from threading import BoundedSemaphore, Lock
+from threading import Lock
 from types import MappingProxyType
 from typing import Callable, Mapping
 from urllib.parse import unquote, urlsplit
@@ -44,13 +44,6 @@ _OPERATION_PATH = re.compile(
     r"^/api/v1/operations/([0-9a-fA-F-]{36})$"
 )
 _MAX_BODY_BYTES = 1024 * 1024
-_SNAPSHOT_MAX_ATTEMPTS = 4
-
-
-class SnapshotTemporarilyUnavailable(RuntimeError):
-    """The requested state cut changed while its projection was being built."""
-
-
 _SNAPSHOT_FIELDS = {
     "state_version",
     "event_cursor",
@@ -69,7 +62,6 @@ _SNAPSHOT_FIELDS = {
 _PERMISSION_SUMMARY_FIELDS = {"actor", "session", "role", "capabilities"}
 _PERMISSION_SUMMARY_REQUIRED_FIELDS = {"actor", "session", "role"}
 _SINGLETON_REQUEST_HEADERS = (
-    "Cookie",
     "Authorization",
     "X-AutoTrade-Actor",
     "Origin",
@@ -363,10 +355,6 @@ class AuthenticatedHostApplication:
                     current = self.store.get_operation(operation_id)
                     if current.phase in self.store.TERMINAL_PHASES:
                         result = current
-                    elif current.phase == "UNKNOWN":
-                        # Repeated uncertainty is not a new journal transition.
-                        # A later attempt may still resolve to terminal success.
-                        result = current
                     else:
                         result = self.store.update_operation(
                             operation_id,
@@ -423,7 +411,6 @@ class AuthenticatedHostApplication:
         principal: HostPrincipal,
         authenticated_role: str,
     ) -> Mapping[str, object]:
-        journal_cut = self.store._journal.current_journal_sequence()
         durable = self.store.snapshot()
         projected = self._snapshot_provider(
             MappingProxyType(dict(durable)),
@@ -532,20 +519,6 @@ class AuthenticatedHostApplication:
         rendered = _json_bytes(payload)
         if principal.token.encode("utf-8") in rendered:
             raise ValueError("UiSnapshot must never contain bearer credential material")
-
-        # The projection can read additional journal-backed truth after the
-        # durable host cut is captured.  Never publish a mixed-generation
-        # snapshot: re-read the durable cut and retry only when its canonical
-        # version/cursor moved while projection was in progress.
-        current = self.store.snapshot()
-        if (
-            self.store._journal.current_journal_sequence() != journal_cut
-            or current.get("state_version") != durable.get("state_version")
-            or current.get("event_cursor") != durable.get("event_cursor")
-        ):
-            raise SnapshotTemporarilyUnavailable(
-                "durable host state changed during snapshot projection"
-            )
         return MappingProxyType(payload)
 
     @staticmethod
@@ -637,25 +610,11 @@ class AuthenticatedHostApplication:
             principal, authenticated_role = self._principal(normalized_headers)
 
             if method == "GET" and path == "/api/v1/state":
-                for attempt in range(_SNAPSHOT_MAX_ATTEMPTS):
-                    try:
-                        snapshot = self._snapshot(principal, authenticated_role)
-                    except SnapshotTemporarilyUnavailable:
-                        if attempt + 1 < _SNAPSHOT_MAX_ATTEMPTS:
-                            continue
-                        return _json_response(
-                            503,
-                            {"error": "SNAPSHOT_BUSY", "retryable": True},
-                            headers=(
-                                ("Cache-Control", "no-store"),
-                                ("Retry-After", "1"),
-                            ),
-                        )
-                    return _json_response(
-                        200,
-                        dict(snapshot),
-                        headers=(("Cache-Control", "no-store"),),
-                    )
+                return _json_response(
+                    200,
+                    dict(self._snapshot(principal, authenticated_role)),
+                    headers=(("Cache-Control", "no-store"),),
+                )
 
             if method == "POST" and path == "/api/v1/commands":
                 command = self._parse_body(body, normalized_headers)
@@ -764,56 +723,45 @@ class _HostRequestHandler(BaseHTTPRequestHandler):
         return
 
     def _handle(self) -> None:
-        # Never keep the worker thread blocked on an idle HTTP/1.1 connection.
-        # Strict host teardown drains request threads, and a retained WebView or
-        # HttpClient keepalive must not prevent emergency STOP / application exit.
-        self.close_connection = True
         server = self.server
         if not isinstance(server, AuthenticatedHostServer):
             self.send_error(500)
             return
-        acquired = server._request_slots.acquire(blocking=False)
-        if not acquired:
-            response = _json_response(503, {"error": "HOST_OVERLOADED", "accepted": False})
-        else:
-            try:
-                for name in _SINGLETON_REQUEST_HEADERS:
-                    if len(self.headers.get_all(name, [])) > 1:
-                        raise ValueError("Duplicate singleton request header")
-                host_values = self.headers.get_all("Host", [])
-                if len(host_values) != 1:
-                    raise ValueError("Exactly one Host header is required")
-                scheme = urlsplit(server.application.public_origin).scheme
-                request_origin = _authenticated_origin(
-                    f"{scheme}://{host_values[0]}"
+        try:
+            for name in _SINGLETON_REQUEST_HEADERS:
+                if len(self.headers.get_all(name, [])) > 1:
+                    raise ValueError("Duplicate singleton request header")
+            host_values = self.headers.get_all("Host", [])
+            if len(host_values) != 1:
+                raise ValueError("Exactly one Host header is required")
+            scheme = urlsplit(server.application.public_origin).scheme
+            request_origin = _authenticated_origin(
+                f"{scheme}://{host_values[0]}"
+            )
+            if request_origin != server.application.public_origin:
+                raise PermissionError("Host header does not match public origin")
+            if self.headers.get("Transfer-Encoding") is not None:
+                raise ValueError("Transfer-Encoding is not supported")
+            length_text = self.headers.get("Content-Length", "0")
+            length = int(length_text)
+            if length < 0 or length > _MAX_BODY_BYTES:
+                response = _error(413, "REQUEST_TOO_LARGE")
+            else:
+                body = self.rfile.read(length) if length else b""
+                header_map = {key: value for key, value in self.headers.items()}
+                response = server.application.dispatch(
+                    method=self.command,
+                    target=self.path,
+                    headers=header_map,
+                    body=body,
                 )
-                if request_origin != server.application.public_origin:
-                    raise PermissionError("Host header does not match public origin")
-                if self.headers.get("Transfer-Encoding") is not None:
-                    raise ValueError("Transfer-Encoding is not supported")
-                length_text = self.headers.get("Content-Length", "0")
-                length = int(length_text)
-                if length < 0 or length > _MAX_BODY_BYTES:
-                    response = _error(413, "REQUEST_TOO_LARGE")
-                else:
-                    body = self.rfile.read(length) if length else b""
-                    header_map = {key: value for key, value in self.headers.items()}
-                    response = server.application.dispatch(
-                        method=self.command,
-                        target=self.path,
-                        headers=header_map,
-                        body=body,
-                    )
-            except PermissionError:
-                response = _error(403, "AUTHENTICATION_OR_AUTHORIZATION_FAILED")
-            except (ValueError, OverflowError):
-                response = _error(400, "INVALID_REQUEST")
-            finally:
-                server._request_slots.release()
+        except PermissionError:
+            response = _error(403, "AUTHENTICATION_OR_AUTHORIZATION_FAILED")
+        except (ValueError, OverflowError):
+            response = _error(400, "INVALID_REQUEST")
         self.send_response(response.status)
         self.send_header("Content-Type", response.content_type)
         self.send_header("Content-Length", str(len(response.body)))
-        self.send_header("Connection", "close")
         self.send_header("X-Content-Type-Options", "nosniff")
         for name, value in response.headers:
             self.send_header(name, value)
@@ -871,8 +819,6 @@ class AuthenticatedHostServer(ThreadingHTTPServer):
             self.server_close()
             raise ValueError("public_origin port does not match the bound listener")
         self.application = application
-        # Bound concurrent HTTP admissions before command dispatch.
-        self._request_slots = BoundedSemaphore(value=16)
         try:
             # Repair the acceptance/execution crash boundary before serving new
             # traffic. Canonical authority mutation is idempotent and evidence

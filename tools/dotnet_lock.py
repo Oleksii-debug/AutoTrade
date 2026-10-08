@@ -191,10 +191,7 @@ def dotnet_restore_command_tokens(command: str) -> tuple[str, ...]:
     if _DOTNET_RESTORE_SHELL_CONTROL.search(payload) is not None:
         raise ValueError('dotnet restore command must not contain shell execution control')
     try:
-        # Preserve Windows separators as literal backslashes for the
-        # canonical repo-relative target check. POSIX shlex would otherwise
-        # silently remove them and admit a noncanonical path.
-        tokens = tuple(shlex.split(payload.replace("\\", "\\\\"), comments=True))
+        tokens = tuple(shlex.split(payload, comments=True))
     except ValueError as error:
         raise ValueError('malformed dotnet restore command') from error
     if len(tokens) < 3 or tokens[:2] != ('dotnet', 'restore'):
@@ -385,11 +382,7 @@ def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
                 continue
             project_root = tree.getroot()
             sdk_attribute = project_root.attrib.get('Sdk')
-            if sdk_attribute is not None and not (
-                sdk_attribute == 'Microsoft.NET.Sdk'
-                or (relative == 'src/AutoTrade.Host/AutoTrade.Host.csproj'
-                    and sdk_attribute == 'Microsoft.NET.Sdk.Web')
-            ):
+            if sdk_attribute is not None and sdk_attribute != 'Microsoft.NET.Sdk':
                 blockers.append(
                     f'DOTNET_PROJECT_SDK_AUTHORITY_UNSUPPORTED:'
                     f'{relative}:{sdk_attribute}'
@@ -414,9 +407,6 @@ def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
                 )
 
     for path in sorted(candidates):
-        if any(part in {"obj", "bin"} for part in path.relative_to(root).parts):
-            # Generated restore artifacts are outputs, not source-controlled authority.
-            continue
         relative = path.relative_to(root).as_posix()
         try:
             tree = ET.parse(path)

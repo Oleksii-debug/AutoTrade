@@ -105,7 +105,7 @@ def _write_rights_workflow(root: Path, projects: list[Path]) -> None:
 def _write_policy(root: Path) -> None:
     licenses = root / "provenance" / "licenses"
     licenses.mkdir(parents=True)
-    (licenses / "Example.Package.LICENSE.txt").write_bytes(_LICENSE.encode("utf-8"))
+    (licenses / "Example.Package.LICENSE.txt").write_text(_LICENSE, encoding="utf-8")
     (root / "provenance" / "dotnet-package-rights.json").write_text(
         json.dumps(
             {
@@ -115,7 +115,6 @@ def _write_policy(root: Path) -> None:
                         "name": "Example.Package",
                         "version": "1.2.3",
                         "content_hash_sha512_base64": _HASH,
-                        "archive_sha512_base64": _HASH,
                         "license_id": "EXAMPLE-REDISTRIBUTABLE",
                         "license_file": "LICENSE.txt",
                         "expected_license_text_path": "provenance/licenses/Example.Package.LICENSE.txt",
@@ -139,12 +138,9 @@ def _write_restored_package(root: Path, *, license_text: str = _LICENSE) -> Path
         encoding="ascii",
     )
     (package / "example.package.1.2.3.nupkg").write_bytes(_NUPKG_BYTES)
-    (package / ".nupkg.metadata").write_text(
-        json.dumps({"version": 2, "contentHash": _HASH}), encoding="utf-8"
-    )
-    (package / "LICENSE.txt").write_bytes(license_text.encode("utf-8"))
-    (package / "NOTICE.txt").write_bytes(_NOTICE.encode("utf-8"))
-    (package / "example.package.nuspec").write_bytes(_NUSPEC.encode("utf-8"))
+    (package / "LICENSE.txt").write_text(license_text, encoding="utf-8")
+    (package / "NOTICE.txt").write_text(_NOTICE, encoding="utf-8")
+    (package / "example.package.nuspec").write_text(_NUSPEC, encoding="utf-8")
     return packages
 
 
@@ -291,7 +287,7 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertIn(
-                "DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_MISSING:src/App/App.csproj",
+                "DOTNET_PACKAGE_RIGHTS_VERIFY_ORDER_INVALID:src/App/App.csproj",
                 package_rights_blockers(root),
             )
 

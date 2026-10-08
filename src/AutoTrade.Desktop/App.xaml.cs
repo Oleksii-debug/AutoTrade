@@ -1,4 +1,3 @@
-using System.IO;
 using System.Windows;
 
 namespace AutoTrade.Desktop;

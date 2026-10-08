@@ -1,0 +1,67 @@
+name: Plan 3 Operator Observability qualification
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/plan3-operator-observability-qualification.yml'
+      - 'mvp/autotrade_mvp/operator_observability.py'
+      - 'mvp/autotrade_mvp/diagnostics.py'
+      - 'mvp/autotrade_mvp/decision_trace.py'
+      - 'mvp/autotrade_mvp/readiness.py'
+      - 'mvp/autotrade_mvp/recovery.py'
+      - 'mvp/autotrade_mvp/host_network.py'
+      - 'mvp/tests/test_operator_observability.py'
+      - 'mvp/tests/test_diagnostics.py'
+      - 'mvp/tests/test_readiness.py'
+      - 'mvp/tests/test_decision_trace.py'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/plan3-operator-observability-qualification.yml'
+      - 'mvp/autotrade_mvp/operator_observability.py'
+      - 'mvp/autotrade_mvp/diagnostics.py'
+      - 'mvp/autotrade_mvp/decision_trace.py'
+      - 'mvp/autotrade_mvp/readiness.py'
+      - 'mvp/autotrade_mvp/recovery.py'
+      - 'mvp/autotrade_mvp/host_network.py'
+      - 'mvp/tests/test_operator_observability.py'
+      - 'mvp/tests/test_diagnostics.py'
+      - 'mvp/tests/test_readiness.py'
+      - 'mvp/tests/test_decision_trace.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  operator-observability:
+    name: observability (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Compile existing diagnostic/readiness and operator observer modules
+        run: |
+          python -m compileall -q mvp/autotrade_mvp/operator_observability.py mvp/autotrade_mvp/diagnostics.py mvp/autotrade_mvp/readiness.py mvp/autotrade_mvp/decision_trace.py
+      - name: Test exact operator state, redaction, recovery, evidence and adversarial boundaries
+        run: |
+          python -m unittest -v mvp.tests.test_operator_observability mvp.tests.test_diagnostics mvp.tests.test_readiness mvp.tests.test_decision_trace
+      - name: Emit exact-source nonsecret qualification receipt
+        env:
+          AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python tools/write_ci_evidence.py --suite plan3-operator-observability-section7 --command "operator diagnostics and existing evidence/readiness unittest suite" --output plan3-operator-observability-evidence.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan3-operator-observability-${{ runner.os }}-${{ github.sha }}
+          path: plan3-operator-observability-evidence.json
+          if-no-files-found: error

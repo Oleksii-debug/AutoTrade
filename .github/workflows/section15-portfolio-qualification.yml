@@ -1,0 +1,75 @@
+name: section15-portfolio-qualification
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "mvp/autotrade_mvp/allocation*.py"
+      - "mvp/autotrade_mvp/portfolio_correlation*.py"
+      - "mvp/tests/test_allocation*.py"
+      - "mvp/tests/test_authority_allocation_snapshot_ingress.py"
+      - "mvp/tests/test_portfolio_correlation*.py"
+      - "requirements-section15-test.txt"
+      - ".github/workflows/section15-portfolio-qualification.yml"
+  push:
+    branches: [main]
+    paths:
+      - "mvp/autotrade_mvp/allocation*.py"
+      - "mvp/autotrade_mvp/portfolio_correlation*.py"
+      - "mvp/tests/test_allocation*.py"
+      - "mvp/tests/test_authority_allocation_snapshot_ingress.py"
+      - "mvp/tests/test_portfolio_correlation*.py"
+      - "requirements-section15-test.txt"
+      - ".github/workflows/section15-portfolio-qualification.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  portfolio:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    env:
+      AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install exact hash-locked qualification dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements-dev.txt
+          python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements-section15-test.txt
+      - name: Run native pytest and unittest portfolio tests
+        run: >-
+          python -m pytest -q -ra
+            mvp/tests/test_allocation_evidence.py
+            mvp/tests/test_allocation_payload_provenance.py
+            mvp/tests/test_allocation_valuation.py
+            mvp/tests/test_authority_allocation_snapshot_ingress.py
+            mvp/tests/test_portfolio_correlation.py
+            mvp/tests/test_portfolio_correlation_allocation_integrity.py
+            mvp/tests/test_portfolio_correlation_oms.py
+            mvp/tests/test_portfolio_correlation_resolver_ingress.py
+      - name: Record exact-source qualification evidence
+        run: >-
+          python tools/write_ci_evidence.py
+          --suite section15-portfolio-qualification
+          --command "python -m pytest -q -ra section15 portfolio test modules"
+          --output "artifacts/section15-${{ runner.os }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: section15-evidence-${{ runner.os }}
+          path: artifacts/section15-${{ runner.os }}.json
+          if-no-files-found: error

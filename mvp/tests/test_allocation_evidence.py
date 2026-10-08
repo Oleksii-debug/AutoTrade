@@ -990,7 +990,10 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                     context.traps[Inexact] = True
                     context.traps[Rounded] = True
                     result = self.allocate(candidate=candidate, bundle=bundle)
-                    self.assertEqual(result.objective.allocation.status, "ALLOCATED")
+                    # Negative directional forecast does not justify adding
+                    # a fresh short exposure. Conversion evidence must remain
+                    # exact even when allocation correctly fails closed.
+                    self.assertEqual(result.objective.allocation.status, "NO_INCREASE_FALLBACK")
                     # Call the real exact conversion rather than spoofing the
                     # financial allocator; both paths execute under the same
                     # hostile Decimal contexts, preserving precision invariance.

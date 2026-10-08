@@ -50,7 +50,7 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 | 1 | DONE | legacy Section 3 |
 | 2 | DONE | legacy Section 4 |
 | 3 | DONE | legacy Section 7 |
-| 4 | PARTIAL_EXISTING | legacy Section 24 |
+| 4 | QUALIFYING | legacy Section 24; canonical finisher PR #2324 candidate `3cd756ad124942bdf228d685ea4ad50dcd3dae05`; previous exact-head CI [37725170968](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37725170968) FAILED (Linux two assertions; Windows same plus path-identity fixture); focused repairs read back on finisher; new two-OS CI [37726712635](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37726712635) QUEUED, not PASS; requires qualification, main integration and readback before DONE |
 | 5 | OPEN | legacy Section 25 |
 | 6 | PARTIAL_EXISTING | legacy Section 28 |
 | 7 | OPEN | legacy Section 29 |
@@ -70,7 +70,7 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 ### Plan 5 — Web / Windows / accessibility / packaging
 | Section | State | Existing evidence / note |
 | ---: | --- | --- |
-| 1 | PARTIAL_EXISTING | legacy Section 30; current web source and prior lineages |
+| 1 | QUALIFYING | canonical PR #2325 exact head `6de95a9d1c6fa837e111145862bd72c863b4622e`; 10-route semantic Web navigation, focus/hash/history and fail-closed provider-unavailable projection. Prior exact-head Plan-5 CI [37725515985](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37725515985) FAILED 12/108 static tests; repaired stale-refresh success, poll SNAPSHOT_BUSY fail-close, ambiguous retry warning, duplicate live status, and refactor-aware static assertions on same finisher. Focused source V8/semantic checks 9/9 PASS (not a browser run). New exact-head scoped [37726609637](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37726609637) QUEUED; other exact-head gates QUEUED; NOT DONE until CI, integration and readback. Conflict key `web-ui`; no other plan source mutated; no provider credentials or manual NVDA claim. |
 | 2 | PARTIAL_EXISTING | legacy Section 31 |
 | 3 | PARTIAL_EXISTING | legacy Section 32 |
 | 4 | PARTIAL_EXISTING | legacy Section 33 |
@@ -81,8 +81,8 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 ### Plan 6 — Providers (offline/source engineering; no owner input required)
 | Section | State | Existing evidence / note |
 | ---: | --- | --- |
-| 1 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | legacy Section 38 provider domain/account/capability contracts |
-| 2 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | legacy Section 38 reads/streams/request/signing/reconciliation adapters |
+| 1 | QUALIFYING_OFFLINE / ACTIONABLE_OFFLINE | canonical PR #2326; BYBIT PAPER/LIVE guard and negative tests implemented; initial Linux/Windows offline run 37725452108 FAILED at f58578a3 (missing canonical submission-response projection import plus capability/provenance negatives). Regression test repair on head 2185f640; exact-head rerun 37726827766 queued at readback. NOT DONE: repair remaining failures, qualify, integrate/read back |
+| 2 | QUALIFYING_OFFLINE / ACTIONABLE_OFFLINE | canonical PR #2326; reuse signing, reads, durable UNKNOWN/reconciliation and ACK-not-fill tests. Initial exact-head offline run 37725452108 FAILED at Section 1, so Section 2 did not execute. Head 2185f640 rerun 37726827766 queued; requires Section 1 pass, Section 2 exact-head Linux/Windows pass, integration/readback. NOT DONE |
 | 3 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | legacy Section 39 provider-family adapters |
 | 4 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | engineering slice of legacy Section 40; real provider financial truth remains Plan 9 |
 | 5 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | provider qualification harness using non-secret fixtures/test vectors |
@@ -91,7 +91,7 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 ### Plan 7 — Scientific evidence / performance
 | Section | State | Existing evidence / note |
 | ---: | --- | --- |
-| 1 | PARTIAL_EXISTING | legacy Section 19; WP-36/#1346 ancestry |
+| 1 | QUALIFYING | legacy Section 19; canonical [PR #2327](https://github.com/Oleksii-debug/AutoTrade/pull/2327), frozen head `a7a54133c00db9f3c6e5f760e06eef43c82c64bd`. Prior head `29461f1`: Ubuntu/Windows science [37725855205](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37725855205) SUCCESS, baseline [37725855229](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37725855229) SUCCESS; Verify [37725855207](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37725855207) FAILED (direct CLI provenance import), provider-free [37725855251](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37725855251) FAILED (desktop win-x64 restore). Exact integration-gate repairs committed to same canonical branch; new-head science 37726807913, baseline 37726807876, Verify 37726807874, provider-free 37726807915 QUEUED (NOT PASS). Await terminal exact-head gates, safe reconvergence, merge, main readback, then paired Drive/GitHub DONE. No Section 2 mutation yet |
 | 2 | PARTIAL_EXISTING | qualification slice of legacy Section 20 |
 | 3 | PARTIAL_EXISTING | qualification slice of legacy Section 35 |
 | 4 | PARTIAL_EXISTING | strategy economics qualification harness |

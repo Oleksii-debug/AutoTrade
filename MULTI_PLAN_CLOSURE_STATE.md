@@ -88,6 +88,13 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 | 5 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | provider qualification harness using non-secret fixtures/test vectors |
 | 6 | OPEN / ACTIONABLE_OFFLINE | plan-level offline qualification; real account/PAPER/LIVE evidence not required |
 
+#### Plan 6 — exact-head repair/readback 2026-10-08 (#2326; NOT DONE)
+- Canonical single PR [#2326](https://github.com/Oleksii-debug/AutoTrade/pull/2326), open/unmerged exact head `e84099a414149b79892522ead8d0fe9a0baaf11a`; **Sections 1 and 2 remain QUALIFYING_OFFLINE / ACTIONABLE_OFFLINE — NOT DONE**.
+- Historical `a37d4b8`: [offline run #37741030815](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37741030815) Section 1 Ubuntu **176/176 PASS**, Windows step PASS; Section 2 Linux 528 tests **97 errors + 19 failures** and Windows FAILED. Historical result is **not** current-head acceptance.
+- Reused same PR to repair proven issuer/journal-bound SENT-vs-UNKNOWN projection, post-send response mutation/rebinding and synthetic fixture/schema drift, including canonical reconciliation epoch/UUID, provider environment, IBKR credential handle and fixture-only capability admission. Exact commits `c44063f`, `e8d9c35`, `cc4a529`, `24b41fc`, `f98867d`, `57babcf`, `e84099a`; evidence [PR comment #6055602110](https://github.com/Oleksii-debug/AutoTrade/pull/2326#issuecomment-6055602110).
+- New exact SHA GitHub Actions: [offline 37747821551](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37747821551), baseline 37747821716, Verify 37747821476, recovery 37747821639, provider-free 37747821660 all **QUEUED/PENDING** at latest readback; **no current exact-head PASS**. Additional old Section-2 opaque HTTP, intent fence and reconciliation/route failures remain unqualified.
+- Do **not** mark terminal DONE or integrate financial adapter code before completed exact-head Linux+Windows qualification, smallest proven repairs, safe main integration and accepted source readback; update only assigned Drive Plan 6 alongside final closure. Real credentials/PAPER/LIVE are not required or claimed; no real-money operations.
+
 ### Plan 7 — Scientific evidence / performance
 | Section | State | Existing evidence / note |
 | ---: | --- | --- |

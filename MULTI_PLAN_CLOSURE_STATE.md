@@ -50,7 +50,7 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 | 1 | DONE | legacy Section 3 |
 | 2 | DONE | legacy Section 4 |
 | 3 | DONE | legacy Section 7 |
-| 4 | QUALIFYING | legacy Section 24; canonical finisher PR #2324 candidate `3cd756ad124942bdf228d685ea4ad50dcd3dae05`; previous exact-head CI [37725170968](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37725170968) FAILED (Linux two assertions; Windows same plus path-identity fixture); focused repairs read back on finisher; new two-OS CI [37726712635](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37726712635) QUEUED, not PASS; requires qualification, main integration and readback before DONE |
+| 4 | DONE | legacy Section 24; canonical PR #2324 merged to `main` as `e67a532b053f03b463bd6f08f5b19c56d12d606f`; exact frozen candidate `3cd756ad124942bdf228d685ea4ad50dcd3dae05`; scoped CI [37726712635](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37726712635) SUCCESS on ubuntu-22.04 and windows-2025 (62 recovery/UNKNOWN/sender-fence/takeover/failure tests on Ubuntu); merged recovery_dispatch.py and recovery_takeover.py blob identities match candidate; premerge main-diff overlap was empty; no PAPER/LIVE/provider claim; terminal Plan-3 Section-4 engineering readback verified on 2026-10-08 |
 | 5 | OPEN | legacy Section 25 |
 | 6 | PARTIAL_EXISTING | legacy Section 28 |
 | 7 | OPEN | legacy Section 29 |

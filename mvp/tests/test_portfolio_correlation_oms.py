@@ -9,7 +9,7 @@ import pytest
 
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.order_projection import OrderBookProjection, OrderSnapshot, OrderProjectionConflict
+from mvp.autotrade_mvp.order_projection import OrderBookProjection, OrderSnapshot
 from mvp.autotrade_mvp.portfolio_correlation import CorrelationConcentrationError
 import mvp.autotrade_mvp.portfolio_correlation_oms as correlation_oms
 from mvp.autotrade_mvp.portfolio_correlation_oms import (
@@ -219,18 +219,14 @@ def test_order_snapshot_open_quantity_descriptor_spoof_cannot_hide_open_order():
             new=property(forged_open_quantity, retain_real_quantity),
             create=True,
         ):
-            with pytest.raises((CorrelationConcentrationError, OrderProjectionConflict)) as caught:
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="canonical OMS snapshot field descriptor changed before replay",
+            ):
                 require_correlation_safe_proposal_with_oms(
                     proposal, evidence, resolver, policy, oms=oms
                 )
-        # The durable journal/replay seal may reject descriptor tampering
-        # before the downstream correlation guard sees the order. Both routes
-        # must fail closed; neither may read the forged descriptor.
-        assert (
-            "canonical OMS has unvalued open exposure" in str(caught.value)
-            if isinstance(caught.value, CorrelationConcentrationError)
-            else "order projection journal snapshot differs from replay" in str(caught.value)
-        )
+        # The descriptor is rejected before OMS replay can call it.
         assert calls == []
 
 
@@ -254,16 +250,14 @@ def test_order_snapshot_identifier_descriptor_spoof_cannot_change_exposure_ident
             new=property(forged_identifier, retain_real_identifier),
             create=True,
         ):
-            with pytest.raises((CorrelationConcentrationError, OrderProjectionConflict)) as caught:
+            with pytest.raises(
+                CorrelationConcentrationError,
+                match="canonical OMS snapshot field descriptor changed before replay",
+            ):
                 require_correlation_safe_proposal_with_oms(
                     proposal, evidence, resolver, policy, oms=oms
                 )
-        if isinstance(caught.value, CorrelationConcentrationError):
-            assert "canonical OMS has unvalued open exposure" in str(caught.value)
-            assert "open-order-1" in str(caught.value)
-        else:
-            assert "order projection journal snapshot differs from replay" in str(caught.value)
-        assert "forged-hidden-order" not in str(caught.value)
+        # No forged snapshot identifier becomes authoritative or even executes.
         assert calls == []
 
 

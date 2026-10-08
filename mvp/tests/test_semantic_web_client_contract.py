@@ -53,7 +53,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn('renderProjection(\n      "portfolio-body"', js)
         self.assertIn('renderProjection(\n      "risk-body"', js)
         self.assertIn('renderProjection(\n      "strategy-body"', js)
-        self.assertIn("renderJobs(parsed.jobs)", js)
+        self.assertIn("renderJobs(parsed.jobs, {preserveSelection: !displayContextChanged})", js)
         self.assertIn('text("server-time", parsed.serverTime)', js)
         self.assertNotIn("Not loaded.", html)
 

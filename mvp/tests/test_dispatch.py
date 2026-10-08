@@ -1,7 +1,5 @@
 from tempfile import TemporaryDirectory
 import unittest
-
-import mvp.autotrade_mvp.dispatch as dispatch_module
 from unittest.mock import patch
 from uuid import UUID
 
@@ -12,8 +10,6 @@ from mvp.autotrade_mvp.dispatch import (
     GuardedDispatcher,
     SubmissionResponseBinding,
     load_submission_response_binding,
-    require_canonical_submission_response_binding,
-    submission_response_binding_projection,
     require_canonical_submission_response_binding,
     submission_response_binding_projection,
     stable_client_order_id,

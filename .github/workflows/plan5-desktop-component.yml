@@ -1,0 +1,62 @@
+name: plan5-desktop-component
+on:
+  pull_request:
+    paths:
+      - 'src/AutoTrade.Desktop/**'
+      - 'mvp/tests/test_desktop_shell_contract.py'
+      - 'tests/Desktop.Client/**'
+      - '.github/workflows/plan5-desktop-component.yml'
+  push:
+    branches:
+      - 'plan5/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
+
+jobs:
+  desktop-source-and-accessibility:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Thin Desktop, keyboard/UIA, WebView2 fail-closed, emergency and restart contracts
+        run: python -m unittest mvp.tests.test_desktop_shell_contract -v
+
+  windows-desktop-build-and-emergency-recovery:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.100'
+      - name: Verify rights and locked desktop dependency
+        run: |
+          python tools/dotnet_package_rights.py --check-policy
+          dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --locked-mode
+          python tools/dotnet_package_rights.py --verify-restored --packages-root "${{ env.NUGET_PACKAGES }}" --project src/AutoTrade.Desktop/AutoTrade.Desktop.csproj
+      - name: Compile one canonical thin Windows Desktop shell
+        run: dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --configuration Release --no-restore
+      - name: Execute native host/emergency/restart and policy negative regressions
+        run: |
+          dotnet restore tests/Desktop.Client/Desktop.Client.csproj --locked-mode
+          dotnet run --project tests/Desktop.Client/Desktop.Client.csproj --configuration Release --no-restore

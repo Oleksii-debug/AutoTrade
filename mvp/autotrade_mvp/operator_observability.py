@@ -243,7 +243,7 @@ def build_operator_observability(
     ):
         # A diagnostic read cannot silently bridge a recovery transition.
         # A later read may produce a new projection; no financial retry occurs.
-        raise ValueError("recovery state changed during diagnostic read")
+        raise ValueError("operator observability source changed during diagnostic read")
     return OperatorObservabilitySnapshot(
         mode=mode,
         reasons=tuple(sorted(reasons)),

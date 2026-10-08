@@ -1355,10 +1355,10 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             self.assertEqual(
                 dotnet_imported_package_reference_blockers(root),
                 [
-                    'DOTNET_IMPORTED_PACKAGE_REFERENCE_UNSUPPORTED:'
-                    'src/AutoTrade.Desktop/obj/Custom.targets',
                     'DOTNET_EXPLICIT_MSBUILD_IMPORT_UNSUPPORTED:'
                     'src/AutoTrade.Desktop/obj/AutoTrade.Desktop.csproj.nuget.g.targets',
+                    'DOTNET_IMPORTED_PACKAGE_REFERENCE_UNSUPPORTED:'
+                    'src/AutoTrade.Desktop/obj/Custom.targets',
                 ],
             )
 

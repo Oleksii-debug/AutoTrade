@@ -1552,3 +1552,32 @@ def assess_windows_update_intent_after_restart(
         "may_start_second_host": False,
         "trading_authority_granted": False,
     }
+
+
+def assess_windows_update_restart_with_persisted_intent(
+    plan: WindowsUpdatePlan,
+    checkpoint: WindowsUpdateCheckpoint,
+    *,
+    trust: WindowsUpdateTrustContext,
+    intent_path: Path,
+    observed_windows_package_sha256: str,
+    observed_journal_schema_version: int,
+) -> WindowsUpdateRestartAssessment:
+    """Read the write-ahead record BEFORE assessing a post-crash restart.
+
+    Missing, altered or ambiguous on-disk intents fail closed. An installed
+    updater must use this entry point after any interrupted effect; choosing
+    a different path or asserting a synthetic receipt cannot clear the fence.
+    This still grants neither financial authority nor automatic replay.
+    """
+    pending = read_windows_update_step_intent(
+        plan, trust=trust, path=intent_path,
+    )
+    return assess_windows_update_restart(
+        plan,
+        checkpoint,
+        trust=trust,
+        observed_windows_package_sha256=observed_windows_package_sha256,
+        observed_journal_schema_version=observed_journal_schema_version,
+        pending_intent=pending,
+    )

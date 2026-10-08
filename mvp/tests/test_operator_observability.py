@@ -240,7 +240,7 @@ class OperatorObservabilityTests(unittest.TestCase):
         with patch.object(
             observer, "evaluate_readiness", side_effect=change_during_read
         ):
-            with self.assertRaisesRegex(ValueError, "recovery state changed"):
+            with self.assertRaisesRegex(ValueError, "source changed"):
                 build_operator_observability(
                     ui_snapshot=_snapshot(), recovery=recovery, signals=_signals()
                 )
@@ -255,6 +255,31 @@ class OperatorObservabilityTests(unittest.TestCase):
         self.assertIn("Mode: RECOVERING", text)
         self.assertIn("Financial authority: NONE", text)
         self.assertIn("unknown:", text)
+
+    def test_mutated_exact_signal_and_evidence_counts_fail_closed(self):
+        from mvp.autotrade_mvp.diagnostics import DiagnosticSnapshot
+
+        signals = _signals()
+        object.__setattr__(signals, "unknown_send_count", "leaked-secret")
+        with self.assertRaisesRegex(ValueError, "UNKNOWN send count is noncanonical"):
+            build_operator_observability(
+                ui_snapshot=_snapshot(), recovery=_recovery(HostState.READY),
+                signals=signals,
+            )
+
+        evidence = DiagnosticSnapshot(
+            symbol="ABC",
+            traces=(),
+            evidence_count=1,
+            pending_outbox_sample_count=0,
+            pending_outbox_sample_truncated=False,
+        )
+        object.__setattr__(evidence, "evidence_count", "leaked-secret")
+        with self.assertRaisesRegex(ValueError, "evidence count is noncanonical"):
+            build_operator_observability(
+                ui_snapshot=_snapshot(), recovery=_recovery(HostState.READY),
+                signals=_signals(), evidence=evidence,
+            )
 
     def test_authentic_mappingproxy_is_supported_for_host_snapshot(self):
         view = build_operator_observability(

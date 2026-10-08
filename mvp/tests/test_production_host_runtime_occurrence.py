@@ -281,8 +281,8 @@ class ProductionHostRuntimeOccurrenceContractTests(unittest.TestCase):
                     create=True,
                 ):
                     with self.assertRaisesRegex(
-                        RuntimeError,
-                        "latest durable occurrence",
+                        PermissionError,
+                        "no longer current",
                     ):
                         _ = runtime.runtime_occurrence
             finally:
@@ -302,7 +302,7 @@ class ProductionHostRuntimeOccurrenceContractTests(unittest.TestCase):
                     successor.runtime_occurrence_id,
                     bound.runtime_occurrence_id,
                 )
-                with self.assertRaisesRegex(RuntimeError, "latest durable occurrence"):
+                with self.assertRaisesRegex(PermissionError, "no longer current"):
                     _ = runtime.runtime_occurrence
             finally:
                 runtime.close()
@@ -318,7 +318,7 @@ class ProductionHostRuntimeOccurrenceContractTests(unittest.TestCase):
             try:
                 successor_id = successor.runtime_occurrence.runtime_occurrence_id
                 self.assertNotEqual(first_id, successor_id)
-                with self.assertRaisesRegex(RuntimeError, "latest durable occurrence"):
+                with self.assertRaisesRegex(PermissionError, "no longer current"):
                     _ = first.runtime_occurrence
 
                 object.__setattr__(
@@ -326,7 +326,7 @@ class ProductionHostRuntimeOccurrenceContractTests(unittest.TestCase):
                     "_runtime_occurrence_id",
                     successor_id,
                 )
-                with self.assertRaisesRegex(RuntimeError, "latest durable occurrence"):
+                with self.assertRaisesRegex(PermissionError, "no longer current"):
                     _ = first.runtime_occurrence
             finally:
                 successor.close()

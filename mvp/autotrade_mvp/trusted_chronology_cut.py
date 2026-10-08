@@ -91,7 +91,10 @@ def _require_post_verification_currentness(
         runtime.journal,
         subject="trusted chronology production runtime JournalStore",
     )
-    if runtime_identity != runtime_selected_identity:
+    # The native Windows opened-handle identity is authoritative, even when
+    # the same journal has a different lexical path spelling. On POSIX the
+    # existing canonical-path/device/inode match remains strict.
+    if not _impl.same_journal_backing_object(runtime_identity, runtime_selected_identity):
         raise PermissionError(
             "production runtime does not share trusted chronology JournalStore"
         )

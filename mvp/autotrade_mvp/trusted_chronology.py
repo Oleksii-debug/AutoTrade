@@ -33,6 +33,7 @@ from .production_host import (
 from .store_identity import (
     JournalStoreIdentity,
     require_exact_journal_store_identity,
+    same_journal_backing_object,
 )
 
 
@@ -341,7 +342,10 @@ def _release_runtime_binding(
         runtime.journal,
         subject="chronology production runtime JournalStore",
     )
-    if runtime_identity != selected_identity:
+    # On Windows the strong opened-HANDLE volume/file ID is authoritative;
+    # lexical path spellings can differ for the very same journal generation.
+    # POSIX retains its strict path/device/inode identity comparison.
+    if not same_journal_backing_object(runtime_identity, selected_identity):
         raise PermissionError(
             "production runtime does not share chronology JournalStore generation"
         )

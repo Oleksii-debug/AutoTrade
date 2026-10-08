@@ -63,8 +63,8 @@ def _reconciliation():
         provider_cash={"USD": "900"},
         local_positions={"ABC": "1"},
         provider_positions={"ABC": "1"},
-        local_execution_ids=["exec-1"],
-        provider_fills=[fill],
+        local_execution_ids=[],
+        provider_fills=[],
         snapshot_consistency=snapshot,
         coverage_start="2026-10-04T00:30:00Z",
         coverage_end="2026-10-04T00:31:00Z",
@@ -154,7 +154,7 @@ class CompletedTakeoverStaleSenderTests(unittest.TestCase):
             )
 
             self.assertEqual(outcome.status, "BLOCKED")
-            self.assertIn("Sender fence mismatch", outcome.reason)
+            self.assertEqual(outcome.reason, "sender_fence_rejected:PermissionError")
             self.assertEqual(wire_calls, [])
             aggregate_id = submission_attempt_aggregate_id(
                 environment="PAPER",

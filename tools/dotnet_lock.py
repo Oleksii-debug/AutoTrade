@@ -127,12 +127,21 @@ def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
     .targets file would otherwise bypass project discovery and the lock gate.
     Fail closed until evaluated MSBuild dependency discovery is authoritative.
     """
+    def generated_nuget_import(path: Path) -> bool:
+        if path.parent.name.casefold() != 'obj':
+            return False
+        for suffix in ('.nuget.g.props', '.nuget.g.targets'):
+            if path.name.endswith(suffix):
+                return (path.parent.parent / path.name.removesuffix(suffix)).is_file()
+        return False
+
     candidates: set[Path] = set()
     for pattern in ('*.props', '*.targets'):
         candidates.update(root.glob(pattern))
         source_root = root / 'src'
         if source_root.is_dir():
-            candidates.update(source_root.rglob(pattern))
+            candidates.update(path for path in source_root.rglob(pattern)
+                              if not generated_nuget_import(path))
 
     blockers: list[str] = []
 

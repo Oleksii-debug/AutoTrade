@@ -4,7 +4,9 @@ on:
   pull_request:
     paths:
       - 'mvp/autotrade_mvp/backup.py'
+      - 'mvp/autotrade_mvp/simulation_runtime_checkpoint.py'
       - 'mvp/tests/test_backup_restore.py'
+      - 'mvp/tests/test_simulation_runtime_checkpoint.py'
       - '.github/workflows/plan3-backup-qualification.yml'
   workflow_dispatch:
 

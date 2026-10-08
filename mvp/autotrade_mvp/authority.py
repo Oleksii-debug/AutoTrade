@@ -1425,132 +1425,223 @@ class AllocationAuthoritySnapshot:
     reconciliation_run_id: str
     account_state_version: int
 
-    def __post_init__(self) -> None:
-        if type(self.allocation_policy) is not AllocationPolicy:
-            raise TypeError("allocation_policy must be exact AllocationPolicy")
-        if (
-            type(self.max_candidate_sets) is not int
-            or self.max_candidate_sets < 1
-        ):
-            raise ValueError("max_candidate_sets must be a positive exact integer")
-        if not isinstance(self.resolved_evidence, Mapping):
-            raise TypeError("resolved_evidence must be a mapping")
-        evidence: dict[str, ImmutableAllocationEvidence] = {}
-        for raw_id, item in self.resolved_evidence.items():
-            evidence_id = _text(raw_id, name="allocation evidence id")
-            if not isinstance(item, ImmutableAllocationEvidence):
-                raise TypeError(
-                    "resolved allocation evidence values must be ImmutableAllocationEvidence"
+    def __post_init__(
+        self,
+        _get=object.__getattribute__,
+        _set=object.__setattr__,
+        _type=type,
+        _int=int,
+        _str=str,
+        _tuple=tuple,
+        _list=list,
+        _len=len,
+        _dict=dict,
+        _dict_copy=dict.copy,
+        _dict_items=dict.items,
+        _list_copy=list.copy,
+        _sorted=sorted,
+        _mapping_proxy=MappingProxyType,
+        _policy_type=AllocationPolicy,
+        _evidence_type=ImmutableAllocationEvidence,
+        _instrument_type=InstrumentVersionIdentity,
+        _str_strip=str.strip,
+        _object_new=object.__new__,
+        _uuid_type=UUID,
+        _type_error=TypeError,
+        _value_error=ValueError,
+        _attribute_error=AttributeError,
+    ) -> None:
+        policy = _get(self, "allocation_policy")
+        if _type(policy) is not _policy_type:
+            raise _type_error("allocation_policy must be exact AllocationPolicy")
+        max_candidate_sets = _get(self, "max_candidate_sets")
+        if _type(max_candidate_sets) is not _int or max_candidate_sets < 1:
+            raise _value_error("max_candidate_sets must be a positive exact integer")
+
+        def detached_exact_dict(raw, *, name: str) -> dict:
+            if _type(raw) is not _dict:
+                raise _type_error(f"{name} must be an exact built-in dict")
+            return _dict_copy(raw)
+
+        def exact_text(raw, *, name: str) -> str:
+            if _type(raw) is not _str:
+                raise _type_error(f"{name} must be exact text")
+            normalized = _str_strip(raw)
+            if not normalized:
+                raise _value_error(f"{name} is required")
+            return normalized
+
+        def detached_instrument_identity(
+            raw,
+            *,
+            name: str,
+        ) -> InstrumentVersionIdentity:
+            if _type(raw) is _instrument_type:
+                instrument_id = _get(raw, "instrument_id")
+                version = _get(raw, "version")
+            elif _type(raw) is _tuple:
+                if _len(raw) != 2:
+                    raise _type_error(
+                        f"{name} tuple must contain instrument_id and version"
+                    )
+                instrument_id, version = raw
+            elif _type(raw) is _list:
+                snapshot = _list_copy(raw)
+                if _len(snapshot) != 2:
+                    raise _type_error(
+                        f"{name} list must contain instrument_id and version"
+                    )
+                instrument_id, version = snapshot
+            else:
+                raise _type_error(
+                    f"{name} must be exact InstrumentVersionIdentity, tuple or list"
                 )
-            if evidence_id != item.evidence_id:
-                raise ValueError(
+            instrument_id = exact_text(
+                instrument_id,
+                name=f"{name} instrument_id",
+            )
+            if _type(version) is not _int or version < 1:
+                raise _value_error(
+                    f"{name} version must be a positive exact integer"
+                )
+            try:
+                canonical_id = _str(_uuid_type(instrument_id))
+            except (_value_error, _type_error, _attribute_error) as error:
+                raise _value_error(
+                    f"{name} instrument_id must be a UUID"
+                ) from error
+            detached = _object_new(_instrument_type)
+            _set(detached, "instrument_id", canonical_id)
+            _set(detached, "version", version)
+            return detached
+
+        raw_resolved_evidence = detached_exact_dict(
+            _get(self, "resolved_evidence"),
+            name="resolved_evidence",
+        )
+        evidence: dict[str, ImmutableAllocationEvidence] = {}
+        for raw_id, item in _dict_items(raw_resolved_evidence):
+            evidence_id = exact_text(
+                raw_id,
+                name="allocation evidence id",
+            )
+            if _type(item) is not _evidence_type:
+                raise _type_error(
+                    "resolved allocation evidence values must use the exact "
+                    "ImmutableAllocationEvidence type"
+                )
+            item_evidence_id = exact_text(
+                _get(item, "evidence_id"),
+                name="resolved allocation evidence evidence_id",
+            )
+            if evidence_id != item_evidence_id:
+                raise _value_error(
                     "resolved allocation evidence key must match evidence_id"
                 )
             if evidence_id in evidence:
-                raise ValueError("resolved allocation evidence ids must be unique")
+                raise _value_error("resolved allocation evidence ids must be unique")
             evidence[evidence_id] = item
 
-        def normalized_scope(
-            raw: Mapping[str, str],
-            *,
-            name: str,
-        ) -> Mapping[str, str]:
-            if not isinstance(raw, Mapping):
-                raise TypeError(f"{name} must be a mapping")
+        def normalized_scope(raw, *, name: str) -> Mapping[str, str]:
+            snapshot = detached_exact_dict(raw, name=name)
             result: dict[str, str] = {}
-            for raw_symbol, raw_identity in raw.items():
-                symbol = _text(raw_symbol, name=f"{name} symbol")
+            for raw_symbol, raw_identity in _dict_items(snapshot):
+                symbol = exact_text(raw_symbol, name=f"{name} symbol")
                 if symbol in result:
-                    raise ValueError(f"{name} symbols must be unique")
-                result[symbol] = _text(
+                    raise _value_error(f"{name} symbols must be unique")
+                result[symbol] = exact_text(
                     raw_identity,
                     name=f"{name} identity",
                 )
-            return MappingProxyType(dict(sorted(result.items())))
+            return _mapping_proxy(_dict(_sorted(result.items())))
 
-        if (
-            not isinstance(self.account_state_version, int)
-            or isinstance(self.account_state_version, bool)
-            or self.account_state_version < 0
-        ):
-            raise ValueError(
-                "allocation account_state_version must be a non-negative integer"
+        account_state_version = _get(self, "account_state_version")
+        if _type(account_state_version) is not _int or account_state_version < 0:
+            raise _value_error(
+                "allocation account_state_version must be a non-negative exact integer"
             )
-        object.__setattr__(
+
+        _set(
             self,
             "resolved_evidence",
-            MappingProxyType(dict(sorted(evidence.items()))),
+            _mapping_proxy(_dict(_sorted(evidence.items()))),
         )
-        object.__setattr__(
+        _set(
             self,
             "provider_id",
-            _text(self.provider_id, name="allocation provider_id"),
+            exact_text(_get(self, "provider_id"), name="allocation provider_id"),
         )
-        object.__setattr__(
+        _set(
             self,
             "account_id",
-            _text(self.account_id, name="allocation account_id"),
+            exact_text(_get(self, "account_id"), name="allocation account_id"),
         )
-        object.__setattr__(
+        _set(
             self,
             "policy_version",
-            _text(self.policy_version, name="allocation policy_version"),
+            exact_text(
+                _get(self, "policy_version"),
+                name="allocation policy_version",
+            ),
         )
-        object.__setattr__(
+        _set(
             self,
             "instrument_versions",
             normalized_scope(
-                self.instrument_versions,
+                _get(self, "instrument_versions"),
                 name="allocation instrument_versions",
             ),
         )
-        if not isinstance(self.financial_instruments, Mapping):
-            raise TypeError("financial_instruments must be a mapping")
+
+        raw_financial_instruments = detached_exact_dict(
+            _get(self, "financial_instruments"),
+            name="financial_instruments",
+        )
         normalized_financial_instruments: dict[str, InstrumentVersionIdentity] = {}
-        for raw_symbol, raw_identity in self.financial_instruments.items():
-            symbol = _text(
+        for raw_symbol, raw_identity in _dict_items(raw_financial_instruments):
+            symbol = exact_text(
                 raw_symbol,
                 name="allocation financial_instruments symbol",
             )
             if symbol in normalized_financial_instruments:
-                raise ValueError(
+                raise _value_error(
                     "allocation financial_instruments symbols must be unique"
                 )
-            normalized_financial_instruments[symbol] = _instrument_identity(
+            normalized_financial_instruments[symbol] = detached_instrument_identity(
                 raw_identity,
                 name=f"allocation financial instrument {symbol}",
             )
-        object.__setattr__(
+        _set(
             self,
             "financial_instruments",
-            MappingProxyType(dict(sorted(normalized_financial_instruments.items()))),
+            _mapping_proxy(
+                _dict(_sorted(normalized_financial_instruments.items()))
+            ),
         )
-        object.__setattr__(
+        _set(
             self,
             "capability_snapshot_ids",
             normalized_scope(
-                self.capability_snapshot_ids,
+                _get(self, "capability_snapshot_ids"),
                 name="allocation capability_snapshot_ids",
             ),
         )
-        object.__setattr__(
+        _set(
             self,
             "account_snapshot_id",
-            _text(
-                self.account_snapshot_id,
+            exact_text(
+                _get(self, "account_snapshot_id"),
                 name="allocation account_snapshot_id",
             ),
         )
-        object.__setattr__(
+        _set(
             self,
             "reconciliation_run_id",
-            _text(
-                self.reconciliation_run_id,
+            exact_text(
+                _get(self, "reconciliation_run_id"),
                 name="allocation reconciliation_run_id",
             ),
         )
-
-
 
 def _risk_context_graph_value(value: object, *, name: str) -> object:
     """Detach only the exact base-value graph emitted by RiskContext.create()."""

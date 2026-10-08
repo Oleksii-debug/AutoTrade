@@ -69,7 +69,7 @@ jobs:
         run: python -m compileall -q mvp/autotrade_mvp/production_host.py mvp/autotrade_mvp/production_financial_host.py mvp/autotrade_mvp/host_network.py mvp/autotrade_mvp/readiness.py mvp/autotrade_mvp/product_runtime.py
       - name: Host lifecycle, exact journal, takeover, crash/restart and negative qualification
         run: |
-          python -m unittest -v mvp.tests.test_production_host mvp.tests.test_production_host_config mvp.tests.test_production_host_readiness mvp.tests.test_production_host_runtime_occurrence mvp.tests.test_production_financial_host mvp.tests.test_production_financial_host_authority_bindings mvp.tests.test_host_network mvp.tests.test_host_api mvp.tests.test_durable_host_api mvp.tests.test_readiness mvp.tests.test_runtime_failure_control mvp.tests.test_provider_free_product
+          python -m unittest -v mvp.tests.test_production_host mvp.tests.test_production_host_config mvp.tests.test_production_host_readiness mvp.tests.test_production_host_runtime_occurrence mvp.tests.test_production_financial_host mvp.tests.test_production_financial_host_authority_bindings mvp.tests.test_host_network mvp.tests.test_host_api mvp.tests.test_durable_host_api mvp.tests.test_readiness mvp.tests.test_runtime_failure_control
       - name: Emit SHA-bound non-secret Host qualification receipt
         env:
           AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}

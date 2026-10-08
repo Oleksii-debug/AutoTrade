@@ -284,5 +284,64 @@ class DiagnosticTraceTests(unittest.TestCase):
         )
 
 
+    def test_hostile_mapping_and_string_subclasses_fail_before_callbacks(self):
+        class HostileDict(dict):
+            executed = 0
+
+            def items(self):
+                type(self).executed += 1
+                raise AssertionError("hostile mapping items executed")
+
+            def __iter__(self):
+                type(self).executed += 1
+                raise AssertionError("hostile mapping iterator executed")
+
+        class HostileString(str):
+            executed = 0
+
+            def lower(self):
+                type(self).executed += 1
+                raise AssertionError("hostile string lower executed")
+
+        with self.assertRaisesRegex(TypeError, "exact JSON"):
+            redact_diagnostic_value(HostileDict({"api_secret": "value"}))
+        self.assertEqual(HostileDict.executed, 0)
+
+        with self.assertRaisesRegex(TypeError, "exact JSON"):
+            redact_diagnostic_value(HostileString("access_token=exposed"))
+        self.assertEqual(HostileString.executed, 0)
+
+        with self.assertRaisesRegex(ValueError, "exact strings"):
+            redact_diagnostic_value({HostileString("api_secret"): "value"})
+        self.assertEqual(HostileString.executed, 0)
+
+    def test_redaction_rejects_unbounded_or_nonfinite_diagnostic_values(self):
+        deeply_nested = {"safe": "value"}
+        for _ in range(34):
+            deeply_nested = [deeply_nested]
+        with self.assertRaisesRegex(ValueError, "budget"):
+            redact_diagnostic_value(deeply_nested)
+
+        with self.assertRaisesRegex(ValueError, "budget"):
+            redact_diagnostic_value([0] * 10002)
+        with self.assertRaisesRegex(ValueError, "nonfinite"):
+            redact_diagnostic_value({"latency": float("nan")})
+        with self.assertRaisesRegex(ValueError, "nonfinite"):
+            redact_diagnostic_value({"latency": float("inf")})
+
+    def test_diagnostic_redaction_never_mutates_caller_source(self):
+        source = {
+            "api_key": "sensitive",
+            "rows": [{"Authorization": "Bearer private", "count": 3}],
+            "safe": "latency=12ms",
+        }
+        result = redact_diagnostic_value(source)
+        self.assertEqual(result["api_key"], "[REDACTED]")
+        self.assertEqual(result["rows"][0]["Authorization"], "[REDACTED]")
+        self.assertEqual(result["rows"][0]["count"], 3)
+        self.assertEqual(source["api_key"], "sensitive")
+        self.assertEqual(source["rows"][0]["Authorization"], "Bearer private")
+
+
 if __name__ == "__main__":
     unittest.main()

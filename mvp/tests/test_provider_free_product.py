@@ -380,7 +380,8 @@ def crash(*a, **kw):
     value=original(*a, **kw)
     os._exit(73)
 session.commit_order_fill_with_reservation_consumption=crash
-session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_time'],execution_profile='TWO_EQUAL_PARTIALS')
+session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_time'],execution_profile='TWO_EQUAL_PARTIALS',
+    target_quantity=p.get('target_quantity','1'))
 '''
             crashed = subprocess.run([sys.executable, '-c', script, str(data / 'state')], cwd=ROOT,
                 capture_output=True, timeout=30)

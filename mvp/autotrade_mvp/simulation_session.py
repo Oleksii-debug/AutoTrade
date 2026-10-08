@@ -1914,6 +1914,7 @@ def run_autonomous_simulation(
     fault_at_episode: int | None = None, emergency_at_episode: int | None = None,
     execution_profile: str = "IMMEDIATE",
     target_quantity: str = "1",
+    should_pause=None,
 ) -> dict[str, object]:
     """Run/resume a frozen price stream using the canonical SIMULATION authorities.
 
@@ -1929,6 +1930,8 @@ def run_autonomous_simulation(
     from .zero_network import deny_python_network
     from .risk_policy_authority import canonical_risk_policy, risk_policy_digest
 
+    if should_pause is not None and not callable(should_pause):
+        raise TypeError("should_pause must be callable or None")
     if type(run_id) is not str or not run_id or run_id != run_id.strip():
         raise ValueError("run_id must be canonical nonempty text")
     if type(prices) is not list or not 1 <= len(prices) <= 10000:
@@ -1991,7 +1994,7 @@ def run_autonomous_simulation(
         raise ValueError("legacy state requires a separate autonomous simulation directory")
     root.mkdir(parents=True, exist_ok=True)
     with deny_python_network(), ResourceLock(root / ".canonical-simulation.lock"):
-        return _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy)
+        return _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy, should_pause)
 
 
 def _autonomous_reconciliation(
@@ -2652,7 +2655,7 @@ def _recover_autonomous_observed_fill(
         )
 
 
-def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy):
+def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy, should_pause):
     from .allocation import AllocationCandidate, AllocationPolicy, StressScenarioEvidence, allocate_targets
     from .durable_order_projection import DurableOrderBookProjection
     from .exact_decimal import exact_abs, exact_subtract, exact_sum, as_fraction, round_fraction_to_quantum
@@ -2762,6 +2765,7 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                 protocol,
                 stop_after_episodes,
                 selected_policy,
+                should_pause,
             )
         if active.get("decision") in {"HOLD", "NO_TRADE"}:
             _recover_autonomous_zero_wire_completion(
@@ -2786,6 +2790,7 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                 protocol,
                 stop_after_episodes,
                 selected_policy,
+                should_pause,
             )
         return {"status": "UNKNOWN", "environment": ENVIRONMENT, "mode": "ZERO",
                 "run_id": run_id, "completed_episodes": len(completed),
@@ -2871,6 +2876,10 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
 
     authority = None
     for index in range(len(completed), end):
+        # Emergency truth is observed only between completed durable episodes.
+        # Never start another market observation/admission after OWNER pause.
+        if should_pause is not None and should_pause():
+            break
         episode = index + 1
         key = f"{run_id}:{episode}"
         point = started_at + timedelta(seconds=index)

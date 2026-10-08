@@ -4,9 +4,9 @@ No real endpoints, provider accounts, secrets, or trading operations are used.
 """
 from __future__ import annotations
 
-from contextlib import ExitStack
 import socket
 import unittest
+from contextlib import ExitStack
 
 from tools.plan6_offline_sections import deny_network, install_network_deny
 

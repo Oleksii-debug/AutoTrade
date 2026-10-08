@@ -623,9 +623,23 @@ def load_submission_response_binding(
     payload = prepared.get("payload")
     if not isinstance(payload, dict):
         raise ValueError("durable SubmissionPrepared payload is invalid")
+    sending_payload = sending.get("payload")
+    if not isinstance(sending_payload, dict):
+        raise ValueError("durable SubmissionSending payload is invalid")
     sent_payload = sent.get("payload")
     if not isinstance(sent_payload, dict):
         raise ValueError("durable terminal submission payload is invalid")
+    # A response can only be attributed to the economic intent that crossed
+    # the durable send barrier. Malformed/mismatched historical rows fail
+    # closed; they must not mint a valid exact-response binding.
+    client_order_id = payload.get("client_order_id")
+    if (
+        type(client_order_id) is not str
+        or not client_order_id
+        or sending_payload.get("client_order_id") != client_order_id
+        or sent_payload.get("client_order_id") != client_order_id
+    ):
+        raise ValueError("client_order_id continuity mismatch")
     response_text = sent_payload.get("response_text")
     response_sha256 = sent_payload.get("response_sha256")
     response_encoding = sent_payload.get("response_encoding")

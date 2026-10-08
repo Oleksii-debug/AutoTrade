@@ -255,6 +255,28 @@ class TrustedChronologyCutTests(unittest.TestCase):
         verifier_side_effect=None,
         runtime=None,
     ):
+        # A current cut must reread authenticated raw evidence from the canonical
+        # ArtifactStore. The fixture publishes these exact bytes independently of
+        # the chronology accept operation; no mock reader or second trust store.
+        evidence_ref = next(
+            (
+                ref for ref in accepted.evidence_refs
+                if type(ref) is EvidenceArtifactRef
+                and ref.evidence_kind == "TRUSTED_CHRONOLOGY_MEASUREMENT"
+                and ref.media_type == "application/json"
+                and ref.sha256 == "sha256:" + sha256(measurement).hexdigest()
+            ),
+            None,
+        )
+        if evidence_ref is not None:
+            artifact_store.publish_bytes(
+                artifact_id=evidence_ref.artifact_id,
+                data=measurement,
+                media_type=evidence_ref.media_type,
+                rights={"storage": True, "export": False, "rights_id": "plan4-test-fixture"},
+                source_refs=[f"git:{evidence_ref.source_sha}"],
+                metadata={"evidence_kind": evidence_ref.evidence_kind},
+            )
         if verifier_side_effect is None:
             verifier_side_effect = lambda *args, **kwargs: accepted
         with (
@@ -1127,9 +1149,9 @@ class TrustedChronologyCutTests(unittest.TestCase):
                 return_value=(events[0], accepted_event),
             ):
                 with self.assertRaisesRegex(
-                    TrustedChronologyError,
-                    "measurement requirement differs from durable subject",
-                ):
+                    PermissionError,
+                    "trusted chronology durable aggregate binding is invalid",
+                ) as caught:
                     self._require_current(
                         store=store,
                         recovery=recovery,
@@ -1138,6 +1160,11 @@ class TrustedChronologyCutTests(unittest.TestCase):
                         artifact_store=artifacts,
                         expected_scope=ChronologyScope.SOURCE_QUALIFICATION,
                     )
+                self.assertIsInstance(caught.exception.__cause__, TrustedChronologyError)
+                self.assertIn(
+                    "measurement requirement differs from durable subject",
+                    str(caught.exception.__cause__),
+                )
 
     def test_validated_aggregate_rejects_rehashed_owner_splice(self):
         with TemporaryDirectory() as directory:

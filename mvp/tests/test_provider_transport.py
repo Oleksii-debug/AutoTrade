@@ -17,8 +17,9 @@ from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
     CapabilityRegistry,
     EvidenceVerification,
-    derive_capability_snapshot,
+    derive_capability_snapshot as _derive_capability_snapshot,
 )
+from mvp.tests.capability_test_support import fresh_test_admission
 from mvp.autotrade_mvp.alpaca import (
     AlpacaOrderIntent,
     guarded_order_projection as alpaca_guarded_order_projection,
@@ -439,6 +440,11 @@ def verified_read_capability(
         observed_at=snapshot_observed_at,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
     )
+
+
+def derive_capability_snapshot(**kwargs):
+    """Test-only admission for frozen synthetic evidence, never a provider receipt."""
+    return fresh_test_admission(_derive_capability_snapshot(**kwargs))
 
 
 class RecordingCapabilityRegistry(CapabilityRegistry):

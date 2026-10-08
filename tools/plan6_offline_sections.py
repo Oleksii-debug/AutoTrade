@@ -74,10 +74,10 @@ def deny_network(*_args: object, **_kwargs: object) -> None:
 def install_network_deny(stack: ExitStack) -> None:
     """Deny outbound socket sends as well as connection attempts before test imports.
 
-    UDP sendto/sendmsg and preconnected TCP send/sendall bypass connect. Guarding connect alone would allow
+    UDP sendto/sendmsg, preconnected TCP send/sendall and kernel sendfile bypass connect. Guarding connect alone would allow
     real provider datagrams while producing a false "network: DENIED" receipt.
     """
-    for method in ("connect", "connect_ex", "send", "sendall", "sendto"):
+    for method in ("connect", "connect_ex", "send", "sendall", "sendto", "sendfile"):
         stack.enter_context(patch.object(socket.socket, method, deny_network))
     if hasattr(socket.socket, "sendmsg"):
         stack.enter_context(patch.object(socket.socket, "sendmsg", deny_network))

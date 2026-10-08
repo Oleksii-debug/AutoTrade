@@ -10,6 +10,7 @@ on:
       - 'mvp/autotrade_mvp/embedded_web.py'
       - 'mvp/autotrade_mvp/windows_update.py'
       - 'mvp/tests/test_plan5_terminal_source_contract.py'
+      - 'mvp/tests/test_plan5_ci_evidence.py'
       - 'mvp/tests/test_semantic_web_client_contract.py'
       - 'mvp/tests/test_desktop_shell_contract.py'
       - 'mvp/tests/test_windows_bundle.py'
@@ -52,6 +53,7 @@ jobs:
         run: |
           PYTHONPATH="research:." python -m unittest \
             mvp.tests.test_plan5_terminal_source_contract \
+            mvp.tests.test_plan5_ci_evidence \
             mvp.tests.test_semantic_web_client_contract \
             mvp.tests.test_desktop_shell_contract \
             mvp.tests.test_embedded_web \
@@ -134,6 +136,7 @@ jobs:
       - name: Windows source parity, native emergency and accessibility
         run: >-
           python -m unittest mvp.tests.test_plan5_terminal_source_contract
+          mvp.tests.test_plan5_ci_evidence
           mvp.tests.test_desktop_shell_contract
           mvp.tests.test_windows_secrets
           mvp.tests.test_windows_secrets_handle_reseal -v

@@ -41,6 +41,12 @@ SECTION_MODULES = {
     2: (
         "mvp.tests.test_provider_core",
         "mvp.tests.test_provider_transport",
+        "mvp.tests.test_bybit_transport",
+        "mvp.tests.test_kraken_spot_stream",
+        "mvp.tests.test_ibkr_authenticated_read_transport",
+        "mvp.tests.test_provider_evidence_authenticated_snapshot",
+        "mvp.tests.test_provider_route_financial_binding",
+        "mvp.tests.test_recovery_dispatch_reconciliation_freshness",
         "mvp.tests.test_provider_route_reads",
         "mvp.tests.test_provider_route_dispatch",
         "mvp.tests.test_provider_route_recovery_provenance",

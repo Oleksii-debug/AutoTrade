@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # immutable sender-fence and redacted operator negative tests.
 CAMPAIGNS: dict[str, tuple[str, ...]] = {
     "recovery": (
+        "mvp.tests.test_plan3_stack_qualification",
         "mvp.tests.test_recovery_takeover",
         "mvp.tests.test_recovery_takeover_source_sender_fence",
         "mvp.tests.test_recovery_takeover_stale_sender",
@@ -52,6 +53,11 @@ CAMPAIGNS: dict[str, tuple[str, ...]] = {
 # Positive coverage cannot substitute for these named adversarial assertions.
 # Fail closed if a regression silently deletes or renames the negative oracle.
 REQUIRED_NEGATIVES: dict[str, tuple[str, ...]] = {
+    "mvp.tests.test_plan3_stack_qualification": (
+        "test_recovery_restart_reconciliation_and_secret_safe_diagnostic_cut",
+        "test_ambiguous_send_is_never_a_blind_retry_or_a_fill",
+        "test_legacy_backup_restore_preserves_diagnostics_and_blocks_authority",
+    ),
     "mvp.tests.test_recovery_durable_unknown_restart": (
         "test_restart_rebuilds_durable_unknown_before_ready",
         "test_reconciliation_identity_mismatch_cannot_clear_recovered_unknown",
@@ -75,6 +81,7 @@ REQUIRED_NEGATIVES: dict[str, tuple[str, ...]] = {
         "test_unknown_sends_and_uncertain_external_state_cannot_report_ready",
         "test_original_private_payloads_never_enter_accessible_text_or_json",
         "test_concurrent_recovery_change_rejects_torn_diagnostic_cut",
+        "test_durable_ready_projection_rejects_foreign_account_and_host",
     ),
 }
 

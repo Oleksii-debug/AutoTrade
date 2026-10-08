@@ -79,7 +79,7 @@ def _count_array(mapping: dict, field: str, *, name: str) -> int | None:
 
 
 def _codes(value: object, *, name: str) -> tuple[str, ...]:
-    if type(value) not in (list, tuple, set):
+    if type(value) not in (list, tuple, set, frozenset):
         raise TypeError(f"{name} must be a plain sequence of reason codes")
     if len(value) > 128:
         raise ValueError(f"{name} has too many reason codes")

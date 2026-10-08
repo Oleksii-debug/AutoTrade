@@ -1769,12 +1769,26 @@ def create_backup(
         raise
 
 
+def _regular_backup_entry(root: Path, relative: Path) -> Path:
+    """Never follow a symlink inside an untrusted backup bundle."""
+    if root.is_symlink() or not root.is_dir():
+        raise BackupIntegrityError("Backup root is missing or unsafe")
+    candidate = root
+    for part in relative.parts:
+        candidate = candidate / part
+        if candidate.is_symlink():
+            raise BackupIntegrityError("Backup tree contains unsafe symlink")
+    if not candidate.is_file():
+        raise BackupIntegrityError("Backup payload is missing or not regular")
+    return candidate
+
+
 def verify_backup(backup_root: str | Path) -> dict[str, Any]:
     """Verify the backup manifest, every payload byte and compatibility gates."""
 
     root = Path(backup_root)
-    manifest_path = root / MANIFEST_NAME
-    digest_path = root / MANIFEST_DIGEST_NAME
+    manifest_path = _regular_backup_entry(root, Path(MANIFEST_NAME))
+    digest_path = _regular_backup_entry(root, Path(MANIFEST_DIGEST_NAME))
     try:
         manifest_bytes = manifest_path.read_bytes()
         expected_manifest_digest = digest_path.read_text(encoding="ascii").strip()
@@ -1818,9 +1832,7 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
                 f"Backup payload kind does not match canonical path: {normalized}"
             )
         expected_paths.add(normalized)
-        path = root / relative
-        if path.is_symlink() or not path.is_file():
-            raise BackupIntegrityError(f"Backup payload is missing: {normalized}")
+        path = _regular_backup_entry(root, relative)
         digest = item["sha256"]
         if (
             not isinstance(digest, str)
@@ -1954,7 +1966,7 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
     try:
         for item in manifest["files"]:
             relative = _safe_relative_path(item["path"])
-            source = backup / relative
+            source = _regular_backup_entry(backup, relative)
             target = stage / relative
             _copy_file_durable(source, target)
             if _sha256_file(target) != item["sha256"].removeprefix("sha256:"):

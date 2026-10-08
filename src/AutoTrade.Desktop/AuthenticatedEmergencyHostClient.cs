@@ -865,6 +865,19 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
             request,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken);
+        if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
+        {
+            JsonElement unavailable = await ReadObjectAsync(response, cancellationToken);
+            if (unavailable.EnumerateObject().Count() == 2
+                && unavailable.TryGetProperty("error", out JsonElement error)
+                && error.ValueKind == JsonValueKind.String
+                && string.Equals(error.GetString(), "SNAPSHOT_BUSY", StringComparison.Ordinal)
+                && unavailable.TryGetProperty("retryable", out JsonElement retryable)
+                && retryable.ValueKind == JsonValueKind.True)
+            {
+                throw new EmergencySnapshotBusyException();
+            }
+        }
         response.EnsureSuccessStatusCode();
 
         JsonElement value = await ReadObjectAsync(response, cancellationToken);

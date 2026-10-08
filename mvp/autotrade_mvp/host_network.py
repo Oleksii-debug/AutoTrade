@@ -419,6 +419,7 @@ class AuthenticatedHostApplication:
         principal: HostPrincipal,
         authenticated_role: str,
     ) -> Mapping[str, object]:
+        journal_cut = self.store._journal.current_journal_sequence()
         durable = self.store.snapshot()
         projected = self._snapshot_provider(
             MappingProxyType(dict(durable)),
@@ -534,7 +535,8 @@ class AuthenticatedHostApplication:
         # version/cursor moved while projection was in progress.
         current = self.store.snapshot()
         if (
-            current.get("state_version") != durable.get("state_version")
+            self.store._journal.current_journal_sequence() != journal_cut
+            or current.get("state_version") != durable.get("state_version")
             or current.get("event_cursor") != durable.get("event_cursor")
         ):
             raise SnapshotTemporarilyUnavailable(

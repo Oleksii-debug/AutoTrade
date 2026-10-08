@@ -479,8 +479,8 @@ class SupplyChainQualificationTests(unittest.TestCase):
             )
             object.__setattr__(
                 receipt.attestation,
-                "content_digest",
-                "sha256:" + "f" * 64,
+                "source_sha",
+                "f" * 40,
             )
             return accepted
 

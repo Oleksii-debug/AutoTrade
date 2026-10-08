@@ -335,15 +335,21 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
                 now=risk['payload']['evaluated_at'], max_age_seconds='60')
             with self.assertRaisesRegex(ValueError, 'predates settlement financial truth'):
                 load_account_resource_availability_evidence(journal, **args)
-            historical = load_account_resource_availability_evidence(journal, **args,
-                _historical_risk_event_id=risk['event_id'])
+            historical = load_account_resource_availability_evidence(
+                journal, **args, journal_sequence_cut=risk['journal_sequence']
+            )
             self.assertEqual(historical['availability'], evidence['availability'])
-            with self.assertRaisesRegex(ValueError, 'cannot authorize current'):
-                load_account_resource_availability_evidence(journal, **args,
-                    _historical_risk_event_id=risk['event_id'], require_latest_scope=True)
-            with self.assertRaisesRegex(ValueError, 'durable risk event'):
-                load_account_resource_availability_evidence(journal, **args,
-                    _historical_risk_event_id=evidence['checkpoint_event_id'])
+            with self.assertRaisesRegex(ValueError, 'cannot use a historical journal cut'):
+                load_account_resource_availability_evidence(
+                    journal, **args, journal_sequence_cut=risk['journal_sequence'],
+                    require_latest_scope=True
+                )
+            checkpoint = journal.get_event(evidence['checkpoint_event_id'])
+            with self.assertRaisesRegex(ValueError, 'checkpoint is after'):
+                load_account_resource_availability_evidence(
+                    journal, **args,
+                    journal_sequence_cut=checkpoint['journal_sequence'] - 1,
+                )
 
     def test_whole_application_partial_fill_crash_restart_backup_restore_interface(self):
         with TemporaryDirectory() as directory:

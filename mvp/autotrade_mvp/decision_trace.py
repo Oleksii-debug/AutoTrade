@@ -365,6 +365,10 @@ def _read_trace_text_retained_windows(path: Path) -> str | None:
                 target_name=path.name,
                 subject="decision trace store",
             ) as descriptor:
+                # Validate the published leaf while its native handle denies
+                # WRITE/DELETE sharing. The validation-to-open swap regression
+                # then fails rather than changing the file between two steps.
+                validate_publication_destination(path)
                 opened = os.fstat(descriptor)
                 handle = msvcrt.get_osfhandle(descriptor)
                 identity = windows_handle_information(

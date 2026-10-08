@@ -91,14 +91,17 @@ def main() -> int:
         )
 
     modules = tuple(dict.fromkeys(SECTION_MODULES[args.section]))
-    suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
-    count = suite.countTestCases()
-    if not modules or count < len(modules):
-        raise RuntimeError("PLAN6_OFFLINE_TEST_DISCOVERY_INCOMPLETE")
+    # Test discovery imports modules and can run module-level code. Enforce the
+    # offline boundary before importing *any* provider or test module; keeping
+    # this guard only around TextTestRunner would leave import-time I/O open.
     with ExitStack() as stack:
         stack.enter_context(patch.object(socket.socket, "connect", deny_network))
         stack.enter_context(patch.object(socket.socket, "connect_ex", deny_network))
         stack.enter_context(patch.object(socket, "create_connection", deny_network))
+        suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
+        count = suite.countTestCases()
+        if not modules or count < len(modules):
+            raise RuntimeError("PLAN6_OFFLINE_TEST_DISCOVERY_INCOMPLETE")
         result = unittest.TextTestRunner(verbosity=2).run(suite)
 
     ok = result.wasSuccessful() and result.testsRun == count

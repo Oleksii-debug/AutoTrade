@@ -247,7 +247,15 @@ def fixture_install_bundle(
                     after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
                 ):
                     raise FixtureAssemblyError("release fixture archive changed during extraction")
-                atomic_write_json(temporary / _MANIFEST, _inventory(verified, version))
+                # Staging is invisible until rename, so a single fsynced
+                # exclusive file avoids introducing a permanent publication
+                # lock sidecar into the immutable payload inventory.
+                with (temporary / _MANIFEST).open("xb") as receipt:
+                    receipt.write((json.dumps(_inventory(verified, version),
+                        sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                        + "\n").encode("utf-8"))
+                    receipt.flush()
+                    os.fsync(receipt.fileno())
                 # Stage is invisible to selection until the complete verified
                 # version is moved atomically to its immutable content ID.
                 temporary.rename(dest)

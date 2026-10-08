@@ -377,8 +377,16 @@ def _read_trace_text_descriptor_bound(path: Path) -> str | None:
             or _trace_generation_identity(initial)
             != _trace_generation_identity(opened)
         ):
+            # Field-only mismatch evidence contains no user path, file data or
+            # credentials, and pinpoints platform stat/fstat ABI discrepancies.
+            mismatched = [
+                field for field in ("st_dev", "st_ino", "st_size",
+                                    "st_mtime_ns", "st_ctime_ns", "st_nlink")
+                if getattr(initial, field) != getattr(opened, field)
+            ]
             raise ValueError(
                 "Corrupt decision trace store: path changed before descriptor read"
+                + (" (metadata: " + ",".join(mismatched) + ")" if mismatched else "")
             )
 
         expected_bytes = opened.st_size

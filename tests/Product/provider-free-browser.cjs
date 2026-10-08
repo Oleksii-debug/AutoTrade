@@ -455,7 +455,7 @@ async function exerciseCanonicalPageNavigation(page) {
     document.activeElement?.id === "risk-heading");
   assert.equal(await page.locator("nav [aria-current]").count(), 1);
   assert.match(await page.locator("#provider-availability").innerText(), /UNAVAILABLE/);
-  assert.match(await page.locator("#provider-availability").innerText(), /ZERO\\/SIMULATION/);
+  assert.match(await page.locator("#provider-availability").innerText(), /ZERO.SIMULATION/);
 }
 
 (async () => {

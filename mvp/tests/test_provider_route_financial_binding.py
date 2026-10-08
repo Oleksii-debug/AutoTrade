@@ -226,9 +226,12 @@ class ProviderRouteFinancialBindingTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             route = self._route(directory)
             object.__setattr__(route.capability, "account_id", "retargeted-account")
+            # The selected-route issuer rejects mutation before projection can
+            # emit a binding-level mismatch. Both are fail-closed, but this
+            # earlier authority fence is the contract exercised here.
             with self.assertRaisesRegex(
-                ProviderRouteFinancialBindingError,
-                "capability differs from transport scope",
+                FinancialSendAuthorityError,
+                "selected provider route authority changed",
             ):
                 build_selected_provider_route_transport_capability_registry(route)
 

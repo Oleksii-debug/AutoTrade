@@ -294,6 +294,17 @@ def require_correlation_safe_proposal_with_oms(
         if _get(function, "__code__") is not expected_code:
             raise _error_type(f"{name} executable changed after binding")
 
+    # Reject later class-level data descriptors before durable OMS replay can
+    # construct/read an OrderSnapshot through a hostile property callback.
+    # These exact dataclass fields have no class attributes at definition time.
+    # Merely catching replay's seal violation later is insufficient: the
+    # substituted descriptor could already have executed arbitrary callbacks.
+    snapshot_fields = _get(_SNAPSHOT_TYPE, "__dict__")
+    if any(field in snapshot_fields for field in (
+        "client_order_id", "instrument", "state", "open_quantity",
+    )):
+        raise _error_type("canonical OMS snapshot field descriptor changed before replay")
+
     _scope_match(result, oms)
     blockers = _open_orders(oms)
     if blockers:

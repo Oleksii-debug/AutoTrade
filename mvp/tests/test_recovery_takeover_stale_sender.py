@@ -154,7 +154,7 @@ class CompletedTakeoverStaleSenderTests(unittest.TestCase):
             )
 
             self.assertEqual(outcome.status, "BLOCKED")
-            self.assertIn("Sender fence mismatch", outcome.reason)
+            self.assertEqual(outcome.reason, "sender_fence_rejected:PermissionError")
             self.assertEqual(wire_calls, [])
             aggregate_id = submission_attempt_aggregate_id(
                 environment="PAPER",

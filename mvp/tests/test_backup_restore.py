@@ -1681,7 +1681,7 @@ class BackupRestoreTests(unittest.TestCase):
             vault_path, protector=DeterministicProtector()
         )
         handle = vault.register(
-            handle_id="fixture-trade-handle",
+            handle_id=f"fixture-trade-handle-{vault_path.stem}",
             owner_identity="fixture-execution",
             account_id="paper-account",
             provider="SIMULATED",

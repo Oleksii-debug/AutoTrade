@@ -1613,11 +1613,13 @@ def _loop_event(
     )
     if kind == "AutonomousEpisodeCompleted":
         # Deliver existing publications before freezing the completion preimage.
-        for item in store.pending_outbox(limit=1000):
-            store.mark_outbox_delivered(item["outbox_id"], expected_envelope_hash=item["envelope_hash"])
         from .simulation_runtime_checkpoint import (
-            COMPLETION_RECEIPT_FIELD, prepare_autonomous_completion_receipt,
+            COMPLETION_RECEIPT_FIELD,
+            deliver_autonomous_owned_publications,
+            prepare_autonomous_completion_receipt,
         )
+        # Never acknowledge foreign Host or financial outbox publications.
+        deliver_autonomous_owned_publications(store, run_id=run_id)
         first = store.load_events(_LOOP_AGGREGATE, run_id)[0]
         protocol = first["payload"]["protocol"]
         receipt = prepare_autonomous_completion_receipt(
@@ -2334,11 +2336,8 @@ def _recover_autonomous_zero_wire_completion(
         timestamp,
         expected_journal_sequence=checkpoint["journal_sequence"],
     )
-    for item in store.pending_outbox(limit=1000):
-        store.mark_outbox_delivered(
-            item["outbox_id"],
-            expected_envelope_hash=item["envelope_hash"],
-        )
+    from .simulation_runtime_checkpoint import deliver_autonomous_owned_publications
+    deliver_autonomous_owned_publications(store, run_id=run_id)
 
 
 def _recover_autonomous_observed_fill(
@@ -2637,11 +2636,8 @@ def _recover_autonomous_observed_fill(
         result,
         timestamp,
     )
-    for item in store.pending_outbox(limit=1000):
-        store.mark_outbox_delivered(
-            item["outbox_id"],
-            expected_envelope_hash=item["envelope_hash"],
-        )
+    from .simulation_runtime_checkpoint import deliver_autonomous_owned_publications
+    deliver_autonomous_owned_publications(store, run_id=run_id)
 
 
 def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy):
@@ -2907,6 +2903,15 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                                              Decimal("0.000000000000000001"), mode="CEILING")
         frozen_target = parse_bounded_exact_decimal(protocol["target_quantity"])
         proposal = MovingAverageStrategy(**protocol["strategy_parameters"]).decide(values[:episode], frozen_target)
+        # The existing agent specialist provides a durable diagnostic only.
+        # Allocation, hard risk and guarded dispatch retain financial authority.
+        from .product_agent import decide as decide_zero_agent
+        agent_side = decide_zero_agent(
+            store, protocol, episode=episode, strategy_side=proposal.side,
+            position=position, timestamp=timestamp,
+        )
+        if agent_side != proposal.side:
+            raise ValueError("ZERO agent proposal differs from the frozen strategy")
         target_quantity = frozen_target if proposal.side == "BUY" else Decimal("0") if proposal.side == "SELL" else position
         decision = "BUY" if target_quantity > position else "REDUCE" if target_quantity < position else "HOLD" if proposal.side == "HOLD" else "NO_TRADE"
         emergency = protocol["emergency_at_episode"] is not None and episode >= protocol["emergency_at_episode"]
@@ -3081,8 +3086,8 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
             "reconciliation_event_id": after_checkpoint["event_id"], "protocol_digest": protocol_digest,
             "provider_state": provider.export_state(), "emergency": emergency}
         _loop_event(store, run_id, "AutonomousEpisodeCompleted", str(episode), result, timestamp)
-        for item in store.pending_outbox(limit=1000):
-            store.mark_outbox_delivered(item["outbox_id"], expected_envelope_hash=item["envelope_hash"])
+        from .simulation_runtime_checkpoint import deliver_autonomous_owned_publications
+        deliver_autonomous_owned_publications(store, run_id=run_id)
         completed.append(result)
         # Persist only after the durable episode and every publication in this
         # terminal cut are complete.  A crash before this point leaves the

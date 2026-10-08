@@ -429,14 +429,18 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
             )
 
             original_history = stale._history_with_versions
+            winner_inserted = False
 
             def interleaved_history(*, journal_sequence_cut=None):
-                # Preserve the canonical cut-aware history reader signature
-                # while injecting the concurrent-writer race.
+                nonlocal winner_inserted
+                # Inject the competing writer exactly once. The stale writer
+                # must reread on append conflict without resending that event.
                 validated_cut = original_history(
                     journal_sequence_cut=journal_sequence_cut
                 )
-                self.assertTrue(winner.add(newer))
+                if not winner_inserted:
+                    self.assertTrue(winner.add(newer))
+                    winner_inserted = True
                 return validated_cut
 
             stale._history_with_versions = interleaved_history

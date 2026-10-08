@@ -598,11 +598,14 @@ def _autonomous_owned_pending_publications(
     owned_ids = _autonomous_owned_event_ids(store, run_id=run_id)
     # The canonical JournalStore requires an exact topic on every outbox read.
     # Do not weaken that storage contract or guess another source of authority.
+    pending_count = JournalStore.pending_outbox_count(store)
+    if pending_count > 1000:
+        raise AutonomousRuntimeCheckpointError(
+            "ZERO cannot attest foreign publications with an excessive backlog"
+        )
     foreign_publications = {
         item["event_id"]
-        for item in JournalStore.pending_outbox(
-            store, limit=JournalStore.pending_outbox_count(store)
-        )
+        for item in JournalStore.pending_outbox(store, limit=max(1, pending_count))
     }
     for event_id in owned_ids:
         event = JournalStore.get_event(store, event_id)

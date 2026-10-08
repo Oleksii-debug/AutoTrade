@@ -26,3 +26,9 @@ jobs:
       - name: Fail-closed backup/restore, atomic publication, corruption and recovery tests
         run: |
           python -m unittest -v mvp.tests.test_backup_restore
+
+      - name: Diagnose manifest drift without changing authority or claiming PASS
+        if: always()
+        run: |
+          python tools/build_provenance_manifest.py --write
+          git diff -- provenance/release-dependency-manifest.json

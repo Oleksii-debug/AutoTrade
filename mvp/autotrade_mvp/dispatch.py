@@ -180,6 +180,10 @@ class SubmissionResponseBinding:
     submission_scope_hash: str
     response_bytes: bytes
     response_sha256: str
+    response_encoding: str
+    terminal_state: str
+    ambiguity_reason: str | None = None
+    retry_disposition: str | None = None
     http_status: int | None = None
     _factory_token: object = field(default=None, repr=False, compare=False)
 
@@ -213,6 +217,16 @@ class SubmissionResponseBinding:
         ):
             raise ValueError("durable provider response digest mismatch")
         _decode_exact_json_bytes(self.response_bytes)
+        if type(self.response_encoding) is not str or self.response_encoding != "utf-8-json":
+            raise ValueError("durable provider response encoding is invalid")
+        if type(self.terminal_state) is not str or self.terminal_state not in {"SENT", "UNKNOWN"}:
+            raise ValueError("durable submission terminal state is invalid")
+        if self.terminal_state == "UNKNOWN":
+            if (type(self.ambiguity_reason) is not str or not self.ambiguity_reason.strip()
+                    or self.retry_disposition != "RECONCILE_FIRST"):
+                raise ValueError("durable UNKNOWN requires reconciliation-first reason")
+        elif self.ambiguity_reason is not None or self.retry_disposition is not None:
+            raise ValueError("definitive SENT cannot carry UNKNOWN disposition")
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -433,6 +447,10 @@ def load_submission_response_binding(
         submission_scope_hash=scope_hash,
         response_bytes=response_bytes,
         response_sha256=response_sha256,
+        response_encoding="utf-8-json",
+        terminal_state="SENT" if event_types[2] == "SubmissionSent" else "UNKNOWN",
+        ambiguity_reason=sent_payload.get("reason") if event_types[2] == "SubmissionUnknown" else None,
+        retry_disposition=sent_payload.get("retry_disposition") if event_types[2] == "SubmissionUnknown" else None,
         http_status=http_status,
         _factory_token=_SUBMISSION_RESPONSE_BINDING_TOKEN,
     )
@@ -492,6 +510,10 @@ def _install_submission_response_binding_authority(loader):
         "submission_scope_hash",
         "response_bytes",
         "response_sha256",
+        "response_encoding",
+        "terminal_state",
+        "ambiguity_reason",
+        "retry_disposition",
         "http_status",
         "_factory_token",
     )
@@ -544,10 +566,12 @@ def _install_submission_response_binding_authority(loader):
             authority_changed()
 
     def raw_snapshot(value):
-        return canonical_tuple(
-            object_getattribute(value, name)
-            for name in field_names
-        )
+        # The instance dictionary, not a mutable class descriptor, is the
+        # recorded journal-issued state. Reject injected or missing fields.
+        state = object_getattribute(value, "__dict__")
+        if canonical_type(state) is not dict or frozenset(state) != frozenset(field_names):
+            authority_changed()
+        return canonical_tuple(state[name] for name in field_names)
 
     def prune():
         for object_id, (value_ref, _snapshot) in canonical_tuple(states.items()):
@@ -582,30 +606,13 @@ def _install_submission_response_binding_authority(loader):
             authority_changed()
         expected = state[1]
         current = raw_snapshot(value)
-        for index in canonical_range(9):
-            if canonical_type(current[index]) is not canonical_str:
+        for index in canonical_range(len(field_names)):
+            if index in (9, 11, len(field_names) - 1):
+                if current[index] is not expected[index]:
+                    authority_changed()
+            elif (canonical_type(current[index]) is not canonical_type(expected[index])
+                  or current[index] != expected[index]):
                 authority_changed()
-            if current[index] != expected[index]:
-                authority_changed()
-        if canonical_type(current[9]) is not mapping_proxy_type:
-            authority_changed()
-        if current[9] is not expected[9]:
-            authority_changed()
-        if canonical_type(current[10]) is not canonical_str or current[10] != expected[10]:
-            authority_changed()
-        if canonical_type(current[11]) is not canonical_bytes or current[11] is not expected[11]:
-            authority_changed()
-        if canonical_type(current[12]) is not canonical_str or current[12] != expected[12]:
-            authority_changed()
-        if current[13] is not None:
-            if canonical_type(current[13]) is not canonical_int:
-                authority_changed()
-            if current[13] != expected[13]:
-                authority_changed()
-        elif expected[13] is not None:
-            authority_changed()
-        if current[14] is not binding_token:
-            authority_changed()
         return value
 
     def submission_response_binding_projection(value):

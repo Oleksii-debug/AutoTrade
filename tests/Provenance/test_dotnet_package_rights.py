@@ -138,9 +138,10 @@ def _write_restored_package(root: Path, *, license_text: str = _LICENSE) -> Path
         encoding="ascii",
     )
     (package / "example.package.1.2.3.nupkg").write_bytes(_NUPKG_BYTES)
-    (package / "LICENSE.txt").write_text(license_text, encoding="utf-8")
-    (package / "NOTICE.txt").write_text(_NOTICE, encoding="utf-8")
-    (package / "example.package.nuspec").write_text(_NUSPEC, encoding="utf-8")
+    # Preserve exact ZIP-member bytes on Windows; text writes can translate LF.
+    (package / "LICENSE.txt").write_bytes(license_text.encode("utf-8"))
+    (package / "NOTICE.txt").write_bytes(_NOTICE.encode("utf-8"))
+    (package / "example.package.nuspec").write_bytes(_NUSPEC.encode("utf-8"))
     return packages
 
 
@@ -511,6 +512,32 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 root=root,
                 projects=[project],
             )
+
+    def test_native_path_exact_type_and_subclass_rejection(self):
+        from tools.dotnet_package_rights import _locked_nupkg_root_evidence
+
+        with TemporaryDirectory() as directory:
+            packages = _write_restored_package(Path(directory))
+            nupkg_path = (
+                packages / "example.package" / "1.2.3"
+                / "example.package.1.2.3.nupkg"
+            )
+            self.assertEqual(
+                _locked_nupkg_root_evidence(
+                    nupkg_path, license_file="LICENSE.txt", notice_file="NOTICE.txt"
+                ),
+                (_LICENSE.encode("utf-8"), _NOTICE.encode("utf-8"), _NUSPEC.encode("utf-8")),
+            )
+
+            class UntrustedPath(type(Path())):
+                pass
+
+            with self.assertRaisesRegex(TypeError, "exact native Path"):
+                _locked_nupkg_root_evidence(
+                    UntrustedPath(str(nupkg_path)),
+                    license_file="LICENSE.txt",
+                    notice_file="NOTICE.txt",
+                )
 
     def test_sidecar_mismatch_exposes_bounded_hash_evidence_and_still_rejects(self):
         with TemporaryDirectory() as directory:

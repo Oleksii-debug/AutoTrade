@@ -72,11 +72,12 @@ def fill(*, provider_id="TEST_PROVIDER", account_id="test-account", environment=
     )
 
 
-def availability(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER"):
+def availability(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER", provider_environment=None):
     return ResourceAvailabilityEvidence(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         snapshot_id="snapshot-capacity-1",
         query_started_at="2026-09-24T17:00:00Z",
         query_completed_at="2026-09-24T19:00:00Z",

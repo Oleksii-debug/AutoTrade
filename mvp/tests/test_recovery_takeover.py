@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -18,6 +19,7 @@ from mvp.autotrade_mvp.recovery import HostState, RecoveryController
 from mvp.autotrade_mvp.recovery_takeover import (
     DurableTakeoverError,
     execute_durable_takeover,
+    require_committed_durable_takeover,
 )
 from mvp.autotrade_mvp.sender_authority import (
     SenderAuthorityError,
@@ -183,6 +185,51 @@ class DurableRecoveryTakeoverTests(unittest.TestCase):
             pass
         with self.assertRaisesRegex(PermissionError, "Host is not ready"):
             self.controller.validate_sender("host-b", 2)
+
+    def test_sender_activation_proof_requires_issuer_sealed_complete_takeover(self):
+        result = self._takeover()
+        self.assertEqual(
+            require_committed_durable_takeover(
+                self.controller, result=result, vault=self.vault
+            ),
+            result.target_owner,
+        )
+        with self.assertRaises(DurableTakeoverError):
+            require_committed_durable_takeover(
+                self.controller,
+                result=replace(result, completion_event_id="forged-event-id"),
+                vault=self.vault,
+            )
+
+    def test_owner_journal_advance_without_issuer_cannot_fake_completion(self):
+        source = self.controller.owner
+        target = type(source)("host-b", source.epoch + 1)
+        self.controller._append_durable_owner(target)
+        self.controller.owner = target
+        from mvp.autotrade_mvp.recovery_takeover import DurableTakeoverResult
+        fake = DurableTakeoverResult(
+            takeover_id="recovery-takeover/sha256:" + "0" * 64,
+            source_owner=source,
+            target_owner=target,
+            credential_transition_receipt_id="fake",
+            takeover_evidence_event_id="fake",
+            recovery_owner_event_id="fake",
+            completion_event_id="fake",
+        )
+        with self.assertRaisesRegex(
+            DurableTakeoverError, "completion evidence is missing"
+        ):
+            require_committed_durable_takeover(
+                self.controller, result=fake, vault=self.vault
+            )
+        self.assertTrue(self.vault.resolve(
+            self.handle,
+            execution_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="TRADE",
+        ))
 
     def test_direct_restart_start_cannot_mint_next_durable_owner_epoch(self):
         restarted = RecoveryController(

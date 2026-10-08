@@ -1,0 +1,83 @@
+name: Plan 1 financial whole-plan qualification
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "tools/qualify_plan1_financial.py"
+      - "tests/Control/test_plan1_financial_qualification.py"
+      - ".github/workflows/plan1-financial-qualification.yml"
+      - "mvp/autotrade_mvp/accounting.py"
+      - "mvp/autotrade_mvp/allocation*.py"
+      - "mvp/autotrade_mvp/lifecycle_cost*.py"
+      - "mvp/autotrade_mvp/risk*.py"
+      - "mvp/autotrade_mvp/portfolio_correlation*.py"
+      - "mvp/autotrade_mvp/*settlement*.py"
+      - "mvp/autotrade_mvp/*reservations*.py"
+      - "mvp/autotrade_mvp/*order_projection*.py"
+      - "mvp/tests/test_allocation*.py"
+      - "mvp/tests/test_lifecycle_cost*.py"
+      - "mvp/tests/test_portfolio_correlation*.py"
+      - "mvp/tests/test_*conservation*.py"
+      - "tests/Science/test_strategy_economics*.py"
+      - "requirements-section15-test.txt"
+  push:
+    branches: [main]
+    paths:
+      - "tools/qualify_plan1_financial.py"
+      - "tests/Control/test_plan1_financial_qualification.py"
+      - ".github/workflows/plan1-financial-qualification.yml"
+      - "mvp/autotrade_mvp/accounting.py"
+      - "mvp/autotrade_mvp/allocation*.py"
+      - "mvp/autotrade_mvp/lifecycle_cost*.py"
+      - "mvp/autotrade_mvp/risk*.py"
+      - "mvp/autotrade_mvp/portfolio_correlation*.py"
+      - "mvp/tests/test_allocation*.py"
+      - "mvp/tests/test_lifecycle_cost*.py"
+      - "mvp/tests/test_portfolio_correlation*.py"
+      - "mvp/tests/test_*conservation*.py"
+      - "tests/Science/test_strategy_economics*.py"
+  # No real provider credentials, PAPER/LIVE, or order transmission.
+
+permissions:
+  contents: read
+
+jobs:
+  plan1-financial:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    env:
+      AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Install pinned non-provider qualification dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements-dev.txt
+          python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements-section15-test.txt
+      - name: Test qualification guard against missing/tampered evidence
+        run: python -m unittest discover -s tests/Control -p test_plan1_financial_qualification.py -v
+      - name: Require all named negative tests before running
+        run: python tools/qualify_plan1_financial.py --check
+      - name: Run existing exact-source core, allocation, cost, recovery and peer consumers
+        run: python tools/qualify_plan1_financial.py --suite all
+      - name: Write CI evidence only after every campaign succeeds
+        run: >-
+          python tools/write_ci_evidence.py
+          --suite plan1-financial-section12
+          --command "python tools/qualify_plan1_financial.py --suite all"
+          --output "artifacts/plan1-financial-${{ runner.os }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan1-financial-${{ runner.os }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: artifacts/plan1-financial-${{ runner.os }}.json
+          if-no-files-found: error

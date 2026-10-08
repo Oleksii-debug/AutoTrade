@@ -66,6 +66,7 @@ class ProductionFinancialHostTests(unittest.TestCase):
             provider_id=provider_id,
             account_id=runtime.config.account_id,
             environment=runtime.config.environment,
+            provider_environment="TESTNET" if provider_id == "BYBIT" else None,
         )
         record_reconciliation_checkpoint(
             runtime.journal,

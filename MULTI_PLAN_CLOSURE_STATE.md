@@ -70,7 +70,7 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 ### Plan 5 — Web / Windows / accessibility / packaging
 | Section | State | Existing evidence / note |
 | ---: | --- | --- |
-| 1 | PARTIAL_EXISTING | legacy Section 30; current web source and prior lineages |
+| 1 | QUALIFYING | canonical PR #2325, candidate `efa7bf483e3b930564db3201101aac961c2b5dcc`; 10-route semantic Web nav, hash/deep-link/browser-history keyboard focus, provider-unavailable fail-closed UI; source-executed navigation state-machine PASS (default/risk/main/unknown/root), JS syntax/HTML-ID checks PASS; exact-head Plan-5 browser CI `37725515985` QUEUED, so not yet DONE. Separate shared Contracts/Verify/provider-free failures observed on earlier SHA `66674ced8199db4ecc82f98b1b0db6ad7fe17db4` (provider dispatch import, candidate builder, win-x64 restore); no unrelated plan authority mutated. |
 | 2 | PARTIAL_EXISTING | legacy Section 31 |
 | 3 | PARTIAL_EXISTING | legacy Section 32 |
 | 4 | PARTIAL_EXISTING | legacy Section 33 |

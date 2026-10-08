@@ -1070,50 +1070,68 @@ class ChampionRegistry:
                     "routing generation changed before promotion"
                 )
 
-            with self._obligation_commit_window(
-                snapshot,
+            # Scientific validity is commit-time authority, not only a
+            # preflight observation. Hold the ScientificRegistry writer
+            # reservation from final evidence revalidation through the durable
+            # routing commit so a concurrent holdout peek/trial write cannot
+            # race a promotion that already passed preflight.
+            with self.scientific_registry.candidate_promotion_evidence_guard(
+                evaluation_id=approval.evaluation_id,
+                protocol_id=approval.protocol_id,
+                protocol_hash=approval.protocol_hash,
+                result_hash=approval.evaluation_result_hash,
+                candidate_id=approval.candidate_id,
+                artifact_hash=approval.artifact_hash,
+                evaluation_status=approval.evaluation_status,
+                retention_passed=approval.retention_passed,
+                risk_passed=approval.risk_passed,
                 authority_scope_id=approval.authority_scope_id,
-            ) as commit_snapshot:
-                self._management_policy(commit_snapshot, policy)
-                generation = expected_generation + 1
-                con.execute(
-                    """UPDATE routing_state SET generation=?,champion_candidate_id=?,
-                        champion_artifact_hash=?,authority_scope_id=?,
-                        existing_position_policy=?,obligation_snapshot_digest=?,
-                        management_policy_digest=?,updated_at=? WHERE singleton=1""",
-                    (
-                        generation,
-                        approval.candidate_id,
-                        approval.artifact_hash,
-                        approval.authority_scope_id,
-                        policy_token,
-                        snapshot.snapshot_digest,
-                        policy_digest,
-                        current_time,
-                    ),
-                )
-                con.execute(
-                    """INSERT INTO promotion_history(
-                        generation,action,candidate_id,artifact_hash,evidence_id,
-                        authority_scope_id,existing_position_policy,
-                        obligation_snapshot_digest,management_policy_digest,
-                        request_fingerprint,created_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                    (
-                        generation,
-                        "PROMOTE",
-                        approval.candidate_id,
-                        approval.artifact_hash,
-                        approval.evidence_id,
-                        approval.authority_scope_id,
-                        policy_token,
-                        snapshot.snapshot_digest,
-                        policy_digest,
-                        request_fingerprint,
-                        current_time,
-                    ),
-                )
-                con.commit()
+                evidence_valid_until=approval.evidence_valid_until.isoformat(),
+            ):
+                with self._obligation_commit_window(
+                    snapshot,
+                    authority_scope_id=approval.authority_scope_id,
+                ) as commit_snapshot:
+                    self._management_policy(commit_snapshot, policy)
+                    generation = expected_generation + 1
+                    con.execute(
+                        """UPDATE routing_state SET generation=?,champion_candidate_id=?,
+                            champion_artifact_hash=?,authority_scope_id=?,
+                            existing_position_policy=?,obligation_snapshot_digest=?,
+                            management_policy_digest=?,updated_at=? WHERE singleton=1""",
+                        (
+                            generation,
+                            approval.candidate_id,
+                            approval.artifact_hash,
+                            approval.authority_scope_id,
+                            policy_token,
+                            snapshot.snapshot_digest,
+                            policy_digest,
+                            current_time,
+                        ),
+                    )
+                    con.execute(
+                        """INSERT INTO promotion_history(
+                            generation,action,candidate_id,artifact_hash,evidence_id,
+                            authority_scope_id,existing_position_policy,
+                            obligation_snapshot_digest,management_policy_digest,
+                            request_fingerprint,created_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            generation,
+                            "PROMOTE",
+                            approval.candidate_id,
+                            approval.artifact_hash,
+                            approval.evidence_id,
+                            approval.authority_scope_id,
+                            policy_token,
+                            snapshot.snapshot_digest,
+                            policy_digest,
+                            request_fingerprint,
+                            current_time,
+                        ),
+                    )
+                    con.commit()
         return self.state()
 
     def rollback(

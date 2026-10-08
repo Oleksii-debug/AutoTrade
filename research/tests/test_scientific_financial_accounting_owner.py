@@ -29,7 +29,7 @@ from research.autotrade_research.evaluation.scientific_trial_owner import (
 )
 from research.autotrade_research.science.registry import ScientificRegistry
 from research.tests.test_evaluation_gates import evidence, profile
-from research.tests.test_science_registry import protocol
+from research.tests.test_science_registry import preregister_holdout, protocol
 
 
 PROVIDER = "TEST_PROVIDER"
@@ -174,6 +174,7 @@ def _science_owner(directory: str):
     registration = registry.register_protocol(
         _bound_protocol(gate_profile, trial_budget=1)
     )
+    preregister_holdout(registry, registration.protocol_id)
     registry.record_trial(
         registration.protocol_id,
         status="COMPLETED",

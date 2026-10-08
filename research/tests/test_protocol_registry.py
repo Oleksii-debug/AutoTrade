@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from hashlib import sha256
+import json
 import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from uuid import UUID
 
+from research.autotrade_research.data.vintages import HistoricalVintageRegistry
 from research.autotrade_research.science import (
     ProtocolConflict,
     ProtocolViolation,
@@ -41,13 +45,116 @@ def protocol() -> dict:
     }
 
 
+def _token_uuid(token: str) -> str:
+    return str(UUID(hex=sha256(("uuid:" + token).encode("utf-8")).hexdigest()[:32]))
+
+
+def _vintage_manifest(token: str = "a") -> dict:
+    return {
+        "dataset_id": _token_uuid("dataset:" + token),
+        "version": "1",
+        "content_hashes": [
+            "sha256:" + sha256(("content:" + token).encode("utf-8")).hexdigest()
+        ],
+        "instrument_universe_version": "universe:test-v1",
+        "calendar_version": "calendar:test-v1",
+        "coverage": {
+            "from": "2026-01-01T00:00:00Z",
+            "to": "2026-06-30T23:59:59Z",
+        },
+        "availability_policy": {
+            "point_in_time": True,
+            "no_future_leakage": True,
+            "cutoff": "2026-06-30T23:59:59Z",
+            "basis": "test-fixture-evidence",
+        },
+        "revision_policy": {
+            "append_only": True,
+            "replace_prior_vintages": False,
+        },
+        "normalization_version": "normalization:test-v1",
+        "adjustment_policy": {
+            "raw_retained": True,
+            "adjusted_available": False,
+            "method": "none",
+        },
+        "rights": {
+            "storage": True,
+            "research_use": True,
+            "redistribution": False,
+            "basis": "first-party-test-fixture",
+        },
+        "missingness_report": {
+            "expected_count": 1,
+            "observed_count": 1,
+            "missing_keys": [],
+            "invented_count": 0,
+        },
+        "source_evidence": [
+            {
+                "artifact_id": _token_uuid("evidence:" + token),
+                "sha256": "sha256:"
+                + sha256(("evidence:" + token).encode("utf-8")).hexdigest(),
+                "observed_at": "2026-06-30T23:59:59Z",
+            }
+        ],
+        "created_at": "2026-07-01T00:00:00Z",
+    }
+
+
+def _manifest_digest(token: str = "a") -> str:
+    raw = json.dumps(
+        _vintage_manifest(token),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + sha256(raw).hexdigest()
+
+
 def holdout_identity(dataset_digit="a", *, start="2026-01-01", end="2026-06-30", role="LOCKED_FORWARD"):
     return {
-        "dataset_digest": "sha256:" + dataset_digit * 64,
+        "dataset_digest": _manifest_digest(dataset_digit),
         "segment_start": start,
         "segment_end": end,
         "role": role,
     }
+
+
+def preregister_holdout(
+    registry: ScientificRegistry,
+    protocol_id: str,
+    *,
+    dataset_digit: str = "a",
+):
+    vintages = HistoricalVintageRegistry(registry.path.parent / "historical-vintages")
+    manifest = _vintage_manifest(dataset_digit)
+    committed_digest = vintages.commit(manifest)
+    if committed_digest != _manifest_digest(dataset_digit):
+        raise AssertionError("test vintage digest drifted from canonical manifest")
+    return registry.preregister_locked_holdout(
+        protocol_id,
+        vintage_registry=vintages,
+        dataset_id=manifest["dataset_id"],
+        dataset_version=1,
+    )
+
+
+def exhaust_trials(registry: ScientificRegistry, protocol_id: str) -> None:
+    try:
+        registry.locked_holdout_registration(protocol_id)
+    except ProtocolViolation as error:
+        if "lacks preregistered physical locked holdout" not in str(error):
+            raise
+        preregister_holdout(registry, protocol_id)
+    remaining = registry.completeness(protocol_id)["remaining_trial_budget"]
+    for index in range(remaining):
+        registry.record_trial(
+            protocol_id,
+            status="FAILED",
+            payload={"fixture": "registered-trial", "index": index},
+        )
 
 
 class ProtocolRegistryHardeningTests(unittest.TestCase):
@@ -192,6 +299,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = registry.register_protocol(protocol())
+            preregister_holdout(registry, registered.protocol_id)
             registry.record_trial(
                 registered.protocol_id,
                 status="FAILED",
@@ -219,6 +327,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = registry.register_protocol(protocol())
             holdout = "forward-2026-h1"
+            exhaust_trials(registry, registered.protocol_id)
 
             first = registry.register_evaluation(
                 registered.protocol_id,
@@ -245,10 +354,13 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
             first_protocol = registry.register_protocol(protocol())
+            preregister_holdout(registry, first_protocol.protocol_id)
 
             second_payload = protocol()
             second_payload["hypothesis"] = "independent candidate over same locked segment"
             second_protocol = registry.register_protocol(second_payload)
+            preregister_holdout(registry, second_protocol.protocol_id)
+            exhaust_trials(registry, second_protocol.protocol_id)
 
             holdout = "forward-2026-h1"
             registry.record_holdout_access(
@@ -273,6 +385,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             path = Path(directory) / "science.sqlite3"
             first = ScientificRegistry(path)
             p1 = first.register_protocol(protocol())
+            preregister_holdout(first, p1.protocol_id)
             identity = holdout_identity()
             first.record_holdout_access(
                 p1.protocol_id,
@@ -287,6 +400,8 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             second_payload = protocol()
             second_payload["hypothesis"] = "second candidate after prior holdout exposure"
             p2 = reopened.register_protocol(second_payload)
+            preregister_holdout(reopened, p2.protocol_id)
+            exhaust_trials(reopened, p2.protocol_id)
             evaluation = reopened.register_evaluation(
                 p2.protocol_id,
                 holdout_id="forward-display-B",
@@ -300,6 +415,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
             p = registry.register_protocol(protocol())
+            exhaust_trials(registry, p.protocol_id)
 
             wrong_window = holdout_identity(
                 start="2026-02-01",
@@ -307,7 +423,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "match registered forward_period",
+                "match preregistered physical holdout",
             ):
                 registry.register_evaluation(
                     p.protocol_id,
@@ -319,7 +435,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             wrong_role = holdout_identity(role="VALIDATION")
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "role must be LOCKED_FORWARD",
+                "match preregistered physical holdout",
             ):
                 registry.register_evaluation(
                     p.protocol_id,
@@ -339,16 +455,24 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
     def test_holdout_alias_cannot_be_rebound_to_different_evidence(self):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
-            p = registry.register_protocol(protocol())
+            first = registry.register_protocol(protocol())
+            preregister_holdout(registry, first.protocol_id, dataset_digit="a")
             registry.record_holdout_access(
-                p.protocol_id,
+                first.protocol_id,
                 holdout_id="locked-forward",
                 holdout_identity=holdout_identity("a"),
                 purpose="initial-inspection",
             )
+
+            second_payload = protocol()
+            second_payload["hypothesis"] = "independent protocol bound to dataset B"
+            second = registry.register_protocol(second_payload)
+            preregister_holdout(registry, second.protocol_id, dataset_digit="b")
+            exhaust_trials(registry, second.protocol_id)
+
             with self.assertRaisesRegex(ProtocolConflict, "cannot be rebound"):
                 registry.register_evaluation(
-                    p.protocol_id,
+                    second.protocol_id,
                     holdout_id="locked-forward",
                     holdout_identity=holdout_identity("b"),
                     result={"net_utility": "0.030"},
@@ -382,6 +506,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = registry.register_protocol(protocol())
+            preregister_holdout(registry, registered.protocol_id)
             holdout = "forward-2026-h1"
             registry.record_holdout_access(
                 registered.protocol_id,
@@ -389,6 +514,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
                 holdout_identity=holdout_identity(),
                 purpose="parameter_selection",
             )
+            exhaust_trials(registry, registered.protocol_id)
             evaluation = registry.register_evaluation(
                 registered.protocol_id,
                 holdout_id=holdout,
@@ -423,6 +549,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             path = Path(directory) / "science.sqlite3"
             first = ScientificRegistry(path)
             registered = first.register_protocol(protocol())
+            preregister_holdout(first, registered.protocol_id)
             first.record_trial(
                 registered.protocol_id,
                 status="FAILED",

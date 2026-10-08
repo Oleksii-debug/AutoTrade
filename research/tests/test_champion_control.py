@@ -2,12 +2,14 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone, tzinfo
 from hashlib import sha256
 import json
+import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from uuid import NAMESPACE_URL, uuid5
 
 from autotrade_research.artifacts.store import ArtifactStore
+from autotrade_research.data.vintages import HistoricalVintageRegistry
 
 from research.autotrade_research.learning.champion import (
     CandidateApproval,
@@ -29,6 +31,88 @@ BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 def digest(value: str) -> str:
     return "sha256:" + sha256(value.encode("utf-8")).hexdigest()
+
+
+def _vintage_manifest(seed: str) -> dict:
+    return {
+        "dataset_id": str(uuid5(NAMESPACE_URL, f"wp35-dataset:{seed}")),
+        "version": "1",
+        "content_hashes": [digest(f"wp35-content:{seed}")],
+        "instrument_universe_version": "universe:test-v1",
+        "calendar_version": "calendar:test-v1",
+        "coverage": {
+            "from": "2026-07-02T00:00:00Z",
+            "to": "2026-09-30T23:59:59Z",
+        },
+        "availability_policy": {
+            "point_in_time": True,
+            "no_future_leakage": True,
+            "cutoff": "2026-09-30T23:59:59Z",
+            "basis": "test-fixture-evidence",
+        },
+        "revision_policy": {
+            "append_only": True,
+            "replace_prior_vintages": False,
+        },
+        "normalization_version": "normalization:test-v1",
+        "adjustment_policy": {
+            "raw_retained": True,
+            "adjusted_available": False,
+            "method": "none",
+        },
+        "rights": {
+            "storage": True,
+            "research_use": True,
+            "redistribution": False,
+            "basis": "first-party-test-fixture",
+        },
+        "missingness_report": {
+            "expected_count": 1,
+            "observed_count": 1,
+            "missing_keys": [],
+            "invented_count": 0,
+        },
+        "source_evidence": [
+            {
+                "artifact_id": str(uuid5(NAMESPACE_URL, f"wp35-evidence:{seed}")),
+                "sha256": digest(f"wp35-evidence:{seed}"),
+                "observed_at": "2026-09-30T23:59:59Z",
+            }
+        ],
+        "created_at": "2026-10-01T00:00:00Z",
+    }
+
+
+def _manifest_digest(seed: str) -> str:
+    raw = json.dumps(
+        _vintage_manifest(seed),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + sha256(raw).hexdigest()
+
+
+def preregister_holdout(
+    science: ScientificRegistry,
+    protocol_id: str,
+    *,
+    seed: str,
+):
+    vintages = HistoricalVintageRegistry(
+        science.path.parent / f"historical-vintages-{seed}"
+    )
+    manifest = _vintage_manifest(seed)
+    committed = vintages.commit(manifest)
+    if committed != _manifest_digest(seed):
+        raise AssertionError("test vintage digest drifted from canonical manifest")
+    return science.preregister_locked_holdout(
+        protocol_id,
+        vintage_registry=vintages,
+        dataset_id=manifest["dataset_id"],
+        dataset_version=1,
+    )
 
 
 class FakeObligationAuthority:
@@ -143,7 +227,7 @@ def champion_registry(
 
 def holdout_identity(seed: str) -> dict[str, str]:
     return {
-        "dataset_digest": digest(f"locked-forward:{seed}"),
+        "dataset_digest": _manifest_digest(seed),
         "segment_start": "2026-07-02",
         "segment_end": "2026-09-30",
         "role": "LOCKED_FORWARD",
@@ -204,6 +288,7 @@ def approval(
     record_trial=True,
 ):
     registered = science.register_protocol(protocol())
+    preregister_holdout(science, registered.protocol_id, seed=candidate)
     valid_until = BASE + timedelta(days=valid_days)
     if record_trial:
         science.record_trial(
@@ -375,6 +460,11 @@ class ChampionRegistryTests(unittest.TestCase):
             registered = science.register_protocol(protocol())
             original_candidate = "candidate-original"
             promoted_candidate = "candidate-forged"
+            preregister_holdout(
+                science,
+                registered.protocol_id,
+                seed="holdout-forged-trial-binding",
+            )
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -458,6 +548,87 @@ class ChampionRegistryTests(unittest.TestCase):
                 )
             self.assertEqual(registry.state().generation, 0)
 
+    def test_scientific_promotion_guard_holds_writer_reservation(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            candidate = approval(science)
+
+            with science.candidate_promotion_evidence_guard(
+                evaluation_id=candidate.evaluation_id,
+                protocol_id=candidate.protocol_id,
+                protocol_hash=candidate.protocol_hash,
+                result_hash=candidate.evaluation_result_hash,
+                candidate_id=candidate.candidate_id,
+                artifact_hash=candidate.artifact_hash,
+                evaluation_status=candidate.evaluation_status,
+                retention_passed=candidate.retention_passed,
+                risk_passed=candidate.risk_passed,
+                authority_scope_id=candidate.authority_scope_id,
+                evidence_valid_until=candidate.evidence_valid_until.isoformat(),
+            ):
+                contender = sqlite3.connect(science.path, timeout=0)
+                try:
+                    with self.assertRaises(sqlite3.OperationalError):
+                        contender.execute("BEGIN IMMEDIATE")
+                finally:
+                    contender.close()
+
+            contender = sqlite3.connect(science.path, timeout=0)
+            try:
+                contender.execute("BEGIN IMMEDIATE")
+                contender.rollback()
+            finally:
+                contender.close()
+
+    def test_promotion_keeps_scientific_guard_through_routing_commit(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            candidate = approval(science)
+            guard_active = []
+            commit_observations = []
+
+            original_guard = science.candidate_promotion_evidence_guard
+
+            @contextmanager
+            def observed_guard(**kwargs):
+                with original_guard(**kwargs) as evidence:
+                    guard_active.append(True)
+                    try:
+                        yield evidence
+                    finally:
+                        guard_active.pop()
+
+            science.candidate_promotion_evidence_guard = observed_guard
+            authority = FakeObligationAuthority()
+            original_commit_guard = authority.commit_guard
+
+            @contextmanager
+            def observed_commit_guard(expected):
+                commit_observations.append(tuple(guard_active))
+                self.assertEqual(guard_active, [True])
+                with original_commit_guard(expected) as current:
+                    self.assertEqual(guard_active, [True])
+                    yield current
+
+            authority.commit_guard = observed_commit_guard
+            registry = champion_registry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+                obligation_authority=authority,
+            )
+
+            state = registry.promote(
+                candidate,
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+
+            self.assertEqual(state.generation, 1)
+            self.assertEqual(commit_observations, [(True,)])
+            self.assertEqual(guard_active, [])
+
     def test_promotion_with_unused_trial_budget_requires_registered_stop_evidence(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
@@ -467,6 +638,11 @@ class ChampionRegistryTests(unittest.TestCase):
             registered = science.register_protocol(value)
             candidate = "candidate-early-stop"
             artifact = digest(candidate)
+            preregister_holdout(
+                science,
+                registered.protocol_id,
+                seed="holdout-early-stop",
+            )
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -493,41 +669,23 @@ class ChampionRegistryTests(unittest.TestCase):
                 "trial_budget": trial_state["trial_budget"],
                 "trial_log_hash": trial_state["trial_log_hash"],
             }
-            locked = science.register_evaluation(
-                registered.protocol_id,
-                holdout_id="holdout-early-stop",
-                holdout_identity=holdout_identity("holdout-early-stop"),
-                result=base_result,
-            )
-            approval_value = CandidateApproval.create(
-                candidate_id=candidate,
-                artifact_hash=artifact,
-                evidence_id="evidence:early-stop",
-                evidence_valid_until=valid_until,
-                evaluation_status="PASS",
-                retention_passed=True,
-                risk_passed=True,
-                authority_scope_id="paper-scope",
-                protocol_id=registered.protocol_id,
-                protocol_hash=registered.protocol_hash,
-                evaluation_id=locked["evaluation_id"],
-                evaluation_result_hash=locked["result_hash"],
-            )
-            registry = champion_registry(
-                Path(directory) / "champion.sqlite3",
-                scientific_registry=science,
-            )
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "trial-budget exhaustion",
+                "exact registered trial budget",
             ):
-                registry.promote(
-                    approval_value,
-                    expected_generation=0,
-                    now=BASE,
-                    open_position_count=0,
-                    existing_position_policy=None,
+                science.register_evaluation(
+                    registered.protocol_id,
+                    holdout_id="holdout-early-stop",
+                    holdout_identity=holdout_identity("holdout-early-stop"),
+                    result=base_result,
                 )
+            self.assertEqual(
+                science.holdout_access_count(
+                    registered.protocol_id,
+                    "holdout-early-stop",
+                ),
+                0,
+            )
 
     def test_locked_evaluation_trial_log_hash_detects_trial_log_tampering(self):
         with TemporaryDirectory() as directory:
@@ -537,6 +695,11 @@ class ChampionRegistryTests(unittest.TestCase):
             registered = science.register_protocol(value)
             candidate = "candidate-log-bound"
             artifact = digest(candidate)
+            preregister_holdout(
+                science,
+                registered.protocol_id,
+                seed="holdout-log-bound",
+            )
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -878,20 +1041,22 @@ class ChampionRegistryTests(unittest.TestCase):
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
-            candidate = approval(science, record_trial=False)
-            with self.assertRaisesRegex(ProtocolViolation, "registered trial"):
-                registry.promote(
-                    candidate,
-                    expected_generation=0,
-                    now=BASE,
-                    open_position_count=0,
-                    existing_position_policy=None,
-                )
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "exact registered trial budget",
+            ):
+                approval(science, record_trial=False)
+            self.assertEqual(registry.state().generation, 0)
 
     def test_completed_trial_must_be_bound_to_exact_candidate_artifact(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = science.register_protocol(protocol())
+            preregister_holdout(
+                science,
+                registered.protocol_id,
+                seed="holdout-a",
+            )
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",

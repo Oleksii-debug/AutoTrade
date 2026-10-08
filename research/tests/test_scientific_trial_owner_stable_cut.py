@@ -12,7 +12,7 @@ from research.autotrade_research.evaluation.scientific_trial_owner import (
 )
 from research.autotrade_research.science.registry import ScientificRegistry
 from research.tests.test_evaluation_gates import evidence, profile
-from research.tests.test_science_registry import protocol
+from research.tests.test_science_registry import preregister_holdout, protocol
 
 
 class ScientificTrialOwnerStableCutTests(unittest.TestCase):
@@ -26,6 +26,7 @@ class ScientificTrialOwnerStableCutTests(unittest.TestCase):
             payload["gate_profile_id"] = gate_profile.profile_id
             payload["gate_profile_digest"] = gate_profile_subject_digest(gate_profile)
             registered = first.register_protocol(payload)
+            preregister_holdout(first, registered.protocol_id)
             first.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -58,6 +59,7 @@ class ScientificTrialOwnerStableCutTests(unittest.TestCase):
             payload["gate_profile_id"] = gate_profile.profile_id
             payload["gate_profile_digest"] = gate_profile_subject_digest(gate_profile)
             registered = registry.register_protocol(payload)
+            preregister_holdout(registry, registered.protocol_id)
             registry.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -147,6 +149,7 @@ class ScientificTrialOwnerStableCutTests(unittest.TestCase):
             payload["gate_profile_id"] = gate_profile.profile_id
             payload["gate_profile_digest"] = gate_profile_subject_digest(gate_profile)
             registered = registry.register_protocol(payload)
+            preregister_holdout(registry, registered.protocol_id)
             registry.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",

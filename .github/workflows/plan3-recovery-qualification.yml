@@ -29,4 +29,4 @@ jobs:
           python-version: '3.12'
       - name: Canonical recovery crash, restart, owner fencing and negative tests
         run: |
-          python -m unittest -v mvp.tests.test_recovery_takeover mvp.tests.test_recovery_takeover_source_sender_fence mvp.tests.test_recovery_durable_unknown_restart mvp.tests.test_recovery_takeover_stale_sender mvp.tests.test_recovery_takeover_source_sender_fence mvp.tests.test_runtime_failure_control
+          python -m unittest -v mvp.tests.test_recovery_takeover mvp.tests.test_recovery_takeover_source_sender_fence mvp.tests.test_recovery_durable_unknown_restart mvp.tests.test_recovery_takeover_stale_sender mvp.tests.test_runtime_failure_control

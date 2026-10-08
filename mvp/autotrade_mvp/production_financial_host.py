@@ -91,7 +91,11 @@ def _capture_host_financial_authority(
     store_identity = host.store_identity
     if journal.store_identity != store_identity:
         raise PermissionError("production host journal identity is inconsistent")
-    if config.journal_path != journal.path:
+    # ProductionHostConfig canonicalizes with Path.resolve(), while the
+    # JournalStore can preserve a platform-specific qualified backing path
+    # (notably on Windows). Compare the same canonical namespace only after
+    # validating the bound exact JournalStore backing identity above.
+    if config.journal_path != journal.path.resolve(strict=False):
         raise PermissionError("production host config journal does not match host journal")
     return _HostFinancialAuthority(
         config_identity=identity,

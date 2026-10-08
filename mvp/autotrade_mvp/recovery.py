@@ -699,6 +699,7 @@ class RecoveryController:
         provider_id: str,
         account_id: str,
         environment: str,
+        provider_environment: str | None = None,
     ) -> dict[str, object]:
         """Derive durable readiness only from current owner-bound provider truth.
 
@@ -727,6 +728,7 @@ class RecoveryController:
             provider_id=provider_id,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
             host_id=self.owner.owner_id,
             owner_epoch=str(self.owner.epoch),
         )

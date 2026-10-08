@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 from hashlib import sha256
@@ -53,6 +54,24 @@ def write_bound_host_publish(publish, source_sha, *, host_bytes=b'MZ-host',
 
 
 class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
+    def test_relative_work_root_is_absolute_before_windows_namespace_staging(self):
+        # The Windows provider-free job supplies --work artifacts/candidate-work.
+        # A retained Windows namespace must not receive a relative parent.
+        with TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            relative_work = root.relative_to(Path.cwd()) / 'candidate-work'
+            with patch.object(candidate, 'stage_source', side_effect=RuntimeError('staging-probe')) as stage:
+                with self.assertRaisesRegex(RuntimeError, 'staging-probe'):
+                    candidate.build_candidate(
+                        source_root=candidate.ROOT, source_sha='a' * 40,
+                        desktop=root, host=root, python_archive=root / 'python.zip',
+                        webview_archive=root / 'webview.nupkg', work=relative_work,
+                        output=root / 'candidate.zip',
+                    )
+            self.assertEqual(stage.call_args.args[2], relative_work.absolute() / 'payload' / 'product')
+            self.assertEqual(stage.call_args.args[3], relative_work.absolute() / 'source-composition.json')
+            self.assertTrue(stage.call_args.args[3].is_absolute())
+
     def test_stage_source_uses_canonical_exact_git_reader(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -379,6 +398,68 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
                 source_sha=source_sha,
                 label='Host',
             )
+
+
+    def test_dual_rid_webview2_lock_and_release_provenance_are_exact(self):
+        # An ordinary TFM plus an explicitly restored win-x64 TFM is one
+        # reviewed package in two target graphs, NOT two independent packages.
+        lock = json.loads(
+            (candidate.ROOT / 'src/AutoTrade.Desktop/packages.lock.json').read_text(encoding='utf-8')
+        )
+        source_rows = json.loads(
+            (candidate.ROOT / 'provenance/release-dependency-manifest.json').read_text(encoding='utf-8')
+        )['dotnet_package_dependencies']
+        rows = [row for row in source_rows if row.get('name') == 'Microsoft.Web.WebView2']
+        self.assertEqual(len(rows), 2)
+        baseline = lock['dependencies']['net10.0-windows7.0']['Microsoft.Web.WebView2']
+        version = baseline['resolved']
+        content_hash = baseline['contentHash']
+        inputs = {
+            'webview2_sdk': {
+                'version': version,
+                'url': ('https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/'
+                        + version.lower() + '/microsoft.web.webview2.'
+                        + version.lower() + '.nupkg'),
+                'content_hash_sha512_base64': content_hash,
+            },
+        }
+
+        def evaluate(locked, declared):
+            with TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'provenance').mkdir()
+                (root / 'provenance/release-dependency-manifest.json').write_text(
+                    json.dumps({'dotnet_package_dependencies': declared}),
+                    encoding='utf-8',
+                )
+                return candidate._require_webview2_input_identity(root, inputs, locked)
+
+        self.assertEqual(evaluate(lock, rows), content_hash)
+        cases = (
+            ('missing RID target', lambda locked, declared: locked['dependencies'].pop(
+                'net10.0-windows7.0/win-x64'), 'target graph differs'),
+            ('unexpected target', lambda locked, declared: locked['dependencies'].update(
+                {'net10.0-windows7.0/win-arm64': {}}), 'target graph differs'),
+            ('RID hash drift', lambda locked, declared: locked['dependencies'][
+                'net10.0-windows7.0/win-x64']['Microsoft.Web.WebView2'].update(
+                    {'contentHash': 'tampered'}), 'differs from frozen input'),
+            ('RID request drift', lambda locked, declared: locked['dependencies'][
+                'net10.0-windows7.0/win-x64']['Microsoft.Web.WebView2'].update(
+                    {'requested': '[1.0.0, )'}), 'RID request identity differs'),
+            ('missing provenance target', lambda locked, declared: declared.pop(),
+             'provenance target set differs'),
+            ('duplicated provenance target', lambda locked, declared: declared.append(
+                copy.deepcopy(declared[0])), 'provenance target set differs'),
+            ('tampered provenance RID hash', lambda locked, declared: declared[1].update(
+                {'content_hash_sha512_base64': 'tampered'}), 'differs from release provenance'),
+        )
+        for label, change, expected in cases:
+            with self.subTest(label=label):
+                locked = copy.deepcopy(lock)
+                declared = copy.deepcopy(rows)
+                change(locked, declared)
+                with self.assertRaisesRegex(ValueError, expected):
+                    evaluate(locked, declared)
 
 
 if __name__ == '__main__':

@@ -288,6 +288,14 @@ def _is_loopback_bind(host: str) -> bool:
         return False
 
 
+class SnapshotTemporarilyUnavailable(RuntimeError):
+    """A coherent operator snapshot is temporarily unavailable.
+
+    The network adapter returns a safe retryable 503, never a partial
+    financial snapshot or internal state/secret details.
+    """
+
+
 class AuthenticatedHostApplication:
     """Pure request dispatcher around one durable host command authority."""
 
@@ -697,6 +705,8 @@ class AuthenticatedHostApplication:
                 )
 
             return _error(404, "NOT_FOUND")
+        except SnapshotTemporarilyUnavailable:
+            return _error(503, "SNAPSHOT_TEMPORARILY_UNAVAILABLE")
         except EventGap:
             return _json_response(
                 409,

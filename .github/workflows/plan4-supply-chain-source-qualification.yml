@@ -1,0 +1,65 @@
+name: Plan 4 - Supply chain source qualification
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/plan4-supply-chain-source-qualification.yml'
+      - 'provenance/**'
+      - 'tools/build_provenance_manifest.py'
+      - 'tools/check_dependency_composition.py'
+      - 'mvp/autotrade_mvp/supply_chain_qualification.py'
+      - 'mvp/autotrade_mvp/release_candidate.py'
+      - 'mvp/autotrade_mvp/release_qualification.py'
+      - 'mvp/autotrade_mvp/qualification_attestation.py'
+      - 'mvp/tests/test_release_dependency_manifest.py'
+      - 'mvp/tests/test_release_candidate_freeze.py'
+      - 'mvp/tests/test_release_qualification.py'
+      - 'mvp/tests/test_supply_chain_qualification_authority_ingress.py'
+      - 'tests/Provenance/**'
+      - 'tests/SupplyChain/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/plan4-supply-chain-source-qualification.yml'
+      - 'provenance/**'
+      - 'tools/build_provenance_manifest.py'
+      - 'tools/check_dependency_composition.py'
+      - 'mvp/autotrade_mvp/supply_chain_qualification.py'
+      - 'mvp/autotrade_mvp/release_candidate.py'
+      - 'mvp/autotrade_mvp/release_qualification.py'
+      - 'mvp/autotrade_mvp/qualification_attestation.py'
+      - 'mvp/tests/test_release_dependency_manifest.py'
+      - 'mvp/tests/test_release_candidate_freeze.py'
+      - 'mvp/tests/test_release_qualification.py'
+      - 'mvp/tests/test_supply_chain_qualification_authority_ingress.py'
+      - 'tests/Provenance/**'
+      - 'tests/SupplyChain/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canonical-source-trust:
+    name: canonical source trust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Install pinned dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Compile canonical provenance and supply-chain authorities
+        run: python -m compileall -q mvp/autotrade_mvp/qualification_attestation.py mvp/autotrade_mvp/supply_chain_qualification.py mvp/autotrade_mvp/release_candidate.py mvp/autotrade_mvp/release_qualification.py tools/build_provenance_manifest.py
+      - name: Check deterministic source-controlled dependency and rights manifest
+        run: python tools/build_provenance_manifest.py --check
+      - name: Test fixture SBOM, provenance, exact-source signatures and fail-closed policy
+        run: |
+          python -m unittest -v mvp.tests.test_release_dependency_manifest mvp.tests.test_release_candidate_freeze mvp.tests.test_release_qualification mvp.tests.test_supply_chain_qualification_authority_ingress tests.Provenance.test_release_manifest_portability tests.Provenance.test_release_policy_composition tests.Provenance.test_release_evidence_json_authority tests.Provenance.test_dependency_composition tests.SupplyChain.test_supply_chain_qualification tests.SupplyChain.test_supply_chain_proof_canonical tests.SupplyChain.test_supply_chain_proof_strict_json

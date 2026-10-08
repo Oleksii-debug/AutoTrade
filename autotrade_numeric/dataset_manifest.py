@@ -1,9 +1,9 @@
-"""Canonical cross-field semantics for DatasetManifest contract v6."""
+"""Canonical cross-field semantics for DatasetManifest contract v7."""
 
 from collections.abc import Mapping
 from typing import Any
 
-CONTRACT_VERSION = "6.0.0"
+CONTRACT_VERSION = "7.0.0"
 DATASET_MANIFEST_SEMANTIC_VALIDATOR_ID = "dataset-manifest-content-authority-v1"
 
 

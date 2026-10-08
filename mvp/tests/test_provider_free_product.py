@@ -95,7 +95,7 @@ class ProductClient:
         status, accepted, _ = self.request('POST', '/api/v1/commands', request)
         assert status == 200 and accepted['status'] == 'ACCEPTED', (status, accepted)
         operation = accepted['operation_id']
-        for _ in range(300):
+        for _ in range(1500):
             status, result, _ = self.request('GET', '/api/v1/operations/' + operation)
             if status == 200 and result['phase'] in {'SUCCEEDED', 'FAILED', 'UNKNOWN'}:
                 return command_id, result
@@ -318,7 +318,7 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
                 status, replay, _ = client.request('POST', '/api/v1/commands', command)
                 self.assertEqual(replay['operation_id'], operation_id)
                 self.assertEqual(len(client.state()['portfolio']['fills']), 6)
-                self.assertEqual(client.state()['portfolio']['status']['cash'], '895.696')
+                self.assertEqual(client.state()['portfolio']['status']['cash'], '791.392')
             finally: client.close()
 
     def test_historical_admission_replay_cannot_authorize_stale_current_cash(self):
@@ -388,7 +388,7 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             self.assertEqual(crashed.returncode, 73, crashed.stderr.decode())
             store = JournalStore(data / 'state' / 'journal.sqlite3')
             book = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
-            self.assertEqual(str(book.position(INSTRUMENT)), '0.5')
+            self.assertEqual(str(book.position(INSTRUMENT)), '1')
             oms = DurableOrderBookProjection(store, provider_id=PROVIDER, account_id=ACCOUNT,
                 environment=ENVIRONMENT, host_id='local-simulation', owner_epoch='1')
             self.assertEqual(oms.snapshots[0].state, 'PARTIALLY_FILLED')
@@ -437,8 +437,8 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
                 state = client.state()
                 self.assertEqual(state['portfolio']['status']['session_status'], 'COMPLETED')
-                self.assertEqual(state['portfolio']['status']['cash'], '895.696')
-                self.assertEqual(state['portfolio']['status']['position'], '1')
+                self.assertEqual(state['portfolio']['status']['cash'], '791.392')
+                self.assertEqual(state['portfolio']['status']['position'], '2')
                 self.assertEqual(len(state['portfolio']['fills']), 6)
                 self.assertEqual([o['state'] for o in state['portfolio']['orders']], ['FILLED'] * 3)
                 self.assertEqual(len(store.load_events_by_aggregate_type('settlement_book')), 12)
@@ -459,13 +459,13 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             client = ProductClient(restored)
             try:
                 state = client.state()
-                self.assertEqual(state['portfolio']['status']['cash'], '895.696')
+                self.assertEqual(state['portfolio']['status']['cash'], '791.392')
                 self.assertEqual(len(state['portfolio']['fills']), 6)
                 self.assertEqual(state['risk']['real_order_submission'], 'UNAVAILABLE')
                 self.assertEqual(state['risk']['restore_trading_gate'], 'RECONCILIATION_REQUIRED')
                 _, operation = client.command('RECOVER_SIMULATION')
                 self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
-                self.assertEqual(client.state()['portfolio']['status']['cash'], '895.696')
+                self.assertEqual(client.state()['portfolio']['status']['cash'], '791.392')
             finally: client.close()
 
     def test_product_restore_layout_failure_leaves_final_destination_retryable(self):

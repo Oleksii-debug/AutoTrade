@@ -12,6 +12,7 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
 {
     private readonly Process _process;
     private readonly HttpClient _http;
+    private readonly HttpClient _emergencyHttp;
     private readonly EmergencyHostSession _session;
     private readonly Task _stdoutDrain;
     private readonly Task _stderrDrain;
@@ -29,7 +30,16 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
         _stdoutDrain = stdoutDrain;
         _stderrDrain = stderrDrain;
         DataDirectory = data;
-        Client = new AuthenticatedEmergencyHostClient(http, Origin, this,
+        // Pairing has already sent a request through http. HttpClient forbids
+        // assigning BaseAddress after first send; use a distinct, preconfigured
+        // emergency-channel transport for authenticated command requests.
+        _emergencyHttp = new(new HttpClientHandler
+        {
+            AllowAutoRedirect = false,
+            UseCookies = false
+        })
+        { Timeout = TimeSpan.FromSeconds(10) };
+        Client = new AuthenticatedEmergencyHostClient(_emergencyHttp, Origin, this,
             new WindowsCredentialManagerPendingCommandStore("AutoTrade.ZERO:pending-emergency-command-v1"));
     }
 
@@ -182,6 +192,7 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
             }
             await Task.WhenAll(_stdoutDrain, _stderrDrain);
             _process.Dispose();
+            _emergencyHttp.Dispose();
             _http.Dispose();
         }
 

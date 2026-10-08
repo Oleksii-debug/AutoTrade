@@ -576,7 +576,7 @@ def _locked_nupkg_root_evidence(
     are allowed to support a rights decision.
     """
 
-    if type(nupkg_path) is not Path:
+    if type(nupkg_path) is not type(Path()):
         raise TypeError("nupkg_path must be exact Path")
     for value, label in (
         (license_file, "license_file"),

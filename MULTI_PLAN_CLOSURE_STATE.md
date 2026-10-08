@@ -28,7 +28,7 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 | 7 | DONE | legacy Section 12 |
 | 8 | DONE | legacy Section 13 |
 | 9 | DONE | legacy Section 14 |
-| 10 | QUALIFYING | legacy Section 15; canonical finisher PR #2318, live head must be refreshed before work |
+| 10 | QUALIFYING | legacy Section 15; canonical finisher PR #2318; migration readback head `7662ddbc8226965f4676684f7309d40f882ddaed`; control-only multi-plan commits advanced main to `efed52b213039f88e03d33561c9d1429cb4f0371`, so preserve candidate source and perform fresh target-topology/reconvergence after functional qualification |
 | 11 | PARTIAL_EXISTING | legacy Section 17; parked PR #1628 plus existing cost/capacity source |
 | 12 | OPEN | plan-level qualification |
 
@@ -115,5 +115,7 @@ Sections 1–6: WAITING_UPSTREAM until Plans 1,2,3,4,5,7 provide required termin
 | 8 | WAITING_SECTION7 |
 | 9 | WAITING_CLAIMED_SCOPE |
 | 10 | WAITING_SECTION9 |
+
+Migration note: old parked/partial PRs may have stale bases after the control-plane switch. Their existence is preserved as work/evidence, not as a requirement to merge stale topology. When a Section becomes actionable, refresh head/base/current-main, preserve unique changes, and converge once under the new owner plan.
 
 Update this file in the same closure/reopen run whenever a new-plan Section status changes.

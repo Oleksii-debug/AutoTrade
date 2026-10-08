@@ -66,29 +66,7 @@ jobs:
           python -m compileall -q mvp/autotrade_mvp/backup.py mvp/autotrade_mvp/production_host.py mvp/autotrade_mvp/recovery.py mvp/autotrade_mvp/host_network.py mvp/autotrade_mvp/diagnostics.py mvp/autotrade_mvp/operator_observability.py mvp/tests/test_plan3_stack_qualification.py
       - name: Crash, recovery, sender fencing, backup, Host and observability fixtures
         run: |
-          python -m unittest -v \
-            mvp.tests.test_plan3_stack_qualification \
-            mvp.tests.test_recovery_takeover \
-            mvp.tests.test_recovery_durable_unknown_restart \
-            mvp.tests.test_recovery_sender_gate_current \
-            mvp.tests.test_runtime_failure_control \
-            mvp.tests.test_recovery_clock_incident_chronology \
-            mvp.tests.test_dispatch_prepared_recovery_race \
-            mvp.tests.test_dispatch_prepared_zero_wire_recovery \
-            mvp.tests.test_backup_restore \
-            mvp.tests.test_simulation_runtime_checkpoint \
-            mvp.tests.test_production_host \
-            mvp.tests.test_production_host_config \
-            mvp.tests.test_production_host_readiness \
-            mvp.tests.test_production_host_runtime_occurrence \
-            mvp.tests.test_production_financial_host \
-            mvp.tests.test_production_financial_host_authority_bindings \
-            mvp.tests.test_host_network \
-            mvp.tests.test_host_api \
-            mvp.tests.test_durable_host_api \
-            mvp.tests.test_operator_observability \
-            mvp.tests.test_diagnostics \
-            mvp.tests.test_readiness
+          python -m unittest -v mvp.tests.test_plan mvp.tests.test_recovery_takeover mvp.tests.test_recovery_durable_unknown_restart mvp.tests.test_recovery_sender_gate_current mvp.tests.test_runtime_failure_control mvp.tests.test_recovery_clock_incident_chronology mvp.tests.test_dispatch_prepared_recovery_race mvp.tests.test_dispatch_prepared_zero_wire_recovery mvp.tests.test_backup_restore mvp.tests.test_simulation_runtime_checkpoint mvp.tests.test_production_host mvp.tests.test_production_host_config mvp.tests.test_production_host_readiness mvp.tests.test_production_host_runtime_occurrence mvp.tests.test_production_financial_host mvp.tests.test_production_financial_host_authority_bindings mvp.tests.test_host_network mvp.tests.test_host_api mvp.tests.test_durable_host_api mvp.tests.test_operator_observability mvp.tests.test_diagnostics mvp.tests.test_readiness
       - name: Publish non-secret exact-head suite evidence only after completed tests
         env:
           AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}

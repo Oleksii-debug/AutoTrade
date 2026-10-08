@@ -792,6 +792,22 @@ class ProductionHostRuntime:
         _bind(self, occurrence.runtime_occurrence_id)
 
     @property
+    def runtime_occurrence(self) -> ProductionHostRuntimeOccurrence:
+        """Read the single process-bound occurrence through the durable Host journal.
+
+        This is a read-only view of the existing canonical Host authority, never
+        a second stored occurrence or an instance-writable cached witness.
+        """
+        bound_id = _RUNTIME_OCCURRENCE_READ(self)
+        if type(bound_id) is not str or not bound_id:
+            raise PermissionError("production host runtime occurrence is not bound")
+        history = _load_production_host_runtime_occurrences(self.journal, self.config)
+        if not history or history[-1].runtime_occurrence_id != bound_id:
+            raise PermissionError("production host runtime occurrence is no longer current")
+        return require_current_production_host_runtime_occurrence(
+            journal=self.journal,
+            occurrence=history[-1],
+        )
 
     @property
     def closed(self) -> bool:

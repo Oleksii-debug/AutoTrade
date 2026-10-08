@@ -81,8 +81,9 @@ class Plan5TerminalSourceContractTests(unittest.TestCase):
         self.assertIn("class AuthenticatedEmergencyHostClient", (DESKTOP / "AuthenticatedEmergencyHostClient.cs").read_text(encoding="utf-8"))
         owned = (DESKTOP / "OwnedProviderFreeRuntime.cs").read_text(encoding="utf-8")
         self.assertIn("127.0.0.1", owned)
-        self.assertTrue('new Uri(origin, "api/v1/session")' in owned or
-                        "new Uri(origin, HostApiRoutes.PairLocalSession)" in owned)
+        # PairLocalSession is NOT a member of the canonical generated routes.
+        # Do not let a future uncompiled source assertion accept that stale alias.
+        self.assertIn('new Uri(origin, "api/v1/session")', owned)
         self.assertNotIn("NavigateToString(", src)
 
     def test_existing_packaging_and_recovery_authorities_are_reused(self):

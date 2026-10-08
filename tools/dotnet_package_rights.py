@@ -4,6 +4,7 @@ import argparse
 import base64
 import binascii
 from hashlib import sha512
+from io import BytesIO
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -567,6 +568,7 @@ def _locked_nupkg_root_evidence(
     *,
     license_file: str,
     notice_file: str,
+    verified_archive_bytes: bytes | None = None,
 ) -> tuple[bytes, bytes, bytes]:
     """Read exact root rights metadata from the already hash-verified nupkg.
 
@@ -586,8 +588,18 @@ def _locked_nupkg_root_evidence(
         if PurePosixPath(value).name != value:
             raise ValueError(f"{label} must be one package-root filename")
 
+    # Archive metadata must be read from the SAME bytes that passed the
+    # locked SHA-512 check. Reopening a mutable path would create a TOCTOU
+    # window between hash verification and license/NOTICE acceptance.
+    if verified_archive_bytes is not None and type(verified_archive_bytes) is not bytes:
+        raise TypeError("verified archive bytes must be exact bytes")
+    archive_source = (
+        BytesIO(verified_archive_bytes)
+        if verified_archive_bytes is not None
+        else nupkg_path
+    )
     try:
-        with zipfile.ZipFile(nupkg_path) as archive:
+        with zipfile.ZipFile(archive_source) as archive:
             root_entries: dict[str, tuple[str, zipfile.ZipInfo]] = {}
             for entry in archive.infolist():
                 name = entry.filename
@@ -723,11 +735,24 @@ def verify_restored_package_rights(
         )
         restored_hash = sha_path.read_text(encoding="ascii").strip()
         if restored_hash != artifact["content_hash_sha512_base64"]:
-            raise ValueError(
-                f"restored NuGet package content hash mismatch: {package_name}@{package_version}"
+            # Diagnostic evidence is never an alternate trust root. Read the
+            # payload only to identify a stale/misrouted NuGet cache; still
+            # reject the package before any license/rights acceptance.
+            observed_package_hash = base64.b64encode(
+                sha512(nupkg_path.read_bytes()).digest()
+            ).decode("ascii")
+            observed_sidecar_hash = (
+                restored_hash if _valid_content_hash(restored_hash) else "INVALID"
             )
+            raise ValueError(
+                f"restored NuGet package content hash mismatch: {package_name}@{package_version}; "
+                f"locked_sha512={artifact['content_hash_sha512_base64']}; "
+                f"sidecar_sha512={observed_sidecar_hash}; "
+                f"payload_sha512={observed_package_hash}"
+            )
+        nupkg_payload = nupkg_path.read_bytes()
         actual_nupkg_hash = base64.b64encode(
-            sha512(nupkg_path.read_bytes()).digest()
+            sha512(nupkg_payload).digest()
         ).decode("ascii")
         if actual_nupkg_hash != artifact["content_hash_sha512_base64"]:
             raise ValueError(
@@ -741,6 +766,7 @@ def verify_restored_package_rights(
             nupkg_path,
             license_file=record["license_file"],
             notice_file=record["notice_file"],
+            verified_archive_bytes=nupkg_payload,
         )
         license_candidate = package_dir / record["license_file"]
         notice_candidate = package_dir / record["notice_file"]

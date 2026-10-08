@@ -1632,6 +1632,7 @@ function renderOperation(operation) {
     text("active-host", parsed.hostId);
     text("active-account", parsed.accountId);
     text("active-environment", parsed.environment);
+    text("provider-availability", "UNAVAILABLE — the current UiSnapshot exposes no provider-capability authority. Host-supported ZERO/SIMULATION/research workflows do not require provider setup.");
     text(
       "connection-summary",
       "Host: " + parsed.hostId + ". Account: " + parsed.accountId +
@@ -1823,6 +1824,10 @@ function renderOperation(operation) {
           pollRenderedEnvironment !== state.renderedEnvironment
         )
       ) {
+        return;
+      }
+      if (isSnapshotBusy(error)) {
+        reportSnapshotBusy();
         return;
       }
       if (error.status === 409 || error.status === 410) {
@@ -2169,7 +2174,7 @@ function renderOperation(operation) {
         invalidateSnapshotAuthority();
         text("command-result",
           "Command " + commandId +
-            " was not accepted because the authenticated host session was rejected before command acceptance. Its fresh command identity was discarded; re-establish a valid session and canonical snapshot before trying again.");
+            " was not accepted because the authenticated host session was rejected before command acceptance. Its fresh command identity was discarded; re-establish a valid session and canonical snapshot before trying again. A retry is different: its prior attempt may already be durable.");
       } else if (isSnapshotBusy(error) && commandContextMatchesCurrentSnapshot(payload, submittedHostId)) {
         invalidateSnapshotAuthority();
         reportSnapshotBusy();
@@ -2201,8 +2206,8 @@ function renderOperation(operation) {
     const restoreKeyboardFocus = button !== null && document.activeElement === button;
     if (button) button.disabled = true;
     try {
-      await refreshSnapshot();
-      announce("Host state refreshed from the canonical snapshot.");
+      const refreshed = await refreshSnapshot();
+      if (refreshed) announce("Host state refreshed from the canonical snapshot.");
     } catch (error) {
       if (isSnapshotBusy(error)) {
         reportSnapshotBusy();
@@ -2224,7 +2229,77 @@ function renderOperation(operation) {
       }
     }
   }
+  // The ten canonical page locations are projections of this document, never
+  // browser-held financial, provider or account authority.
+  const PAGE_ROUTES = Object.freeze([
+    "overview", "accounts", "opportunities", "portfolio", "risk",
+    "research", "learning", "models", "history", "settings"
+  ]);
+
+  function bindPageNavigation() {
+    const nav = document.querySelector('nav[aria-label="Primary"]');
+    if (!nav) throw new Error("Canonical primary navigation is missing");
+    const pages = new Map();
+    for (const id of PAGE_ROUTES) {
+      const link = nav.querySelector('a[href="#' + id + '"]');
+      const heading = byId(id + "-heading");
+      const section = byId(id);
+      if (!link || !heading || !section || !section.contains(heading)) {
+        throw new Error("Canonical page navigation is incomplete: " + id);
+      }
+      pages.set(id, {link, heading});
+    }
+    function activate({focusHeading = false} = {}) {
+      // No URL decoding, HTML interpretation, route substitution or Host API call.
+      const hash = window.location.hash;
+      const id = hash === "" ? "overview" : hash.slice(1);
+      const target = hash === "#main" ? null : pages.get(id);
+      for (const page of pages.values()) page.link.removeAttribute("aria-current");
+      if (hash === "#main") {
+        const message = "Main content. Use headings to move among AutoTrade sections.";
+        text("page-navigation-status", message);
+        if (focusHeading) {
+          byId("main").focus({preventScroll: true});
+          queuePoliteAnnouncement(message);
+        }
+        return;
+      }
+      if (!target || (hash !== "" && hash !== "#" + id)) {
+        const message = "Unknown section. Select a valid page from Primary navigation. No command or provider request was issued.";
+        text("page-navigation-status", message);
+        if (focusHeading) queuePoliteAnnouncement(message);
+        return;
+      }
+      target.link.setAttribute("aria-current", "location");
+      const message = "Current section: " + target.heading.textContent.trim() + ". Use browser Back and Forward to revisit sections.";
+      text("page-navigation-status", message);
+      if (focusHeading) {
+        target.heading.focus({preventScroll: true});
+        queuePoliteAnnouncement(message);
+      }
+    }
+    // Ordinary anchors own browser history, URLs, and scroll. This adds only
+    // heading focus and an announced active-section state for keyboard/NVDA.
+    nav.addEventListener("click", (event) => {
+      const link = event.target.closest("a[href]");
+      if (!link || !nav.contains(link)) return;
+      if (link.getAttribute("href") === window.location.hash) {
+        const page = pages.get(window.location.hash.slice(1));
+        if (page) page.heading.focus({preventScroll: true});
+      }
+    });
+    window.addEventListener("hashchange", () => activate({focusHeading: true}));
+    // Native fragment scrolling/focus can run after DOMContentLoaded on an
+    // initial deep link. Re-apply the semantic heading focus after load, so a
+    // fresh browser navigation and keyboard history use the same route contract.
+    window.addEventListener("load", () => {
+      if (window.location.hash !== "") activate({focusHeading: true});
+    }, {once: true});
+    activate({focusHeading: window.location.hash !== ""});
+  }
+
   async function start() {
+    bindPageNavigation();
     bindTableTools();
     bindAuthorityPolicyReviewInvalidation();
     byId("host-command-form").addEventListener("submit", submitCommand);
@@ -2269,8 +2344,8 @@ function renderOperation(operation) {
     state.environment = null;
     setCommandAvailability(false);
     try {
-      await refreshSnapshot();
-      announce("Host state refreshed after page restoration.");
+      const restored = await refreshSnapshot();
+      if (restored) announce("Host state refreshed after page restoration.");
     } catch (error) {
       if (isSnapshotBusy(error)) {
         reportSnapshotBusy();

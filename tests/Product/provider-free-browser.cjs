@@ -9,7 +9,8 @@ const {spawn, spawnSync} = require("node:child_process");
 const {chromium} = require(process.env.AUTOTRADE_PLAYWRIGHT_MODULE || "playwright");
 const ROOT = process.env.AUTOTRADE_PRODUCT_ROOT || path.resolve(__dirname, "../..");
 const python = process.env.AUTOTRADE_PYTHON || "python";
-const env = {...process.env, PYTHONPATH: ROOT + path.delimiter + path.join(ROOT, "research")};
+const env = {...process.env, AUTOTRADE_TEST_DIAGNOSTIC: "1",
+  PYTHONPATH: ROOT + path.delimiter + path.join(ROOT, "research")};
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "autotrade-browser-"));
 const data = path.join(scratch, "product state with spaces #");
 let host, browser, observedPage;
@@ -80,8 +81,14 @@ async function command(page, action, index) {
     "command-result",
     action + " command feedback focus");
   await page.waitForFunction(count => document.querySelectorAll("#operations-body tr[data-operation-id]").length > count
-    && document.querySelector("#operations-body").lastElementChild?.children[1]?.textContent === "SUCCEEDED", before,
+    && ["SUCCEEDED", "UNKNOWN"].includes(
+      document.querySelector("#operations-body").lastElementChild?.children[1]?.textContent), before,
     {timeout: 240000});
+  const phase = await page.locator("#operations-body tr[data-operation-id]").last()
+    .locator("td").nth(1).innerText();
+  const diagnostic = path.join(data, "worker-stage-diagnostic.txt");
+  assert.equal(phase, "SUCCEEDED", fs.existsSync(diagnostic)
+    ? `Worker stage: ${fs.readFileSync(diagnostic, "utf8")}` : "No worker stage diagnostic");
   await page.keyboard.press("Shift+Tab");
   assert.equal(
     await page.evaluate(() => document.activeElement.id),

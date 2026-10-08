@@ -217,16 +217,23 @@ def execute_simulation_action(journal, action, payload, accepted_at):
         import os
         import sys
         from .simulation_status import inspect_canonical_simulation
+        def diagnostic(stage, detail=''):
+            if os.environ.get('AUTOTRADE_TEST_DIAGNOSTIC') == '1':
+                (root.parent / 'worker-stage-diagnostic.txt').write_text(
+                    stage + (':' + detail if detail else ''), encoding='utf-8'
+                )
         command = [sys.executable, '-B', '-m', 'mvp.autotrade_mvp.product_worker', '--state-dir', str(root), '--action', action, '--command-id', payload['command_id'], '--parent-pid', str(os.getpid())]
         if payload['stop_after_episodes'] is not None:
             command += ['--stop', str(payload['stop_after_episodes'])]
         try:
+            diagnostic('worker_launch')
             # The desktop Host owns a private stdin control pipe. Never pass
             # that pipe to the worker process; an isolated worker has no
             # interactive input and must not consume Host STOP control.
             completed = subprocess.run(
                 command, stdin=subprocess.DEVNULL, capture_output=True, timeout=300
             )
+            diagnostic('worker_exited', str(completed.returncode))
         except (OSError, subprocess.SubprocessError) as error:
             # Process-launch failure and timeout are recoverable execution
             # uncertainty, not permission to strand a durable Host operation in
@@ -240,7 +247,9 @@ def execute_simulation_action(journal, action, payload, accepted_at):
         # after the worker exits and derive the operator receipt only from the
         # validated durable projection. This prevents a stale/forged success
         # payload from certifying cash, position, protocol identity or edge.
+        diagnostic('inspection_started')
         inspected = inspect_canonical_simulation(root)
+        diagnostic('inspection_returned')
         if type(inspected) is not dict:
             raise ValueError('simulation worker produced no canonical durable state')
         status = inspected.get('status')
@@ -265,6 +274,7 @@ def execute_simulation_action(journal, action, payload, accepted_at):
             or report.get('reconciled') is not True
             or report.get('economic_edge_status') != 'INCONCLUSIVE'
         ):
+            diagnostic('inspection_unverified')
             raise ValueError('simulation worker durable completion is not verified')
         result = {
             'status': 'COMPLETED' if completed_episodes == len(protocol['prices']) else 'PAUSED',
@@ -282,8 +292,12 @@ def execute_simulation_action(journal, action, payload, accepted_at):
         'occurred_at': accepted_at, 'observed_at': accepted_at, 'committed_at': accepted_at,
         'correlation_id': payload['command_id'], 'causation_id': None, 'payload': data,
         'payload_hash': payload_digest(data), 'evidence_refs': []}
+    if action != 'BACKUP_SIMULATION':
+        diagnostic('receipt_append')
     journal.append_event(
         event,
         expected_journal_sequence=verified_journal_cut,
     )
+    if action != 'BACKUP_SIMULATION':
+        diagnostic('receipt_committed')
     return resolve_simulation_action(journal, action, payload)

@@ -221,7 +221,12 @@ def execute_simulation_action(journal, action, payload, accepted_at):
         if payload['stop_after_episodes'] is not None:
             command += ['--stop', str(payload['stop_after_episodes'])]
         try:
-            completed = subprocess.run(command, capture_output=True, timeout=300)
+            # The desktop Host owns a private stdin control pipe. Never pass
+            # that pipe to the worker process; an isolated worker has no
+            # interactive input and must not consume Host STOP control.
+            completed = subprocess.run(
+                command, stdin=subprocess.DEVNULL, capture_output=True, timeout=300
+            )
         except (OSError, subprocess.SubprocessError) as error:
             # Process-launch failure and timeout are recoverable execution
             # uncertainty, not permission to strand a durable Host operation in

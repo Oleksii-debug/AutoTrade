@@ -65,9 +65,8 @@ class JournalStoreTests(unittest.TestCase):
             self.assertFalse(state["delivered"])
             self.assertEqual(state["outbox_id"], pending["outbox_id"])
             self.assertEqual(state["envelope_hash"], pending["envelope_hash"])
-            self.assertIsNone(
+            with self.assertRaisesRegex(ValueError, "publication is missing"):
                 store.outbox_delivery_state("evt-1", topic="other.events")
-            )
 
             self.assertTrue(
                 store.mark_outbox_delivered(

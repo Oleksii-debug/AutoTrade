@@ -436,7 +436,14 @@ def _stable_runtime_components(
             raise AutonomousRuntimeCheckpointError(
                 "completed autonomous episode chronology is not contiguous"
             )
-        completed_values.append(dict(item))
+        # The terminal completion receipt is attached atomically to the
+        # durable episode after its runtime preimage was captured. Its seal
+        # proves publication of that episode; it is not part of strategy
+        # state. Excluding it keeps the persisted cut stable on reopen.
+        completed_values.append({
+            key: value for key, value in item.items()
+            if key != COMPLETION_RECEIPT_FIELD
+        })
 
     last = completed_values[-1] if completed_values else None
     financial_projection = (

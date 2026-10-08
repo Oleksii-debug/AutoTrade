@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import timedelta
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -18,6 +18,7 @@ from mvp.autotrade_mvp.production_bybit import (
     build_production_bybit_order_sender,
 )
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
+from mvp.autotrade_mvp import production_host
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
 from mvp.autotrade_mvp.provider_transport import ProviderTransportScopeError
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
@@ -28,7 +29,7 @@ from mvp.tests.test_bybit_v5 import READ_AT, write_capability
 from mvp.tests.test_reconciliation_journal import reconciliation
 
 
-_NOW = datetime(2026, 10, 4, 2, 0, tzinfo=timezone.utc)
+_NOW = READ_AT
 
 
 class _FenceStub:
@@ -75,6 +76,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             server=object(),
             instance_fence=_FenceStub(),
             admission_gate=object(),
+            issuance_token=production_host._RUNTIME_ISSUANCE_TOKEN,
         )
         return compose_financial_authority(host), host, boundary
 
@@ -136,7 +138,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             runtime.journal,
             reconciliation_id=reconciliation_id,
             result=result,
-            observed_at="2026-10-04T01:59:59Z",
+            observed_at=(_NOW - timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
             host_id=owner.owner_id,
             owner_epoch=str(owner.epoch),
         )
@@ -384,7 +386,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             finally:
                 SecurityBoundary.lease_for_execution = original
 
-            self.assertEqual(outcome.status, "SENT")
+            self.assertEqual(outcome.status, "SENT", outcome.reason)
             self.assertEqual(outcome.reason, "sent_confirmed")
             self.assertEqual(outcome.response["retCode"], 0)
             self.assertEqual(outcome.response["result"]["orderId"], "provider-1")

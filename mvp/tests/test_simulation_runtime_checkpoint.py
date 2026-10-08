@@ -64,6 +64,16 @@ class AutonomousRuntimeCheckpointTests(unittest.TestCase):
                 path.read_text(encoding="utf-8")
             )
             self.assertEqual(final_checkpoint.replay.cursor, len(PRICES))
+            final_bytes = path.read_bytes()
+            with patch.object(
+                SimulatedProvider,
+                "transport_send",
+                side_effect=AssertionError("completed checkpoint reopen cannot send"),
+            ):
+                reopened = run(restarted)
+            self.assertEqual(reopened["status"], "COMPLETED")
+            self.assertEqual(reopened["new_outbound_requests"], 0)
+            self.assertEqual(path.read_bytes(), final_bytes)
 
     def test_identical_semantics_in_distinct_journal_backings_keep_distinct_provenance(self):
         with TemporaryDirectory() as first, TemporaryDirectory() as second:

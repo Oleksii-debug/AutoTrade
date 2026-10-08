@@ -78,8 +78,11 @@ class AutonomousPartialFillLoopTests(unittest.TestCase):
                     {
                         "event_id": f"zero-publication-test-{number}",
                         "event_type": "PublicationTest",
-                        "aggregate_type": "zero_publication_test",
-                        "aggregate_id": f"item-{number}",
+                        "aggregate_type": (
+                            "canonical_autonomous_simulation"
+                            if number == 1 else "zero_publication_test"
+                        ),
+                        "aggregate_id": "test-run" if number == 1 else f"item-{number}",
                         "aggregate_version": "1",
                         "payload": payload,
                         "payload_hash": payload_digest(payload),
@@ -88,15 +91,17 @@ class AutonomousPartialFillLoopTests(unittest.TestCase):
                     outbox_topic=topic,
                 )
             before = store.pending_outbox(limit=1000)
-            with self.assertRaisesRegex(ValueError, "foreign publication"):
-                session._deliver_pending_zero_publications(store)
-            self.assertEqual(store.pending_outbox(limit=1000), before)
+            session._deliver_pending_zero_publications(store, run_id="test-run")
+            self.assertEqual(
+                [item["topic"] for item in store.pending_outbox(limit=1000)],
+                ["ui.host-events"],
+            )
 
             foreign = next(item for item in before if item["topic"] == "ui.host-events")
             store.mark_outbox_delivered(
                 foreign["outbox_id"], expected_envelope_hash=foreign["envelope_hash"]
             )
-            session._deliver_pending_zero_publications(store)
+            session._deliver_pending_zero_publications(store, run_id="test-run")
             self.assertEqual(store.pending_outbox_count(), 0)
 
     def test_each_partial_atomically_consumes_only_its_cash_and_creates_its_settlement(self):

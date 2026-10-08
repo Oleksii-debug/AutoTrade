@@ -13,6 +13,7 @@ from mvp.autotrade_mvp.host_network import AuthenticatedHostApplication
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.production_bybit import build_production_bybit_order_sender
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
+from mvp.autotrade_mvp import production_host
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
 from mvp.autotrade_mvp.security import SecurityBoundary
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
@@ -54,6 +55,7 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             server=object(),
             instance_fence=_FenceStub(),
             admission_gate=object(),
+            issuance_token=production_host._RUNTIME_ISSUANCE_TOKEN,
         )
         return compose_financial_authority(host), boundary
 

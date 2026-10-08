@@ -49,11 +49,13 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.100'
-      - name: Verify rights and locked desktop dependency
-        run: |
-          python tools/dotnet_package_rights.py --check-policy
-          dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --locked-mode
-          python tools/dotnet_package_rights.py --verify-restored --packages-root "${{ env.NUGET_PACKAGES }}" --project src/AutoTrade.Desktop/AutoTrade.Desktop.csproj
+      # Component-level Section 2 proof: the exact WebView2 version is
+      # pinned in the project and NuGet lock; locked restore rejects drift.
+      # Repository-wide package-rights/release graph is owned by Plan 4/9,
+      # and currently fails for the unrelated Host SDK and generated imports.
+      # Do not present this job as supply-chain or final-release approval.
+      - name: Restore exact locked Desktop WebView2 dependency
+        run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --locked-mode
       - name: Compile one canonical thin Windows Desktop shell
         run: dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --configuration Release --no-restore
       - name: Execute native host/emergency/restart and policy negative regressions

@@ -7,6 +7,7 @@ from mvp.autotrade_mvp.dispatch import (
     DispatchBlocked,
     ExactJsonTransportResponse,
     GuardedDispatcher,
+    submission_attempt_aggregate_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
@@ -36,6 +37,80 @@ class DurableUnknownRestartTests(unittest.TestCase):
                 "owner_epoch": "1",
             }
         )
+
+    @staticmethod
+    def _append_manual_unknown_chain(
+        store: JournalStore,
+        *,
+        attempt_id: str = "attempt-manual",
+        prepared_envelope_epoch: str = "1",
+        prepared_payload_epoch: int = 1,
+        sending_envelope_epoch: str = "1",
+        sending_payload_epoch: int = 1,
+        sending_owner_token: str = "sender-a",
+        sending_client_order_id: str = "client-manual",
+        unknown_envelope_epoch: str = "1",
+        unknown_client_order_id: str = "client-manual",
+    ) -> None:
+        aggregate_id = submission_attempt_aggregate_id(
+            environment="SIMULATION",
+            account_id="acct",
+            attempt_id=attempt_id,
+        )
+        rows = (
+            (
+                "prepared",
+                "SubmissionPrepared",
+                1,
+                prepared_envelope_epoch,
+                {
+                    "attempt_id": attempt_id,
+                    "intent_id": "intent-manual",
+                    "client_order_id": "client-manual",
+                    "provider": "sim",
+                    "environment": "SIMULATION",
+                    "account_id": "acct",
+                    "owner_token": "sender-a",
+                    "owner_epoch": prepared_payload_epoch,
+                },
+            ),
+            (
+                "sending",
+                "SubmissionSending",
+                2,
+                sending_envelope_epoch,
+                {
+                    "client_order_id": sending_client_order_id,
+                    "owner_token": sending_owner_token,
+                    "owner_epoch": sending_payload_epoch,
+                    "reason": "final_send_barrier_passed",
+                },
+            ),
+            (
+                "unknown",
+                "SubmissionUnknown",
+                3,
+                unknown_envelope_epoch,
+                {
+                    "client_order_id": unknown_client_order_id,
+                    "reason": "transport_result_ambiguous",
+                },
+            ),
+        )
+        for suffix, event_type, version, owner_epoch, payload in rows:
+            store.append_event(
+                {
+                    "event_id": f"manual-{attempt_id}-{suffix}",
+                    "event_type": event_type,
+                    "aggregate_type": "submission_attempt",
+                    "aggregate_id": aggregate_id,
+                    "aggregate_version": str(version),
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-09-25T20:01:00Z",
+                    "owner_epoch": owner_epoch,
+                }
+            )
 
     def _unknown_dispatch(self, store: JournalStore, *, attempt_id: str = "attempt-1"):
         dispatcher = GuardedDispatcher(
@@ -80,6 +155,92 @@ class DurableUnknownRestartTests(unittest.TestCase):
             self.assertIn("provider_uncertainty", recovery.reason_codes)
             with self.assertRaisesRegex(PermissionError, "not ready|unresolved"):
                 recovery.validate_admission(owner.epoch)
+
+    def test_manual_same_sender_unknown_recovers_prepared_owner_epoch(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            self._append_manual_unknown_chain(store)
+            recovery = RecoveryController(
+                owner_store=store,
+                owner_scope="SIMULATION:acct",
+            )
+
+            recovered = recovery.recover_durable_submission_uncertainty(
+                environment="SIMULATION",
+                account_id="acct",
+            )
+
+            self.assertEqual(recovered, ("attempt-manual",))
+            self.assertEqual(
+                recovery._unresolved_send_bindings["attempt-manual"][1],
+                1,
+            )
+            self.assertEqual(
+                recovery.unresolved_attempts,
+                {"attempt-manual"},
+            )
+
+    def test_restart_rejects_cross_sender_submission_chains_before_state_mutation(self):
+        cases = (
+            (
+                "non-canonical prepared envelope epoch",
+                {"prepared_envelope_epoch": "01"},
+                "SubmissionPrepared owner epoch is invalid",
+            ),
+            (
+                "prepared payload epoch",
+                {"prepared_payload_epoch": 2},
+                "SubmissionPrepared payload owner epoch does not match envelope",
+            ),
+            (
+                "sending envelope epoch",
+                {
+                    "sending_envelope_epoch": "2",
+                    "unknown_envelope_epoch": "2",
+                },
+                "owner epoch changed within one attempt",
+            ),
+            (
+                "sending payload epoch",
+                {"sending_payload_epoch": 2},
+                "SubmissionSending owner epoch does not match Prepared",
+            ),
+            (
+                "sending owner token",
+                {"sending_owner_token": "sender-b"},
+                "SubmissionSending owner token does not match Prepared",
+            ),
+            (
+                "sending client order",
+                {"sending_client_order_id": "client-other"},
+                "client order identity changed within one attempt",
+            ),
+            (
+                "terminal client order",
+                {"unknown_client_order_id": "client-other"},
+                "client order identity changed within one attempt",
+            ),
+        )
+        for label, overrides, pattern in cases:
+            with self.subTest(case=label), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                self._append_manual_unknown_chain(store, **overrides)
+                recovery = RecoveryController(
+                    owner_store=store,
+                    owner_scope="SIMULATION:acct",
+                )
+
+                with self.assertRaisesRegex(RuntimeError, pattern):
+                    recovery.recover_durable_submission_uncertainty(
+                        environment="SIMULATION",
+                        account_id="acct",
+                    )
+
+                self.assertEqual(recovery._unresolved_send_attempts, set())
+                self.assertEqual(recovery._unresolved_send_bindings, {})
+                self.assertEqual(recovery._recovered_unknown_identities, {})
+                self.assertEqual(recovery.unresolved_attempts, set())
+                self.assertEqual(recovery.state, HostState.STOPPED)
 
     def test_completed_send_is_not_recovered_as_unknown(self):
         with TemporaryDirectory() as directory:

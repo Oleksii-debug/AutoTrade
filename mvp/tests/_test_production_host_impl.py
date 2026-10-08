@@ -172,13 +172,25 @@ class InstanceFenceTests(unittest.TestCase):
 class ProductionHostRuntimeTests(unittest.TestCase):
     @staticmethod
     def _runtime(*, server=None, gate=None, fence=None):
+        config = ProductionHostConfig(
+            journal_path=Path.cwd().resolve() / "runtime-test-journal.sqlite3",
+            account_id="runtime-test-account",
+            environment="SIMULATION",
+            host_id="runtime-test-host",
+            bind_host="127.0.0.1",
+            bind_port=18765,
+            public_origin="http://127.0.0.1:18765",
+        )
+        journal = Mock()
+        journal.store_identity = Mock()
         return ProductionHostRuntime(
-            config=Mock(),
-            journal=Mock(),
+            config=config,
+            journal=journal,
             application=Mock(),
             server=server or Mock(),
             instance_fence=fence or Mock(),
             admission_gate=gate or Mock(),
+            issuance_token=production_host._RUNTIME_ISSUANCE_TOKEN,
         )
 
     def test_shutdown_cut_rejects_handler_that_reaches_gate_after_closing(self):

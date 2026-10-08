@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import Mock, patch
 
-from mvp.tests._test_production_host_impl import (
+from _test_production_host_impl import (
     CommandAdmissionGateTests,
     ProductionHostConfigTests,
     ProductionHostRuntimeTests,
@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.host_network import TransportResponse
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.production_host import (
     ProductionHostConfig,
+    ProductionHostRuntime,
     _InstanceFence,
     _StoreIdentityGate,
     build_production_host,
@@ -125,6 +126,51 @@ class ProductionHostCompositionTests(unittest.TestCase):
             finally:
                 runtime.close()
             fence.release.assert_called_once_with()
+
+    def test_runtime_constructor_requires_canonical_issuance(self):
+        with self.assertRaisesRegex(
+            PermissionError,
+            "issued by canonical host composition",
+        ):
+            ProductionHostRuntime(
+                config=Mock(),
+                journal=Mock(),
+                application=Mock(),
+                server=Mock(),
+                instance_fence=Mock(),
+                admission_gate=Mock(),
+            )
+
+    def test_runtime_config_reads_return_detached_canonical_snapshots(self):
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            application = Mock()
+            server = Mock()
+            patches = self._composition_patches(
+                application=application,
+                server=server,
+            )
+            with patches[0], patches[1], patches[2], patches[3]:
+                runtime = build_production_host(
+                    config,
+                    security_boundary=self.DummySecurityBoundary(),
+                    principal_resolver=Mock(),
+                    snapshot_provider=Mock(),
+                )
+            try:
+                exposed = runtime.config
+                object.__setattr__(exposed, "environment", "LIVE")
+                object.__setattr__(exposed, "account_id", "retargeted")
+                object.__setattr__(exposed, "host_id", "forged-host")
+
+                current = runtime.config
+                self.assertEqual(current.environment, "PAPER")
+                self.assertEqual(current.account_id, "paper-account")
+                self.assertEqual(current.host_id, "host-a")
+                self.assertIsNot(current, exposed)
+                self.assertIsNot(current, config)
+            finally:
+                runtime.close()
 
     def test_resource_lock_failure_constructs_no_financial_or_listener_components(self):
         with TemporaryDirectory() as directory:
@@ -299,6 +345,136 @@ class ProductionHostCompositionTests(unittest.TestCase):
                     snapshot_provider=Mock(),
                 )
                 successor.close()
+
+    def test_build_readmits_exact_config_before_host_side_effects(self):
+        with TemporaryDirectory() as directory:
+            base = self._config(directory)
+            touched = []
+
+            class HostileText(str):
+                def strip(self):
+                    touched.append("strip")
+                    raise AssertionError("hostile config text executed")
+
+                def __bool__(self):
+                    touched.append("bool")
+                    raise AssertionError("hostile config text executed")
+
+            class HostileInt(int):
+                def __le__(self, other):
+                    touched.append("le")
+                    raise AssertionError("hostile config integer executed")
+
+                def __gt__(self, other):
+                    touched.append("gt")
+                    raise AssertionError("hostile config integer executed")
+
+            for field, hostile, message in (
+                ("host_id", HostileText("host-a"), "host_id must be exact text"),
+                (
+                    "bind_port",
+                    HostileInt(8765),
+                    "bind_port must be an exact integer",
+                ),
+            ):
+                with self.subTest(field=field):
+                    config = self._config(directory)
+                    object.__setattr__(config, field, hostile)
+                    fence = Mock()
+                    with (
+                        patch.object(
+                            production_host,
+                            "SecurityBoundary",
+                            self.DummySecurityBoundary,
+                        ),
+                        patch.object(
+                            production_host,
+                            "_InstanceFence",
+                            fence,
+                        ),
+                    ):
+                        with self.assertRaisesRegex(TypeError, message):
+                            build_production_host(
+                                config,
+                                security_boundary=self.DummySecurityBoundary(),
+                                principal_resolver=Mock(),
+                                snapshot_provider=Mock(),
+                            )
+                    fence.acquire.assert_not_called()
+            self.assertEqual(touched, [])
+
+    def test_build_rejects_security_boundary_subclass_before_host_side_effects(self):
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+
+            class HostileSecurityBoundary(self.DummySecurityBoundary):
+                pass
+
+            fence = Mock()
+            with (
+                patch.object(
+                    production_host,
+                    "SecurityBoundary",
+                    self.DummySecurityBoundary,
+                ),
+                patch.object(production_host, "_InstanceFence", fence),
+            ):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "security_boundary must be exact SecurityBoundary",
+                ):
+                    build_production_host(
+                        config,
+                        security_boundary=HostileSecurityBoundary(),
+                        principal_resolver=Mock(),
+                        snapshot_provider=Mock(),
+                    )
+            fence.acquire.assert_not_called()
+
+    def test_runtime_binding_failure_closes_listener_and_releases_fence(self):
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            application = Mock()
+            server = Mock()
+            fence = Mock()
+            failure = RuntimeError("runtime binding failed")
+            with (
+                patch.object(
+                    production_host,
+                    "SecurityBoundary",
+                    self.DummySecurityBoundary,
+                ),
+                patch.object(
+                    production_host,
+                    "_InstanceFence",
+                ) as fence_type,
+                patch.object(
+                    production_host,
+                    "AuthenticatedHostApplication",
+                    return_value=application,
+                ),
+                patch.object(
+                    production_host,
+                    "AuthenticatedHostServer",
+                    return_value=server,
+                ),
+                patch.object(
+                    production_host,
+                    "ProductionHostRuntime",
+                    side_effect=failure,
+                ),
+            ):
+                fence_type.acquire.return_value = fence
+                with self.assertRaises(RuntimeError) as raised:
+                    build_production_host(
+                        config,
+                        security_boundary=self.DummySecurityBoundary(),
+                        principal_resolver=Mock(),
+                        snapshot_provider=Mock(),
+                    )
+            self.assertIs(raised.exception, failure)
+            server.server_close.assert_called_once_with()
+            fence.release.assert_called_once_with()
 
     def test_https_requires_tls_context(self):
         with TemporaryDirectory() as directory:

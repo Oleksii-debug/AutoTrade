@@ -635,7 +635,9 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
             if (
                 set(payload)
                 != {"episode", "protocol_digest", "provider_state",
-                    "fills" if protocol.get("execution_profile") == "TWO_EQUAL_PARTIALS" else "fill"}
+                    "fills" if protocol.get("execution_profile") in {
+                        "TWO_EQUAL_PARTIALS", "PARTIAL_THEN_FULL_V1"
+                    } else "fill"}
                 or type(payload.get("provider_state")) is not dict
             ):
                 raise ValueError(
@@ -725,7 +727,11 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
         if exact_subtract(exact_sum((pnl.realized_pnl, pnl.unrealized_pnl)),
                           economic.fee_expense("USD")) != net_pnl:
             raise ValueError("autonomous P&L does not conserve financial equity")
-        report = {"evidence_class": "SIMULATION", "final_equity": canonical_decimal_text(equity),
+        report = {"evidence_class": "SIMULATION", "journal_sequence": cut,
+            "environment": ENVIRONMENT, "initial_equity": protocol["initial_cash"],
+            "cash": canonical_decimal_text(cash),
+            "ending_position": canonical_decimal_text(position),
+            "final_equity": canonical_decimal_text(equity),
             "net_pnl": canonical_decimal_text(net_pnl),
             "realized_pnl": canonical_decimal_text(pnl.realized_pnl),
             "unrealized_pnl": canonical_decimal_text(pnl.unrealized_pnl),

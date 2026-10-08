@@ -17,9 +17,10 @@ from mvp.autotrade_mvp.cli import get_economic_report, get_status, main
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.durable_settlement import DurableSettlementBook
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.simulated_provider import SimulatedProvider
+from mvp.autotrade_mvp.simulation_status import inspect_canonical_simulation
 from mvp.tests.test_autonomous_simulation import run as base_run, NOW
 from research.autotrade_research.artifacts.store import ArtifactStore
 
@@ -57,6 +58,52 @@ def owners(directory):
 
 
 class AutonomousPartialFillLoopTests(unittest.TestCase):
+    def test_partial_then_full_status_reads_retained_two_fill_observation(self):
+        with TemporaryDirectory() as directory:
+            result = run(directory, ["100", "101", "103", "102"], partial_fills=True)
+            status = inspect_canonical_simulation(directory)["status"]
+            self.assertEqual(result["status"], "COMPLETED")
+            self.assertEqual(status["session_status"], "COMPLETED")
+            self.assertEqual(status["completed_episodes"], 4)
+            self.assertEqual(status["position"], "2")
+
+    def test_zero_does_not_acknowledge_foreign_host_ui_publications(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            for number, topic in enumerate(
+                ("autotrade.simulation.events", "ui.host-events"), start=1
+            ):
+                payload = {"number": number}
+                store.append_event(
+                    {
+                        "event_id": f"zero-publication-test-{number}",
+                        "event_type": "PublicationTest",
+                        "aggregate_type": (
+                            "canonical_autonomous_simulation"
+                            if number == 1 else "zero_publication_test"
+                        ),
+                        "aggregate_id": "test-run" if number == 1 else f"item-{number}",
+                        "aggregate_version": "1",
+                        "payload": payload,
+                        "payload_hash": payload_digest(payload),
+                        "committed_at": "2026-09-30T12:00:00Z",
+                    },
+                    outbox_topic=topic,
+                )
+            before = store.pending_outbox(limit=1000)
+            session._deliver_pending_zero_publications(store, run_id="test-run")
+            self.assertEqual(
+                [item["topic"] for item in store.pending_outbox(limit=1000)],
+                ["ui.host-events"],
+            )
+
+            foreign = next(item for item in before if item["topic"] == "ui.host-events")
+            store.mark_outbox_delivered(
+                foreign["outbox_id"], expected_envelope_hash=foreign["envelope_hash"]
+            )
+            session._deliver_pending_zero_publications(store, run_id="test-run")
+            self.assertEqual(store.pending_outbox_count(), 0)
+
     def test_each_partial_atomically_consumes_only_its_cash_and_creates_its_settlement(self):
         with TemporaryDirectory() as directory, patch.object(session, "INITIAL_CASH", Decimal("500")):
             original = session.commit_order_fill_with_reservation_consumption
@@ -166,7 +213,13 @@ session.run_autonomous_simulation(["100", "101", "103", "90", "110", "120", "121
                 context.traps[Inexact] = context.traps[Rounded] = True
                 actual = run(partial, PRICES, execution_profile=PROFILE)
             self.assertEqual((actual["cash"], actual["position"]), (expected["cash"], expected["position"]))
-            self.assertEqual(get_economic_report(partial), get_economic_report(full))
+            partial_report = get_economic_report(partial)
+            full_report = get_economic_report(full)
+            self.assertNotEqual(partial_report["journal_sequence"], full_report["journal_sequence"])
+            self.assertEqual(
+                {key: value for key, value in partial_report.items() if key != "journal_sequence"},
+                {key: value for key, value in full_report.items() if key != "journal_sequence"},
+            )
 
     def test_policy_registration_uses_frozen_time_and_matches_after_restart(self):
         original_register = session.AuthorityService.register_policy

@@ -20,6 +20,13 @@ from autotrade_numeric.exact_decimal import (
 
 from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_response_limits import require_provider_json_depth
+from .sender_authority import sender_authority_window
+
+
+# Retain the installed JournalStore CAS primitives once. The final-send boundary
+# must not be redirected by later mutation of public class attributes.
+_CANONICAL_JOURNAL_CURRENT_SEQUENCE = JournalStore.current_journal_sequence
+_CANONICAL_JOURNAL_COMMIT_COMMAND = JournalStore.commit_command
 
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
@@ -628,32 +635,56 @@ class GuardedDispatcher:
         version: int,
         payload: dict[str, Any],
         now: str,
+        expected_journal_sequence: int | None = None,
+        _journal_commit_command: Callable[..., object] | None = None,
     ):
         store = self._journal_store_authority()
-        return JournalStore.append_event(
-            store,
-            _envelope(
-                scope_key=self.scope_key,
-                aggregate_id=self._aggregate_id(attempt_id),
-                environment=self.environment,
-                attempt_id=attempt_id,
-                event_type=event_type,
-                version=version,
-                payload=payload,
-                now=now,
-                owner_epoch=self.owner_epoch,
-            ),
-            outbox_topic="autotrade.submission.events",
+        envelope = _envelope(
+            scope_key=self.scope_key,
+            aggregate_id=self._aggregate_id(attempt_id),
+            environment=self.environment,
+            attempt_id=attempt_id,
+            event_type=event_type,
+            version=version,
+            payload=payload,
+            now=now,
+            owner_epoch=self.owner_epoch,
         )
+        if expected_journal_sequence is None:
+            return JournalStore.append_event(
+                store,
+                envelope,
+                outbox_topic="autotrade.submission.events",
+            )
+        commit_command = (
+            _CANONICAL_JOURNAL_COMMIT_COMMAND
+            if _journal_commit_command is None
+            else _journal_commit_command
+        )
+        _, inserted, appended = commit_command(
+            store,
+            command_id=envelope["event_id"],
+            actor=f"dispatcher:{self.scope_key}",
+            environment=self.environment,
+            idempotency_key=f"send-barrier:{envelope['event_id']}",
+            request={
+                "event": envelope,
+                "journal_sequence": expected_journal_sequence,
+            },
+            result={"event_id": envelope["event_id"]},
+            state_version=expected_journal_sequence,
+            events=[(envelope, "autotrade.submission.events")],
+            expected_journal_sequence=expected_journal_sequence,
+        )
+        if not inserted:
+            raise DispatchBlocked("send_barrier_already_committed")
+        return appended[0]
 
     @staticmethod
     def _outcome_from_terminal(event: dict[str, Any], client_order_id: str) -> DispatchOutcome:
         payload = event["payload"]
         if event["event_type"] == "SubmissionSent":
             if _has_exact_response_markers(payload):
-                # Any reserved exact marker commits the row to the SHA-bound
-                # evidence contract. Partial/mislabeled exact rows must never
-                # fall through to the historical response mirror.
                 if payload.get("response_encoding") != "utf-8-json":
                     return DispatchOutcome(
                         "UNKNOWN", client_order_id, None, "exact_response_invalid"
@@ -680,7 +711,6 @@ class GuardedDispatcher:
                 return DispatchOutcome(
                     "SENT", client_order_id, exact_payload, "sent_confirmed"
                 )
-            # Only marker-free historical rows may use the legacy mirror.
             return DispatchOutcome(
                 "SENT", client_order_id, payload.get("response"), "sent_confirmed"
             )
@@ -753,6 +783,12 @@ class GuardedDispatcher:
         sender_check: SenderCheck | None = None,
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
+        # Capture the installed journal-cut callables before any caller callback
+        # can execute. final_barrier_clock, sender_check and authority_check are
+        # caller-controlled seams and cannot redirect the irreversible CAS.
+        journal_current_sequence = _CANONICAL_JOURNAL_CURRENT_SEQUENCE
+        journal_commit_command = _CANONICAL_JOURNAL_COMMIT_COMMAND
+
         for value, name in (
             (attempt_id, "attempt_id"),
             (intent_id, "intent_id"),
@@ -870,33 +906,27 @@ class GuardedDispatcher:
         guard_called = False
         barrier_passed = False
         barrier_now = now
+        sender_window = None
+        sender_window_entered = False
 
         def final_guard() -> None:
             nonlocal guard_called, barrier_passed, barrier_now
+            nonlocal sender_window, sender_window_entered
             if guard_called:
                 raise RuntimeError("final send guard may be consumed only once")
             guard_called = True
-            # request_frozen is a recursively immutable canonical JSON snapshot.
-            # Transport cannot pass the barrier for one payload and then mutate
-            # the same object before its actual provider call.
             if final_barrier_clock is not None:
                 try:
                     barrier_now = final_barrier_clock()
                     parsed_barrier_now = _instant(barrier_now)
                 except Exception as error:
                     barrier_now = now
-                    reason = (
-                        "final_barrier_clock_failed:"
-                        + type(error).__name__
-                    )
+                    reason = "final_barrier_clock_failed:" + type(error).__name__
                     self._append(
                         attempt_id=attempt_id,
                         event_type="SubmissionBlocked",
                         version=2,
-                        payload={
-                            "client_order_id": client_order_id,
-                            "reason": reason,
-                        },
+                        payload={"client_order_id": client_order_id, "reason": reason},
                         now=barrier_now,
                     )
                     raise DispatchBlocked(reason) from error
@@ -913,6 +943,13 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked("final_barrier_clock_moved_backwards")
+
+            # Snapshot the exact canonical journal cut before sender/reconciliation
+            # and final financial authority validation. SubmissionSending can
+            # commit only if no durable fact changed across those checks.
+            store = self._journal_store_authority()
+            barrier_journal_sequence = journal_current_sequence(store)
+
             if self.environment in {"PAPER", "LIVE"} and sender_check is None:
                 barrier_reason = "sender_fence_required"
                 self._append(
@@ -928,6 +965,33 @@ class GuardedDispatcher:
                     now=barrier_now,
                 )
                 raise DispatchBlocked(barrier_reason)
+            if self.environment in {"PAPER", "LIVE"}:
+                try:
+                    sender_window = sender_authority_window(
+                        self._journal_store_authority(),
+                        owner_scope=f"{self.environment}:{self.account_id}",
+                    )
+                    sender_window.__enter__()
+                    sender_window_entered = True
+                except Exception as error:
+                    sender_window = None
+                    sender_window_entered = False
+                    barrier_reason = (
+                        "sender_authority_gate_failed:" + type(error).__name__
+                    )
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionBlocked",
+                        version=2,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": barrier_reason,
+                            "owner_token": self.owner_token,
+                            "owner_epoch": self.owner_epoch,
+                        },
+                        now=barrier_now,
+                    )
+                    raise DispatchBlocked(barrier_reason) from error
             if sender_check is not None:
                 try:
                     sender_check(self.owner_token, self.owner_epoch)
@@ -950,8 +1014,7 @@ class GuardedDispatcher:
                 authority_result = authority_check(intent_hash, barrier_now)
             except Exception as error:
                 barrier_reason = (
-                    "authority_check_failed_at_final_barrier:"
-                    + type(error).__name__
+                    "authority_check_failed_at_final_barrier:" + type(error).__name__
                 )
                 self._append(
                     attempt_id=attempt_id,
@@ -971,23 +1034,58 @@ class GuardedDispatcher:
                     now=barrier_now,
                 )
                 raise DispatchBlocked(barrier_reason)
-            self._append(
-                attempt_id=attempt_id,
-                event_type="SubmissionSending",
-                version=2,
-                payload={
-                    "client_order_id": client_order_id,
-                    "owner_token": self.owner_token,
-                    "owner_epoch": self.owner_epoch,
-                    "reason": "final_send_barrier_passed",
-                },
-                now=barrier_now,
-            )
+            try:
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionSending",
+                    version=2,
+                    payload={
+                        "client_order_id": client_order_id,
+                        "owner_token": self.owner_token,
+                        "owner_epoch": self.owner_epoch,
+                        "reason": "final_send_barrier_passed",
+                    },
+                    now=barrier_now,
+                    expected_journal_sequence=barrier_journal_sequence,
+                    _journal_commit_command=journal_commit_command,
+                )
+            except ValueError as error:
+                reason = "journal_changed_during_final_send_validation"
+                latest = self._events(attempt_id)
+                if latest and latest[-1]["event_type"] == "SubmissionPrepared":
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionBlocked",
+                        version=2,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": reason,
+                        },
+                        now=barrier_now,
+                    )
+                raise DispatchBlocked(reason) from error
             barrier_passed = True
 
         try:
-            response = transport_send(client_order_id, request_frozen, final_guard)
+            try:
+                response = transport_send(client_order_id, request_frozen, final_guard)
+            finally:
+                if sender_window_entered and sender_window is not None:
+                    sender_window.__exit__(None, None, None)
+                    sender_window_entered = False
         except DispatchBlocked as error:
+            events = self._events(attempt_id)
+            if events:
+                last = events[-1]
+                if last["event_type"] == "SubmissionSending":
+                    return DispatchOutcome(
+                        "UNKNOWN",
+                        client_order_id,
+                        None,
+                        "concurrent_send_barrier_already_committed",
+                    )
+                if last["event_type"] in {"SubmissionSent", "SubmissionUnknown"}:
+                    return self._outcome_from_terminal(last, client_order_id)
             return DispatchOutcome("BLOCKED", client_order_id, None, str(error))
         except Exception as error:
             events = self._events(attempt_id)
@@ -1017,11 +1115,6 @@ class GuardedDispatcher:
                 )
                 return DispatchOutcome("BLOCKED", client_order_id, None, "transport_failed_before_send")
             if not barrier_passed:
-                # The provider wrapper invoked a guard that rejected, but did
-                # not propagate DispatchBlocked. Once it masks that rejection
-                # and raises something else, we can no longer prove that it
-                # refrained from an outbound side effect after the guard.
-                # Preserve worst-case exposure and force reconciliation.
                 next_version = int(last["aggregate_version"]) + 1
                 self._append(
                     attempt_id=attempt_id,
@@ -1058,11 +1151,6 @@ class GuardedDispatcher:
             return DispatchOutcome("UNKNOWN", client_order_id, None, "provider_guard_contract_violation")
 
         if not barrier_passed:
-            # A wrapper that catches DispatchBlocked (or any final-guard
-            # failure) and then returns has violated the only safe outbound
-            # contract. We cannot prove that it refrained from sending after
-            # swallowing the barrier, so preserve worst-case exposure and force
-            # reconciliation instead of fabricating SENT or safe-to-retry.
             events = self._events(attempt_id)
             last = events[-1]
             next_version = int(last["aggregate_version"]) + 1
@@ -1087,11 +1175,6 @@ class GuardedDispatcher:
         terminal_reason = "sent_confirmed"
         try:
             if type(response) is ExactJsonTransportResponse:
-                # The exact raw bytes + digest are the durable source.
-                # The prior "response" JSON mirror could silently round
-                # decimals to float; persisting Decimal objects directly is
-                # not JSON-serializable and misclassified valid sends UNKNOWN.
-                # Keep the mirror out of exact response events altogether.
                 sent_payload = {
                     "client_order_id": client_order_id,
                     "response_text": response.response_text,
@@ -1104,14 +1187,11 @@ class GuardedDispatcher:
                 terminal_requires_reconciliation = response.requires_reconciliation
                 if terminal_requires_reconciliation:
                     terminal_reason = (
-                        response.ambiguity_reason
-                        or "provider_response_ambiguous"
+                        response.ambiguity_reason or "provider_response_ambiguous"
                     )
                     sent_payload["reason"] = terminal_reason
                     sent_payload["retry_disposition"] = "RECONCILE_FIRST"
             elif isinstance(response, ExactJsonTransportResponse):
-                # Caller-polymorphic post-SEND response getters are not evidence.
-                # A durable UNKNOWN retains the no-blind-retry property.
                 raise TypeError("exact provider response subtype is forbidden")
             else:
                 sent_payload = {
@@ -1131,9 +1211,6 @@ class GuardedDispatcher:
                 now=barrier_now,
             )
         except Exception as persistence_error:
-            # The outbound request has already crossed the final barrier.
-            # Never make this state safe to retry merely because the provider
-            # response could not be journaled.
             try:
                 self._append(
                     attempt_id=attempt_id,
@@ -1149,8 +1226,6 @@ class GuardedDispatcher:
                     now=barrier_now,
                 )
             except Exception:
-                # A durable SubmissionSending row already exists. Recovery will
-                # convert that state to UNKNOWN without another outbound send.
                 raise persistence_error
             return DispatchOutcome(
                 "UNKNOWN",

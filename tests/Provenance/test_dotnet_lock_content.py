@@ -424,7 +424,7 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 }
             }
             (project.parent / 'packages.lock.json').write_text(json.dumps(payload), encoding='utf-8')
-            with self.assertRaisesRegex(ValueError, 'invalid NuGet content hash'):
+            with self.assertRaisesRegex(ValueError, 'DOTNET_PROJECT_LOCK_CONTENT_HASH_INVALID'):
                 dotnet_locked_dependency_graph(root, [project])
 
     def test_missing_package_version_fails_closed(self):
@@ -771,6 +771,36 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 'imported MSBuild PackageReference',
             ):
                 dotnet_locked_dependency_graph(root, [project])
+
+    def test_restore_generated_obj_imports_do_not_change_source_graph(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'Desktop' / 'Desktop.csproj'
+            generated = root / 'src' / 'Desktop' / 'obj' / 'Desktop.csproj.nuget.g.targets'
+            generated.parent.mkdir(parents=True)
+            project.write_text('<Project />', encoding='utf-8')
+            generated.write_text(
+                '<Project><Import Project="missing.targets" /></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(dotnet_imported_package_reference_blockers(root), [])
+            unexpected = generated.parent / 'Injected.targets'
+            unexpected.write_text(
+                '<Project><ItemGroup><PackageReference Include="Injected" '
+                'Version="9.9.9" /></ItemGroup></Project>', encoding='utf-8',
+            )
+            self.assertEqual(dotnet_imported_package_reference_blockers(root), [
+                'DOTNET_IMPORTED_PACKAGE_REFERENCE_UNSUPPORTED:src/Desktop/obj/Injected.targets'
+            ])
+            unexpected.unlink()
+            project.write_text(
+                '<Project><Import Project="obj/Desktop.csproj.nuget.g.targets" /></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                ['DOTNET_EXPLICIT_MSBUILD_IMPORT_UNSUPPORTED:src/Desktop/Desktop.csproj'],
+            )
 
     def test_root_props_package_reference_fails_closed(self):
         with TemporaryDirectory() as directory:

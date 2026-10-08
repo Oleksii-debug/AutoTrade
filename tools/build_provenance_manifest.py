@@ -21,10 +21,10 @@ if __package__:
     )
 else:
     from dotnet_lock import (
-        dotnet_imported_package_reference_blockers,
         dotnet_locked_dependency_graph,
         dotnet_project_package_references,
         dotnet_restore_command_tokens,
+        dotnet_restore_targets_project,
         dotnet_restore_tokens_are_locked,
     )
 

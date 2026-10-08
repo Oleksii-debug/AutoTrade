@@ -11,9 +11,10 @@ from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
 import ssl
-from threading import Condition, Thread, current_thread
+from threading import Condition, RLock, Thread, current_thread
 from typing import Callable
 from urllib.parse import urlsplit
+from weakref import WeakKeyDictionary
 
 from research.autotrade_research.artifacts.resource_lock import (
     ResourceLock,
@@ -52,6 +53,9 @@ _CONFIG_FIELDS = frozenset(
 )
 _TERMINAL_STATES = frozenset({"CLOSED", "FAILED"})
 _STOPPING_STATES = frozenset({"CLOSING", "CLOSED", "FAILED"})
+_RUNTIME_CONFIG_BINDINGS = WeakKeyDictionary()
+_RUNTIME_CONFIG_BINDINGS_LOCK = RLock()
+_RUNTIME_ISSUANCE_TOKEN = object()
 
 
 @dataclass(frozen=True)
@@ -94,6 +98,58 @@ class ProductionHostConfig:
 
         object.__setattr__(self, "journal_path", journal_path)
         object.__setattr__(self, "public_origin", canonical_origin)
+
+
+def _readmit_production_host_config(
+    config: ProductionHostConfig,
+) -> ProductionHostConfig:
+    """Detach one exact canonical config snapshot before host side effects.
+
+    frozen dataclasses prevent ordinary assignment but are not an authority
+    boundary: object.__setattr__ can still replace fields after initial
+    construction. Reject executable scalar/path subclasses before invoking
+    normalization, URL parsing, comparison, hashing, or filesystem code.
+    """
+
+    if type(config) is not ProductionHostConfig:
+        raise TypeError("config must be exact ProductionHostConfig")
+    source_state = vars(config)
+    if type(source_state) is not dict:
+        raise TypeError("production host config state must be an exact dict")
+    state = dict.copy(source_state)
+    if any(type(key) is not str for key in state):
+        raise TypeError("production host config field names must be exact strings")
+    if set(state) != _CONFIG_FIELDS:
+        raise ValueError("production host config state is not canonical")
+
+    journal_path = state["journal_path"]
+    if type(journal_path) is not type(Path()):
+        raise TypeError("production host journal_path must be an exact platform Path")
+    for field in (
+        "account_id",
+        "environment",
+        "host_id",
+        "bind_host",
+        "public_origin",
+    ):
+        if type(state[field]) is not str:
+            raise TypeError(
+                f"production host config field {field} must be exact text"
+            )
+    if type(state["bind_port"]) is not int:
+        raise TypeError(
+            "production host config field bind_port must be an exact integer"
+        )
+
+    return ProductionHostConfig(
+        journal_path=journal_path,
+        account_id=state["account_id"],
+        environment=state["environment"],
+        host_id=state["host_id"],
+        bind_host=state["bind_host"],
+        bind_port=state["bind_port"],
+        public_origin=state["public_origin"],
+    )
 
 
 def _strict_json_object(payload: bytes) -> dict[str, object]:
@@ -350,8 +406,17 @@ class ProductionHostRuntime:
         server: AuthenticatedHostServer,
         instance_fence: _InstanceFence,
         admission_gate: _CommandAdmissionGate,
+        issuance_token: object | None = None,
     ) -> None:
-        self.config = config
+        if issuance_token is not _RUNTIME_ISSUANCE_TOKEN:
+            raise PermissionError(
+                "ProductionHostRuntime must be issued by canonical host composition"
+            )
+        canonical_config = _readmit_production_host_config(config)
+        with _RUNTIME_CONFIG_BINDINGS_LOCK:
+            if self in _RUNTIME_CONFIG_BINDINGS:
+                raise RuntimeError("production host config is already bound")
+            _RUNTIME_CONFIG_BINDINGS[self] = canonical_config
         self.journal = journal
         self.store_identity: JournalStoreIdentity = journal.store_identity
         self.application = application
@@ -366,6 +431,14 @@ class ProductionHostRuntime:
         self._teardown_owner: Thread | None = None
         self._serve_entry_hook: Callable[[], None] = lambda: None
         self._serve_loop_entry_hook: Callable[[], None] = lambda: None
+
+    @property
+    def config(self) -> ProductionHostConfig:
+        with _RUNTIME_CONFIG_BINDINGS_LOCK:
+            bound = _RUNTIME_CONFIG_BINDINGS.get(self)
+        if type(bound) is not ProductionHostConfig:
+            raise RuntimeError("production host config authority is not bound")
+        return _readmit_production_host_config(bound)
 
     @property
     def closed(self) -> bool:
@@ -552,20 +625,21 @@ def build_production_host(
     security_boundary: SecurityBoundary,
     principal_resolver: PrincipalResolver,
     snapshot_provider: SnapshotProvider,
+    application_factory: Callable[..., AuthenticatedHostApplication] | None = None,
     tls_context: ssl.SSLContext | None = None,
     now: Callable[[], str] | None = None,
-    application_factory: Callable[..., AuthenticatedHostApplication] | None = None,
 ) -> ProductionHostRuntime:
     """Compose the existing durable host authorities into one runnable process seam."""
 
-    if not isinstance(config, ProductionHostConfig):
-        raise TypeError("config must be ProductionHostConfig")
-    if not isinstance(security_boundary, SecurityBoundary):
-        raise TypeError("security_boundary must be SecurityBoundary")
+    config = _readmit_production_host_config(config)
+    if type(security_boundary) is not SecurityBoundary:
+        raise TypeError("security_boundary must be exact SecurityBoundary")
     if not callable(principal_resolver):
         raise TypeError("principal_resolver must be callable")
     if not callable(snapshot_provider):
         raise TypeError("snapshot_provider must be callable")
+    if application_factory is not None and not callable(application_factory):
+        raise TypeError("application_factory must be callable")
 
     scheme = urlsplit(config.public_origin).scheme
     if tls_context is None and scheme != "http":
@@ -574,10 +648,10 @@ def build_production_host(
         raise ValueError("TLS listener requires HTTPS public_origin")
 
     instance_fence = _InstanceFence.acquire(config.journal_path)
+    server: AuthenticatedHostServer | None = None
     try:
         journal = JournalStore(config.journal_path)
-        factory = AuthenticatedHostApplication if application_factory is None else application_factory
-        application = factory(
+        application = (application_factory or AuthenticatedHostApplication)(
             journal,
             security_boundary=security_boundary,
             account_id=config.account_id,
@@ -588,8 +662,20 @@ def build_production_host(
             snapshot_provider=snapshot_provider,
             now=now,
         )
-        if application_factory is not None and not isinstance(application, AuthenticatedHostApplication):
-            raise TypeError("application factory must return the canonical host application")
+        if application_factory is not None:
+            from .host_network import AuthenticatedHostApplication as HostApplicationBase
+            if (
+                not isinstance(application, HostApplicationBase)
+                or application._journal is not journal
+                or application.security_boundary is not security_boundary
+                or application.host_id != config.host_id
+                or application.public_origin != config.public_origin
+                or application._principal_resolver is not principal_resolver
+                or application._snapshot_provider is not snapshot_provider
+                or application.store.account_id != config.account_id
+                or application.store.environment != config.environment
+            ):
+                raise TypeError("application_factory changed canonical host authorities")
         identity_gate = _StoreIdentityGate(application, journal)
         admission_gate = _CommandAdmissionGate(identity_gate)
         application.dispatch = admission_gate.dispatch  # type: ignore[method-assign]
@@ -600,14 +686,29 @@ def build_production_host(
         )
         server.daemon_threads = False
         server.block_on_close = True
-    except BaseException:
-        instance_fence.release()
+        return ProductionHostRuntime(
+            config=config,
+            journal=journal,
+            application=application,
+            server=server,
+            instance_fence=instance_fence,
+            admission_gate=admission_gate,
+            issuance_token=_RUNTIME_ISSUANCE_TOKEN,
+        )
+    except BaseException as error:
+        cleanup_errors: list[tuple[str, BaseException]] = []
+        if server is not None:
+            try:
+                server.server_close()
+            except BaseException as cleanup_error:
+                cleanup_errors.append(("listener close", cleanup_error))
+        try:
+            instance_fence.release()
+        except BaseException as cleanup_error:
+            cleanup_errors.append(("instance fence release", cleanup_error))
+        for stage, cleanup_error in cleanup_errors:
+            error.add_note(
+                f"production host bootstrap cleanup failed during {stage}: "
+                f"{cleanup_error!r}"
+            )
         raise
-    return ProductionHostRuntime(
-        config=config,
-        journal=journal,
-        application=application,
-        server=server,
-        instance_fence=instance_fence,
-        admission_gate=admission_gate,
-    )

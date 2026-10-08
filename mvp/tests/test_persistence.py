@@ -53,6 +53,34 @@ class JournalStoreTests(unittest.TestCase):
             )
             self.assertEqual(store.pending_outbox(), [])
 
+    def test_exact_outbox_delivery_state_survives_delivery_and_restart(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event(), outbox_topic="events")
+            pending = store.pending_outbox()[0]
+
+            state = store.outbox_delivery_state("evt-1", topic="events")
+            self.assertIsNotNone(state)
+            self.assertFalse(state["delivered"])
+            self.assertEqual(state["outbox_id"], pending["outbox_id"])
+            self.assertEqual(state["envelope_hash"], pending["envelope_hash"])
+            with self.assertRaisesRegex(ValueError, "publication is missing"):
+                store.outbox_delivery_state("evt-1", topic="other.events")
+
+            self.assertTrue(
+                store.mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=pending["envelope_hash"],
+                )
+            )
+            reopened = JournalStore(path)
+            delivered = reopened.outbox_delivery_state("evt-1", topic="events")
+            self.assertIsNotNone(delivered)
+            self.assertTrue(delivered["delivered"])
+            self.assertEqual(delivered["outbox_id"], pending["outbox_id"])
+            self.assertEqual(delivered["envelope_hash"], pending["envelope_hash"])
+
     def test_explicit_journal_sequence_survives_vacuum_backup_and_reopen(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

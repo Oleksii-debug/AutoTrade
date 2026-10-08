@@ -3,12 +3,14 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 import zipfile
 
 import research.autotrade_research.artifacts.durable_publish as durable_publish_module
+import tools.build_windows_bundle as windows_bundle_module
 from tools.build_windows_bundle import (
     BundleError,
     WINDOWS_REPARSE_POINT,
@@ -191,10 +193,20 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             return StatProxy()
 
         output = self.root / "descriptor-domain.zip"
+        original_collect = windows_bundle_module._collect
+
+        def collect_with_descriptor_specific_inode(staging):
+            with patch.object(
+                windows_bundle_module.os,
+                "fstat",
+                side_effect=descriptor_specific_inode,
+            ):
+                return original_collect(staging)
+
         with patch.object(
-            windows_bundle_module.os,
-            "fstat",
-            side_effect=descriptor_specific_inode,
+            windows_bundle_module,
+            "_collect",
+            side_effect=collect_with_descriptor_specific_inode,
         ):
             build_bundle(
                 staging=self.staging,

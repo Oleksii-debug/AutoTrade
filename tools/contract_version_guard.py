@@ -173,6 +173,12 @@ def openapi_operation_blocks(
         normalized = line.strip()
         if normalized.startswith(("description:", "summary:")):
             continue
+        # The local OpenAPI file can resolve a JSON Schema through the sibling
+        # jsonschema directory; its absolute $id denotes the same definition.
+        if normalized.startswith("$ref: ../jsonschema/"):
+            normalized = normalized.replace(
+                "$ref: ../jsonschema/", "$ref: {SCHEMA_BASE}/", 1
+            )
         if schema_base_uri:
             normalized = normalized.replace(schema_base_uri.rstrip("/") + "/", "{SCHEMA_BASE}/")
         operations[current_key].append(normalized)
@@ -471,6 +477,23 @@ def contract_bytes(root: Path) -> dict[str, bytes]:
     return files
 
 
+def comparable_contract_bytes(root: Path, manifest: dict) -> dict[str, bytes]:
+    """Treat an OpenAPI sibling-schema ref and that schema's $id as one target."""
+    files = contract_bytes(root)
+    openapi = manifest.get("openapi")
+    base_uri = manifest.get("schema_base_uri")
+    if isinstance(openapi, dict) and isinstance(base_uri, str):
+        relative = openapi.get("path")
+        if isinstance(relative, str) and relative in files:
+            absolute_prefix = (base_uri.rstrip("/") + "/").encode("utf-8")
+            files[relative] = re.sub(
+                rb"(?m)^([ \t]*\$ref:[ \t]*)\.\./jsonschema/",
+                lambda match: match.group(1) + absolute_prefix,
+                files[relative],
+            )
+    return files
+
+
 def evaluate(base_root: Path, current_root: Path) -> list[str]:
     base = load_manifest(base_root)
     current = load_manifest(current_root)
@@ -481,7 +504,7 @@ def evaluate(base_root: Path, current_root: Path) -> list[str]:
     if current_version < base_version:
         errors.append("contract_version must never decrease")
 
-    changed = contract_bytes(base_root) != contract_bytes(current_root)
+    changed = comparable_contract_bytes(base_root, base) != comparable_contract_bytes(current_root, current)
     if changed and current_version == base_version:
         errors.append("contract surface changed without increasing contract_version")
 

@@ -60,7 +60,8 @@
     pendingUrgentAnnouncements: [],
     announcementGeneration: 0,
     restoreFocusId: null,
-    pendingCommand: null
+    pendingCommand: null,
+    trackedOperation: null
   };
 
   const byId = (id) => document.getElementById(id);
@@ -1206,6 +1207,28 @@
     return operation;
   }
 
+  async function refreshTrackedOperation() {
+    const tracked = state.trackedOperation;
+    if (tracked === null || !state.snapshotReady) return;
+    if (tracked.hostId !== state.renderedHostId ||
+        tracked.accountId !== state.accountId ||
+        tracked.environment !== state.environment) {
+      state.trackedOperation = null;
+      return;
+    }
+    try {
+      const operation = await refreshOperation(tracked.operationId);
+      if (["SUCCEEDED", "FAILED", "CANCELLED"].includes(operation.phase) &&
+          state.trackedOperation === tracked) {
+        state.trackedOperation = null;
+      }
+    } catch {
+      // Keep the exact accepted identity for the next poll. A failed status
+      // GET does not turn an accepted command into a completed outcome.
+      queuePoliteAnnouncement("Accepted operation status is temporarily unavailable.");
+    }
+  }
+
   function renderHostEvent(event, cursor, stateVersion) {
     const body = byId("event-history-body");
     if (!body) return;
@@ -1317,6 +1340,7 @@
       parsed.cursor > priorCursor;
 
     if (displayContextChanged) {
+      state.trackedOperation = null;
       state.cursor = 0n;
       state.version = 0n;
       discardQueuedAnnouncementsForEvidenceReset();
@@ -1530,6 +1554,7 @@
         announce("Host synchronization failed. Displayed values may be stale.", true);
       }
     } finally {
+      await refreshTrackedOperation();
       state.polling = false;
     }
   }
@@ -1607,6 +1632,7 @@
     }
     const payload = commandForSubmission(action);
     const commandId = payload.command_id;
+    const submittedHostId = state.renderedHostId;
     if (recovering && action !== payload.action) {
       byId("host-action").value = payload.action;
     }
@@ -1622,13 +1648,28 @@
       const result = await submitCanonicalCommand(payload);
       clearConfirmedCommand(payload);
       renderCommandValidationDetails(result.fieldErrors, "confirmed");
+      let feedbackAlreadyFocused = false;
       if (result.status === "ACCEPTED") {
+        if (result.operationId !== null) {
+          state.trackedOperation = Object.freeze({
+            operationId: result.operationId,
+            hostId: submittedHostId,
+            accountId: payload.account_id,
+            environment: payload.environment
+          });
+        }
         let acceptedMessage =
           "Command " + commandId +
           " was accepted for processing. It is not yet a completed financial outcome.";
+        text("command-result", acceptedMessage);
+        byId("command-result").focus();
+        feedbackAlreadyFocused = true;
         if (result.operationId !== null) {
           try {
             const operation = await refreshOperation(result.operationId);
+            if (["SUCCEEDED", "FAILED", "CANCELLED"].includes(operation.phase)) {
+              state.trackedOperation = null;
+            }
             const uncertainty = operation.remainingUncertainty.length > 0
               ? " Remaining uncertainty: " +
                 operation.remainingUncertainty.join(", ") + "."
@@ -1654,9 +1695,26 @@
           "command-result",
           "Command " + commandId + " was rejected by the host." + reasons);
       }
-      byId("command-result").focus();
+      if (!feedbackAlreadyFocused) byId("command-result").focus();
       try {
         await refreshSnapshot();
+        const operationsBody = byId("operations-body");
+        if (result.status === "ACCEPTED" && result.operationId !== null &&
+            state.renderedHostId === submittedHostId &&
+            state.accountId === payload.account_id &&
+            state.environment === payload.environment &&
+            operationsBody &&
+            ![...operationsBody.querySelectorAll("tr[data-operation-id]")].some(
+              row => row.dataset.operationId === result.operationId)) {
+          // A coherent snapshot may overtake the event poll and clear an
+          // event-derived row. Reload only this accepted operation from Host.
+          try {
+            await refreshOperation(result.operationId);
+          } catch {
+            queuePoliteAnnouncement(
+              "The accepted operation could not be reloaded after a host event gap.");
+          }
+        }
       } catch (refreshError) {
         if (isSnapshotBusy(refreshError)) {
           reportSnapshotBusy();

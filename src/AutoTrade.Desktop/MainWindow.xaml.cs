@@ -36,7 +36,12 @@ public partial class MainWindow : Window
     {
     }
 
-    internal MainWindow(IEmergencyHostClient hostClient, OwnedProviderFreeRuntime? ownedRuntime = null)
+    internal MainWindow(IEmergencyHostClient hostClient)
+        : this(hostClient, null)
+    {
+    }
+
+    internal MainWindow(IEmergencyHostClient hostClient, OwnedProviderFreeRuntime? ownedRuntime)
     {
         _hostClient = hostClient ?? throw new ArgumentNullException(nameof(hostClient));
         _ownedRuntime = ownedRuntime;
@@ -210,7 +215,7 @@ public partial class MainWindow : Window
         }
         finally
         {
-            System.Windows.Input.IInputElement? focusedElement =
+            var focusedElement =
                 System.Windows.Input.Keyboard.FocusedElement;
             if (manageRefreshButton)
             {

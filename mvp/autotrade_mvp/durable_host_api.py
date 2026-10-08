@@ -285,7 +285,9 @@ class JournalBackedHostCommandStore:
         if account_id != self.account_id or environment != self.environment:
             raise ValueError("command scope does not match active host account/environment")
         action = canonical_host_action(command.get("action"))
-        expected_raw = self._required_text(command, "expected_state_version")
+        # Preserve the exact wire value. Trimming here would turn a malformed
+        # sequence into a valid command before the canonical scalar check.
+        expected_raw = command.get("expected_state_version")
         if "payload" not in command or not isinstance(command["payload"], dict):
             raise ValueError("payload must be an object")
         if not is_valid_common_scalar("Sequence", expected_raw):
@@ -835,8 +837,17 @@ class JournalBackedHostCommandStore:
     def execute_authority_operation(self, operation_id: str) -> OperationResult:
         """Execute or resume an accepted host authority operation safely."""
 
+        def test_stage(stage: str) -> None:
+            import os
+            if os.environ.get("AUTOTRADE_TEST_DIAGNOSTIC") == "1":
+                from pathlib import Path
+                Path(self._journal.path).parent.parent.joinpath(
+                    "host-operation-stage-diagnostic.txt"
+                ).write_text(operation_id + ":" + stage, encoding="utf-8")
+
         current = self.get_operation(operation_id)
         if current.phase in self.TERMINAL_PHASES:
+            test_stage("already_terminal:" + current.phase)
             return current
         action, action_payload, action_hash, accepted_at = (
             self._accepted_authority_contract(operation_id)
@@ -847,6 +858,7 @@ class JournalBackedHostCommandStore:
                 "RUNNING",
                 remaining_uncertainty=("authority_commit_pending",),
             )
+        test_stage("authority_started:" + action)
         try:
             result = execute_operator_authority_action(
                 self._journal,
@@ -857,6 +869,7 @@ class JournalBackedHostCommandStore:
                 self.environment,
                 accepted_at,
             )
+            test_stage("authority_returned:" + action)
         except OperatorAuthorityConflict:
             observed = observed_authority_operation_effects(
                 self._journal,
@@ -880,13 +893,26 @@ class JournalBackedHostCommandStore:
                 ),
                 remaining_uncertainty=(),
             )
-        return self.update_operation(
-            operation_id,
-            "SUCCEEDED",
-            affected_refs=result.affected_refs,
-            evidence=result.evidence,
-            remaining_uncertainty=(),
-        )
+        try:
+            test_stage("success_commit_started:" + action)
+            committed = self.update_operation(
+                operation_id,
+                "SUCCEEDED",
+                affected_refs=result.affected_refs,
+                evidence=result.evidence,
+                remaining_uncertainty=(),
+            )
+            test_stage("success_committed:" + action)
+            return committed
+        except (TypeError, ValueError, OverflowError) as error:
+            frame = error.__traceback__
+            while frame is not None and frame.tb_next is not None:
+                frame = frame.tb_next
+            test_stage(
+                "success_fault:" + type(error).__name__ + ":" +
+                (frame.tb_frame.f_code.co_name if frame is not None else "UNKNOWN")
+            )
+            raise
 
     def get_operation(self, operation_id: str) -> OperationResult:
         try:

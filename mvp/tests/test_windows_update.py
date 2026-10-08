@@ -1260,7 +1260,8 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             expected_prefix[0],
             trust=self.trust,
         )
-        self.assertIs(replay, checkpoint)
+        self.assertEqual(replay, checkpoint)
+        self.assertIsNot(replay, checkpoint)
         for step in expected_prefix[1:]:
             checkpoint = advance_update_checkpoint(
                 plan,
@@ -1345,7 +1346,8 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             "QUIESCE_NEW_ADMISSIONS",
             trust=self.trust,
         )
-        self.assertIs(replay, checkpoint)
+        self.assertEqual(replay, checkpoint)
+        self.assertIsNot(replay, checkpoint)
         checkpoint = advance_rollback_checkpoint(
             plan,
             checkpoint,

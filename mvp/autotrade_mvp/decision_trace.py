@@ -633,14 +633,26 @@ class DecisionTraceStore:
             return True
 
     def records(self) -> list[dict[str, Any]]:
-        with durable_path_lock(self.path):
-            try:
-                records = self._load()
-            except ValueError as error:
-                raise ValueError("Decision trace chain is corrupt") from error
-            if records and not self._records_are_valid(records):
-                raise ValueError("Decision trace chain is corrupt")
-            return records
+        # A missing trace is an empty read, never an invitation to create its
+        # parent directory or a writer lock. The read linearizes before any
+        # concurrent writer that creates the parent after this existence check.
+        if not os.path.lexists(self.path.parent):
+            return []
+        try:
+            with durable_path_lock(self.path):
+                try:
+                    records = self._load()
+                except ValueError as error:
+                    raise ValueError("Decision trace chain is corrupt") from error
+                if records and not self._records_are_valid(records):
+                    raise ValueError("Decision trace chain is corrupt")
+                return records
+        except DurablePublishLockError as error:
+            # Preserve fail-closed source and do not follow symlink or
+            # hard-link aliases merely because the shared writer lock refused.
+            raise ValueError(
+                "Decision trace chain is corrupt: unsafe publication path"
+            ) from error
 
     def reconstruct(
         self,

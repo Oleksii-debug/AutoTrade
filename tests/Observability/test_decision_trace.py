@@ -163,7 +163,7 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             )
 
             self.assertFalse(store.verify())
-            with self.assertRaisesRegex(ValueError, "Corrupt decision trace store"):
+            with self.assertRaisesRegex(ValueError, "Decision trace chain is corrupt"):
                 store.records()
 
     def test_noncanonical_jsonl_bytes_fail_verification(self):
@@ -636,7 +636,7 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             store = DecisionTraceStore(path)
             item = evidence_trace()
             item["attributes"]["diagnostic_score"] = float("nan")
-            with self.assertRaisesRegex(ValueError, "JSON compliant"):
+            with self.assertRaisesRegex(ValueError, "strict JSON resource domain"):
                 store.append(item)
             self.assertFalse(path.exists())
 

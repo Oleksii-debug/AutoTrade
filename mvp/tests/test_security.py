@@ -1494,7 +1494,7 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertEqual(redacted["query"], "[REDACTED]")
         self.assertEqual(
             redacted["url"],
-            "[REDACTED]",
+            "https://[REDACTED]@example.test/path?token=[REDACTED]&ok=1",
         )
 
         with patch(

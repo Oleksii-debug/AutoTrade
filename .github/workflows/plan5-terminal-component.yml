@@ -55,6 +55,9 @@ jobs:
             mvp.tests.test_semantic_web_client_contract \
             mvp.tests.test_desktop_shell_contract \
             mvp.tests.test_embedded_web \
+            mvp.tests.test_host_network \
+            mvp.tests.test_windows_secrets \
+            mvp.tests.test_windows_secrets_handle_reseal \
             mvp.tests.test_accessible_status -v
       - name: Reused packaging, secrets, update, rollback and recovery checks
         shell: bash
@@ -66,7 +69,7 @@ jobs:
             mvp.tests.test_runtime_locality_packaging \
             mvp.tests.test_provider_free_candidate_builder -v
       - name: Emit exact-head source/negative evidence after successful execution
-        run: python tools/write_ci_evidence.py --suite plan5-terminal-source-and-recovery --command "source accessibility + Desktop contract + package/update/rollback adversarial tests" --output artifacts/plan5-terminal-source.json
+        run: python tools/write_ci_evidence.py --suite plan5-terminal-source-and-recovery --command "source accessibility + Desktop contract + authenticated Host and vault leak negatives + package/update/rollback adversarial tests" --output artifacts/plan5-terminal-source.json
       - uses: actions/upload-artifact@v4
         with:
           name: plan5-terminal-source-${{ env.AUTOTRADE_SOURCE_SHA }}

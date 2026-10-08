@@ -1246,7 +1246,7 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertTrue(restore_requires_reconciliation(restored))
             with self.assertRaisesRegex(
                 BackupIntegrityError,
-                "cannot coexist with runtime checkpoint evidence",
+                "cannot downgrade journal-bound restore provenance",
             ):
                 complete_restore_reconciliation(
                     restored,

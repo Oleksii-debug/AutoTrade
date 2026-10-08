@@ -1,0 +1,135 @@
+name: plan5-terminal-component-qualification
+
+on:
+  pull_request:
+    paths:
+      - 'web/**'
+      - 'src/AutoTrade.Desktop/**'
+      - 'src/AutoTrade.Host/**'
+      - 'mvp/autotrade_mvp/accessibility.py'
+      - 'mvp/autotrade_mvp/embedded_web.py'
+      - 'mvp/autotrade_mvp/windows_update.py'
+      - 'mvp/tests/test_plan5_terminal_source_contract.py'
+      - 'mvp/tests/test_semantic_web_client_contract.py'
+      - 'mvp/tests/test_desktop_shell_contract.py'
+      - 'mvp/tests/test_windows_bundle.py'
+      - 'mvp/tests/test_windows_update.py'
+      - 'mvp/tests/test_windows_install_manifest.py'
+      - 'tests/Product/plan5-navigation.cjs'
+      - 'tools/build_windows_bundle.py'
+      - 'tools/build_windows_install_manifest.py'
+      - 'tools/build_provider_free_candidate.py'
+      - '.github/workflows/plan5-terminal-component.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  source-security-accessibility-update:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Exact source identity
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$AUTOTRADE_SOURCE_SHA"
+      - name: Reused source accessibility and cross-surface/negative checks
+        shell: bash
+        run: |
+          PYTHONPATH="research:." python -m unittest \
+            mvp.tests.test_plan5_terminal_source_contract \
+            mvp.tests.test_semantic_web_client_contract \
+            mvp.tests.test_desktop_shell_contract \
+            mvp.tests.test_embedded_web \
+            mvp.tests.test_accessible_status -v
+      - name: Reused packaging, secrets, update, rollback and recovery checks
+        shell: bash
+        run: |
+          PYTHONPATH="research:." python -m unittest \
+            mvp.tests.test_windows_bundle \
+            mvp.tests.test_windows_install_manifest \
+            mvp.tests.test_windows_update \
+            mvp.tests.test_runtime_locality_packaging \
+            mvp.tests.test_provider_free_candidate_builder -v
+      - name: No final-release or live-provider assertion
+        run: echo 'SOURCE COMPONENT TESTS ONLY; physical NVDA, real provider and signed final release NOT CLAIMED'
+
+  keyboard-semantic-browser:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Exact source identity
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$AUTOTRADE_SOURCE_SHA"
+      - name: Parse canonical Web JavaScript and browser harness
+        run: |
+          node --check web/src/app.js
+          node --check tests/Product/plan5-navigation.cjs
+      - name: Install pinned browser harness
+        working-directory: tests/Product
+        run: |
+          npm ci --ignore-scripts
+          npx playwright install --with-deps chromium
+      - name: Real headless keyboard-only navigation, focus, history, outage and fail-closed checks
+        working-directory: tests/Product
+        run: node plan5-navigation.cjs
+
+  windows-desktop-native-emergency:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.100'
+      - name: Exact source identity
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD).Trim() -ne $env:AUTOTRADE_SOURCE_SHA) { throw 'Source SHA mismatch' }
+      - name: Windows source parity, native emergency and accessibility
+        run: python -m unittest mvp.tests.test_plan5_terminal_source_contract mvp.tests.test_desktop_shell_contract -v
+      - name: Restore locked canonical Desktop dependencies
+        run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --locked-mode
+      - name: Build thin WebView2 desktop, not a second UX
+        run: dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj -c Release --no-restore
+      - name: Native emergency, restart and policy-negative regression
+        run: |
+          dotnet restore tests/Desktop.Client/Desktop.Client.csproj --locked-mode
+          dotnet run --project tests/Desktop.Client/Desktop.Client.csproj -c Release --no-restore
+
+  component-gate:
+    runs-on: ubuntu-22.04
+    needs:
+      - source-security-accessibility-update
+      - keyboard-semantic-browser
+      - windows-desktop-native-emergency
+    steps:
+      - name: Explicit evidence class and outstanding terminal prerequisites
+        run: |
+          echo 'Plan 5 Section 7: this is exact-SHA component qualification.'
+          echo 'Requires separate exact-SHA provider-free packaged candidate proof,'
+          echo 'terminal Sections 1-6, main integration/readback and Drive/GitHub registry.'
+          echo 'This workflow cannot self-issue DONE, physical NVDA or final-release PASS.'

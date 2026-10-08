@@ -24,7 +24,7 @@ import tempfile
 import zipfile
 
 from research.autotrade_research.artifacts.durable_publish import (
-    atomic_write_json, durable_path_lock,
+    atomic_write_json, durable_path_lock, sync_parent_directory,
 )
 from tools.build_windows_install_manifest import (
     InstallerManifestError,
@@ -270,6 +270,7 @@ def fixture_install_bundle(
                 # version is moved atomically to its immutable content ID.
                 temporary.rename(dest)
                 temporary = None
+                sync_parent_directory(dest)
                 _check_inventory(root, version)
                 _select(root, version)
                 return {
@@ -316,6 +317,8 @@ def fixture_uninstall(fixture_root: Path, *, fixture_only: bool) -> dict:
         # Durable state is at root/state and NEVER traversed, reset or touched.
         for version in (versions.iterdir() if versions.exists() else []):
             shutil.rmtree(version)
+        if versions.exists():
+            sync_parent_directory(versions)
         return {"disposition": "FIXTURE_PROGRAM_REMOVED", "durable_state_preserved": True,
                 "host_started": False, "trading_authority_granted": False}
 

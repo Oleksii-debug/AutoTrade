@@ -354,7 +354,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(resource_availability=resource),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             tampered = deepcopy(checkpoint)
             tampered["payload"]["resource_availability"]["resource_details"][
@@ -402,7 +402,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(resource_availability=availability()),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             original_call = reconciliation_journal_module._journal_store_call
 
@@ -460,7 +460,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(resource_availability=availability()),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             HostileList.calls = 0
             with self.assertRaisesRegex(TypeError, "exact tuple or list"):
@@ -500,7 +500,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
         self.assertEqual(ExplosiveJournalStore.calls, 0)
 
@@ -533,7 +533,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                             result=reconciliation(),
                             observed_at="2026-09-24T19:00:00Z",
                             host_id="test-host",
-                            owner_epoch="epoch-1",
+                            owner_epoch="1",
                         )
             finally:
                 if "load_events" in vars(store):
@@ -605,7 +605,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                         result=reconciliation(),
                         observed_at="2026-09-24T19:00:00Z",
                         host_id="test-host",
-                        owner_epoch="epoch-1",
+                        owner_epoch="1",
                     )
             finally:
                 JournalStore.load_events = original
@@ -639,7 +639,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                         result=reconciliation(),
                         observed_at="2026-09-24T19:00:00Z",
                         host_id="test-host",
-                        owner_epoch="epoch-1",
+                        owner_epoch="1",
                     )
             finally:
                 reconciliation_journal_module.require_exact_journal_store_authority = (
@@ -672,7 +672,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                     result=reconciliation(),
                     observed_at="2026-09-24T19:00:00Z",
                     host_id="test-host",
-                    owner_epoch="epoch-1",
+                    owner_epoch="1",
                 )
             self.assertEqual(ExplosiveText.calls, 0)
             self.assertEqual(
@@ -743,7 +743,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             self.assertEqual(
                 checkpoint["payload"]["provider_environment"],
@@ -810,7 +810,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             bindings = checkpoint["payload"]["unexpected_provider_fill_bindings"]
             self.assertEqual(len(bindings), 1)
@@ -871,7 +871,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                     result=forged,
                     observed_at="2026-09-24T19:00:00Z",
                     host_id="test-host",
-                    owner_epoch="epoch-1",
+                    owner_epoch="1",
                 )
             self.assertEqual(
                 store.load_events_by_aggregate_type("account_reconciliation"),
@@ -921,7 +921,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                     result=forged,
                     observed_at="2026-09-24T19:00:00Z",
                     host_id="test-host",
-                    owner_epoch="epoch-1",
+                    owner_epoch="1",
                 )
             self.assertEqual(
                 store.load_events_by_aggregate_type("account_reconciliation"),
@@ -965,7 +965,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                     result=forged,
                     observed_at="2026-09-24T19:00:00Z",
                     host_id="test-host",
-                    owner_epoch="epoch-1",
+                    owner_epoch="1",
                 )
             self.assertEqual(
                 store.load_events_by_aggregate_type("account_reconciliation"),
@@ -982,7 +982,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             self.assertFalse(
                 checkpoint["payload"]["settlement_reconciliation_performed"]
@@ -1025,7 +1025,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             self.assertTrue(
                 checkpoint["payload"]["settlement_reconciliation_performed"]
@@ -1072,7 +1072,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             self.assertFalse(checkpoint["payload"]["complete"])
             self.assertTrue(
@@ -1122,7 +1122,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             self.assertTrue(
                 checkpoint["payload"]["settlement_reconciliation_performed"]
@@ -1168,7 +1168,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
             host_id="test-host",
-            owner_epoch="epoch-1",
+            owner_epoch="1",
             )
             second = record_reconciliation_checkpoint(
                 store,
@@ -1176,7 +1176,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
             host_id="test-host",
-            owner_epoch="epoch-1",
+            owner_epoch="1",
             )
 
             self.assertEqual(first["event_id"], second["event_id"])
@@ -1244,7 +1244,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(resource_availability=availability()),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             settlement_payload = {
                 "schema_version": "1.0.0",
@@ -1289,7 +1289,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(resource_availability=availability()),
                 observed_at="2026-09-24T19:00:20Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             with self.assertRaisesRegex(
                 ValueError,
@@ -1336,7 +1336,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 ),
                 observed_at="2026-09-24T19:00:20Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             evidence = load_account_resource_availability_evidence(
                 store,
@@ -1370,7 +1370,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 ),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
 
             demo_payload = {
@@ -1458,7 +1458,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 ),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             legacy_payload = {
                 "provider_id": "BYBIT",
@@ -1504,7 +1504,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(resource_availability=availability()),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             lifecycle_payload = {
                 "provider_id": "TEST_PROVIDER",
@@ -1595,7 +1595,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 ),
                 observed_at="2026-09-24T19:00:20Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             with self.assertRaisesRegex(
                 ValueError,
@@ -1661,7 +1661,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 ),
                 observed_at="2026-09-24T19:00:40Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             with self.assertRaisesRegex(
                 ValueError,
@@ -1687,7 +1687,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(resource_availability=availability()),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             other_payload = {
                 "schema_version": "1.0.0",
@@ -1732,7 +1732,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(resource_availability=availability()),
                 observed_at="2026-09-24T19:02:00Z",
                 host_id="host-a",
-                owner_epoch="epoch-a",
+                owner_epoch="1",
             )
             newer = record_reconciliation_checkpoint(
                 store,
@@ -1744,7 +1744,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 # The provider clock regresses, but this fact is durably recorded later.
                 observed_at="2026-09-24T19:01:00Z",
                 host_id="host-b",
-                owner_epoch="epoch-b",
+                owner_epoch="2",
             )
             latest = load_latest_reconciliation_checkpoint_for_scope(
                 store,
@@ -1766,7 +1766,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 # Equal provider timestamps are not ambiguous: durable order is unique.
                 observed_at="2026-09-24T19:01:00Z",
                 host_id="host-c",
-                owner_epoch="epoch-c",
+                owner_epoch="3",
             )
             latest = load_latest_reconciliation_checkpoint_for_scope(
                 store,
@@ -1789,7 +1789,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="host-a",
-                owner_epoch="epoch-a",
+                owner_epoch="1",
             )
             self.assertIsNone(
                 load_reconciliation_checkpoint_for_readiness(
@@ -1799,7 +1799,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                     account_id="test-account",
                     environment="PAPER",
                     host_id="host-b",
-                    owner_epoch="epoch-b",
+                    owner_epoch="2",
                 )
             )
 
@@ -1809,17 +1809,17 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="host-b",
-                owner_epoch="epoch-b",
+                owner_epoch="2",
             )
             self.assertNotEqual(owner_a["event_id"], owner_b["event_id"])
             self.assertEqual(owner_b["aggregate_version"], 2)
             self.assertEqual(
                 owner_a["payload"]["checkpoint_owner"],
-                {"host_id": "host-a", "owner_epoch": "epoch-a"},
+                {"host_id": "host-a", "owner_epoch": "1"},
             )
             self.assertEqual(
                 owner_b["payload"]["checkpoint_owner"],
-                {"host_id": "host-b", "owner_epoch": "epoch-b"},
+                {"host_id": "host-b", "owner_epoch": "2"},
             )
 
             reopened = JournalStore(path)
@@ -1830,7 +1830,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 account_id="test-account",
                 environment="PAPER",
                 host_id="host-b",
-                owner_epoch="epoch-b",
+                owner_epoch="2",
             )
             self.assertEqual(ready["event_id"], owner_b["event_id"])
             self.assertIsNone(
@@ -1841,7 +1841,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                     account_id="test-account",
                     environment="PAPER",
                     host_id="host-a",
-                    owner_epoch="epoch-a",
+                    owner_epoch="1",
                 )
             )
 
@@ -1851,7 +1851,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="host-b",
-                owner_epoch="epoch-b",
+                owner_epoch="2",
             )
             self.assertEqual(exact_retry["event_id"], owner_b["event_id"])
 
@@ -1865,7 +1865,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(resource_availability=availability()),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
 
             reopened = JournalStore(path)
@@ -1919,7 +1919,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             with self.assertRaisesRegex(
                 ValueError,
@@ -1955,7 +1955,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(unknown_submissions=[unknown]),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
 
             reopened = JournalStore(path)
@@ -1999,7 +1999,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(unknown_submissions=[unknown]),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
 
             with self.assertRaisesRegex(ValueError, "scope mismatch"):
@@ -2064,7 +2064,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             reopened = JournalStore(path)
             latest = load_latest_reconciliation_checkpoint(
@@ -2088,7 +2088,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(provider_cash={"USD": "899.50"}),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             record_reconciliation_checkpoint(
                 store,
@@ -2096,7 +2096,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(),
                 observed_at="2026-09-24T19:01:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             events = store.load_events(
                 "account_reconciliation",
@@ -2191,7 +2191,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
             host_id="test-host",
-            owner_epoch="epoch-1",
+            owner_epoch="1",
             )
             self.assertEqual(
                 unresolved_attempt_ids_from_checkpoint(
@@ -2228,7 +2228,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
             host_id="test-host",
-            owner_epoch="epoch-1",
+            owner_epoch="1",
             )
             self.assertEqual(
                 checkpoint["payload"]["unexpected_provider_activity_ids"],
@@ -2282,7 +2282,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
             host_id="test-host",
-            owner_epoch="epoch-1",
+            owner_epoch="1",
             )
             self.assertEqual(
                 unresolved_provider_activity_ids_from_checkpoint(
@@ -2358,7 +2358,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(resource_availability=availability()),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
 
             contexts = (
@@ -2426,7 +2426,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(resource_availability=availability()),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
 
             with self.assertRaisesRegex(ValueError, "exact resource envelope"):
@@ -2460,7 +2460,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(resource_availability=availability()),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
 
             with self.assertRaisesRegex(

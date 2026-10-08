@@ -166,20 +166,19 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
     def test_structural_qualified_binding_remains_terminally_inconclusive(self):
         item = _proposal()
         binding = _binding(item)
-        diagnostic = to_decision_proposal(
-            item,
-            proposal_id=(
-                "11111111-1111-4111-8111-111111111111"
-            ),
-            instrument_version=INSTRUMENT_VERSION,
-            economics_binding=binding,
-            exit_policy_ref="exit:v1",
-            compute_cost_currency="USD",
-        )
-        self.assertEqual(
-            diagnostic["candidate_instruments"],
-            [INSTRUMENT_VERSION],
-        )
+        # The current registered-run boundary is deliberately fail-closed:
+        # even a structurally QUALIFIED economics binding is not a run receipt.
+        with self.assertRaisesRegex(ValueError, "verified run receipt"):
+            to_decision_proposal(
+                item,
+                proposal_id=(
+                    "11111111-1111-4111-8111-111111111111"
+                ),
+                instrument_version=INSTRUMENT_VERSION,
+                economics_binding=binding,
+                exit_policy_ref="exit:v1",
+                compute_cost_currency="USD",
+            )
 
         assessment = assess_strategy_economics_authority(
             item,

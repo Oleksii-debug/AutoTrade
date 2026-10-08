@@ -335,7 +335,7 @@ def _ci_runtime_blockers(root: Path) -> list[str]:
             value = stripped.split(":", 1)[1].strip()
             if value.startswith("${{"):
                 blockers.append(
-                    f"UNRESOLVED_CI_PYTHON_VERSION:{path.relative_to(root)}:{value}"
+                    f"UNRESOLVED_CI_PYTHON_VERSION:{path.relative_to(root).as_posix()}:{value}"
                 )
                 continue
             literals: list[str]
@@ -344,7 +344,7 @@ def _ci_runtime_blockers(root: Path) -> list[str]:
                     parsed = json.loads(value.replace("'", '"'))
                 except json.JSONDecodeError:
                     blockers.append(
-                        f"UNREADABLE_CI_PYTHON_VERSION:{path.relative_to(root)}:{value}"
+                        f"UNREADABLE_CI_PYTHON_VERSION:{path.relative_to(root).as_posix()}:{value}"
                     )
                     continue
                 literals = [str(item) for item in parsed]
@@ -353,7 +353,7 @@ def _ci_runtime_blockers(root: Path) -> list[str]:
             for literal in literals:
                 if not exact_python.fullmatch(literal):
                     blockers.append(
-                        f"NON_EXACT_CI_PYTHON_VERSION:{path.relative_to(root)}:{literal}"
+                        f"NON_EXACT_CI_PYTHON_VERSION:{path.relative_to(root).as_posix()}:{literal}"
                     )
     return blockers
 

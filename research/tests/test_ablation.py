@@ -839,7 +839,7 @@ class AblationTests(unittest.TestCase):
             with self.assertRaisesRegex(AttributeError, "backing path is immutable"):
                 science.path = root / "retargeted-science.sqlite3"
             # Rejected mutation cannot retarget the already issued authority.
-            self.assertEqual(science.path, root / "science.sqlite3")
+            self.assertEqual(science.path, (root / "science.sqlite3").resolve(strict=False))
 
             authority, science, _memory, _artifacts = issued()
             science.protocol_registration = lambda _protocol_id: None

@@ -786,7 +786,9 @@
   }
 
   function captureTableSelection(body) {
-    const selection = window.getSelection();
+    // Non-browser smoke shims legitimately omit Selection; text bookmark
+    // preservation is optional, not required for rendering accessible rows.
+    const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
     if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
     const anchor = selectedCellEndpoint(body, selection.anchorNode, selection.anchorOffset);
     const focus = selectedCellEndpoint(body, selection.focusNode, selection.focusOffset);

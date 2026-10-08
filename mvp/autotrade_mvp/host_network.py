@@ -764,6 +764,10 @@ class _HostRequestHandler(BaseHTTPRequestHandler):
         return
 
     def _handle(self) -> None:
+        # Never keep the worker thread blocked on an idle HTTP/1.1 connection.
+        # Strict host teardown drains request threads, and a retained WebView or
+        # HttpClient keepalive must not prevent emergency STOP / application exit.
+        self.close_connection = True
         server = self.server
         if not isinstance(server, AuthenticatedHostServer):
             self.send_error(500)
@@ -809,6 +813,7 @@ class _HostRequestHandler(BaseHTTPRequestHandler):
         self.send_response(response.status)
         self.send_header("Content-Type", response.content_type)
         self.send_header("Content-Length", str(len(response.body)))
+        self.send_header("Connection", "close")
         self.send_header("X-Content-Type-Options", "nosniff")
         for name, value in response.headers:
             self.send_header(name, value)

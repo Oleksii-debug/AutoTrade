@@ -145,6 +145,11 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
         Exception? gracefulStopFailure = null;
         try
         {
+            // Close owned HTTP pools before requesting the host's blocking
+            // shutdown. Otherwise an idle keep-alive thread can prevent the
+            // host from draining and cause an artificial 30-second timeout.
+            _emergencyHttp.Dispose();
+            _http.Dispose();
             if (!_process.HasExited)
             {
                 // The owned pipe requests the existing production-host drain. It does

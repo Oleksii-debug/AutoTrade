@@ -114,7 +114,8 @@ class Section8ReceiptTests(unittest.TestCase):
 
     def test_symlink_receipt_is_rejected(self):
         file = self.directory / "0.json"
-        original = self.directory / "payload.txt"
+        original = Path(self.temp.name + "-payload.txt")
+        self.addCleanup(lambda: original.unlink(missing_ok=True))
         original.write_bytes(file.read_bytes())
         file.unlink()
         try:

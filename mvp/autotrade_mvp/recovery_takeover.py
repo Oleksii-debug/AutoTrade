@@ -1161,3 +1161,119 @@ def execute_durable_takeover(
                 events[2]["event_id"]
             ),
         )
+
+def require_committed_durable_takeover(
+    controller: RecoveryController,
+    *,
+    result: DurableTakeoverResult,
+    vault: ProtectedCredentialVault,
+) -> OwnerFence:
+    """Read back an issuer-authenticated, fully committed takeover.
+
+    A RecoveryOwnerChanged journal tail is necessary but is never by itself
+    proof that the previous credential/sender was fenced.  Reuse the one
+    canonical takeover journal, vault-issued revocation receipt and durable
+    credential anchor before allowing product sender activation.  This function
+    issues no additional financial authority.
+    """
+
+    if type(controller) is not RecoveryController:
+        raise TypeError("controller must be exact RecoveryController")
+    if type(result) is not DurableTakeoverResult:
+        raise TypeError("result must be exact DurableTakeoverResult")
+    if type(vault) is not ProtectedCredentialVault:
+        raise TypeError("vault must be exact ProtectedCredentialVault")
+
+    store = controller._journal_store_authority()
+    groups = _takeover_groups(store)
+    events = groups.get(result.takeover_id)
+    if events is None or len(events) != 3:
+        raise DurableTakeoverError(
+            "durable takeover completion evidence is missing"
+        )
+    started_event, evidence_event, completed_event = events
+    if (
+        started_event["event_type"] != _STARTED
+        or evidence_event["event_type"] != _EVIDENCE
+        or completed_event["event_type"] != _COMPLETED
+        or evidence_event["event_id"] != result.takeover_evidence_event_id
+        or completed_event["event_id"] != result.completion_event_id
+    ):
+        raise DurableTakeoverError(
+            "durable takeover event identities do not match issued result"
+        )
+    started = started_event["payload"]
+    evidence = evidence_event["payload"]
+    completed = completed_event["payload"]
+    source, target = _started_owners(
+        started, takeover_id=result.takeover_id
+    )
+    if (
+        source != result.source_owner
+        or target != result.target_owner
+        or started.get("owner_scope") != controller.owner_scope
+        or completed.get("takeover_evidence_event_id")
+        != evidence_event["event_id"]
+    ):
+        raise DurableTakeoverError(
+            "durable takeover source/target or evidence scope changed"
+        )
+    _require_checkpoint_event(store, started)
+    _verify_evidence_seal(vault, evidence)
+    credential, active, receipt = _vault_snapshot(
+        vault, handle_id=_text(
+            started.get("credential_handle_id"),
+            name="credential_handle_id",
+        )
+    )
+    if active is not False or receipt is None:
+        raise DurableTakeoverError(
+            "takeover credential revocation is no longer current"
+        )
+    receipt = _require_receipt_for_started(receipt, started=started)
+    if (
+        credential.handle_id != started["credential_handle_id"]
+        or receipt.receipt_id != result.credential_transition_receipt_id
+        or evidence.get("credential_transition_receipt_id")
+        != receipt.receipt_id
+        or completed.get("credential_transition_receipt_id")
+        != receipt.receipt_id
+    ):
+        raise DurableTakeoverError(
+            "durable takeover credential receipt identity changed"
+        )
+    anchor = require_current_trade_credential_transition_anchor(
+        store, vault, receipt
+    )
+    if (
+        evidence.get("credential_anchor_event_id") != anchor.event_id
+        or evidence.get("credential_anchor_payload_hash")
+        != anchor.payload_hash
+        or evidence.get("credential_anchor_journal_sequence")
+        != anchor.journal_sequence
+        or evidence.get("credential_transition_sequence")
+        != receipt.transition_sequence
+    ):
+        raise DurableTakeoverError(
+            "durable takeover credential anchor is no longer current"
+        )
+    owner_event = _owner_event(
+        store, owner_scope=controller.owner_scope, owner=target
+    )
+    if (
+        owner_event["event_id"] != result.recovery_owner_event_id
+        or completed.get("recovery_owner_event_id")
+        != owner_event["event_id"]
+        or completed.get("recovery_owner_payload_hash")
+        != owner_event["payload_hash"]
+        or completed.get("recovery_owner_journal_sequence")
+        != owner_event["journal_sequence"]
+    ):
+        raise DurableTakeoverError(
+            "durable takeover owner commit does not match journal"
+        )
+    if controller._latest_durable_owner() != target:
+        raise DurableTakeoverError(
+            "durable takeover was superseded by another owner"
+        )
+    return target

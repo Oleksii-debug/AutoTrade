@@ -643,14 +643,6 @@ def _install_submission_response_binding_authority(loader):
     )
 
 
-(
-    load_submission_response_binding,
-    require_canonical_submission_response_binding,
-    submission_response_binding_projection,
-) = _install_submission_response_binding_authority(
-    load_submission_response_binding
-)
-del _install_submission_response_binding_authority
 
 
 def stable_client_order_id(
@@ -1540,3 +1532,15 @@ class GuardedDispatcher:
             outcome_response,
             "sent_confirmed",
         )
+
+
+# Install journal-owned response binding only after every dependent helper,
+# including _instant, has been defined. Imported modules see the final sealed API.
+(
+    load_submission_response_binding,
+    require_canonical_submission_response_binding,
+    submission_response_binding_projection,
+) = _install_submission_response_binding_authority(
+    load_submission_response_binding
+)
+del _install_submission_response_binding_authority

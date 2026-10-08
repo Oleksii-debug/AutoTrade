@@ -41,6 +41,7 @@ class RecoveryDispatchReconciliationFreshnessTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="acct",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         self.assertIs(recovery.state, HostState.READY)
 

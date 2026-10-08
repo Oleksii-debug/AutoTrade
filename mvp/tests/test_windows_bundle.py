@@ -42,7 +42,7 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(BundleError, "private-key material"):
             _reject_sensitive_content(
                 relative,
-                source + b"\\n-----BEGIN PRIVATE KEY-----\\nsecret-payload\\n",
+                source + b"\n-----BEGIN PRIVATE KEY-----\nsecret-payload\n",
             )
         with self.assertRaisesRegex(BundleError, "private-key material"):
             _reject_sensitive_content("other/source.py", source)

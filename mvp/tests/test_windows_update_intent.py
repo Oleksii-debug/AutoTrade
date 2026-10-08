@@ -342,6 +342,60 @@ class WindowsUpdateIntentTests(unittest.TestCase):
                 observed_journal_schema_version=1,
             )
 
+    def test_two_concurrent_updater_intents_cannot_both_publish(self):
+        from concurrent.futures import ThreadPoolExecutor
+        intent = self.first()
+
+        def attempt():
+            try:
+                update.publish_windows_update_step_intent(intent, path=self.path)
+                return "PUBLISHED"
+            except update.WindowsUpdateError as error:
+                if "already exists" not in str(error):
+                    raise
+                return "DENIED"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(lambda _: attempt(), range(2)))
+        self.assertEqual(sorted(outcomes), ["DENIED", "PUBLISHED"])
+        recovered = update.read_windows_update_step_intent(
+            self.plan, trust=self.trust, path=self.path,
+        )
+        self.assertEqual(recovered, intent)
+
+    def test_abrupt_child_exit_after_intent_publication_never_replays_step(self):
+        import subprocess
+        import sys
+        intent = self.first()
+        child = (
+            "import os,sys; from pathlib import Path; "
+            "from mvp.autotrade_mvp.windows_update import "
+            "WindowsUpdateStepIntent,publish_windows_update_step_intent; "
+            "i=WindowsUpdateStepIntent("
+            "plan_sha256=sys.argv[2],checkpoint_json=sys.argv[3],"
+            "phase=sys.argv[4],step=sys.argv[5]); "
+            "publish_windows_update_step_intent(i,path=Path(sys.argv[1])); "
+            "os._exit(23)"
+        )
+        done = subprocess.run(
+            [sys.executable, "-c", child, str(self.path), intent.plan_sha256,
+             intent.checkpoint_json, intent.phase, intent.step],
+            check=False,
+            timeout=30,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(done.returncode, 23, done.stderr)
+        restored = update.read_windows_update_step_intent(
+            self.plan, trust=self.trust, path=self.path,
+        )
+        self.assertEqual(restored, intent)
+        self.assertFalse(
+            update.assess_windows_update_intent_after_restart(restored)[
+                "may_replay_step"
+            ]
+        )
+
     def test_no_generic_action_can_be_disguised_as_canonical_step(self):
         with self.assertRaisesRegex(update.WindowsUpdateError, "noncanonical step"):
             update.WindowsUpdateStepIntent(

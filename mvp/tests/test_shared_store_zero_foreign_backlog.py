@@ -136,7 +136,9 @@ class SharedStoreZeroForeignBacklogTests(unittest.TestCase):
 
             deliver_autonomous_owned_publications(store, run_id=run_id)
 
-            zero_state = store.outbox_delivery_state(zero_event["event_id"])
+            zero_state = store.outbox_delivery_state(
+                zero_event["event_id"], topic="autotrade.simulation.events",
+            )
             self.assertIsNotNone(zero_state)
             self.assertTrue(zero_state["delivered"])
             self.assertEqual(store.pending_outbox_count(), 1000)
@@ -174,7 +176,9 @@ class SharedStoreZeroForeignBacklogTests(unittest.TestCase):
             ):
                 deliver_autonomous_owned_publications(store, run_id=run_id)
 
-            state = store.outbox_delivery_state(zero_event["event_id"])
+            state = store.outbox_delivery_state(
+                zero_event["event_id"], topic="ui.host-events",
+            )
             self.assertIsNotNone(state)
             self.assertEqual(state["topic"], "ui.host-events")
             self.assertFalse(state["delivered"])
@@ -193,7 +197,9 @@ class SharedStoreZeroForeignBacklogTests(unittest.TestCase):
                 host_id="local-simulation",
             )
             store.append_event(zero_event, outbox_topic="ui.host-events")
-            state = store.outbox_delivery_state(zero_event["event_id"])
+            state = store.outbox_delivery_state(
+                zero_event["event_id"], topic="ui.host-events",
+            )
             self.assertIsNotNone(state)
             store.mark_outbox_delivered(
                 state["outbox_id"],
@@ -208,7 +214,9 @@ class SharedStoreZeroForeignBacklogTests(unittest.TestCase):
             ):
                 deliver_autonomous_owned_publications(store, run_id=run_id)
 
-            delivered = store.outbox_delivery_state(zero_event["event_id"])
+            delivered = store.outbox_delivery_state(
+                zero_event["event_id"], topic="ui.host-events",
+            )
             self.assertIsNotNone(delivered)
             self.assertTrue(delivered["delivered"])
             self.assertEqual(delivered["topic"], "ui.host-events")

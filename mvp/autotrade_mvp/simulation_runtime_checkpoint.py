@@ -595,45 +595,67 @@ def _autonomous_owned_pending_publications(
 ) -> tuple[dict[str, object], ...]:
     pending: list[dict[str, object]] = []
     financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
+    # The canonical Plan-3 event inventory provides authenticated exact events,
+    # never a globally bounded or foreign-host outbox scan.
     for event in _autonomous_owned_publication_events(store, run_id=run_id):
-        # The canonical event, not caller input, chooses the only trusted topic.
-        # Non-published component events must not be treated as outbox rows.
+        event_id = event["event_id"]
         topic = _canonical_publication_topic(event)
         if topic is None:
+            # A non-publishing ZERO component cannot borrow an outbox topic.
+            # Keep the existing strict JournalStore topic-required API.
+            for unexpected_topic in (
+                "autotrade.economic.events",
+                "autotrade.submission.events",
+                "autotrade.reconciliation.events",
+                "autotrade.simulation.events",
+                "financial.admission.ready",
+                "ui.host-events",
+            ):
+                try:
+                    JournalStore.outbox_delivery_state(
+                        store, event_id, topic=unexpected_topic,
+                    )
+                except ValueError as error:
+                    if str(error) != "durable outbox publication is missing for bootstrap event":
+                        raise AutonomousRuntimeCheckpointError(
+                            "ZERO cannot attest an unauthorized publication"
+                        ) from error
+                else:
+                    raise AutonomousRuntimeCheckpointError(
+                        "ZERO component has an unauthorized outbox publication"
+                    )
             continue
-        state = JournalStore.outbox_delivery_state(
-            store, event["event_id"], topic=topic,
-        )
-        # The JournalStore's authenticated single-cut read returns only
-        # validated delivery metadata, not a second caller-visible envelope.
-        # The original canonical journal event remains the ownership authority;
-        # JournalStore has already byte-compared that event to the outbox row.
+        try:
+            state = JournalStore.outbox_delivery_state(
+                store, event_id, topic=topic,
+            )
+        except ValueError as error:
+            raise AutonomousRuntimeCheckpointError(
+                "ZERO owned publication is missing or misrouted"
+            ) from error
+        # Join the validated outbox metadata to the original authenticated
+        # journal event: no second owner, payload, route or delivery authority.
+        owned_state = {**state, "payload": event}
         if not _autonomous_publication_owned(
-            {"payload": event},
+            owned_state,
             run_id=run_id,
             financial_scope=financial_scope,
         ):
             raise AutonomousRuntimeCheckpointError(
                 "exact ZERO outbox state escaped runtime ownership"
             )
-        if state.get("event_id") != event["event_id"]:
+        if state.get("event_id") != event_id:
             raise AutonomousRuntimeCheckpointError(
                 "ZERO publication does not match canonical event identity"
             )
-        expected_topic = _canonical_publication_topic(event)
-        if expected_topic is None:
-            raise AutonomousRuntimeCheckpointError(
-                "ZERO component event unexpectedly has an outbox publication"
-            )
-        if state.get("topic") != expected_topic:
+        if state.get("topic") != topic:
             raise AutonomousRuntimeCheckpointError(
                 "ZERO publication routing topic is not canonical"
             )
         if state["delivered"]:
             continue
-        pending.append(state)
+        pending.append(owned_state)
     return tuple(pending)
-
 
 def deliver_autonomous_owned_publications(
     store: JournalStore,

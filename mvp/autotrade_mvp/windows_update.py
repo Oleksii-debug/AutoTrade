@@ -1302,3 +1302,236 @@ def assess_windows_update_restart(
             "blind_forward_resume_forbidden",
         ),
     )
+
+
+# --- Plan-5 update intent barrier: no financial or installer authority ---
+
+@dataclass(frozen=True)
+class WindowsUpdateStepIntent:
+    """One durable *pre-effect* checkpoint bound to the existing update plan.
+
+    An intent means the outcome is UNKNOWN until separately reconciled. This
+    component never invokes installer, Host, migration or trading-side effects.
+    It is not a second financial journal or an authority to resume/retry.
+    """
+
+    plan_sha256: str
+    checkpoint_json: str
+    phase: str
+    step: str
+    no_trading_authority: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "plan_sha256", _sha256(
+            self.plan_sha256, name="intent plan_sha256"
+        ))
+        if type(self.checkpoint_json) is not str or not self.checkpoint_json:
+            raise WindowsUpdateError("intent requires an exact checkpoint JSON")
+        if type(self.phase) is not str or self.phase not in ("UPDATE", "ROLLBACK"):
+            raise WindowsUpdateError("intent phase must be canonical UPDATE/ROLLBACK")
+        if type(self.step) is not str or self.step not in (
+            _ROLLBACK_STEPS if self.phase == "ROLLBACK" else _INSTALL_STEPS
+        ):
+            raise WindowsUpdateError("intent contains a noncanonical step")
+        if self.no_trading_authority is not True:
+            raise WindowsUpdateError("intent never grants trading authority")
+
+
+def prepare_windows_update_step_intent(
+    plan: WindowsUpdatePlan,
+    checkpoint: WindowsUpdateCheckpoint,
+    *,
+    trust: WindowsUpdateTrustContext,
+    rollback: bool = False,
+) -> WindowsUpdateStepIntent:
+    """Select exactly the next canonical step without performing it.
+
+    The caller must durably publish the returned intent BEFORE attempting an
+    external side effect. After process death, never automatically replay it.
+    """
+    if type(rollback) is not bool:
+        raise WindowsUpdateError("rollback selector must be an exact bool")
+    document = _plan_document(plan, trust=trust)
+    if not isinstance(checkpoint, WindowsUpdateCheckpoint):
+        raise TypeError("checkpoint must be WindowsUpdateCheckpoint")
+    if checkpoint.plan_sha256 != plan.plan_sha256:
+        raise WindowsUpdateError("intent checkpoint belongs to a different plan")
+    if checkpoint.rollback_started != rollback:
+        raise WindowsUpdateError("intent phase does not match checkpoint phase")
+    steps = _step_sequence(document, rollback=rollback)
+    completed = (
+        checkpoint.rollback_completed_steps if rollback
+        else checkpoint.update_completed_steps
+    )
+    _validate_prefix(completed, steps, name="intent checkpoint")
+    if len(completed) >= len(steps):
+        raise WindowsUpdateError("no uncompleted canonical update step")
+    return WindowsUpdateStepIntent(
+        plan_sha256=checkpoint.plan_sha256,
+        checkpoint_json=serialize_update_checkpoint(checkpoint),
+        phase="ROLLBACK" if rollback else "UPDATE",
+        step=steps[len(completed)],
+    )
+
+
+def _windows_update_intent_payload(intent: WindowsUpdateStepIntent) -> dict[str, Any]:
+    if type(intent) is not WindowsUpdateStepIntent:
+        raise TypeError("intent must be an exact WindowsUpdateStepIntent")
+    values = {
+        "schema_version": 1,
+        "plan_sha256": intent.plan_sha256,
+        "checkpoint_json": intent.checkpoint_json,
+        "phase": intent.phase,
+        "step": intent.step,
+        "no_trading_authority": True,
+        "effect_outcome": "UNKNOWN",
+        "replay_authorized": False,
+    }
+    material = json.dumps(
+        values, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    values["content_sha256"] = "sha256:" + sha256(material).hexdigest()
+    return values
+
+
+def publish_windows_update_step_intent(
+    intent: WindowsUpdateStepIntent,
+    *,
+    path: Path,
+) -> None:
+    """Publish once through the existing locked atomic artifact boundary.
+
+    Existing intents cannot be overwritten, even by the same process. A
+    disk-full/write failure leaves no positive resume permission. Two competing
+    updater processes serialize on the existing durable path lock; neither is
+    authorized to start a financial host.
+    """
+    from research.autotrade_research.artifacts.durable_publish import (
+        atomic_write_json, durable_path_lock,
+    )
+
+    if type(path) is not type(Path()) or not path.is_absolute():
+        raise WindowsUpdateError("intent path must be an exact absolute Path")
+    values = _windows_update_intent_payload(intent)
+    for ancestor in (path, *path.parents):
+        if ancestor.is_symlink():
+            raise WindowsUpdateError("intent path crosses a symbolic link")
+    with durable_path_lock(path):
+        if path.exists() or path.is_symlink():
+            raise WindowsUpdateError(
+                "an update intent already exists; reconcile before another attempt"
+            )
+        atomic_write_json(path, values)
+
+
+def read_windows_update_step_intent(
+    plan: WindowsUpdatePlan,
+    *,
+    trust: WindowsUpdateTrustContext,
+    path: Path,
+) -> WindowsUpdateStepIntent:
+    """Read a bounded, stable, exact-plan intent; never resume its effect.
+
+    The hash is a corruption detector, not an authenticity signature. Trust
+    rechecks the canonical frozen plan; independent post-crash observations
+    remain mandatory even for an intact intent file.
+    """
+    import stat
+
+    if type(path) is not type(Path()) or not path.is_absolute():
+        raise WindowsUpdateError("intent path must be an exact absolute Path")
+    for ancestor in (path, *path.parents):
+        if ancestor.is_symlink():
+            raise WindowsUpdateError("intent path crosses a symbolic link")
+    try:
+        entry = path.lstat()
+        if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
+            raise WindowsUpdateError("intent must be one ordinary file")
+        with path.open("rb") as handle:
+            before = os.fstat(handle.fileno())
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or (entry.st_dev, entry.st_ino) != (before.st_dev, before.st_ino)
+            ):
+                raise WindowsUpdateError("intent file identity changed")
+            raw = handle.read(16385)
+            after = os.fstat(handle.fileno())
+        if (
+            len(raw) > 16384
+            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        ):
+            raise WindowsUpdateError("intent bytes are truncated or unstable")
+    except OSError as error:
+        raise WindowsUpdateError("intent file cannot be read safely") from error
+
+    def unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise WindowsUpdateError("intent JSON contains duplicate fields")
+            value[key] = item
+        return value
+
+    try:
+        payload = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_pairs)
+    except (ValueError, UnicodeError) as error:
+        raise WindowsUpdateError("intent JSON is malformed") from error
+    expected_fields = {
+        "schema_version", "plan_sha256", "checkpoint_json", "phase", "step",
+        "no_trading_authority", "effect_outcome", "replay_authorized",
+        "content_sha256",
+    }
+    if type(payload) is not dict or set(payload) != expected_fields:
+        raise WindowsUpdateError("intent JSON has a noncanonical shape")
+    if (
+        type(payload["schema_version"]) is not int
+        or payload["schema_version"] != 1
+        or payload["effect_outcome"] != "UNKNOWN"
+        or payload["replay_authorized"] is not False
+    ):
+        raise WindowsUpdateError("intent cannot claim a completed or replayable effect")
+    digest = payload["content_sha256"]
+    material = {key: value for key, value in payload.items() if key != "content_sha256"}
+    expected_digest = "sha256:" + sha256(json.dumps(
+        material, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+    if type(digest) is not str or digest != expected_digest:
+        raise WindowsUpdateError("intent content digest mismatch")
+
+    intent = WindowsUpdateStepIntent(
+        plan_sha256=payload["plan_sha256"],
+        checkpoint_json=payload["checkpoint_json"],
+        phase=payload["phase"],
+        step=payload["step"],
+        no_trading_authority=payload["no_trading_authority"],
+    )
+    checkpoint = restore_update_checkpoint(
+        plan, intent.checkpoint_json, trust=trust,
+    )
+    expected = prepare_windows_update_step_intent(
+        plan, checkpoint, trust=trust, rollback=intent.phase == "ROLLBACK",
+    )
+    if intent != expected:
+        raise WindowsUpdateError("intent is stale or changes the next canonical step")
+    return intent
+
+
+def assess_windows_update_intent_after_restart(
+    intent: WindowsUpdateStepIntent,
+) -> dict[str, object]:
+    """One fail-closed outcome class; never infer whether the effect happened."""
+    _windows_update_intent_payload(intent)
+    return {
+        "disposition": "BLOCKED_UNCERTAIN_EFFECT",
+        "step": intent.step,
+        "phase": intent.phase,
+        "plan_sha256": intent.plan_sha256,
+        "requires_independent_reconciliation": True,
+        "may_replay_step": False,
+        "may_start_second_host": False,
+        "trading_authority_granted": False,
+    }

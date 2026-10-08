@@ -576,8 +576,10 @@ def _locked_nupkg_root_evidence(
     are allowed to support a rights decision.
     """
 
-    if type(nupkg_path) is not Path:
-        raise TypeError("nupkg_path must be exact Path")
+    # pathlib.Path() returns the native concrete PosixPath/WindowsPath type.
+    # Compare against that exact native type, not its abstract factory class.
+    if type(nupkg_path) is not type(Path()):
+        raise TypeError("nupkg_path must be exact native Path")
     for value, label in (
         (license_file, "license_file"),
         (notice_file, "notice_file"),

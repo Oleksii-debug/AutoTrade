@@ -8,9 +8,9 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 - Drive status lines are migration snapshots; this file is the live status authority.
 - Plans 1–7 are independent; there is no earliest global Section across them.
 - Within an assigned independent plan, skip terminal DONE and take the first ACTIONABLE unfinished Section.
-- DEFERRED_OWNER is not ACTIONABLE without explicit owner reauthorization.
+- Real provider/account credentials are not required for Plan-6 component engineering. Plan 6 is ACTIONABLE_OFFLINE; workers use public specs, existing code and fixtures and must not request credentials from the owner.
 - Plan 8 waits for terminal M1-required outputs from Plans 1,2,3,4,5,7; Plan 6 is not required.
-- Plan 9 uses named per-Section dependency gates and may skip WAITING_* Sections to the first ACTIONABLE Section.
+- Plan 9 uses named per-Section dependency gates. Sections 2–6 are optional provider/PAPER/LIVE activation and do not block provider-free signed/NVDA/M2-PF release. Skip WAITING/PARKED Sections to the first ACTIONABLE Section.
 - DONE is terminal under Simplified Section Closure Protocol v3; reopen only for demonstrated regression, invalid evidence, changed acceptance contract or breaking integration.
 - The former SEQUENTIAL_CLOSURE_STATE.md is legacy audit evidence and does not choose work.
 
@@ -78,15 +78,15 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 | 6 | OPEN | reusable final installer/signing/update assembly |
 | 7 | OPEN | plan-level qualification |
 
-### Plan 6 — Providers
+### Plan 6 — Providers (offline/source engineering; no owner input required)
 | Section | State | Existing evidence / note |
 | ---: | --- | --- |
-| 1 | DEFERRED_OWNER_WITH_EXISTING_SOURCE | legacy Section 38 |
-| 2 | DEFERRED_OWNER_WITH_EXISTING_SOURCE | legacy Section 38 |
-| 3 | DEFERRED_OWNER_WITH_EXISTING_SOURCE | legacy Section 39 |
-| 4 | DEFERRED_OWNER_WITH_EXISTING_SOURCE | engineering slice of legacy Section 40 |
-| 5 | DEFERRED_OWNER_WITH_EXISTING_SOURCE | provider qualification harness |
-| 6 | DEFERRED_OWNER | plan-level qualification |
+| 1 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | legacy Section 38 provider domain/account/capability contracts |
+| 2 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | legacy Section 38 reads/streams/request/signing/reconciliation adapters |
+| 3 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | legacy Section 39 provider-family adapters |
+| 4 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | engineering slice of legacy Section 40; real provider financial truth remains Plan 9 |
+| 5 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | provider qualification harness using non-secret fixtures/test vectors |
+| 6 | OPEN / ACTIONABLE_OFFLINE | plan-level offline qualification; real account/PAPER/LIVE evidence not required |
 
 ### Plan 7 — Scientific evidence / performance
 | Section | State | Existing evidence / note |
@@ -102,20 +102,28 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 ### Plan 8 — M1 convergence
 Sections 1–6: WAITING_UPSTREAM until Plans 1,2,3,4,5,7 provide required terminal outputs.
 
-### Plan 9 — External / release / M2
+### Plan 9 — Release / NVDA / optional external-provider activation / M2
 | Section | State |
 | ---: | --- |
-| 1 | WAITING_EXTERNAL |
-| 2 | WAITING_OWNER_AND_PLAN6 |
-| 3 | WAITING_PLAN1_PLAN6_SECTION2 |
-| 4 | WAITING_M1_PROVIDER |
-| 5 | WAITING_PLAN2_PLAN7_PAPER |
-| 6 | WAITING_OWNER_AND_UPSTREAM |
-| 7 | WAITING_PLAN4_PLAN5_PLAN8_AND_EXTERNAL |
+| 1 | WAITING_EXTERNAL_RELEASE_EVIDENCE |
+| 2 | PARKED_OPTIONAL_PROVIDER_TRACK |
+| 3 | PARKED_OPTIONAL_PROVIDER_TRACK |
+| 4 | PARKED_OPTIONAL_PROVIDER_TRACK |
+| 5 | PARKED_OPTIONAL_PROVIDER_TRACK |
+| 6 | PARKED_OPTIONAL_PROVIDER_TRACK |
+| 7 | WAITING_PLAN4_PLAN5_PLAN8_AND_RELEASE_EVIDENCE |
 | 8 | WAITING_SECTION7 |
-| 9 | WAITING_CLAIMED_SCOPE |
-| 10 | WAITING_SECTION9 |
+| 9 | WAITING_CLAIMED_SCOPE; provider rows may be NOT_ACTIVATED/NOT_CLAIMED |
+| 10 | WAITING_SECTION9; provider-free M2-PF does not wait for Sections 2–6 |
 
 Migration note: old parked/partial PRs may have stale bases after the control-plane switch. Their existence is preserved as work/evidence, not as a requirement to merge stale topology. When a Section becomes actionable, refresh head/base/current-main, preserve unique changes, and converge once under the new owner plan.
 
 Update this file in the same closure/reopen run whenever a new-plan Section status changes.
+
+## Current provider-input rule — 2026-10-08
+
+Missing real provider/account/credential data is a normal expected state, not a development blocker. Plan 6 closes offline against fixtures. Plan 8 is provider-free. Plan 9 Sections 2–6 stay parked until external activation is actually desired; workers must not ask the owner for provider data merely to keep working.
+
+## Canonical UI rule — 2026-10-08
+
+Plan 5 develops the existing semantic browser-like Web UI as the canonical navigation experience. Desktop embeds that same UI and may add only native host/emergency surfaces. Provider absence must render as NOT_CONFIGURED/UNAVAILABLE while ZERO/SIMULATION/research workflows remain usable.

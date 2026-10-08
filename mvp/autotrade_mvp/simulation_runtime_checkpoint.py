@@ -552,12 +552,12 @@ def _canonical_publication_topic(envelope: Mapping[str, object]) -> str | None:
     return _COMPONENT_PUBLICATION_TOPICS[aggregate_type]
 
 
-def _autonomous_owned_event_ids(
+def _autonomous_owned_publication_events(
     store: JournalStore,
     *,
     run_id: str,
-) -> tuple[str, ...]:
-    """Resolve exact ZERO publication candidates without a bounded outbox scan."""
+) -> tuple[dict[str, object], ...]:
+    """Identify exact ZERO-owned events and canonical routes without bounded scans."""
 
     events = list(
         JournalStore.load_events(
@@ -585,7 +585,7 @@ def _autonomous_owned_event_ids(
         raise AutonomousRuntimeCheckpointError(
             "ZERO runtime event identities are not unique"
         )
-    return event_ids
+    return tuple(events)
 
 
 def _autonomous_owned_pending_publications(
@@ -595,10 +595,15 @@ def _autonomous_owned_pending_publications(
 ) -> tuple[dict[str, object], ...]:
     pending: list[dict[str, object]] = []
     financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
-    for event_id in _autonomous_owned_event_ids(store, run_id=run_id):
-        state = JournalStore.outbox_delivery_state(store, event_id)
-        if state is None:
+    for event in _autonomous_owned_publication_events(store, run_id=run_id):
+        # The canonical event, not caller input, chooses the only trusted topic.
+        # Non-published component events must not be treated as outbox rows.
+        topic = _canonical_publication_topic(event)
+        if topic is None:
             continue
+        state = JournalStore.outbox_delivery_state(
+            store, event["event_id"], topic=topic,
+        )
         if not _autonomous_publication_owned(
             state,
             run_id=run_id,

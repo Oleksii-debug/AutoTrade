@@ -22,6 +22,10 @@ from autotrade_numeric.exact_decimal import (
 from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_response_limits import require_provider_json_depth
 
+# Journal CAS primitives are the sole atomic send+intent binding authority.
+_CANONICAL_JOURNAL_CURRENT_SEQUENCE = JournalStore.current_journal_sequence
+_CANONICAL_JOURNAL_COMMIT_COMMAND = JournalStore.commit_command
+
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
 SenderCheck = Callable[[str, int], None]
@@ -255,7 +259,7 @@ class SubmissionResponseBinding:
             (self.client_order_id, "client_order_id"),
             (self.account_id, "account_id"),
         ):
-            if not isinstance(value, str) or not value.strip():
+            if type(value) is not str or not value.strip():
                 raise ValueError(f"{name} is required")
         if re.fullmatch(r"sha256:[0-9a-f]{64}", self.request_hash) is None:
             raise ValueError("request_hash must be a canonical SHA-256 digest")
@@ -368,21 +372,134 @@ def submission_attempt_aggregate_id(
     """Return the canonical durable aggregate identity for one send attempt."""
 
     normalized_environment = (
-        environment.strip().upper() if isinstance(environment, str) else ""
+        environment.strip().upper() if type(environment) is str else ""
     )
     if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
         raise ValueError(
             "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
         )
-    if not isinstance(account_id, str) or not account_id.strip():
+    if type(account_id) is not str or not account_id.strip():
         raise ValueError("account_id is required")
-    if not isinstance(attempt_id, str) or not attempt_id.strip():
+    if type(attempt_id) is not str or not attempt_id.strip():
         raise ValueError("attempt_id is required")
     return "submission-attempt:" + _identity_digest(
         normalized_environment,
         account_id.strip(),
         attempt_id.strip(),
     )
+
+
+def submission_intent_aggregate_id(
+    *,
+    provider: str,
+    environment: str,
+    account_id: str,
+    intent_id: str,
+) -> str:
+    """Return one durable financial-send identity for one economic intent."""
+
+    if type(provider) is not str or not provider.strip():
+        raise ValueError("provider is required")
+    normalized_environment = (
+        environment.strip().upper() if type(environment) is str else ""
+    )
+    if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
+    if type(account_id) is not str or not account_id.strip():
+        raise ValueError("account_id is required")
+    if type(intent_id) is not str or not intent_id.strip():
+        raise ValueError("intent_id is required")
+    return "submission-intent:" + _identity_digest(
+        provider.strip().lower(),
+        normalized_environment,
+        account_id.strip(),
+        intent_id.strip(),
+    )
+
+
+def _legacy_submission_intent_attempt(
+    store: JournalStore,
+    *,
+    provider: str,
+    environment: str,
+    account_id: str,
+    intent_id: str,
+    intent_hash: str,
+    request_hash: str,
+    client_order_id: str,
+    submission_scope_hash: str,
+) -> str | None:
+    """Resolve pre-fence durable intent history without trusting provider dedupe.
+
+    Older journal generations can contain submission attempts created before the
+    submission_intent aggregate existed. A fresh attempt for that same economic
+    intent must not cross the provider-send boundary merely because the upgrade
+    introduced a new local attempt_id.
+    """
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for event in JournalStore.load_events_by_aggregate_type(
+        store, "submission_attempt"
+    ):
+        aggregate_id = event.get("aggregate_id")
+        if not isinstance(aggregate_id, str) or not aggregate_id:
+            raise RuntimeError("durable submission attempt aggregate is invalid")
+        grouped.setdefault(aggregate_id, []).append(event)
+
+    expected = {
+        "provider": provider,
+        "environment": environment,
+        "account_id": account_id,
+        "intent_id": intent_id,
+        "intent_hash": intent_hash,
+        "request_hash": request_hash,
+        "client_order_id": client_order_id,
+        "submission_scope_hash": submission_scope_hash,
+    }
+    candidates: list[str] = []
+    for events in grouped.values():
+        first = events[0]
+        if first.get("event_type") != "SubmissionPrepared":
+            raise RuntimeError("durable submission attempt does not start prepared")
+        payload = first.get("payload")
+        if not isinstance(payload, dict):
+            raise RuntimeError("durable submission prepared payload is invalid")
+        historical_provider = payload.get("provider")
+        if (
+            not isinstance(historical_provider, str)
+            or historical_provider.strip().lower() != provider.strip().lower()
+            or payload.get("environment") != environment
+            or payload.get("account_id") != account_id
+            or payload.get("intent_id") != intent_id
+        ):
+            continue
+        if any(payload.get(key) != value for key, value in expected.items()):
+            raise ValueError(
+                "intent_id conflicts with historical submission content"
+            )
+        attempt_id = payload.get("attempt_id")
+        if not isinstance(attempt_id, str) or not attempt_id:
+            raise RuntimeError("historical submission attempt identity is invalid")
+        last_type = events[-1].get("event_type")
+        if last_type == "SubmissionBlocked":
+            continue
+        if last_type not in {
+            "SubmissionPrepared",
+            "SubmissionSending",
+            "SubmissionSent",
+            "SubmissionUnknown",
+        }:
+            raise RuntimeError(
+                "historical submission attempt has unsupported terminal state"
+            )
+        candidates.append(attempt_id)
+
+    unique = sorted(set(candidates))
+    if len(unique) > 1:
+        raise RuntimeError(
+            "multiple durable non-blocked submission attempts exist for one economic intent"
+        )
+    return unique[0] if unique else None
 
 
 def _canonical_journal_authority_snapshot(
@@ -717,16 +834,16 @@ def stable_client_order_id(
     max_length: int = 32,
     client_id_format: str = "TOKEN",
 ) -> str:
-    if not isinstance(provider, str) or not provider.strip():
+    if type(provider) is not str or not provider.strip():
         raise ValueError("provider is required")
-    if not isinstance(intent_id, str) or not intent_id.strip():
+    if type(intent_id) is not str or not intent_id.strip():
         raise ValueError("intent_id is required")
-    normalized_environment = environment.strip().upper() if isinstance(environment, str) else ""
+    normalized_environment = environment.strip().upper() if type(environment) is str else ""
     if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
         raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
-    if not isinstance(account_id, str) or not account_id.strip():
+    if type(account_id) is not str or not account_id.strip():
         raise ValueError("account_id is required")
-    if not isinstance(client_id_format, str):
+    if type(client_id_format) is not str:
         raise TypeError("client_id_format must be text")
     normalized_format = client_id_format.strip().upper()
     if normalized_format not in {"TOKEN", "UUID"}:
@@ -756,7 +873,7 @@ def stable_client_order_id(
 
 
 def _instant(value: str) -> datetime:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError("now must be an ISO timestamp")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -868,11 +985,11 @@ class GuardedDispatcher:
         ) = _canonical_journal_authority_snapshot(store)
         self.store = store
         normalized_environment = (
-            environment.strip().upper() if isinstance(environment, str) else ""
+            environment.strip().upper() if type(environment) is str else ""
         )
         if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
-        if not isinstance(account_id, str) or not account_id.strip():
+        if type(account_id) is not str or not account_id.strip():
             raise ValueError("account_id is required")
         self.environment = normalized_environment
         self.account_id = account_id.strip()
@@ -918,23 +1035,56 @@ class GuardedDispatcher:
         version: int,
         payload: dict[str, Any],
         now: str,
+        expected_journal_sequence: int | None = None,
+        _journal_commit_command: Callable[..., object] | None = None,
+        co_events: list[tuple[dict[str, Any], str]] | None = None,
     ):
         store = self._journal_store_authority()
-        return JournalStore.append_event(
-            store,
-            _envelope(
-                scope_key=self.scope_key,
-                aggregate_id=self._aggregate_id(attempt_id),
-                environment=self.environment,
-                attempt_id=attempt_id,
-                event_type=event_type,
-                version=version,
-                payload=payload,
-                now=now,
-                owner_epoch=self.owner_epoch,
-            ),
-            outbox_topic="autotrade.submission.events",
+        envelope = _envelope(
+            scope_key=self.scope_key,
+            aggregate_id=self._aggregate_id(attempt_id),
+            environment=self.environment,
+            attempt_id=attempt_id,
+            event_type=event_type,
+            version=version,
+            payload=payload,
+            now=now,
+            owner_epoch=self.owner_epoch,
         )
+        if expected_journal_sequence is None:
+            if co_events:
+                raise ValueError("co_events require the journal-cut send barrier")
+            return JournalStore.append_event(
+                store,
+                envelope,
+                outbox_topic="autotrade.submission.events",
+            )
+        commit_command = (
+            _CANONICAL_JOURNAL_COMMIT_COMMAND
+            if _journal_commit_command is None
+            else _journal_commit_command
+        )
+        _, inserted, appended = commit_command(
+            store,
+            command_id=envelope["event_id"],
+            actor=f"dispatcher:{self.scope_key}",
+            environment=self.environment,
+            idempotency_key=f"send-barrier:{envelope['event_id']}",
+            request={
+                "event": envelope,
+                "journal_sequence": expected_journal_sequence,
+            },
+            result={"event_id": envelope["event_id"]},
+            state_version=expected_journal_sequence,
+            events=[
+                (envelope, "autotrade.submission.events"),
+                *(co_events or []),
+            ],
+            expected_journal_sequence=expected_journal_sequence,
+        )
+        if not inserted:
+            raise DispatchBlocked("send_barrier_already_committed")
+        return appended[0]
 
     @staticmethod
     def _outcome_from_terminal(event: dict[str, Any], client_order_id: str) -> DispatchOutcome:
@@ -1103,6 +1253,8 @@ class GuardedDispatcher:
         sender_check: SenderCheck | None = None,
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
+        journal_current_sequence = _CANONICAL_JOURNAL_CURRENT_SEQUENCE
+        journal_commit_command = _CANONICAL_JOURNAL_COMMIT_COMMAND
         for value, name in (
             (attempt_id, "attempt_id"),
             (intent_id, "intent_id"),
@@ -1138,6 +1290,13 @@ class GuardedDispatcher:
             client_id_format=client_id_format,
         )
 
+        intent_aggregate_id = submission_intent_aggregate_id(
+            provider=provider,
+            environment=self.environment,
+            account_id=self.account_id,
+            intent_id=intent_id,
+        )
+
         existing = self._events(attempt_id)
         if existing:
             prepared = existing[0]["payload"]
@@ -1156,6 +1315,78 @@ class GuardedDispatcher:
                 raise ValueError("attempt_id conflicts with existing submission content")
             return self._recover_existing(
                 attempt_id=attempt_id,
+                client_order_id=client_order_id,
+                now=now,
+            )
+
+        # A stable provider client ID is necessary but not sufficient: provider
+        # duplicate-ID behavior cannot be the authority for money movement. The
+        # canonical intent aggregate makes the first durable send owner unique
+        # across process restarts and across fresh attempt_id values.
+        store = self._journal_store_authority()
+        intent_events = JournalStore.load_events(
+            store,
+            "submission_intent",
+            intent_aggregate_id,
+        )
+        if intent_events:
+            if (
+                len(intent_events) != 1
+                or intent_events[0].get("event_type") != "SubmissionIntentBound"
+            ):
+                raise RuntimeError("durable submission intent binding is invalid")
+            binding = intent_events[0].get("payload")
+            if not isinstance(binding, dict):
+                raise RuntimeError("durable submission intent binding payload is invalid")
+            expected_binding = {
+                "provider": provider,
+                "environment": self.environment,
+                "account_id": self.account_id,
+                "intent_id": intent_id,
+                "intent_hash": intent_hash,
+                "request_hash": request_hash,
+                "client_order_id": client_order_id,
+                "submission_scope_hash": submission_scope_hash,
+            }
+            if any(binding.get(key) != value for key, value in expected_binding.items()):
+                raise ValueError("intent_id conflicts with existing submission content")
+            canonical_attempt_id = binding.get("attempt_id")
+            if not isinstance(canonical_attempt_id, str) or not canonical_attempt_id:
+                raise RuntimeError("durable submission intent owner is invalid")
+            canonical_events = self._events(canonical_attempt_id)
+            if not canonical_events:
+                raise RuntimeError("submission intent binding lost its canonical attempt")
+            canonical_last = canonical_events[-1]
+            if canonical_last["event_type"] in {"SubmissionSent", "SubmissionUnknown"}:
+                return self._outcome_from_terminal(canonical_last, client_order_id)
+            # SubmissionIntentBound and SubmissionSending are committed in the
+            # same SQLite transaction below. Seeing the binding therefore means
+            # an irreversible send may already be in flight; never send again.
+            if canonical_last["event_type"] == "SubmissionSending":
+                return DispatchOutcome(
+                    "UNKNOWN",
+                    client_order_id,
+                    None,
+                    "intent_send_already_committed",
+                )
+            raise RuntimeError(
+                "submission intent binding has no irreversible send evidence"
+            )
+
+        legacy_attempt_id = _legacy_submission_intent_attempt(
+            store,
+            provider=provider,
+            environment=self.environment,
+            account_id=self.account_id,
+            intent_id=intent_id,
+            intent_hash=intent_hash,
+            request_hash=request_hash,
+            client_order_id=client_order_id,
+            submission_scope_hash=submission_scope_hash,
+        )
+        if legacy_attempt_id is not None:
+            return self._recover_existing(
+                attempt_id=legacy_attempt_id,
                 client_order_id=client_order_id,
                 now=now,
             )
@@ -1263,6 +1494,8 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked("final_barrier_clock_moved_backwards")
+            # Fixed journal cut before untrusted sender/authority callbacks.
+            barrier_journal_sequence = journal_current_sequence(self._journal_store_authority())
             if self.environment in {"PAPER", "LIVE"} and sender_check is None:
                 barrier_reason = "sender_fence_required"
                 self._append(
@@ -1359,6 +1592,29 @@ class GuardedDispatcher:
                     pass
                 raise DispatchBlocked(barrier_reason)
             try:
+                intent_binding = _envelope(
+                    scope_key=self.scope_key,
+                    aggregate_id=intent_aggregate_id,
+                    environment=self.environment,
+                    attempt_id=attempt_id,
+                    event_type="SubmissionIntentBound",
+                    version=1,
+                    payload={
+                        "attempt_id": attempt_id,
+                        "provider": provider,
+                        "environment": self.environment,
+                        "account_id": self.account_id,
+                        "intent_id": intent_id,
+                        "intent_hash": intent_hash,
+                        "request_hash": request_hash,
+                        "client_order_id": client_order_id,
+                        "submission_scope_hash": submission_scope_hash,
+                        "bound_at": _instant(barrier_now).isoformat().replace("+00:00", "Z"),
+                    },
+                    now=barrier_now,
+                    owner_epoch=self.owner_epoch,
+                )
+                intent_binding["aggregate_type"] = "submission_intent"
                 self._append(
                     attempt_id=attempt_id,
                     event_type="SubmissionSending",
@@ -1370,14 +1626,16 @@ class GuardedDispatcher:
                         "reason": "final_send_barrier_passed",
                     },
                     now=barrier_now,
+                    expected_journal_sequence=barrier_journal_sequence,
+                    _journal_commit_command=journal_commit_command,
+                    co_events=[
+                        (intent_binding, "autotrade.submission.intent.events"),
+                    ],
                 )
             except ValueError as error:
-                # A concurrent recovery may have terminalized the Prepared
-                # attempt as zero-wire BLOCKED after its lease expired. Never
-                # let a stale final_guard cross that durable fence.
+                reason = "journal_changed_during_final_send_validation"
                 latest = self._events(attempt_id)
                 if latest and latest[-1]["event_type"] == "SubmissionPrepared":
-                    reason = "submission_changed_during_final_send_validation"
                     self._append(
                         attempt_id=attempt_id,
                         event_type="SubmissionBlocked",
@@ -1388,9 +1646,7 @@ class GuardedDispatcher:
                         },
                         now=barrier_now,
                     )
-                raise DispatchBlocked(
-                    "submission_changed_during_final_send_validation"
-                ) from error
+                raise DispatchBlocked(reason) from error
             barrier_passed = True
 
         canonical_response_guard = _require_canonical_exact_transport_response

@@ -264,6 +264,44 @@ class WindowsUpdateIntentTests(unittest.TestCase):
                 pending_intent=self.first(),
             )
 
+    def test_crash_during_verified_schema_migration_is_never_auto_replayed(self):
+        transition = update._INSTALL_STEPS.index(
+            "APPLY_VERIFIED_SCHEMA_TRANSITION_IF_REQUIRED"
+        )
+        cp = update.WindowsUpdateCheckpoint(
+            plan_sha256=SOURCE_PLAN_DIGEST,
+            update_completed_steps=update._INSTALL_STEPS[:transition],
+        )
+        intent = update.prepare_windows_update_step_intent(
+            self.plan, cp, trust=self.trust,
+        )
+        self.assertEqual(intent.step, "APPLY_VERIFIED_SCHEMA_TRANSITION_IF_REQUIRED")
+        update.publish_windows_update_step_intent(intent, path=self.path)
+        after_crash = update.read_windows_update_step_intent(
+            self.plan, trust=self.trust, path=self.path,
+        )
+        recovery = update.assess_windows_update_intent_after_restart(after_crash)
+        self.assertEqual(recovery["disposition"], "BLOCKED_UNCERTAIN_EFFECT")
+        self.assertIs(recovery["may_replay_step"], False)
+        self.assertIs(recovery["trading_authority_granted"], False)
+
+    def test_pending_financial_host_fence_prohibits_parallel_sender_start(self):
+        index = update._INSTALL_STEPS.index("STOP_AND_FENCE_FINANCIAL_SENDER")
+        cp = update.WindowsUpdateCheckpoint(
+            plan_sha256=SOURCE_PLAN_DIGEST,
+            update_completed_steps=update._INSTALL_STEPS[:index],
+        )
+        intent = update.prepare_windows_update_step_intent(
+            self.plan, cp, trust=self.trust,
+        )
+        self.assertEqual(intent.step, "STOP_AND_FENCE_FINANCIAL_SENDER")
+        self.assertIs(
+            update.assess_windows_update_intent_after_restart(
+                intent,
+            )["may_start_second_host"],
+            False,
+        )
+
     def test_no_generic_action_can_be_disguised_as_canonical_step(self):
         with self.assertRaisesRegex(update.WindowsUpdateError, "noncanonical step"):
             update.WindowsUpdateStepIntent(

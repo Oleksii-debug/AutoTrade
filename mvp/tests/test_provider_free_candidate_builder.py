@@ -53,6 +53,24 @@ def write_bound_host_publish(publish, source_sha, *, host_bytes=b'MZ-host',
 
 
 class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
+    def test_relative_work_root_is_absolute_before_windows_namespace_staging(self):
+        # The Windows provider-free job supplies --work artifacts/candidate-work.
+        # A retained Windows namespace must not receive a relative parent.
+        with TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            relative_work = root.relative_to(Path.cwd()) / 'candidate-work'
+            with patch.object(candidate, 'stage_source', side_effect=RuntimeError('staging-probe')) as stage:
+                with self.assertRaisesRegex(RuntimeError, 'staging-probe'):
+                    candidate.build_candidate(
+                        source_root=candidate.ROOT, source_sha='a' * 40,
+                        desktop=root, host=root, python_archive=root / 'python.zip',
+                        webview_archive=root / 'webview.nupkg', work=relative_work,
+                        output=root / 'candidate.zip',
+                    )
+            self.assertEqual(stage.call_args.args[2], relative_work.absolute() / 'payload' / 'product')
+            self.assertEqual(stage.call_args.args[3], relative_work.absolute() / 'source-composition.json')
+            self.assertTrue(stage.call_args.args[3].is_absolute())
+
     def test_stage_source_uses_canonical_exact_git_reader(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

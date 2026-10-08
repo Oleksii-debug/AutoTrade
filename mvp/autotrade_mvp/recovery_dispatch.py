@@ -30,7 +30,12 @@ from .dispatch import (
 from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import load_latest_reconciliation_checkpoint_for_scope
 from .recovery import HostState, OwnerFence, RecoveryController
-from .recovery_takeover import _latest_effectful_submission_sequence
+from .recovery_takeover import (
+    DurableTakeoverResult,
+    _latest_effectful_submission_sequence,
+    require_committed_durable_takeover,
+)
+from .windows_secrets import ProtectedCredentialVault
 
 
 _ISSUANCE_TOKEN = object()
@@ -197,6 +202,8 @@ def activate_recovery_takeover_target(
     *,
     source: OwnerFence,
     target: OwnerFence,
+    takeover: DurableTakeoverResult,
+    vault: ProtectedCredentialVault,
 ) -> OwnerFence:
     """Release takeover-only fencing only after exact durable N -> N+1 advance."""
 
@@ -223,6 +230,15 @@ def activate_recovery_takeover_target(
     chain = recovery.durable_owner_chain()
     if not chain or chain[-1] != target:
         raise PermissionError("takeover target is not the current durable owner")
+    verified_target = require_committed_durable_takeover(
+        recovery,
+        result=takeover,
+        vault=vault,
+    )
+    if verified_target != target:
+        raise PermissionError(
+            "issued takeover does not match target recovery owner"
+        )
     state.pop(_TAKEOVER_SOURCE_ATTR, None)
     recovery.provider_reconciled = False
     recovery.reason_codes.discard("takeover_source_only")

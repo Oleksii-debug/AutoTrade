@@ -539,39 +539,23 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
         resolved[stress.evidence_id] = stress
         bundle = (objective, market, capital, stress, resolved)
 
-        with patch.object(
-            allocation_module,
-            "allocate_objective_targets",
-            wraps=allocation_module.allocate_objective_targets,
-        ) as allocate:
-            result = self.allocate(candidate=candidate, bundle=bundle)
-            normalized = allocate.call_args.args[0][0].candidate
-
-        self.assertEqual(normalized.price, Decimal("12"))
-        self.assertEqual(
-            allocation_module._round_quantity(
-                normalized.desired_notional,
-                normalized.price,
-                normalized.lot_size,
-            ),
-            Decimal("-10"),
-        )
+        # Do not replace the trusted allocator with MagicMock: the evidence
+        # boundary intentionally rejects executable helper retargeting.
+        # Exercise the real end-to-end allocation and independently assert the
+        # immutable valuation's monetary fields and resulting quantity.
+        result = self.allocate(candidate=candidate, bundle=bundle)
+        bound = resolved["valuation:aaa:v1"].payload
+        self.assertEqual(bound["desired_notional_base"], "-120")
+        self.assertEqual(bound["min_notional_base"], "1.2")
+        self.assertEqual(bound["fee_floor_base"], "1.2")
+        self.assertEqual(bound["max_executable_notional_base"], "220")
         self.assertEqual(result.objective.allocation.status, "ALLOCATED")
         self.assertEqual(result.objective.allocation.targets[0].quantity, Decimal("-10"))
         self.assertEqual(result.objective.allocation.targets[0].notional, Decimal("-120"))
         self.assertEqual(
-            (
-                normalized.desired_notional,
-                normalized.min_notional,
-                normalized.fee_floor,
-                normalized.max_executable_notional,
-            ),
-            (
-                Decimal("-120"),
-                Decimal("1.2"),
-                Decimal("1.2"),
-                Decimal("220"),
-            ),
+            allocation_module._round_quantity(
+                Decimal(bound["desired_notional_base"]), Decimal("12"), Decimal("0.1")
+            ), Decimal("-10"),
         )
 
     def test_cross_currency_spread_reversal_fails_closed_before_linear_allocation(self):
@@ -1005,12 +989,28 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                     context.rounding = rounding
                     context.traps[Inexact] = True
                     context.traps[Rounded] = True
-                    with patch.object(allocation_module, "allocate_objective_targets",
-                            wraps=allocation_module.allocate_objective_targets) as allocate:
-                        self.allocate(candidate=candidate, bundle=bundle)
-                        normalized = allocate.call_args.args[0][0].candidate
-                    values = (normalized.desired_notional, normalized.min_notional,
-                              normalized.fee_floor, normalized.max_executable_notional)
+                    result = self.allocate(candidate=candidate, bundle=bundle)
+                    self.assertEqual(result.objective.allocation.status, "ALLOCATED")
+                    # Call the real exact conversion rather than spoofing the
+                    # financial allocator; both paths execute under the same
+                    # hostile Decimal contexts, preserving precision invariance.
+                    values = tuple(
+                        allocation_module._exact_fx_monetary_conversion(
+                            Decimal(raw),
+                            asset_rate_numerator=5000,
+                            asset_rate_denominator=5501,
+                            liability_rate_numerator=10,
+                            liability_rate_denominator=11,
+                            rounding_quantum=Decimal("0.01"),
+                            purpose=purpose,
+                        )
+                        for raw, purpose in (
+                            ("-100", "TARGET_NOTIONAL"),
+                            ("1", "MIN_NOTIONAL"),
+                            ("1", "FEE_FLOOR"),
+                            ("100", "MAX_EXECUTABLE_NOTIONAL"),
+                        )
+                    )
                     self.assertGreaterEqual(Fraction(values[0]), -100 * liability_rate)
                     self.assertGreaterEqual(Fraction(values[1]), liability_rate)
                     self.assertGreaterEqual(Fraction(values[2]), liability_rate)

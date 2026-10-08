@@ -47,13 +47,13 @@ class SemanticWebClientContractTests(unittest.TestCase):
             'id="server-time"',
         ):
             self.assertIn(required, html)
-        self.assertIn("function renderProjection(bodyId, record, emptyMessage)", js)
-        self.assertIn("function renderPermissionSummary(permissionSummary)", js)
-        self.assertIn("renderPermissionSummary(parsed.permissionSummary)", js)
+        self.assertIn("function renderProjection(bodyId, record, emptyMessage, {preserveSelection = true} = {})", js)
+        self.assertIn("function renderPermissionSummary(permissionSummary, {preserveSelection = true} = {})", js)
+        self.assertIn("renderPermissionSummary(parsed.permissionSummary, {preserveSelection: !displayContextChanged})", js)
         self.assertIn('renderProjection(\n      "portfolio-body"', js)
         self.assertIn('renderProjection(\n      "risk-body"', js)
         self.assertIn('renderProjection(\n      "strategy-body"', js)
-        self.assertIn("renderJobs(parsed.jobs)", js)
+        self.assertIn("renderJobs(parsed.jobs, {preserveSelection: !displayContextChanged})", js)
         self.assertIn('text("server-time", parsed.serverTime)', js)
         self.assertNotIn("Not loaded.", html)
 
@@ -92,7 +92,8 @@ class SemanticWebClientContractTests(unittest.TestCase):
             self.assertIn("row.appendChild(rowHeader)", scope)
             self.assertIn("for (let index = 1; index < 4; index += 1)", scope)
         self.assertIn("row.children[0].textContent = operation.operationId", operation)
-        self.assertIn("row.children[0].textContent = cursor.toString()", event)
+        self.assertIn("row.children[0].textContent = cursorText", event)
+        self.assertIn("const cursorText = cursor.toString()", event)
 
     def test_received_host_events_are_exposed_as_read_only_semantic_history(self):
         html = INDEX.read_text(encoding="utf-8")
@@ -112,10 +113,13 @@ class SemanticWebClientContractTests(unittest.TestCase):
         )
         self.assertIn('"event-history-region"', js)
         self.assertIn("function renderHostEvent(event, cursor, stateVersion)", js)
-        self.assertIn("row.children[0].textContent = cursor.toString()", js)
-        self.assertIn("row.children[1].textContent = stateVersion.toString()", js)
+        self.assertIn("row.children[0].textContent = cursorText", js)
+        self.assertIn("const cursorText = cursor.toString()", js)
+        self.assertIn("row.children[1].textContent = stateVersionText", js)
+        self.assertIn("const stateVersionText = stateVersion.toString()", js)
         self.assertIn("row.children[2].textContent = kind", js)
-        self.assertIn("row.children[3].textContent = projectionText(payload)", js)
+        self.assertIn("const payloadText = projectionText(payload)", js)
+        self.assertIn("row.children[3].textContent = payloadText", js)
         event = js[js.index("function renderHostEvent"):js.index("function resetNotificationsForScope")]
         self.assertIn('const rowHeader = document.createElement("th")', event)
         self.assertIn('rowHeader.scope = "row"', event)
@@ -213,23 +217,29 @@ class SemanticWebClientContractTests(unittest.TestCase):
 
     def test_cursor_gap_recovery_failure_blocks_commands_fail_closed(self):
         js = APP.read_text(encoding="utf-8")
-        catch_index = js.index("error.status === 409 || error.status === 410")
-        recovery_index = js.index(
-            "await refreshSnapshot({announceRefresh: true})",
-            catch_index,
-        )
-        nested_catch = js.index("} catch {", recovery_index)
-        blocked = js.index("setCommandAvailability(false)", nested_catch)
-        snapshot_unready = js.index("state.snapshotReady = false", nested_catch)
-        identity_cleared = js.index("state.sessionIdentity = null", nested_catch)
-        self.assertGreater(nested_catch, recovery_index)
-        self.assertGreater(blocked, nested_catch)
-        self.assertGreater(snapshot_unready, nested_catch)
-        self.assertGreater(identity_cleared, nested_catch)
+        poll = js[js.index("async function pollEvents()"):js.index("function newCommandPayload")]
+        catch_index = poll.index("error.status === 409 || error.status === 410")
+        recovery = poll.index("await refreshSnapshot({announceRefresh: true})", catch_index)
+        nested_catch = poll.index("} catch (recoveryError) {", recovery)
+        self.assertIn("if (isSnapshotBusy(recoveryError))", poll[nested_catch:])
+        self.assertIn("reportSnapshotBusy();", poll[nested_catch:])
+        self.assertIn("invalidateSnapshotAuthority();", poll[nested_catch:])
         self.assertIn(
             "Host synchronization gap recovery failed. Commands remain blocked",
-            js[nested_catch:blocked + 500],
+            poll[nested_catch:],
         )
+        invalidate = js[
+            js.index("function invalidateSnapshotAuthority()"):
+            js.index("function isSnapshotBusy(error)")
+        ]
+        for control in (
+            "state.snapshotReady = false",
+            "state.sessionIdentity = null",
+            "state.accountId = null",
+            "state.environment = null",
+            "setCommandAvailability(false)",
+        ):
+            self.assertIn(control, invalidate)
 
     def test_successful_http_response_still_rejects_internal_cursor_gap(self):
         js = APP.read_text(encoding="utf-8")
@@ -258,7 +268,8 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn('version: exactCounter(snapshot.state_version, "state_version")', js)
         self.assertIn('cursor: exactCounter(snapshot.event_cursor, "event_cursor")', js)
         self.assertIn("expected_state_version: state.version.toString()", js)
-        self.assertNotIn("Number.isSafeInteger(value)", js)
+        counter = js[js.index("function exactCounter("):js.index("return BigInt(value)", js.index("function exactCounter("))]
+        self.assertNotIn("Number.isSafeInteger(value)", counter)
         self.assertNotIn("const token = String(value)", js)
         self.assertNotIn("Number.parseInt(snapshot.state_version", js)
         self.assertNotIn("Number.parseInt(snapshot.event_cursor", js)
@@ -1209,7 +1220,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
             'aria-label="Authenticated permission and capability evidence"',
             html,
         )
-        self.assertIn("function renderPermissionSummary(permissionSummary)", js)
+        self.assertIn("function renderPermissionSummary(permissionSummary, {preserveSelection = true} = {})", js)
         self.assertIn(
             'appendProjectionRow(body, "Actor", permissionSummary.actor)',
             js,
@@ -1226,7 +1237,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
             'body, "Capability " + String(index + 1), capability',
             js,
         )
-        self.assertIn("renderPermissionSummary(parsed.permissionSummary)", js)
+        self.assertIn("renderPermissionSummary(parsed.permissionSummary, {preserveSelection: !displayContextChanged})", js)
         self.assertIn('reapplyTableFilter("permissions-body")', js)
 
 
@@ -1332,7 +1343,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         catch = poll.rindex("} catch (error) {")
         stale = poll.index("pollEpoch !== state.scopeEpoch", catch)
         early_return = poll.index("return;", stale)
-        invalidation = poll.index("state.snapshotReady = false", early_return)
+        invalidation = poll.index("invalidateSnapshotAuthority()", early_return)
         self.assertLess(catch, stale)
         self.assertLess(stale, early_return)
         self.assertLess(early_return, invalidation)
@@ -2015,7 +2026,8 @@ class SemanticWebClientContractTests(unittest.TestCase):
         js = APP.read_text(encoding="utf-8")
         render = js[js.index("function renderHostEvent"):js.index("function resetEventHistoryForScope")]
         self.assertIn("const bookmark = captureTableSelection(body);", render)
-        self.assertIn('row.dataset.selectionKey = "event:" + cursor.toString();', render)
+        self.assertIn('row.dataset.selectionKey = "event:" + cursorText;', render)
+        self.assertIn("const cursorText = cursor.toString()", render)
         self.assertIn('row.dataset.selectionExact = "true";', render)
         self.assertIn('reapplyTableFilter("event-history-body");', render)
         self.assertLess(

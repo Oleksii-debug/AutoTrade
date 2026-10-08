@@ -110,33 +110,36 @@ class RecoveryTakeoverSourceSenderFenceTests(unittest.TestCase):
             ):
                 mark_recovery_takeover_source(recovery, forged)
 
-    def test_exact_next_durable_generation_releases_issuance_fence(self) -> None:
+    def test_manual_owner_advance_cannot_activate_sender(self) -> None:
         with TemporaryDirectory() as directory:
             journal, recovery, source = self._controller(directory)
             mark_recovery_takeover_source(recovery, source)
             target = OwnerFence("host-new", source.epoch + 1)
 
+            # A durable owner event alone is not proof of credential revocation,
+            # issuer-sealed takeover evidence, or a completed takeover.
             recovery._append_durable_owner(target)
             recovery.owner = target
-            activated = activate_recovery_takeover_target(
-                recovery,
-                source=source,
-                target=target,
-            )
-
-            self.assertEqual(activated, target)
-            self.assertIs(recovery.state, HostState.RECOVERING)
-            self.assertFalse(recovery.provider_reconciled)
-            self.assertNotIn("takeover_source_only", recovery.reason_codes)
-            self.assertEqual(recovery.durable_owner_chain()[-1], target)
-
-            dispatcher = build_recovery_issued_dispatcher(
-                recovery,
-                journal,
-                environment="PAPER",
-                account_id="acct",
-            )
-            self.assertEqual(dispatcher.owner, target)
+            with self.assertRaises(TypeError):
+                activate_recovery_takeover_target(
+                    recovery,
+                    source=source,
+                    target=target,
+                    takeover=None,
+                    vault=None,
+                )
+            self.assertIn("takeover_source_only", recovery.reason_codes)
+            with self.assertRaisesRegex(
+                PermissionError,
+                "takeover source owner cannot receive recovery-issued sender authority",
+            ):
+                recovery.owner = source
+                build_recovery_issued_dispatcher(
+                    recovery,
+                    journal,
+                    environment="PAPER",
+                    account_id="acct",
+                )
 
     def test_activation_rejects_skipped_generation_without_clearing_source_fence(self) -> None:
         with TemporaryDirectory() as directory:
@@ -153,6 +156,8 @@ class RecoveryTakeoverSourceSenderFenceTests(unittest.TestCase):
                     recovery,
                     source=source,
                     target=skipped,
+                    takeover=None,
+                    vault=None,
                 )
 
             recovery.owner = source

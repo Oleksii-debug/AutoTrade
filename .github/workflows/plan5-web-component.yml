@@ -1,0 +1,39 @@
+name: plan5-web-component
+on:
+  pull_request:
+    paths:
+      - 'web/**'
+      - 'tests/Product/plan5-navigation.cjs'
+      - 'tests/Product/package*.json'
+      - 'mvp/tests/test_semantic_web_client_contract.py'
+      - '.github/workflows/plan5-web-component.yml'
+  push:
+    branches:
+      - 'plan5/**'
+  workflow_dispatch:
+jobs:
+  semantic-browser:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Source-level semantic Web tests
+        run: python -m unittest mvp.tests.test_semantic_web_client_contract -v
+      - name: Exact JS parse
+        run: |
+          node --check web/src/app.js
+          node --check tests/Product/plan5-navigation.cjs
+      - name: Install pinned browser harness
+        working-directory: tests/Product
+        run: |
+          npm ci --ignore-scripts
+          npx playwright install --with-deps chromium
+      - name: Keyboard, hash history, deep link, negative and outage browser checks
+        working-directory: tests/Product
+        run: node plan5-navigation.cjs

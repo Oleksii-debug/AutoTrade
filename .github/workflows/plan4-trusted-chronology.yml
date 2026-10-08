@@ -1,0 +1,51 @@
+name: Plan 4 - Trusted chronology component qualification
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/plan4-trusted-chronology.yml'
+      - 'mvp/autotrade_mvp/trusted_chronology*.py'
+      - 'mvp/autotrade_mvp/_trusted_chronology_cut_impl.py'
+      - 'mvp/autotrade_mvp/recovery_clock_incident.py'
+      - 'mvp/tests/test_trusted_chronology*.py'
+      - 'mvp/tests/_trusted_chronology_cut_cases.py'
+      - 'mvp/tests/test_recovery_clock_incident_chronology.py'
+      - 'mvp/tests/test_production_host_runtime_occurrence.py'
+      - 'control/findings/plan4-section3-trusted-chronology-qualification-20261008.md'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/plan4-trusted-chronology.yml'
+      - 'mvp/autotrade_mvp/trusted_chronology*.py'
+      - 'mvp/autotrade_mvp/_trusted_chronology_cut_impl.py'
+      - 'mvp/autotrade_mvp/recovery_clock_incident.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  chronology:
+    name: chronology (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Install exact pinned validation dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Compile existing single chronology/recovery authority
+        run: python -m compileall -q mvp/autotrade_mvp/trusted_chronology.py mvp/autotrade_mvp/trusted_chronology_cut.py mvp/autotrade_mvp/_trusted_chronology_cut_impl.py mvp/autotrade_mvp/recovery_clock_incident.py
+      - name: Challenge, durable cuts, signed evidence, adversarial and future-time falsifiers
+        run: python -m unittest discover -s mvp/tests -p "test_trusted_chronology*.py" -v
+      - name: Durable clock incident crash-restart and journal-owner falsifiers
+        run: python -m unittest discover -s mvp/tests -p "test_recovery_clock_incident_chronology.py" -v
+      - name: RELEASE_RUNTIME host occurrence identity and restart
+        run: python -m unittest discover -s mvp/tests -p "test_production_host_runtime_occurrence.py" -v

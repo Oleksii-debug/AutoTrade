@@ -275,26 +275,26 @@ class AutonomousRuntimeCheckpointTests(unittest.TestCase):
             self.assertTrue(checkpoint_path(directory).is_file())
             self.assertEqual(store.whole_store_state_cut(), before)
 
-    def test_foreign_durable_journal_mutation_invalidates_checkpoint_before_restore(self):
+    def test_zero_owned_durable_journal_mutation_invalidates_checkpoint_before_restore(self):
         with TemporaryDirectory() as directory:
             run(directory, stop_after_episodes=3)
             store = JournalStore(Path(directory) / "journal.sqlite3")
             payload = {"probe": "post-checkpoint-durable-mutation"}
             store.append_event(
                 {
-                    "event_id": "wp12-post-checkpoint-probe",
+                    "event_id": "c6f8e0c8-a398-5a1c-9ce1-41247e7dca7b",
                     "event_type": "Wp12DurableMutationProbe",
                     "schema_version": "1.0.0",
-                    "aggregate_type": "wp12_test_probe",
-                    "aggregate_id": "probe",
+                    "aggregate_type": "risk_decision",
+                    "aggregate_id": "zero-owned-risk-mutation-probe",
                     "aggregate_version": "1",
-                    "host_id": "test",
+                    "host_id": "local-simulation",
                     "owner_epoch": "1",
                     "environment": ENVIRONMENT,
                     "occurred_at": NOW,
                     "observed_at": NOW,
                     "committed_at": NOW,
-                    "correlation_id": "wp12-probe",
+                    "correlation_id": "1e6fc88c-6210-511d-9d69-5f18ac9990e7",
                     "causation_id": None,
                     "payload": payload,
                     "payload_hash": payload_digest(payload),

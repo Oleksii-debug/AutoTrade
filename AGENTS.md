@@ -24,17 +24,20 @@ The former 48-Section monolithic plan and `SEQUENTIAL_CLOSURE_STATE.md` are audi
 - Obey mutation ownership/conflict keys in `MULTI_PLAN_PARALLELISM_CONTRACT.md`.
 - Cross-plan fixtures/contracts may prove component behavior but never M1/PAPER/LIVE/physical/final-release evidence.
 
-## Provider defer
+## Provider-input independence
 
-Plan 6 is architecturally independent but OWNER-DEFERRED.
-This v4 reorganization is **not** provider reauthorization.
-Do not start new provider execution/qualification work unless the owner explicitly reauthorizes it.
+The owner has explicitly stated that real provider/account/credential input is not available in the coming days and must not block development.
+Plan 6 is therefore ACTIONABLE for offline/source engineering using existing code, public specifications, frozen/recorded/synthetic fixtures, mocks and non-secret test vectors.
+Workers MUST NOT ask the owner for provider credentials/accounts to close Plan-6 engineering Sections.
+Real authenticated account binding, PAPER/LIVE and bounded-real qualification remain the optional external track in Plan 9.
 
 ## Convergence
 
 - Plan 8 is provider-free M1 convergence. It depends on terminal M1-required outputs from Plans 1,2,3,4,5,7. Plan 6 is not required for M1.
-- Plan 9 is a dependency-aware final DAG. WAITING_UPSTREAM / WAITING_EXTERNAL / WAITING_OWNER Sections may be skipped without false DONE; take the first ACTIONABLE Section whose named gates are met.
+- Plan 9 is a dependency-aware final DAG. Real-provider/PAPER/LIVE Sections 2–6 are an OPTIONAL_EXTERNAL_PROVIDER_TRACK and do not block a provider-free signed/NVDA/M2-PF release whose claimed scope explicitly excludes those capabilities.
+- WAITING/PARKED Sections may be skipped without false DONE; take the first ACTIONABLE Section whose named gates are met.
 - Real provider/PAPER/LIVE/bounded-real evidence classes remain distinct and cannot be fabricated from source/simulation/replay evidence.
+- Canonical product UI is the semantic browser-like Web UI under `web/src`; Windows Desktop is a thin wrapper over the same Web artifact plus native emergency fallback, not a second divergent product UX.
 
 ## Migrated closed work
 

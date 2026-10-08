@@ -1,0 +1,58 @@
+name: Plan 3 Production Host qualification
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/plan3-production-host-qualification.yml'
+      - 'mvp/autotrade_mvp/production_host.py'
+      - 'mvp/autotrade_mvp/production_financial_host.py'
+      - 'mvp/autotrade_mvp/host_network.py'
+      - 'mvp/autotrade_mvp/readiness.py'
+      - 'mvp/autotrade_mvp/product_runtime.py'
+      - 'mvp/tests/test_production_host*.py'
+      - 'mvp/tests/test_production_financial_host*.py'
+      - 'mvp/tests/test_host_network.py'
+      - 'mvp/tests/test_readiness.py'
+      - 'mvp/tests/test_provider_free_product.py'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/plan3-production-host-qualification.yml'
+      - 'mvp/autotrade_mvp/production_host.py'
+      - 'mvp/autotrade_mvp/production_financial_host.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canonical-host:
+    name: production-host (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile canonical Host/recovery/security/readiness code
+        run: python -m compileall -q mvp/autotrade_mvp/production_host.py mvp/autotrade_mvp/production_financial_host.py mvp/autotrade_mvp/host_network.py mvp/autotrade_mvp/readiness.py mvp/autotrade_mvp/product_runtime.py
+      - name: Host lifecycle, exact journal, takeover, crash/restart and negative qualification
+        run: |
+          python -m unittest -v mvp.tests.test_production_host mvp.tests.test_production_host_config mvp.tests.test_production_host_readiness mvp.tests.test_production_host_runtime_occurrence mvp.tests.test_production_financial_host mvp.tests.test_production_financial_host_authority_bindings mvp.tests.test_host_network mvp.tests.test_host_api mvp.tests.test_durable_host_api mvp.tests.test_readiness mvp.tests.test_runtime_failure_control mvp.tests.test_provider_free_product
+      - name: Emit SHA-bound non-secret Host qualification receipt
+        env:
+          AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python tools/write_ci_evidence.py --suite plan3-production-host-section6 --command "canonical host and provider-free component unittest suite" --output plan3-host-evidence.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan3-production-host-${{ runner.os }}-${{ github.sha }}
+          path: plan3-host-evidence.json
+          if-no-files-found: error

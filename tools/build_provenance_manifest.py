@@ -1191,37 +1191,6 @@ def main() -> int:
         OUTPUT.write_text(rendered, encoding="utf-8", newline="\n")
         return 0
     if not OUTPUT.exists() or OUTPUT.read_text(encoding="utf-8") != rendered:
-        # Fail closed and identify which canonical manifest field differs.
-        # No auto-write during --check: the committed release graph is authority.
-        try:
-            observed = _strict_json_loads_bytes(OUTPUT.read_bytes())
-            expected = _strict_json_loads_bytes(rendered.encode("utf-8"))
-            if type(observed) is dict and type(expected) is dict:
-                mismatched = sorted(
-                    key for key in observed.keys() | expected.keys()
-                    if observed.get(key) != expected.get(key)
-                )
-                print("release dependency manifest mismatch fields: " +
-                      ", ".join(mismatched), file=sys.stderr)
-                if "source_inventory" in mismatched:
-                    old_inventory = observed.get("source_inventory")
-                    new_inventory = expected.get("source_inventory")
-                    if type(old_inventory) is dict and type(new_inventory) is dict:
-                        diff_keys = sorted(
-                            key for key in old_inventory.keys() | new_inventory.keys()
-                            if old_inventory.get(key) != new_inventory.get(key)
-                        )
-                        print("source inventory mismatch fields: " +
-                              ", ".join(diff_keys), file=sys.stderr)
-                if "blocking_issues" in mismatched:
-                    print("observed blockers: " +
-                          repr([b.get("code") for b in observed.get("blocking_issues", [])
-                                if type(b) is dict]), file=sys.stderr)
-                    print("expected blockers: " +
-                          repr([b.get("code") for b in expected.get("blocking_issues", [])
-                                if type(b) is dict]), file=sys.stderr)
-        except (OSError, UnicodeError, ValueError, TypeError):
-            print("release manifest is unreadable as canonical JSON", file=sys.stderr)
         print(
             "release-dependency-manifest.json is stale; run "
             "python tools/build_provenance_manifest.py --write",

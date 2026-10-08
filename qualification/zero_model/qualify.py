@@ -33,6 +33,7 @@ from mvp.autotrade_mvp.model_gateway import (
     route_model,
 )
 from mvp.autotrade_mvp.pipeline import run_multi_episode, run_vertical_slice, verify_replay
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
 
 
@@ -530,6 +531,30 @@ def qualify(source_sha: str) -> dict[str, object]:
 
             if continuous["status"] != "COMPLETED" or resumed["status"] != "COMPLETED":
                 raise RuntimeError("canonical autonomous ZERO loop did not complete")
+
+            # Read back immutable specialist evidence from both uninterrupted
+            # and restarted stores: advisory only, zero models/cost/authority.
+            agent_traces = []
+            for state_root in (continuous_directory, restarted_directory):
+                ledger = JournalStore(Path(state_root) / "journal.sqlite3")
+                rows = ledger.load_events_by_aggregate_type("simulation_agent_decision")
+                if len(rows) != len(autonomous_prices):
+                    raise RuntimeError("ZERO agent decision evidence is missing or duplicated")
+                trace = []
+                for row in rows:
+                    decision_row = row["payload"]
+                    if (
+                        decision_row.get("model_calls") != 0
+                        or decision_row.get("total_cost") != "0"
+                        or decision_row.get("live_authority_granted") is not False
+                        or decision_row.get("economic_edge_status") != "INCONCLUSIVE"
+                        or decision_row.get("agent_side") != decision_row.get("strategy_side")
+                    ):
+                        raise RuntimeError("ZERO agent manufactured model, trading, or research authority")
+                    trace.append((decision_row["episode"], decision_row["agent_side"]))
+                agent_traces.append(trace)
+            if agent_traces[0] != agent_traces[1]:
+                raise RuntimeError("ZERO agent proposals changed across restart")
             if paused["status"] != "PAUSED" or paused["completed_episodes"] != 41:
                 raise RuntimeError("canonical autonomous ZERO loop did not produce the frozen pause cut")
             if continuous["completed_episodes"] != len(autonomous_prices):

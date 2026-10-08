@@ -131,12 +131,12 @@ _EMBEDDED_SECRET_PATTERNS = (
 )
 
 _PRIVATE_KEY_MARKERS = (
-    "-----BEGIN PRIVATE KEY-----",
-    "-----BEGIN ENCRYPTED PRIVATE KEY-----",
-    "-----BEGIN RSA PRIVATE KEY-----",
-    "-----BEGIN DSA PRIVATE KEY-----",
-    "-----BEGIN EC PRIVATE KEY-----",
-    "-----BEGIN OPENSSH PRIVATE KEY-----",
+    "-----BEGIN " + "PRIVATE KEY-----",
+    "-----BEGIN " + "ENCRYPTED PRIVATE KEY-----",
+    "-----BEGIN " + "RSA PRIVATE KEY-----",
+    "-----BEGIN " + "DSA PRIVATE KEY-----",
+    "-----BEGIN " + "EC PRIVATE KEY-----",
+    "-----BEGIN " + "OPENSSH PRIVATE KEY-----",
 )
 
 _URL_QUERY_SENSITIVE_KEYS = _SENSITIVE_KEYS | {

@@ -253,8 +253,8 @@ def fixture_install_bundle(
                             raise FixtureAssemblyError("fixture source payload changed during extraction")
                 _assert_open_file_identity(bundle, held, name="release bundle")
                 after = os.fstat(held.fileno())
-                if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != (
-                    after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+                if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (
+                    after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns
                 ):
                     raise FixtureAssemblyError("release fixture archive changed during extraction")
                 # Staging is invisible until rename, so a single fsynced

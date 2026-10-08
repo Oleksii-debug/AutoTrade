@@ -5,6 +5,7 @@ from copy import deepcopy
 from decimal import Decimal
 from types import MappingProxyType
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.operator_observability import build_operator_observability
 from mvp.autotrade_mvp.readiness import RuntimeSafetySignals
@@ -224,6 +225,36 @@ class OperatorObservabilityTests(unittest.TestCase):
             build_operator_observability(
                 ui_snapshot=snapshot, recovery=_recovery(HostState.READY), signals=_signals()
             )
+
+    def test_concurrent_recovery_change_rejects_torn_diagnostic_cut(self):
+        from mvp.autotrade_mvp import operator_observability as observer
+
+        recovery = _recovery(HostState.READY)
+        original_evaluate = observer.evaluate_readiness
+
+        def change_during_read(signals):
+            result = original_evaluate(signals)
+            recovery.state = HostState.RECOVERING
+            return result
+
+        with patch.object(
+            observer, "evaluate_readiness", side_effect=change_during_read
+        ):
+            with self.assertRaisesRegex(ValueError, "recovery state changed"):
+                build_operator_observability(
+                    ui_snapshot=_snapshot(), recovery=recovery, signals=_signals()
+                )
+
+    def test_existing_diagnostics_module_exposes_same_nvda_text(self):
+        from mvp.autotrade_mvp.diagnostics import build_operator_diagnostic_text
+
+        recovery = _recovery(HostState.RECOVERING)
+        text = build_operator_diagnostic_text(
+            ui_snapshot=_snapshot(), recovery=recovery, signals=_signals()
+        )
+        self.assertIn("Mode: RECOVERING", text)
+        self.assertIn("Financial authority: NONE", text)
+        self.assertIn("unknown:", text)
 
     def test_authentic_mappingproxy_is_supported_for_host_snapshot(self):
         view = build_operator_observability(

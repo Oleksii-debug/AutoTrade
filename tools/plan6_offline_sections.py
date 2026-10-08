@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "research"))
 # fail closed rather than silently shrink the offline acceptance surface.
 SECTION_MODULES = {
     1: (
+        "mvp.tests.test_plan6_offline_harness",
         "mvp.tests.test_provider_domain",
         "mvp.tests.test_provider_account_cut",
         "mvp.tests.test_provider_qualification_identity",
@@ -70,6 +71,19 @@ def deny_network(*_args: object, **_kwargs: object) -> None:
     raise RuntimeError("PLAN6_OFFLINE_NETWORK_DENIED: real provider network is prohibited")
 
 
+def install_network_deny(stack: ExitStack) -> None:
+    """Deny outbound socket sends as well as connection attempts before test imports.
+
+    UDP sendto/sendmsg need no connect call. Guarding connect alone would allow
+    real provider datagrams while producing a false "network: DENIED" receipt.
+    """
+    for method in ("connect", "connect_ex", "sendto"):
+        stack.enter_context(patch.object(socket.socket, method, deny_network))
+    if hasattr(socket.socket, "sendmsg"):
+        stack.enter_context(patch.object(socket.socket, "sendmsg", deny_network))
+    stack.enter_context(patch.object(socket, "create_connection", deny_network))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--section", type=int, choices=sorted(SECTION_MODULES), required=True)
@@ -95,9 +109,7 @@ def main() -> int:
     # offline boundary before importing *any* provider or test module; keeping
     # this guard only around TextTestRunner would leave import-time I/O open.
     with ExitStack() as stack:
-        stack.enter_context(patch.object(socket.socket, "connect", deny_network))
-        stack.enter_context(patch.object(socket.socket, "connect_ex", deny_network))
-        stack.enter_context(patch.object(socket, "create_connection", deny_network))
+        install_network_deny(stack)
         suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
         count = suite.countTestCases()
         if not modules or count < len(modules):

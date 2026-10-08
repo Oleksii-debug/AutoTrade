@@ -1053,7 +1053,7 @@ def build_production_host(
             from .host_network import AuthenticatedHostApplication as HostApplicationBase
             if (
                 not isinstance(application, HostApplicationBase)
-                or application._journal is not journal
+                or application.store._journal is not journal
                 or application.security_boundary is not security_boundary
                 or application.host_id != config.host_id
                 or application.public_origin != config.public_origin

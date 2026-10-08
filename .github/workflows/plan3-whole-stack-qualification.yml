@@ -81,11 +81,11 @@ jobs:
         env:
           AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: python tools/write_ci_evidence.py --suite plan3-whole-stack-section8 --command "qualify_plan3_stack.py --suite all" --output plan3-stack-evidence.json
+        run: python tools/write_ci_evidence.py --suite plan3-whole-stack-section8 --command "qualify_plan3_stack.py --suite all" --output plan3-stack-${{ runner.os }}-evidence.json
       - uses: actions/upload-artifact@v4
         with:
           name: plan3-stack-${{ runner.os }}-${{ github.event.pull_request.head.sha || github.sha }}
-          path: plan3-stack-evidence.json
+          path: plan3-stack-${{ runner.os }}-evidence.json
           if-no-files-found: error
 
   native-host:
@@ -128,7 +128,7 @@ jobs:
         with:
           python-version: '3.12.10'
       - name: Test receipt checker tamper and missing-evidence negatives
-        run: python -m unittest -v tests.Control.test_plan3_qualification_receipts
+        run: python -m unittest discover -s tests/Control -p test_plan3_qualification_receipts.py -v
       - uses: actions/download-artifact@v4
         with:
           pattern: plan3-*-${{ github.event.pull_request.head.sha || github.sha }}

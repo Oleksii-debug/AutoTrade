@@ -34,6 +34,12 @@ from .exact_decimal import (
     canonical_decimal_text, exact_add, exact_multiply,
     parse_bounded_exact_decimal,
 )
+from .lifecycle_cost import (
+    LifecycleCostComponent,
+    LifecycleCostProfile,
+    LifecycleCostRequirements,
+    allocation_cost_split,
+)
 from .persistence import JournalStore, canonical_json, payload_digest
 from .pipeline import MovingAverageStrategy
 from .provider_activity_accounting import (
@@ -105,6 +111,91 @@ _PROVIDER_PROTOCOL = "simulated-provider@1"
 _SIMULATION_SETTLEMENT_RULE_ID = "canonical-simulator-equity-cash-same-day"
 _SIMULATION_SETTLEMENT_RULE_VERSION = "1"
 _SIMULATION_SETTLEMENT_EVIDENCE_DELAY_SECONDS = 3
+
+
+def _simulation_lifecycle_cost_split(
+    *,
+    decision_scope_ref: str,
+    decision_time: datetime,
+    horizon_end: datetime,
+):
+    """Freeze the complete provider-free cost cut consumed by one decision.
+
+    Realized simulator accounting remains owned by provider/fill economics.
+    This profile is ex-ante decision evidence only. Families that are genuinely
+    absent in the frozen simulator are represented explicitly as known-zero
+    evidence so completeness never relies on omission.
+    """
+
+    instrument_version = f"{INSTRUMENT_ID}@1"
+    zero_families = (
+        ("TURNOVER", "EXCHANGE_FEE"),
+        ("TURNOVER", "SPREAD"),
+        ("TURNOVER", "SLIPPAGE"),
+        ("TURNOVER", "MARKET_IMPACT"),
+        ("TURNOVER", "FX_CONVERSION"),
+        ("TURNOVER", "TRANSACTION_TAX"),
+        ("HOLDING", "FUNDING"),
+        ("HOLDING", "BORROW"),
+        ("HOLDING", "FINANCING"),
+        ("HOLDING", "CARRY"),
+        ("HOLDING", "STORAGE"),
+    )
+    components = (
+        LifecycleCostComponent(
+            component_id="simulation-commission",
+            phase="TURNOVER",
+            kind="COMMISSION",
+            normalized_rate=FEE_RATE,
+            evidence_ref="simulation:commission-rate:v1",
+            observed_at=decision_time,
+            valid_until=horizon_end,
+        ),
+        *tuple(
+            LifecycleCostComponent(
+                component_id=f"simulation-known-zero-{kind.lower()}",
+                phase=phase,
+                kind=kind,
+                normalized_rate="0",
+                evidence_ref=f"simulation:known-zero:{kind.lower()}:v1",
+                observed_at=decision_time,
+                valid_until=horizon_end,
+            )
+            for phase, kind in zero_families
+        ),
+    )
+    profile = LifecycleCostProfile(
+        profile_id="canonical-simulation-lifecycle-cost-v1",
+        decision_scope_ref=decision_scope_ref,
+        instrument_version=instrument_version,
+        as_of=decision_time,
+        horizon_end=horizon_end,
+        requirements=LifecycleCostRequirements(
+            requirements_ref="simulation:lifecycle-cost-requirements:v1",
+            required_kinds=(
+                "COMMISSION",
+                "EXCHANGE_FEE",
+                "SPREAD",
+                "SLIPPAGE",
+                "MARKET_IMPACT",
+                "FX_CONVERSION",
+                "TRANSACTION_TAX",
+                "FUNDING",
+                "BORROW",
+                "FINANCING",
+                "CARRY",
+                "STORAGE",
+            ),
+        ),
+        components=components,
+    )
+    return allocation_cost_split(
+        profile,
+        decision_scope_ref=decision_scope_ref,
+        instrument_version=instrument_version,
+        decision_time=decision_time,
+        horizon_end=horizon_end,
+    )
 
 
 def _uuid(kind: str, episode_id: str) -> str:
@@ -2918,10 +3009,16 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
         if emergency:
             decision = "NO_TRADE"
             target_quantity = position
+        lifecycle_cost = _simulation_lifecycle_cost_split(
+            decision_scope_ref=f"simulation:decision:{key}",
+            decision_time=datetime.fromisoformat(timestamp.replace("Z", "+00:00")),
+            horizon_end=datetime.fromisoformat(future.replace("Z", "+00:00")),
+        )
         allocation = allocate_targets((AllocationCandidate.create(symbol=INSTRUMENT,
             desired_notional=exact_multiply(target_quantity, price), price=price, lot_size=instrument.quantity_step,
-            current_quantity=position, cost_rate=FEE_RATE, turnover_cost_rate=FEE_RATE,
-            holding_cost_rate="0", max_executable_notional="1000"),),
+            current_quantity=position, cost_rate=lifecycle_cost.cost_rate,
+            turnover_cost_rate=lifecycle_cost.turnover_cost_rate,
+            holding_cost_rate=lifecycle_cost.holding_cost_rate, max_executable_notional="1000"),),
             AllocationPolicy.create(cash_available=exact_subtract(available_cash, reservations.total_reserved("CASH:USD")),
                 max_gross_notional="1000", max_net_notional="1000", max_symbol_notional="1000",
                 max_total_cost="10", max_stress_loss="500", max_turnover_notional="1000"),
@@ -2933,6 +3030,8 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
         _loop_event(store, run_id, "AutonomousEpisodeStarted", str(episode), {
             "episode": episode, "decision": decision, "financial_cut": store.current_journal_sequence(),
             "protocol_digest": protocol_digest, "allocation_status": allocation.status,
+            "lifecycle_cost_digest": lifecycle_cost.lifecycle_cost_digest,
+            "lifecycle_cost_requirements_ref": lifecycle_cost.requirements_ref,
         }, timestamp)
         status = decision
         order_id = fill_id = None
@@ -2964,7 +3063,11 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                     journal_sequence_cut=request.journal_sequence_cut)
                 refs = {name: f"simulated:{name.lower()}:{key}" for name in
                         ("PORTFOLIO", "MARGIN", "RECONCILIATION", "CAPABILITY", "BORROW", "STRESS")}
-                refs.update(POLICY=resolved.registration_event_id, MARKET=selected.observation_id + ":" + fresh.evidence_digest)
+                refs.update(
+                    POLICY=resolved.registration_event_id,
+                    MARKET=selected.observation_id + ":" + fresh.evidence_digest,
+                    COST=lifecycle_cost.lifecycle_cost_digest,
+                )
                 return AuthoritativeRiskSnapshot(context=context, risk_policy=resolved.policy,
                     resolved_risk_policy=resolved, provider_environment=request.provider_environment,
                     entity_policy_id=request.entity_policy_id, instrument_family=request.instrument_family,
@@ -2996,7 +3099,11 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
             intent_id = _uuid("loop-intent", key)
             intent_hash = payload_digest({"protocol_digest": protocol_digest, "episode": episode,
                 "side": side, "quantity": canonical_decimal_text(exact_abs(quantity)), "price": canonical_decimal_text(price),
-                "instrument": INSTRUMENT, "allocation": {"target": canonical_decimal_text(allocation.targets[0].quantity)}})
+                "instrument": INSTRUMENT, "allocation": {
+                    "target": canonical_decimal_text(allocation.targets[0].quantity),
+                    "lifecycle_cost_digest": lifecycle_cost.lifecycle_cost_digest,
+                    "lifecycle_cost_requirements_ref": lifecycle_cost.requirements_ref,
+                }})
             admission_id = _uuid("loop-admission", key)
             reservation_id = _uuid("loop-reservation", key)
             admission = authority.admit(command_id=_uuid("loop-financial-command", key),

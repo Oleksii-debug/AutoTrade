@@ -775,6 +775,7 @@ class DispatchTests(unittest.TestCase):
                 SubmissionResponseBinding,
                 "terminal_state",
                 property(lambda _binding: "UNKNOWN"),
+                create=True,  # required: dataclass field has no class-level descriptor
             ):
                 descriptor_spoofed = submission_response_binding_projection(binding)
                 self.assertEqual(descriptor_spoofed["terminal_state"], "SENT")

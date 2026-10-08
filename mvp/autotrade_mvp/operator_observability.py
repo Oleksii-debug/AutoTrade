@@ -163,6 +163,17 @@ def build_operator_observability(
         raise ValueError("recovery owner is noncanonical")
     if type(reconciled_before) is not bool:
         raise ValueError("recovery reconciliation state is noncanonical")
+    unknown_count = signals.unknown_send_count
+    external_uncertainty = signals.unresolved_external_uncertainty
+    if type(unknown_count) is not int or unknown_count < 0:
+        raise ValueError("UNKNOWN send count is noncanonical")
+    if type(external_uncertainty) is not bool:
+        raise ValueError("external uncertainty state is noncanonical")
+    evidence_count = None
+    if evidence is not None:
+        evidence_count = evidence.evidence_count
+        if type(evidence_count) is not int or evidence_count < 0:
+            raise ValueError("diagnostic evidence count is noncanonical")
     readiness = evaluate_readiness(signals)
     readiness_reasons = _codes(readiness.blockers, name="readiness blockers")
     warnings = _codes(readiness.warnings, name="readiness warnings")
@@ -188,6 +199,7 @@ def build_operator_observability(
     orders = _count_array(portfolio, "orders", name="portfolio.orders")
     fills = _count_array(portfolio, "fills", name="portfolio.fills")
     reservations = _count_array(risk, "active_reservations", name="risk.active_reservations")
+    jobs_count = len(snapshot["jobs"])
     # Do not expose raw portfolio, risk, order, reservation or model payloads:
     # unclassified free text can contain unrecognizable secrets and PII.
     observations = {
@@ -205,13 +217,13 @@ def build_operator_observability(
         "risk": {"status": "SOURCE_PRESENT", "financial_mode": "READ_ONLY"},
         "reservations": {"count": reservations, "source": "HOST_RISK" if reservations is not None else "UNAVAILABLE"},
         "orders": {"count": orders, "source": "HOST_PORTFOLIO" if orders is not None else "UNAVAILABLE"},
-        "unknown": {"send_count": signals.unknown_send_count, "unresolved_external": signals.unresolved_external_uncertainty},
+        "unknown": {"send_count": unknown_count, "unresolved_external": external_uncertainty},
         "portfolio": {"source": "HOST_PORTFOLIO", "fill_count": fills},
-        "jobs": {"count": len(snapshot["jobs"]), "source": "HOST_JOBS"},
+        "jobs": {"count": jobs_count, "source": "HOST_JOBS"},
         "model": {"source": "HOST_STRATEGY" if "model" in strategy else "UNAVAILABLE", "qualification": "NOT_ESTABLISHED"},
         "evidence": {
             "source": "SIMULATION_TRACE" if evidence is not None else "UNAVAILABLE",
-            "record_count": evidence.evidence_count if evidence is not None else None,
+            "record_count": evidence_count,
             "science_pass": False,
         },
     }
@@ -221,6 +233,13 @@ def build_operator_observability(
         or recovery.provider_reconciled is not reconciled_before
         or frozenset(recovery.reason_codes) != reason_codes_before
         or len(recovery.unresolved_attempts) != unresolved_before
+        or signals.unknown_send_count is not unknown_count
+        or signals.unresolved_external_uncertainty is not external_uncertainty
+        or (evidence is not None and evidence.evidence_count is not evidence_count)
+        or len(snapshot["jobs"]) != jobs_count
+        or _count_array(portfolio, "orders", name="portfolio.orders") != orders
+        or _count_array(portfolio, "fills", name="portfolio.fills") != fills
+        or _count_array(risk, "active_reservations", name="risk.active_reservations") != reservations
     ):
         # A diagnostic read cannot silently bridge a recovery transition.
         # A later read may produce a new projection; no financial retry occurs.

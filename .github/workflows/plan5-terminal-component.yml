@@ -17,6 +17,12 @@ on:
       - 'mvp/tests/test_desktop_shell_contract.py'
       - 'mvp/tests/test_windows_bundle.py'
       - 'mvp/tests/test_windows_update.py'
+      - 'mvp/tests/test_windows_update_intent.py'
+      - 'mvp/tests/test_windows_fixture_install_assembly.py'
+      - 'mvp/autotrade_mvp/windows_update.py'
+      - 'tools/windows_fixture_install_assembly.py'
+      - '.github/workflows/plan5-windows-update-intent-component.yml'
+      - '.github/workflows/plan5-windows-fixture-install-assembly.yml'
       - 'mvp/tests/test_windows_install_manifest.py'
       - 'tests/Product/plan5-navigation.cjs'
       - 'tools/build_windows_bundle.py'
@@ -71,10 +77,12 @@ jobs:
             mvp.tests.test_windows_bundle \
             mvp.tests.test_windows_install_manifest \
             mvp.tests.test_windows_update \
+            mvp.tests.test_windows_update_intent \
+            mvp.tests.test_windows_fixture_install_assembly \
             mvp.tests.test_runtime_locality_packaging \
             mvp.tests.test_provider_free_candidate_builder -v
       - name: Emit exact-head source/negative evidence after successful execution
-        run: python tools/write_ci_evidence.py --suite plan5-terminal-source-and-recovery --command "source accessibility + Desktop contract + authenticated Host and vault leak negatives + package/update/rollback adversarial tests" --output artifacts/plan5-terminal-source.json
+        run: python tools/write_ci_evidence.py --suite plan5-terminal-source-and-recovery --command "source accessibility + Desktop/Host/vault + verified fixture installer + update writeahead crash/diskfull/restart + rollback negatives" --output artifacts/plan5-terminal-source.json
       - uses: actions/upload-artifact@v4
         with:
           name: plan5-terminal-source-${{ env.AUTOTRADE_SOURCE_SHA }}
@@ -141,6 +149,8 @@ jobs:
           python -m unittest mvp.tests.test_plan5_terminal_source_contract
           mvp.tests.test_plan5_ci_evidence
           mvp.tests.test_desktop_shell_contract
+          mvp.tests.test_windows_update_intent
+          mvp.tests.test_windows_fixture_install_assembly
           mvp.tests.test_windows_secrets
           mvp.tests.test_windows_secrets_handle_reseal -v
       - name: Restore locked canonical Desktop dependencies
@@ -152,7 +162,7 @@ jobs:
           dotnet restore tests/Desktop.Client/Desktop.Client.csproj --locked-mode
           dotnet run --project tests/Desktop.Client/Desktop.Client.csproj -c Release --no-restore
       - name: Emit exact-head Windows Desktop native recovery evidence
-        run: python tools/write_ci_evidence.py --suite plan5-terminal-desktop-native --command "locked Desktop WPF build + Windows DPAPI and credential-vault tests + native emergency + restart + policy negatives" --output artifacts/plan5-terminal-desktop.json
+        run: python tools/write_ci_evidence.py --suite plan5-terminal-desktop-native --command "locked Desktop WPF build + Windows DPAPI and vault + verified fixture installer + update intent crash/restart + native emergency negatives" --output artifacts/plan5-terminal-desktop.json
       - uses: actions/upload-artifact@v4
         with:
           name: plan5-terminal-desktop-${{ env.AUTOTRADE_SOURCE_SHA }}

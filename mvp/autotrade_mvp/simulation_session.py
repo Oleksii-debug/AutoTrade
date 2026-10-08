@@ -1613,11 +1613,13 @@ def _loop_event(
     )
     if kind == "AutonomousEpisodeCompleted":
         # Deliver existing publications before freezing the completion preimage.
-        for item in store.pending_outbox(limit=1000):
-            store.mark_outbox_delivered(item["outbox_id"], expected_envelope_hash=item["envelope_hash"])
         from .simulation_runtime_checkpoint import (
-            COMPLETION_RECEIPT_FIELD, prepare_autonomous_completion_receipt,
+            COMPLETION_RECEIPT_FIELD,
+            deliver_autonomous_owned_publications,
+            prepare_autonomous_completion_receipt,
         )
+        # Never acknowledge foreign host/financial publications as ZERO output.
+        deliver_autonomous_owned_publications(store, run_id=run_id)
         first = store.load_events(_LOOP_AGGREGATE, run_id)[0]
         protocol = first["payload"]["protocol"]
         receipt = prepare_autonomous_completion_receipt(

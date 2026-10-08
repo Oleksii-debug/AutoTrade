@@ -595,10 +595,36 @@ def _autonomous_owned_pending_publications(
 ) -> tuple[dict[str, object], ...]:
     pending: list[dict[str, object]] = []
     financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
-    for event_id in _autonomous_owned_event_ids(store, run_id=run_id):
-        state = JournalStore.outbox_delivery_state(store, event_id)
-        if state is None:
+    owned_ids = _autonomous_owned_event_ids(store, run_id=run_id)
+    # The canonical JournalStore requires an exact topic on every outbox read.
+    # Do not weaken that storage contract or guess another source of authority.
+    foreign_publications = {
+        item["event_id"]
+        for item in JournalStore.pending_outbox(
+            store, limit=JournalStore.pending_outbox_count(store)
+        )
+    }
+    for event_id in owned_ids:
+        event = JournalStore.get_event(store, event_id)
+        if event is None:
+            raise AutonomousRuntimeCheckpointError(
+                "ZERO owned event vanished from the journal"
+            )
+        topic = _canonical_publication_topic(event)
+        if topic is None:
+            if event_id in foreign_publications:
+                raise AutonomousRuntimeCheckpointError(
+                    "ZERO component event has an unauthorized outbox publication"
+                )
             continue
+        try:
+            state = JournalStore.outbox_delivery_state(
+                store, event_id, topic=topic,
+            )
+        except ValueError as error:
+            raise AutonomousRuntimeCheckpointError(
+                "ZERO owned publication is missing or misrouted"
+            ) from error
         if not _autonomous_publication_owned(
             state,
             run_id=run_id,

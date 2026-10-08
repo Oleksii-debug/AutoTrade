@@ -75,8 +75,8 @@ def _write_new_payload_json(path, value):
 
 
 def _capture_publish(publish):
-    if type(publish) is not Path:
-        raise TypeError('publish root must be an exact Path')
+    if type(publish) is not type(Path()):
+        raise TypeError('publish root must be an exact native Path')
     captured = {}
     for relative, _, content in _collect(publish):
         if relative in captured:
@@ -280,7 +280,7 @@ def stage_source(source_root, source_sha, destination, composition_path):
                     for part in parts:
                         descriptor = parents.enter_context(_retained_posix_relative_directory(descriptor, (part,), create=True))
     _stage_source_controlled_components(staging=destination, composition_path=composition_path,
-        source_root=source_root, descriptors=descriptors, expected_source_sha=source_sha)
+        source_root=source_root, descriptors=descriptors)
     _write_new_payload_bytes(destination / 'SOURCE_REVISION', (source_sha + '\n').encode())
     return selected
 

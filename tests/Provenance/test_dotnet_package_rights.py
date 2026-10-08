@@ -560,6 +560,68 @@ class DotnetPackageRightsTests(unittest.TestCase):
             self.assertIn("payload_sha512=" + _HASH, message)
 
 
+
+    def test_root_rights_use_exact_locked_archive_snapshot_when_path_changes(self):
+        from tools.dotnet_package_rights import _locked_nupkg_root_evidence
+
+        with TemporaryDirectory() as directory:
+            packages = _write_restored_package(Path(directory))
+            nupkg = (
+                packages / "example.package" / "1.2.3"
+                / "example.package.1.2.3.nupkg"
+            )
+            locked_payload = nupkg.read_bytes()
+            self.assertEqual(locked_payload, _NUPKG_BYTES)
+            nupkg.write_bytes(b"replaced after hash verification")
+            self.assertEqual(
+                _locked_nupkg_root_evidence(
+                    nupkg,
+                    license_file="LICENSE.txt",
+                    notice_file="NOTICE.txt",
+                    verified_archive_bytes=locked_payload,
+                ),
+                (
+                    _LICENSE.encode("utf-8"),
+                    _NOTICE.encode("utf-8"),
+                    _NUSPEC.encode("utf-8"),
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "archive is unreadable"):
+                _locked_nupkg_root_evidence(
+                    nupkg,
+                    license_file="LICENSE.txt",
+                    notice_file="NOTICE.txt",
+                )
+            with self.assertRaisesRegex(TypeError, "verified archive bytes"):
+                _locked_nupkg_root_evidence(
+                    nupkg,
+                    license_file="LICENSE.txt",
+                    notice_file="NOTICE.txt",
+                    verified_archive_bytes=bytearray(locked_payload),
+                )
+
+    def test_verifier_passes_hash_verified_bytes_to_archive_rights_reader(self):
+        from unittest.mock import patch
+        from tools.dotnet_package_rights import _locked_nupkg_root_evidence
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            packages = _write_restored_package(root)
+            with patch(
+                "tools.dotnet_package_rights._locked_nupkg_root_evidence",
+                wraps=_locked_nupkg_root_evidence,
+            ) as read_evidence:
+                verify_restored_package_rights(
+                    packages, root=root, projects=[project]
+                )
+            read_evidence.assert_called_once()
+            self.assertEqual(
+                read_evidence.call_args.kwargs["verified_archive_bytes"],
+                _NUPKG_BYTES,
+            )
+
     def test_locked_archive_rejects_non_path_inputs_before_reading(self):
         from tools.dotnet_package_rights import _locked_nupkg_root_evidence
 

@@ -1490,11 +1490,11 @@ class SecurityBoundaryTests(unittest.TestCase):
             "value-token-000",
         ):
             self.assertNotIn(secret, rendered)
-        self.assertEqual(redacted["message"], "Authorization: [REDACTED]")
-        self.assertEqual(redacted["query"], "api_key=[REDACTED]")
+        self.assertEqual(redacted["message"], "[REDACTED]")
+        self.assertEqual(redacted["query"], "[REDACTED]")
         self.assertEqual(
             redacted["url"],
-            "https://[REDACTED]@example.test/path?token=[REDACTED]&ok=1",
+            "[REDACTED]",
         )
 
         with patch(

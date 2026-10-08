@@ -178,7 +178,13 @@ class ExactJsonTransportResponse:
             try:
                 _decode_exact_json_bytes(raw)
             except ValueError:
-                return "hex"
+                if not raw:
+                    return "hex"
+                try:
+                    raw.decode("utf-8", errors="strict")
+                except UnicodeDecodeError:
+                    return "hex"
+                return "utf-8-opaque"
         return "utf-8-json"
 
     @property
@@ -298,7 +304,7 @@ class SubmissionResponseBinding:
         if re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None:
             raise ValueError("response_sha256 must be a canonical SHA-256 digest")
         if type(self.response_encoding) is not str or self.response_encoding not in {
-            "utf-8-json", "hex",
+            "utf-8-json", "hex", "utf-8-opaque",
         }:
             raise ValueError("durable provider response encoding is invalid")
         if type(self.response_bytes) is not bytes:
@@ -625,9 +631,9 @@ def load_submission_response_binding(
     response_encoding = sent_payload.get("response_encoding")
     if (
         type(response_encoding) is not str
-        or response_encoding not in {"utf-8-json", "hex"}
+        or response_encoding not in {"utf-8-json", "hex", "utf-8-opaque"}
         or type(response_text) is not str
-        or (response_encoding == "utf-8-json" and not response_text)
+        or (response_encoding != "hex" and not response_text)
         or type(response_sha256) is not str
     ):
         raise ValueError("durable exact provider response bytes are unavailable")

@@ -54,14 +54,14 @@ jobs:
       - name: Run native pytest and unittest portfolio tests
         run: >-
           python -m pytest -q -ra
-            mvp/tests/test_allocation_evidence.py
-            mvp/tests/test_allocation_payload_provenance.py
-            mvp/tests/test_allocation_valuation.py
-            mvp/tests/test_authority_allocation_snapshot_ingress.py
-            mvp/tests/test_portfolio_correlation.py
-            mvp/tests/test_portfolio_correlation_allocation_integrity.py
-            mvp/tests/test_portfolio_correlation_oms.py
-            mvp/tests/test_portfolio_correlation_resolver_ingress.py
+          mvp/tests/test_allocation_evidence.py
+          mvp/tests/test_allocation_payload_provenance.py
+          mvp/tests/test_allocation_valuation.py
+          mvp/tests/test_authority_allocation_snapshot_ingress.py
+          mvp/tests/test_portfolio_correlation.py
+          mvp/tests/test_portfolio_correlation_allocation_integrity.py
+          mvp/tests/test_portfolio_correlation_oms.py
+          mvp/tests/test_portfolio_correlation_resolver_ingress.py
       - name: Record exact-source qualification evidence
         run: >-
           python tools/write_ci_evidence.py

@@ -197,6 +197,10 @@ class TransportResponse:
     headers: tuple[tuple[str, str], ...] = ()
 
 
+class SnapshotTemporarilyUnavailable(RuntimeError):
+    """The canonical snapshot cut is changing; no financial authority is granted."""
+
+
 PrincipalResolver = Callable[[Mapping[str, str], str], HostPrincipal]
 SnapshotProvider = Callable[
     [Mapping[str, object], SnapshotPrincipal], Mapping[str, object]
@@ -286,14 +290,6 @@ def _is_loopback_bind(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
-
-
-class SnapshotTemporarilyUnavailable(RuntimeError):
-    """A coherent operator snapshot is temporarily unavailable.
-
-    The network adapter returns a safe retryable 503, never a partial
-    financial snapshot or internal state/secret details.
-    """
 
 
 class AuthenticatedHostApplication:
@@ -415,6 +411,33 @@ class AuthenticatedHostApplication:
         return principal, session.role
 
     def _snapshot(
+        self,
+        principal: HostPrincipal,
+        authenticated_role: str,
+    ) -> Mapping[str, object]:
+        """Admit only a stable durable journal cut, with bounded retry."""
+        def cut_identity(durable: Mapping[str, object]) -> tuple[object, ...]:
+            return (
+                durable["state_version"],
+                durable["event_cursor"],
+                durable["account_id"],
+                durable["environment"],
+            )
+
+        for _ in range(4):
+            before = self.store.snapshot()
+            try:
+                candidate = self._snapshot_once(principal, authenticated_role)
+            except ValueError:
+                # Do not hide malformed snapshots; retry only a proven journal race.
+                if cut_identity(self.store.snapshot()) != cut_identity(before):
+                    continue
+                raise
+            if cut_identity(self.store.snapshot()) == cut_identity(before):
+                return candidate
+        raise SnapshotTemporarilyUnavailable("canonical journal snapshot cut is changing")
+
+    def _snapshot_once(
         self,
         principal: HostPrincipal,
         authenticated_role: str,
@@ -706,7 +729,11 @@ class AuthenticatedHostApplication:
 
             return _error(404, "NOT_FOUND")
         except SnapshotTemporarilyUnavailable:
-            return _error(503, "SNAPSHOT_TEMPORARILY_UNAVAILABLE")
+            return _json_response(
+                503,
+                {"error": "SNAPSHOT_BUSY", "retryable": True},
+                headers=(("Cache-Control", "no-store"), ("Retry-After", "1")),
+            )
         except EventGap:
             return _json_response(
                 409,

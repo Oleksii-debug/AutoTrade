@@ -209,8 +209,10 @@ class HostNetworkTests(unittest.TestCase):
         self.assertEqual(response.status, 503)
         self.assertEqual(
             self.body(response),
-            {"error": "SNAPSHOT_TEMPORARILY_UNAVAILABLE"},
+            {"error": "SNAPSHOT_BUSY", "retryable": True},
         )
+        self.assertIn(("Cache-Control", "no-store"), response.headers)
+        self.assertIn(("Retry-After", "1"), response.headers)
         self.assertNotIn("secret-provider-token", response.body.decode("utf-8"))
         self.assertNotIn(self.owner.token, response.body.decode("utf-8"))
 
@@ -423,7 +425,7 @@ class HostNetworkTests(unittest.TestCase):
         self.assertEqual(wrong_actor.status, 403)
         self.assertEqual(self.app.store.state_version, 0)
 
-        wrong_session = self.command(session="forged")
+        wrong_session = self.command(session="sid-" + "0" * 64)
         denied = self.post(wrong_session)
         self.assertEqual(denied.status, 403)
         self.assertEqual(self.app.store.state_version, 0)

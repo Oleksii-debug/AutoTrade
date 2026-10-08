@@ -132,7 +132,11 @@ jobs:
         run: |
           if ((git rev-parse HEAD).Trim() -ne $env:AUTOTRADE_SOURCE_SHA) { throw 'Source SHA mismatch' }
       - name: Windows source parity, native emergency and accessibility
-        run: python -m unittest mvp.tests.test_plan5_terminal_source_contract mvp.tests.test_desktop_shell_contract -v
+        run: >-
+          python -m unittest mvp.tests.test_plan5_terminal_source_contract
+          mvp.tests.test_desktop_shell_contract
+          mvp.tests.test_windows_secrets
+          mvp.tests.test_windows_secrets_handle_reseal -v
       - name: Restore locked canonical Desktop dependencies
         run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --locked-mode
       - name: Build thin WebView2 desktop, not a second UX
@@ -142,7 +146,7 @@ jobs:
           dotnet restore tests/Desktop.Client/Desktop.Client.csproj --locked-mode
           dotnet run --project tests/Desktop.Client/Desktop.Client.csproj -c Release --no-restore
       - name: Emit exact-head Windows Desktop native recovery evidence
-        run: python tools/write_ci_evidence.py --suite plan5-terminal-desktop-native --command "locked Desktop WPF build + native emergency + restart + policy negative tests" --output artifacts/plan5-terminal-desktop.json
+        run: python tools/write_ci_evidence.py --suite plan5-terminal-desktop-native --command "locked Desktop WPF build + Windows DPAPI and credential-vault tests + native emergency + restart + policy negatives" --output artifacts/plan5-terminal-desktop.json
       - uses: actions/upload-artifact@v4
         with:
           name: plan5-terminal-desktop-${{ env.AUTOTRADE_SOURCE_SHA }}

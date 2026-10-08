@@ -10,6 +10,7 @@ from decimal import (
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from uuid import NAMESPACE_URL, uuid5
 from unittest.mock import patch
 
 import mvp.autotrade_mvp.reconciliation_journal as reconciliation_journal_module
@@ -2134,7 +2135,7 @@ class ReconciliationJournalTests(unittest.TestCase):
             ):
                 store.append_event(
                     {
-                        "event_id": f"scoped-dispatch-{version}",
+                        "event_id": str(uuid5(NAMESPACE_URL, f"scoped-dispatch-{version}")),
                         "event_type": event_type,
                         "schema_version": "1.0.0",
                         "aggregate_type": "submission_attempt",
@@ -2146,7 +2147,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                         "occurred_at": "2026-09-24T18:00:00Z",
                         "observed_at": "2026-09-24T18:00:00Z",
                         "committed_at": "2026-09-24T18:00:00Z",
-                        "correlation_id": "scoped-dispatch-correlation",
+                        "correlation_id": str(uuid5(NAMESPACE_URL, "scoped-dispatch-correlation")),
                         "causation_id": None,
                         "payload": payload,
                         "payload_hash": payload_digest(payload),

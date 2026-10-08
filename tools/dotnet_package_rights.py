@@ -460,12 +460,19 @@ def _workflow_rights_blockers(
             )
             continue
 
-        restore_command = f"dotnet restore {relative} --locked-mode"
+        # A locked Windows Desktop RID restore is required before a win-x64
+        # --no-restore publish. Keep this exception exact; never admit an
+        # arbitrary runtime identifier, unpinned restore or shell wrapper.
+        restore_commands = {f"dotnet restore {relative} --locked-mode"}
+        if relative == "src/AutoTrade.Desktop/AutoTrade.Desktop.csproj":
+            restore_commands.add(
+                f"dotnet restore {relative} -r win-x64 --locked-mode"
+            )
         verify_suffix = f"--project {relative}"
         restore_lines = [
             index
             for index, raw in enumerate(workflow_lines, start=1)
-            if _direct_workflow_run_command(raw) == restore_command
+            if _direct_workflow_run_command(raw) in restore_commands
         ]
         verify_lines = [
             index
@@ -498,7 +505,7 @@ def _workflow_rights_blockers(
         later_restore = any(
             index > verify_lines[0]
             and _workflow_job_name(workflow_lines, index) == verify_job
-            and _direct_workflow_run_command(raw) == restore_command
+            and _direct_workflow_run_command(raw) in restore_commands
             for index, raw in enumerate(workflow_lines, start=1)
         )
         if later_restore:

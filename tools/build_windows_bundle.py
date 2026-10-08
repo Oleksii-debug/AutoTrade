@@ -145,7 +145,10 @@ def _source_without_known_marker_literals(relative: str, data: bytes) -> bytes:
     string constants.  All other occurrences, including additional markers
     in that same source file, continue to fail closed before publication.
     """
-    if relative != "mvp/autotrade_mvp/decision_trace.py":
+    if relative not in {
+        "mvp/autotrade_mvp/decision_trace.py",
+        "mvp/autotrade_mvp/diagnostics.py",
+    }:
         return data
     before, opening, tail = data.partition(b"_PRIVATE_KEY_MARKERS = (\n")
     if not opening:

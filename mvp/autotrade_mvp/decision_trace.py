@@ -342,8 +342,87 @@ def _trace_generation_identity(info: os.stat_result) -> tuple[int, int, int, int
     )
 
 
+def _read_trace_text_retained_windows(path: Path) -> str | None:
+    """Read one Windows file using a retained NT parent and non-shareable writer.
+
+    Python's Win32 pathname stat and C-runtime fstat can report different
+    metadata even for the same file. Instead of weakening the path-vs-descriptor
+    check, retain the NT directory namespace and open the leaf relative to its
+    held HANDLE with no WRITE/DELETE sharing. The file handle is the authority.
+    """
+
+    import msvcrt
+    from autotrade_foundation.windows_namespace import (
+        retain_windows_directory_namespace,
+        retain_windows_regular_file,
+        windows_handle_information,
+    )
+
+    try:
+        with retain_windows_directory_namespace(path.parent) as parent:
+            with retain_windows_regular_file(
+                parent,
+                target_name=path.name,
+                subject="decision trace store",
+            ) as descriptor:
+                opened = os.fstat(descriptor)
+                handle = msvcrt.get_osfhandle(descriptor)
+                identity = windows_handle_information(
+                    handle,
+                    subject="decision trace store",
+                )
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_nlink != 1
+                    or identity.number_of_links != 1
+                    or identity.volume_serial == 0
+                    or (identity.file_index_high == 0 and identity.file_index_low == 0)
+                ):
+                    raise ValueError("Corrupt decision trace store: unsafe path alias")
+
+                expected_bytes = opened.st_size
+                remaining = expected_bytes + 1
+                chunks: list[bytes] = []
+                copied = 0
+                while remaining > 0:
+                    chunk = os.read(descriptor, min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    copied += len(chunk)
+                    remaining -= len(chunk)
+                after = os.fstat(descriptor)
+                identity_after = windows_handle_information(
+                    handle,
+                    subject="decision trace store",
+                )
+                if (
+                    not stat.S_ISREG(after.st_mode)
+                    or after.st_nlink != 1
+                    or identity_after != identity
+                    or _trace_generation_identity(after)
+                    != _trace_generation_identity(opened)
+                    or copied != expected_bytes
+                ):
+                    raise ValueError(
+                        "Corrupt decision trace store: file generation changed during read"
+                    )
+    except FileNotFoundError:
+        return None
+    except (OSError, RuntimeError) as error:
+        raise ValueError("Corrupt decision trace store: unsafe Windows namespace") from error
+
+    try:
+        return b"".join(chunks).decode("utf-8")
+    except UnicodeError as error:
+        raise ValueError("Corrupt decision trace store") from error
+
+
 def _read_trace_text_descriptor_bound(path: Path) -> str | None:
     """Read one stable regular-file generation and reject path swaps."""
+
+    if os.name == "nt":
+        return _read_trace_text_retained_windows(path)
 
     try:
         initial = os.stat(path, follow_symlinks=False)

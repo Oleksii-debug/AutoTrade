@@ -12,6 +12,8 @@ import mvp.autotrade_mvp.bybit_v5 as bybit_v5_module
 from mvp.autotrade_mvp.bybit_v5 import (
     BybitPreparedSubmission,
     build_order_payload,
+    guarded_order_projection,
+    guarded_order_request_sha256,
     prepare_order_submission,
     coverage_evidence,
     parse_executions,
@@ -610,6 +612,8 @@ class BybitV5AdapterTests(unittest.TestCase):
             client_order_id=client_id,
             time_in_force="IOC",
         )
+        prepared_request = dict(guarded_order_projection(prepared))
+        prepared_request_sha256 = guarded_order_request_sha256(prepared)
         payload = json.loads(json.dumps(response))
         result = payload.get("result")
         if isinstance(result, dict):
@@ -637,7 +641,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 intent_id=intent_id,
                 intent_hash="bybit-intent-hash",
                 provider="BYBIT",
-                request=prepared.body,
+                request=prepared_request,
                 now="2026-09-24T20:00:00Z",
                 authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=lambda _cid, _request, guard: (
@@ -663,7 +667,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                         else prepared.capability_snapshot_id
                     ),
                     "endpoint": prepared.endpoint,
-                    "prepared_request_sha256": prepared.body_sha256,
+                    "prepared_request_sha256": prepared_request_sha256,
                     "capability_snapshot_ids": list(
                         prepared.capability_snapshot_ids
                     ),
@@ -709,7 +713,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 response_binding=binding,
                 provider_id="BYBIT",
                 endpoint=prepared.endpoint,
-                prepared_request_sha256=prepared.body_sha256,
+                prepared_request_sha256=guarded_order_request_sha256(prepared),
                 capability_snapshot_ids=prepared.capability_snapshot_ids,
                 instrument_versions=prepared.instrument_versions,
             )
@@ -864,7 +868,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 response_binding=rebound,
                 provider_id="BYBIT",
                 endpoint=prepared.endpoint,
-                prepared_request_sha256=prepared.body_sha256,
+                prepared_request_sha256=guarded_order_request_sha256(prepared),
                 capability_snapshot_ids=prepared.capability_snapshot_ids,
                 instrument_versions=prepared.instrument_versions,
             )
@@ -891,7 +895,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 response_binding=rebound,
                 provider_id="BYBIT",
                 endpoint=prepared.endpoint,
-                prepared_request_sha256=prepared.body_sha256,
+                prepared_request_sha256=guarded_order_request_sha256(prepared),
                 capability_snapshot_ids=prepared.capability_snapshot_ids,
                 instrument_versions=prepared.instrument_versions,
             )

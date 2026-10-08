@@ -3,6 +3,8 @@ import json
 from tempfile import TemporaryDirectory
 import unittest
 
+import mvp.autotrade_mvp.provider_transport as provider_transport_module
+
 from mvp.autotrade_mvp.bybit_v5 import (
     guarded_order_projection,
     prepare_order_submission,
@@ -11,11 +13,18 @@ from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_transport import (
     BYBIT_V5_ENDPOINT_POLICIES,
+    AuthenticatedReadWireResponse,
     BybitV5AuthenticatedReadSigner,
     BybitV5AuthenticatedReadTransport,
     BybitV5HttpTransport,
     BybitV5Signer,
+    DirectAuthenticatedReadExecutionReceipt,
+    ProviderTransportError,
     ProviderTransportScopeError,
+    UrllibJsonWireClient,
+    _validated_bybit_authenticated_read_wire_semantics_digest,
+    direct_authenticated_read_execution_receipt,
+    direct_authenticated_read_execution_receipt_snapshot,
 )
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 from mvp.autotrade_mvp.provider_core import Surface, prepare_authenticated_read_query
@@ -208,6 +217,72 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
         self.assertEqual(observation.payload["retCode"], 0)
         self.assertEqual(len(wire.requests), 1)
 
+    def test_read_capability_supersession_during_quota_wait_blocks_secret_and_wire(self):
+        capability, binding = self.binding()
+        events = []
+        wire = RecordingWire(events)
+        now = [READ_AT]
+        holder = {}
+
+        def quota(*_args):
+            events.append("quota")
+            replacement = read_capability(
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_version="BTCUSDT@v1",
+                provider_environment="TESTNET",
+                permission_scopes=("ORDER.READ",),
+                at=READ_AT + timedelta(milliseconds=500),
+            )
+            holder["registry"].add(replacement)
+            now[0] = READ_AT + timedelta(seconds=1)
+
+        transport, resolver, registry = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=wire,
+            quota_gate=quota,
+            clock_utc=lambda: now[0],
+        )
+        holder["registry"] = registry
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "no longer valid",
+        ):
+            transport(binding)
+
+        self.assertEqual(events, ["quota", "capability"])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+
+    def test_read_capability_expiry_during_quota_wait_blocks_secret_and_wire(self):
+        capability, binding = self.binding()
+        events = []
+        wire = RecordingWire(events)
+        now = [READ_AT]
+
+        def quota(*_args):
+            events.append("quota")
+            now[0] = READ_AT + timedelta(hours=2)
+
+        transport, resolver, _registry = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=wire,
+            quota_gate=quota,
+            clock_utc=lambda: now[0],
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "current capability",
+        ):
+            transport(binding)
+
+        self.assertEqual(events, ["quota", "capability"])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+
     def test_read_capability_expiry_after_secret_resolution_blocks_wire_send(self):
         capability, binding = self.binding()
         events = []
@@ -249,6 +324,170 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
         ):
             transport(wrong)
         self.assertEqual(resolver.calls, [])
+
+    def test_direct_read_receipt_cannot_be_publicly_constructed(self):
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "minted only by canonical wire execution",
+        ):
+            DirectAuthenticatedReadExecutionReceipt()
+
+    def test_direct_read_receipt_accessor_rejects_unissued_exact_response(self):
+        response = AuthenticatedReadWireResponse(
+            http_status=200,
+            body=b'{"retCode":0,"result":{"list":[]}}',
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "construction authority is unavailable",
+        ):
+            direct_authenticated_read_execution_receipt(response)
+
+    def test_direct_read_semantics_bind_exact_signed_bybit_request_without_secrets(self):
+        _capability, binding = self.binding()
+        signed = BybitV5AuthenticatedReadSigner.sign(
+            policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+            query_binding=binding,
+            credential_plaintext=json.dumps(
+                {
+                    "api_key": "api-key-SECRET",
+                    "api_secret": "signing-SECRET",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            timestamp_ms=1700000000000,
+            recv_window_ms=5000,
+        )
+        digest = _validated_bybit_authenticated_read_wire_semantics_digest(
+            signed,
+            binding,
+        )
+        self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
+        self.assertNotIn("SECRET", digest)
+        changed = provider_transport_module.AuthenticatedReadHttpRequest(
+            url=signed.url + "&extra=1",
+            headers=signed.headers,
+            timeout_seconds=signed.timeout_seconds,
+            method=signed.method,
+            body=signed.body,
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "differs from canonical semantics",
+        ):
+            _validated_bybit_authenticated_read_wire_semantics_digest(
+                changed,
+                binding,
+            )
+
+    def test_execute_direct_capability_expiry_during_quota_wait_is_zero_wire(self):
+        capability, binding = self.binding()
+        events = []
+        now = [READ_AT]
+        direct_client = UrllibJsonWireClient(max_response_bytes=64)
+
+        def quota(*_args):
+            events.append("quota")
+            now[0] = READ_AT + timedelta(hours=2)
+
+        transport, resolver, _registry = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=direct_client,
+            quota_gate=quota,
+            clock_utc=lambda: now[0],
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "current capability",
+        ):
+            transport.execute_direct(binding)
+
+        self.assertEqual(events, ["quota", "capability"])
+        self.assertEqual(resolver.calls, [])
+
+    def test_execute_direct_rejects_injected_wire_before_quota_or_secret(self):
+        capability, binding = self.binding()
+        events = []
+        wire = RecordingWire(events)
+        quota_calls = []
+
+        def quota(*args):
+            quota_calls.append(args)
+
+        transport, resolver, _registry = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=wire,
+            quota_gate=quota,
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "direct authenticated-read",
+        ):
+            transport.execute_direct(binding)
+
+        self.assertEqual(quota_calls, [])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+        self.assertEqual(events, [])
+
+    def test_execute_direct_retains_captured_direct_client_authority(self):
+        capability, binding = self.binding()
+        events = []
+        wire = RecordingWire(events)
+        transport, resolver, _registry = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=wire,
+        )
+        original_require = provider_transport_module.require_direct_trading_write_client
+        original_send = (
+            provider_transport_module._execute_direct_bybit_authenticated_read_wire
+        )
+        provider_transport_module.require_direct_trading_write_client = (
+            lambda _client: _client
+        )
+        provider_transport_module._execute_direct_bybit_authenticated_read_wire = (
+            lambda *_args, **_kwargs: AuthenticatedReadWireResponse(
+                http_status=200,
+                body=b'{"retCode":0,"result":{"list":[]}}',
+            )
+        )
+        try:
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "direct authenticated-read",
+            ):
+                transport.execute_direct(binding)
+        finally:
+            provider_transport_module.require_direct_trading_write_client = original_require
+            provider_transport_module._execute_direct_bybit_authenticated_read_wire = original_send
+
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+        self.assertEqual(events, [])
+
+    def test_direct_receipt_snapshot_rejects_unissued_object_even_with_valid_fields(self):
+        forged = object.__new__(DirectAuthenticatedReadExecutionReceipt)
+        for name, value in {
+            "transport_identity": (
+                "autotrade.provider_transport.UrllibJsonWireClient:direct-auth-read:v1"
+            ),
+            "network_policy_identity": "sha256:" + "1" * 64,
+            "query_digest": "sha256:" + "2" * 64,
+            "request_sha256": "sha256:" + "3" * 64,
+            "request_semantics_sha256": "sha256:" + "4" * 64,
+            "http_status": 200,
+            "response_sha256": "sha256:" + "5" * 64,
+        }.items():
+            object.__setattr__(forged, name, value)
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "construction authority is unavailable",
+        ):
+            direct_authenticated_read_execution_receipt_snapshot(forged)
 
     def test_non_success_http_status_never_becomes_provider_state(self):
         capability, binding = self.binding()
@@ -483,6 +722,37 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                 self.assertEqual(events, [])
                 self.assertEqual(resolver.calls, [])
                 self.assertEqual(wire.requests, [])
+
+    def test_write_capability_expiry_during_quota_wait_blocks_secret_guard_and_wire(self):
+        capability, request = prepared()
+        events = []
+        wire = BybitWriteRecordingWire(events)
+        now = [READ_AT]
+
+        def quota(*_args):
+            events.append("quota")
+            now[0] = READ_AT + timedelta(minutes=10)
+
+        transport, resolver = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=wire,
+            quota_gate=quota,
+            clock_utc=lambda: now[0],
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "current capability",
+        ):
+            transport(
+                "bybit-order-1",
+                guarded_order_projection(request),
+                lambda: events.append("guard"),
+            )
+
+        self.assertEqual(events, ["quota", "capability"])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
 
     def test_expired_write_capability_blocks_before_secret_or_send(self):
         capability, request = prepared()

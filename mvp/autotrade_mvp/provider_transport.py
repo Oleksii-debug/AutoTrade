@@ -33,7 +33,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from weakref import ref as weakref_ref
 from urllib.request import (
+    AbstractHTTPHandler,
     HTTPRedirectHandler,
+    HTTPSHandler,
+    OpenerDirector,
     Request,
     ProxyHandler,
     build_opener,
@@ -57,9 +60,11 @@ from .whitebit import (
 from .provider_core import (
     AuthenticatedReadQueryBinding,
     _require_authenticated_read_query_binding_authority,
+    ProviderCoreError,
     ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
+    provider_response_observation_projection,
 )
 from .windows_secrets import PersistentCredentialHandle
 from .provider_response_limits import (
@@ -67,6 +72,26 @@ from .provider_response_limits import (
     HARD_MAX_PROVIDER_RESPONSE_BYTES,
     require_provider_response_bytes,
 )
+
+_CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES = require_provider_response_bytes
+_CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES_CODE = (
+    require_provider_response_bytes.__code__
+)
+_CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES = HARD_MAX_PROVIDER_RESPONSE_BYTES
+
+
+def _require_canonical_response_resource_authority() -> None:
+    if (
+        require_provider_response_bytes is not _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES
+        or require_provider_response_bytes.__code__
+        is not _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES_CODE
+        or HARD_MAX_PROVIDER_RESPONSE_BYTES
+        != _CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES
+    ):
+        raise ProviderTransportScopeError(
+            "provider response resource authority changed"
+        )
+
 
 
 class ProviderTransportError(RuntimeError):
@@ -149,9 +174,12 @@ def _exclusive_nonce_send_lock(thread_lock, lock_path):
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
         raise ProviderTransportScopeError(f"{name} is required")
-    return value.strip()
+    text = value.strip()
+    if not text:
+        raise ProviderTransportScopeError(f"{name} is required")
+    return text
 
 
 def _canonical_text(value: object, *, name: str) -> str:
@@ -745,6 +773,15 @@ def _validate_bybit_option_delivery_query(
 def _bybit_authenticated_read_rule(
     binding: AuthenticatedReadQueryBinding,
 ) -> AuthenticatedReadEndpointRule:
+    if type(binding) is not AuthenticatedReadQueryBinding:
+        raise TypeError(
+            "Bybit authenticated-read binding must be exact AuthenticatedReadQueryBinding"
+        )
+    _require_authenticated_read_query_binding_authority(binding)
+    if binding.provider_id != "BYBIT":
+        raise ProviderTransportScopeError(
+            "Bybit authenticated-read binding provider mismatch"
+        )
     rule = BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS.get(binding.endpoint)
     if rule is None:
         raise ProviderTransportScopeError(
@@ -1590,10 +1627,11 @@ class TradingWireResponse:
             or self.http_status > 599
         ):
             raise ProviderTransportScopeError("HTTP status must be an integer 100..599")
+        _require_canonical_response_resource_authority()
         try:
-            require_provider_response_bytes(
+            _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES(
                 self.body,
-                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                max_bytes=_CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES,
                 allow_empty=True,
             )
         except (TypeError, ValueError) as error:
@@ -1612,10 +1650,83 @@ class AuthenticatedReadWireResponse:
             or self.http_status > 599
         ):
             raise ProviderTransportScopeError("HTTP status must be an integer 100..599")
+        _require_canonical_response_resource_authority()
         try:
-            require_provider_response_bytes(self.body, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+            _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES(
+                self.body,
+                max_bytes=_CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES,
+            )
         except (TypeError, ValueError) as error:
             raise ProviderTransportError("invalid or oversized authenticated-read response") from error
+
+
+_DIRECT_TRADING_WRITE_TRANSPORT_IDENTITY = (
+    "autotrade.provider_transport.UrllibJsonWireClient:direct-trading-write:v1"
+)
+_DIRECT_TRADING_WRITE_NETWORK_POLICY_IDENTITY = "sha256:" + sha256(
+    json.dumps(
+        {
+            "automatic_retries": False,
+            "https_only": True,
+            "proxy_mode": "DIRECT_ONLY",
+            "redirects": False,
+            "response_body": "BOUNDED_EXACT_BYTES",
+            "transport": "urllib",
+            "version": 1,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
+class DirectTradingWriteExecutionReceipt:
+    """Closure-authorized proof of one exact direct trading HTTP response.
+
+    This proves direct network execution only.  It is not provider lifecycle,
+    qualification, financial-admission or fill authority by itself.
+    """
+
+    transport_identity: str
+    network_policy_identity: str
+    request_sha256: str
+    http_status: int
+    response_sha256: str
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        raise ProviderTransportError(
+            "direct trading-write receipt is minted only by canonical wire execution"
+        )
+
+
+def direct_trading_write_transport_identity() -> str:
+    return _DIRECT_TRADING_WRITE_TRANSPORT_IDENTITY
+
+
+def direct_trading_write_network_policy_identity() -> str:
+    return _DIRECT_TRADING_WRITE_NETWORK_POLICY_IDENTITY
+
+
+def _direct_trading_write_request_digest(request: SignedHttpRequest) -> str:
+    method, url, headers, body, timeout_seconds = _require_signed_http_request(request)
+    material = {
+        "method": method,
+        "url_sha256": "sha256:" + sha256(url.encode("utf-8")).hexdigest(),
+        "headers_sha256": "sha256:"
+        + sha256(
+            json.dumps(
+                dict(sorted(dict(headers).items())),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        "body_sha256": "sha256:" + sha256(body).hexdigest(),
+        "timeout_seconds": timeout_seconds,
+    }
+    return "sha256:" + sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
@@ -1627,7 +1738,8 @@ class UrllibJsonWireClient:
     """One-shot TLS client with redirects and automatic retries disabled."""
 
     def __init__(self, *, max_response_bytes: int = DEFAULT_MAX_PROVIDER_RESPONSE_BYTES) -> None:
-        if type(max_response_bytes) is not int or not 1 <= max_response_bytes <= HARD_MAX_PROVIDER_RESPONSE_BYTES:
+        _require_canonical_response_resource_authority()
+        if type(max_response_bytes) is not int or not 1 <= max_response_bytes <= _CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES:
             raise ProviderTransportScopeError("provider response byte budget is invalid")
         self.max_response_bytes = max_response_bytes
         # urllib otherwise discovers process/OS proxies implicitly. The
@@ -1639,7 +1751,7 @@ class UrllibJsonWireClient:
         budget = self.max_response_bytes
         if (
             type(budget) is not int
-            or not 1 <= budget <= HARD_MAX_PROVIDER_RESPONSE_BYTES
+            or not 1 <= budget <= _CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES
         ):
             raise ProviderTransportScopeError(
                 "provider response byte budget is invalid"
@@ -1647,8 +1759,9 @@ class UrllibJsonWireClient:
         return budget
 
     def _bounded_body(self, raw: bytes, *, max_bytes: int) -> bytes:
+        _require_canonical_response_resource_authority()
         try:
-            return require_provider_response_bytes(
+            return _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES(
                 raw,
                 max_bytes=max_bytes,
                 allow_empty=True,
@@ -1806,28 +1919,1458 @@ class UrllibJsonWireClient:
     del _install_send_authority
 
 
+def _install_direct_trading_write_execution_authority():
+    """Bind exact direct urllib write I/O to one non-self-mintable receipt."""
+
+    clients: dict[int, tuple[object, tuple[object, ...]]] = {}
+    receipts: dict[int, tuple[object, object, tuple[str, str, str, int, str]]] = {}
+
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_list = list
+    canonical_dict = dict
+    canonical_set = set
+    canonical_bool = bool
+    canonical_int = int
+    canonical_str = str
+    canonical_bytes = bytes
+    canonical_repr = repr
+    canonical_sorted = sorted
+    canonical_getattr = getattr
+    canonical_isinstance = isinstance
+    canonical_zip = zip
+    canonical_vars = vars
+    canonical_len = len
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    weakref = weakref_ref
+
+    client_type = UrllibJsonWireClient
+    request_type = SignedHttpRequest
+    response_type = TradingWireResponse
+    receipt_type = DirectTradingWriteExecutionReceipt
+    transport_error = ProviderTransportError
+    opener_type = OpenerDirector
+    proxy_type = ProxyHandler
+    redirect_base_type = HTTPRedirectHandler
+    redirect_type = _NoRedirectHandler
+    abstract_http_type = AbstractHTTPHandler
+    https_handler_type = HTTPSHandler
+
+    canonical_opener_open = OpenerDirector.open
+    canonical_opener_dispatch = OpenerDirector._open
+    canonical_opener_call_chain = OpenerDirector._call_chain
+    canonical_http_do_open = AbstractHTTPHandler.do_open
+    canonical_https_open = HTTPSHandler.https_open
+    canonical_proxy_open = ProxyHandler.proxy_open
+    canonical_redirect_request = _NoRedirectHandler.redirect_request
+
+    # HTTPSHandler.https_open dynamically resolves the lower http.client/TLS
+    # implementation from its module globals. Pin those roots as part of the
+    # same direct-wire authority; otherwise an unchanged urllib handler can be
+    # redirected through a caller-rebound HTTPSConnection or TLS/socket seam.
+    canonical_https_globals = canonical_getattr(
+        canonical_https_open,
+        "__globals__",
+        None,
+    )
+    if canonical_type(canonical_https_globals) is not canonical_dict:
+        raise transport_error(
+            "direct trading-write HTTPS implementation authority is unavailable"
+        )
+    canonical_http_module = canonical_dict.get(canonical_https_globals, "http")
+    canonical_http_client_module = canonical_getattr(
+        canonical_http_module,
+        "client",
+        None,
+    )
+    canonical_https_connection_type = canonical_getattr(
+        canonical_http_client_module,
+        "HTTPSConnection",
+        None,
+    )
+    canonical_socket_module = canonical_getattr(
+        canonical_http_client_module,
+        "socket",
+        None,
+    )
+    canonical_socket_create_connection = canonical_getattr(
+        canonical_socket_module,
+        "create_connection",
+        None,
+    )
+    canonical_socket_getaddrinfo = canonical_getattr(
+        canonical_socket_module,
+        "getaddrinfo",
+        None,
+    )
+    canonical_socket_type = canonical_getattr(
+        canonical_socket_module,
+        "socket",
+        None,
+    )
+    canonical_ssl_module = canonical_getattr(
+        canonical_http_client_module,
+        "ssl",
+        None,
+    )
+    canonical_default_https_context = canonical_getattr(
+        canonical_ssl_module,
+        "_create_default_https_context",
+        None,
+    )
+    canonical_ssl_context_type = canonical_getattr(
+        canonical_ssl_module,
+        "SSLContext",
+        None,
+    )
+    if (
+        canonical_https_connection_type is None
+        or canonical_socket_create_connection is None
+        or canonical_socket_getaddrinfo is None
+        or canonical_socket_type is None
+        or canonical_default_https_context is None
+        or canonical_ssl_context_type is None
+    ):
+        raise transport_error(
+            "direct trading-write lower network authority is unavailable"
+        )
+    canonical_connection_surfaces = canonical_tuple(
+        (base, canonical_tuple(base.__dict__.items()))
+        for base in canonical_https_connection_type.__mro__
+        if base is not canonical_object
+    )
+    canonical_ssl_context_surfaces = canonical_tuple(
+        (base, canonical_tuple(base.__dict__.items()))
+        for base in canonical_ssl_context_type.__mro__
+        if base is not canonical_object
+    )
+
+    def lower_network_implementation_changed() -> bool:
+        if (
+            canonical_dict.get(canonical_https_globals, "http")
+            is not canonical_http_module
+            or canonical_getattr(canonical_http_module, "client", None)
+            is not canonical_http_client_module
+            or canonical_getattr(
+                canonical_http_client_module,
+                "HTTPSConnection",
+                None,
+            )
+            is not canonical_https_connection_type
+            or canonical_getattr(canonical_http_client_module, "socket", None)
+            is not canonical_socket_module
+            or canonical_getattr(
+                canonical_socket_module,
+                "create_connection",
+                None,
+            )
+            is not canonical_socket_create_connection
+            or canonical_getattr(
+                canonical_socket_module,
+                "getaddrinfo",
+                None,
+            )
+            is not canonical_socket_getaddrinfo
+            or canonical_getattr(canonical_socket_module, "socket", None)
+            is not canonical_socket_type
+            or canonical_getattr(canonical_http_client_module, "ssl", None)
+            is not canonical_ssl_module
+            or canonical_getattr(
+                canonical_ssl_module,
+                "_create_default_https_context",
+                None,
+            )
+            is not canonical_default_https_context
+            or canonical_getattr(canonical_ssl_module, "SSLContext", None)
+            is not canonical_ssl_context_type
+        ):
+            return True
+        for base, expected_members in (
+            canonical_connection_surfaces
+            + canonical_ssl_context_surfaces
+        ):
+            current_members = base.__dict__
+            if canonical_len(current_members) != canonical_len(expected_members):
+                return True
+            for member_name, member in expected_members:
+                if (
+                    member_name not in current_members
+                    or current_members[member_name] is not member
+                ):
+                    return True
+        return False
+
+    canonical_request_digest = _direct_trading_write_request_digest
+    request_digest_code = canonical_request_digest.__code__
+    canonical_require_signed_request = _require_signed_http_request
+    require_signed_request_code = canonical_require_signed_request.__code__
+    canonical_sha256 = sha256
+    canonical_json_module = json
+    canonical_json_dumps = json.dumps
+    transport_identity = _DIRECT_TRADING_WRITE_TRANSPORT_IDENTITY
+    network_policy_identity = _DIRECT_TRADING_WRITE_NETWORK_POLICY_IDENTITY
+
+    def freeze_authority_state(value: object) -> object:
+        value_type = canonical_type(value)
+        if value is None or value_type in {canonical_bool, canonical_int, canonical_str, canonical_bytes}:
+            return value
+        if value_type is canonical_tuple:
+            return ("tuple", canonical_tuple(freeze_authority_state(item) for item in value))
+        if value_type is canonical_list:
+            return ("list", canonical_tuple(freeze_authority_state(item) for item in value))
+        if value_type is canonical_dict:
+            frozen_items = canonical_tuple(
+                canonical_sorted(
+                    (
+                        (
+                            freeze_authority_state(key),
+                            freeze_authority_state(item),
+                        )
+                        for key, item in value.items()
+                    ),
+                    key=canonical_repr,
+                )
+            )
+            return ("dict", frozen_items)
+        if value_type is canonical_set:
+            return (
+                "set",
+                canonical_tuple(
+                    canonical_sorted(
+                        (freeze_authority_state(item) for item in value),
+                        key=canonical_repr,
+                    )
+                ),
+            )
+        return ("identity", value_type, canonical_id(value))
+
+    def implementation_changed() -> bool:
+        return (
+            UrllibJsonWireClient is not client_type
+            or SignedHttpRequest is not request_type
+            or TradingWireResponse is not response_type
+            or DirectTradingWriteExecutionReceipt is not receipt_type
+            or OpenerDirector is not opener_type
+            or ProxyHandler is not proxy_type
+            or HTTPRedirectHandler is not redirect_base_type
+            or _NoRedirectHandler is not redirect_type
+            or AbstractHTTPHandler is not abstract_http_type
+            or HTTPSHandler is not https_handler_type
+            or type is not canonical_type
+            or id is not canonical_id
+            or tuple is not canonical_tuple
+            or list is not canonical_list
+            or dict is not canonical_dict
+            or set is not canonical_set
+            or bool is not canonical_bool
+            or int is not canonical_int
+            or str is not canonical_str
+            or bytes is not canonical_bytes
+            or repr is not canonical_repr
+            or sorted is not canonical_sorted
+            or getattr is not canonical_getattr
+            or isinstance is not canonical_isinstance
+            or zip is not canonical_zip
+            or vars is not canonical_vars
+            or len is not canonical_len
+            or object is not canonical_object
+            or weakref_ref is not weakref
+            or sha256 is not canonical_sha256
+            or json is not canonical_json_module
+            or canonical_json_module.dumps is not canonical_json_dumps
+            or _direct_trading_write_request_digest is not canonical_request_digest
+            or canonical_request_digest.__code__ is not request_digest_code
+            or _require_signed_http_request is not canonical_require_signed_request
+            or canonical_require_signed_request.__code__ is not require_signed_request_code
+            or _DIRECT_TRADING_WRITE_TRANSPORT_IDENTITY != transport_identity
+            or _DIRECT_TRADING_WRITE_NETWORK_POLICY_IDENTITY != network_policy_identity
+            or lower_network_implementation_changed()
+        )
+
+    def client_network_authority(client: UrllibJsonWireClient) -> tuple[object, ...]:
+        if implementation_changed():
+            raise transport_error(
+                "direct trading-write wire implementation authority changed"
+            )
+        opener = object_getattribute(client, "__dict__").get("_opener")
+        if canonical_type(opener) is not opener_type:
+            raise transport_error(
+                "direct trading-write wire client opener is not canonical"
+            )
+        opener_state = canonical_vars(opener)
+        if "open" in opener_state:
+            raise transport_error(
+                "direct trading-write wire client opener method is shadowed"
+            )
+        if (
+            opener_type.open is not canonical_opener_open
+            or opener_type._open is not canonical_opener_dispatch
+            or opener_type._call_chain is not canonical_opener_call_chain
+            or abstract_http_type.do_open is not canonical_http_do_open
+            or https_handler_type.https_open is not canonical_https_open
+            or proxy_type.proxy_open is not canonical_proxy_open
+            or redirect_type.redirect_request is not canonical_redirect_request
+        ):
+            raise transport_error(
+                "direct trading-write wire client network implementation changed"
+            )
+        handlers = canonical_tuple(canonical_getattr(opener, "handlers", ()))
+        proxies = canonical_tuple(
+            handler for handler in handlers if canonical_type(handler) is proxy_type
+        )
+        redirects = canonical_tuple(
+            handler
+            for handler in handlers
+            if canonical_isinstance(handler, redirect_base_type)
+        )
+        if (
+            canonical_len(proxies) != 1
+            or canonical_getattr(proxies[0], "proxies", None) != {}
+            or canonical_len(redirects) != 1
+            or canonical_type(redirects[0]) is not redirect_type
+        ):
+            raise transport_error(
+                "direct trading-write wire client direct-only policy changed"
+            )
+        handler_state = canonical_tuple(
+            (handler, freeze_authority_state(canonical_vars(handler)))
+            for handler in handlers
+        )
+        return (
+            opener,
+            freeze_authority_state(opener_state),
+            handler_state,
+        )
+
+    def prune() -> None:
+        for states in (clients, receipts):
+            for object_id, state in canonical_tuple(states.items()):
+                if state[0]() is None:
+                    states.pop(object_id, None)
+
+    def register_client(client: object) -> None:
+        if canonical_type(client) is not client_type:
+            return
+        prune()
+        try:
+            authority = client_network_authority(client)
+        except transport_error:
+            # Neutral/test clients remain usable, but cannot gain direct-wire proof.
+            return
+        clients[canonical_id(client)] = (weakref(client), authority)
+
+    def require_client(client: object) -> UrllibJsonWireClient:
+        if canonical_type(client) is not client_type:
+            raise transport_error(
+                "canonical direct trading-write wire client is required"
+            )
+        prune()
+        client_state = clients.get(canonical_id(client))
+        try:
+            current_authority = client_network_authority(client)
+        except transport_error as error:
+            raise transport_error(
+                "direct trading-write wire client network authority changed"
+            ) from error
+        if (
+            client_state is None
+            or client_state[0]() is not client
+            or client_state[1] != current_authority
+        ):
+            raise transport_error(
+                "direct trading-write wire client network authority changed"
+            )
+        return client
+
+    def eligible_client(client: object) -> bool:
+        try:
+            require_client(client)
+        except transport_error:
+            return False
+        return True
+
+    def mint(
+        client: object,
+        request: object,
+        response: object,
+    ) -> DirectTradingWriteExecutionReceipt | None:
+        if (
+            canonical_type(client) is not client_type
+            or canonical_type(request) is not request_type
+            or canonical_type(response) is not response_type
+        ):
+            return None
+        if not eligible_client(client):
+            return None
+        request_sha256 = canonical_request_digest(request)
+        response_body = object_getattribute(response, "body")
+        http_status = object_getattribute(response, "http_status")
+        if (
+            canonical_type(response_body) is not canonical_bytes
+            or canonical_type(http_status) is not canonical_int
+            or not 100 <= http_status <= 599
+        ):
+            raise transport_error(
+                "direct trading-write response is not canonical"
+            )
+        response_sha256 = "sha256:" + canonical_sha256(response_body).hexdigest()
+        receipt = canonical_object.__new__(receipt_type)
+        values = (
+            transport_identity,
+            network_policy_identity,
+            request_sha256,
+            http_status,
+            response_sha256,
+        )
+        for field_name, field_value in canonical_zip(
+            (
+                "transport_identity",
+                "network_policy_identity",
+                "request_sha256",
+                "http_status",
+                "response_sha256",
+            ),
+            values,
+        ):
+            canonical_object.__setattr__(receipt, field_name, field_value)
+        receipts[canonical_id(receipt)] = (
+            weakref(receipt),
+            weakref(response),
+            values,
+        )
+        canonical_object.__setattr__(
+            response,
+            "_direct_trading_write_execution_receipt",
+            receipt,
+        )
+        return receipt
+
+    def snapshot(
+        receipt: object,
+    ) -> tuple[str, str, str, int, str, object | None]:
+        if implementation_changed() or canonical_type(receipt) is not receipt_type:
+            raise transport_error(
+                "canonical direct trading-write execution receipt is required"
+            )
+        prune()
+        state = receipts.get(canonical_id(receipt))
+        if state is None or state[0]() is not receipt:
+            raise transport_error(
+                "direct trading-write receipt construction authority is unavailable"
+            )
+        values = state[2]
+        current = canonical_tuple(
+            object_getattribute(receipt, name)
+            for name in (
+                "transport_identity",
+                "network_policy_identity",
+                "request_sha256",
+                "http_status",
+                "response_sha256",
+            )
+        )
+        if current != values:
+            raise transport_error(
+                "direct trading-write receipt changed after wire execution"
+            )
+        return (*values, state[1]())
+
+    return register_client, require_client, eligible_client, mint, snapshot
+
+
+(
+    _register_direct_trading_write_client,
+    require_direct_trading_write_client,
+    _direct_trading_write_client_is_eligible,
+    _mint_direct_trading_write_execution_receipt,
+    _direct_trading_write_execution_receipt_state,
+) = _install_direct_trading_write_execution_authority()
+del _install_direct_trading_write_execution_authority
+
+
+def _bind_direct_trading_write_client_init(init_impl, register_client):
+    def __init__(self, *args, **kwargs):
+        init_impl(self, *args, **kwargs)
+        register_client(self)
+
+    return __init__
+
+
+def _bind_direct_trading_write_send(send_impl, eligible_client, mint_receipt):
+    request_type = SignedHttpRequest
+    canonical_type = type
+
+    def send(self, request):
+        eligible_before_send = (
+            canonical_type(request) is request_type
+            and eligible_client(self)
+        )
+        response = send_impl(self, request)
+        if eligible_before_send:
+            mint_receipt(self, request, response)
+        return response
+
+    return send
+
+
+UrllibJsonWireClient.__init__ = _bind_direct_trading_write_client_init(
+    UrllibJsonWireClient.__init__,
+    _register_direct_trading_write_client,
+)
+UrllibJsonWireClient.send = _bind_direct_trading_write_send(
+    UrllibJsonWireClient.send,
+    _direct_trading_write_client_is_eligible,
+    _mint_direct_trading_write_execution_receipt,
+)
+del _bind_direct_trading_write_client_init
+del _bind_direct_trading_write_send
+del _register_direct_trading_write_client
+del _direct_trading_write_client_is_eligible
+del _mint_direct_trading_write_execution_receipt
+
+
+def _bind_direct_trading_write_receipt_access(snapshot_impl):
+    response_type = TradingWireResponse
+    receipt_type = DirectTradingWriteExecutionReceipt
+    canonical_type = type
+    canonical_getattr = getattr
+    canonical_sha256 = sha256
+    mapping_proxy = MappingProxyType
+    transport_error = ProviderTransportError
+    object_getattribute = object.__getattribute__
+
+    def direct_trading_write_execution_receipt(
+        response: TradingWireResponse,
+    ) -> DirectTradingWriteExecutionReceipt:
+        if canonical_type(response) is not response_type:
+            raise transport_error(
+                "exact trading wire response is required"
+            )
+        receipt = canonical_getattr(
+            response,
+            "_direct_trading_write_execution_receipt",
+            None,
+        )
+        values = snapshot_impl(receipt)
+        if values[5] is not response:
+            raise transport_error(
+                "direct trading-write receipt is not bound to exact response"
+            )
+        status = object_getattribute(response, "http_status")
+        raw = object_getattribute(response, "body")
+        if (
+            values[3] != status
+            or values[4] != "sha256:" + canonical_sha256(raw).hexdigest()
+        ):
+            raise transport_error(
+                "direct trading-write receipt does not match exact response"
+            )
+        return receipt
+
+    def direct_trading_write_execution_receipt_snapshot(
+        receipt: DirectTradingWriteExecutionReceipt,
+    ) -> Mapping[str, object]:
+        if canonical_type(receipt) is not receipt_type:
+            raise transport_error(
+                "canonical direct trading-write execution receipt is required"
+            )
+        values = snapshot_impl(receipt)
+        return mapping_proxy(
+            {
+                "transport_identity": values[0],
+                "network_policy_identity": values[1],
+                "request_sha256": values[2],
+                "http_status": values[3],
+                "response_sha256": values[4],
+            }
+        )
+
+    return (
+        direct_trading_write_execution_receipt,
+        direct_trading_write_execution_receipt_snapshot,
+    )
+
+
+(
+    direct_trading_write_execution_receipt,
+    direct_trading_write_execution_receipt_snapshot,
+) = _bind_direct_trading_write_receipt_access(
+    _direct_trading_write_execution_receipt_state
+)
+del _bind_direct_trading_write_receipt_access
+del _direct_trading_write_execution_receipt_state
+
+
+_DIRECT_AUTHENTICATED_READ_TRANSPORT_IDENTITY = (
+    "autotrade.provider_transport.UrllibJsonWireClient:direct-auth-read:v1"
+)
+_DIRECT_AUTHENTICATED_READ_NETWORK_POLICY_IDENTITY = "sha256:" + sha256(
+    json.dumps(
+        {
+            "automatic_retries": False,
+            "https_only": True,
+            "proxy_mode": "DIRECT_ONLY",
+            "redirects": False,
+            "response_body": "BOUNDED_EXACT_BYTES",
+            "transport": "urllib",
+            "version": 1,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+
+
+_BYBIT_DIRECT_AUTHENTICATED_READ_POLICY_SNAPSHOT = MappingProxyType(
+    {
+        provider_environment: (
+            policy.provider_id,
+            policy.environment,
+            policy.base_url,
+            tuple(sorted(policy.allowed_hosts)),
+            policy.timeout_seconds,
+        )
+        for provider_environment, policy in BYBIT_V5_ENDPOINT_POLICIES.items()
+    }
+)
+_BYBIT_DIRECT_AUTHENTICATED_READ_RULE_SNAPSHOT = MappingProxyType(
+    {
+        endpoint: (
+            rule.surface.value,
+            rule.permission_scope,
+            rule.data_entitlement,
+            tuple(sorted(rule.success_statuses)),
+        )
+        for endpoint, rule in BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS.items()
+    }
+)
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
+class DirectAuthenticatedReadExecutionReceipt:
+    """Sealed proof of one exact direct authenticated HTTP response.
+
+    The receipt proves only that the canonical direct urllib client sent the
+    exact signed request and returned the bound status/body. Provider
+    qualification, Host issuer authority and financial PROVIDER_ORIGIN remain
+    separate authorities.
+    """
+
+    transport_identity: str
+    network_policy_identity: str
+    query_digest: str
+    request_sha256: str
+    request_semantics_sha256: str
+    http_status: int
+    response_sha256: str
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        raise ProviderTransportError(
+            "direct authenticated-read receipt is minted only by canonical wire execution"
+        )
+
+
+def direct_authenticated_read_transport_identity() -> str:
+    return _DIRECT_AUTHENTICATED_READ_TRANSPORT_IDENTITY
+
+
+def direct_authenticated_read_network_policy_identity() -> str:
+    return _DIRECT_AUTHENTICATED_READ_NETWORK_POLICY_IDENTITY
+
+
+def _direct_authenticated_read_request_digest(
+    request: AuthenticatedReadHttpRequest,
+    _require_request=_require_authenticated_read_http_request,
+    _sha256=sha256,
+    _json_dumps=json.dumps,
+    _dict=dict,
+    _sorted=sorted,
+    _type_error=TypeError,
+    _scope_error=ProviderTransportScopeError,
+    _transport_error=ProviderTransportError,
+) -> str:
+    try:
+        method, url, headers, body, timeout_seconds = _require_request(request)
+    except (_type_error, _scope_error) as error:
+        raise _transport_error(
+            "direct authenticated-read receipt requires canonical HTTP request"
+        ) from error
+    material = {
+        "method": method,
+        "url_sha256": "sha256:" + _sha256(url.encode("utf-8")).hexdigest(),
+        "headers_sha256": "sha256:"
+        + _sha256(
+            _json_dumps(
+                _dict(_sorted(_dict(headers).items())),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        "body_sha256": "sha256:" + _sha256(body).hexdigest(),
+        "timeout_seconds": timeout_seconds,
+    }
+    return "sha256:" + _sha256(
+        _json_dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _canonical_bybit_authenticated_read_query(
+    query_binding: AuthenticatedReadQueryBinding,
+    _rule=_bybit_authenticated_read_rule,
+    _canonical_text_fn=_canonical_text,
+    _option_endpoint=_BYBIT_OPTION_DELIVERY_ENDPOINT,
+    _urlencode=urlencode,
+    _sorted=sorted,
+    _type=type,
+    _str=str,
+    _rule_type=AuthenticatedReadEndpointRule,
+    _rule_snapshot=_BYBIT_DIRECT_AUTHENTICATED_READ_RULE_SNAPSHOT,
+    _scope_error=ProviderTransportScopeError,
+    _transport_error=ProviderTransportError,
+) -> str:
+    rule = _rule(query_binding)
+    expected_rule = _rule_snapshot.get(query_binding.endpoint)
+    if (
+        _type(rule) is not _rule_type
+        or expected_rule is None
+        or (
+            rule.surface.value,
+            rule.permission_scope,
+            rule.data_entitlement,
+            tuple(_sorted(rule.success_statuses)),
+        )
+        != expected_rule
+    ):
+        raise _transport_error(
+            "Bybit authenticated-read endpoint rule authority changed"
+        )
+    query: dict[str, str] = {}
+    for raw_key, raw_value in query_binding.query.items():
+        key = _canonical_text_fn(raw_key, name="query parameter")
+        if _type(raw_value) is not _str or raw_value != raw_value.strip():
+            raise _scope_error(
+                "Bybit authenticated-read query values must be canonical strings"
+            )
+        if key in query:
+            raise _scope_error(
+                "Bybit authenticated-read query keys must be unique"
+            )
+        query[key] = raw_value
+    if not query:
+        raise _scope_error(
+            "Bybit authenticated-read query must not be empty"
+        )
+    if query_binding.endpoint == _option_endpoint:
+        parts: list[str] = []
+        for key, value in _sorted(query.items()):
+            if key == "cursor":
+                parts.append("cursor=" + value)
+            else:
+                parts.append(_urlencode(((key, value),)))
+        return "&".join(parts)
+    return _urlencode(_sorted(query.items()))
+
+
+def _validated_bybit_authenticated_read_wire_semantics_digest(
+    request: AuthenticatedReadHttpRequest,
+    query_binding: AuthenticatedReadQueryBinding,
+    _require_query=_require_authenticated_read_query_binding_authority,
+    _require_request=_require_authenticated_read_http_request,
+    _query_text=_canonical_bybit_authenticated_read_query,
+    _policies=BYBIT_V5_ENDPOINT_POLICIES,
+    _policy_snapshot=_BYBIT_DIRECT_AUTHENTICATED_READ_POLICY_SNAPSHOT,
+    _policy_type=ProviderEndpointPolicy,
+    _urlsplit=urlsplit,
+    _dict=dict,
+    _set=set,
+    _type=type,
+    _str=str,
+    _int=int,
+    _fullmatch=re.fullmatch,
+    _sha256=sha256,
+    _json_dumps=json.dumps,
+    _sorted=sorted,
+    _exception=Exception,
+    _transport_error=ProviderTransportError,
+    _policy_class=ProviderEndpointPolicy,
+    _policy_absolute_url=ProviderEndpointPolicy.absolute_url,
+) -> str:
+    try:
+        _require_query(query_binding)
+        method, url, headers, body, timeout_seconds = _require_request(request)
+    except _exception as error:
+        raise _transport_error(
+            "Bybit direct authenticated-read authority is unavailable"
+        ) from error
+    if query_binding.provider_id != "BYBIT":
+        raise _transport_error(
+            "Bybit direct authenticated-read requires BYBIT query authority"
+        )
+    policy = _policies.get(query_binding.provider_environment)
+    expected_policy = _policy_snapshot.get(query_binding.provider_environment)
+    if (
+        _type(policy) is not _policy_type
+        or expected_policy is None
+        or (
+            policy.provider_id,
+            policy.environment,
+            policy.base_url,
+            tuple(_sorted(policy.allowed_hosts)),
+            policy.timeout_seconds,
+        )
+        != expected_policy
+    ):
+        raise _transport_error(
+            "Bybit direct authenticated-read provider policy authority changed"
+        )
+    if _policy_class.absolute_url is not _policy_absolute_url:
+        raise _transport_error(
+            "Bybit provider policy executable authority changed"
+        )
+    expected_url = _policy_absolute_url(policy, query_binding.endpoint) + "?" + _query_text(
+        query_binding
+    )
+    header_values = _dict(headers)
+    expected_headers = {
+        "Accept",
+        "X-BAPI-API-KEY",
+        "X-BAPI-TIMESTAMP",
+        "X-BAPI-RECV-WINDOW",
+        "X-BAPI-SIGN",
+    }
+    timestamp = header_values.get("X-BAPI-TIMESTAMP")
+    recv_window = header_values.get("X-BAPI-RECV-WINDOW")
+    signature = header_values.get("X-BAPI-SIGN")
+    api_key = header_values.get("X-BAPI-API-KEY")
+    if (
+        method != "GET"
+        or url != expected_url
+        or body != b""
+        or timeout_seconds != policy.timeout_seconds
+        or _set(header_values) != expected_headers
+        or header_values.get("Accept") != "application/json"
+        or _type(api_key) is not _str
+        or not api_key
+        or _type(timestamp) is not _str
+        or not timestamp.isdigit()
+        or _type(recv_window) is not _str
+        or not recv_window.isdigit()
+        or not 1 <= _int(recv_window) <= 60000
+        or _type(signature) is not _str
+        or _fullmatch(r"[0-9a-f]{64}", signature) is None
+    ):
+        raise _transport_error(
+            "Bybit transmitted authenticated-read request differs from canonical semantics"
+        )
+    material = {
+        "provider_id": "BYBIT",
+        "environment": query_binding.environment,
+        "provider_environment": query_binding.provider_environment,
+        "account_id": query_binding.account_id,
+        "entity_id": query_binding.entity_id,
+        "capability_snapshot_id": query_binding.capability_snapshot_id,
+        "instrument_version": query_binding.instrument_version,
+        "surface": query_binding.surface.value,
+        "permission_scope": query_binding.permission_scope,
+        "endpoint": query_binding.endpoint,
+        "query": _dict(_sorted(_dict(query_binding.query).items())),
+        "query_digest": query_binding.query_digest,
+        "method": method,
+        "host": _urlsplit(policy.base_url).hostname,
+        "timeout_seconds": timeout_seconds,
+    }
+    return "sha256:" + _sha256(
+        _json_dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _install_direct_authenticated_read_execution_authority(
+    require_direct_client,
+    send_impl,
+    request_digest,
+    semantics_digest,
+    require_query,
+):
+    receipts: dict[
+        int,
+        tuple[object, object, tuple[str, str, str, str, str, int, str]],
+    ] = {}
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_zip = zip
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    weakref = weakref_ref
+    client_type = UrllibJsonWireClient
+    request_type = AuthenticatedReadHttpRequest
+    response_type = AuthenticatedReadWireResponse
+    receipt_type = DirectAuthenticatedReadExecutionReceipt
+    transport_error = ProviderTransportError
+    canonical_sha256 = sha256
+    transport_identity = _DIRECT_AUTHENTICATED_READ_TRANSPORT_IDENTITY
+    network_policy_identity = _DIRECT_AUTHENTICATED_READ_NETWORK_POLICY_IDENTITY
+
+    def prune() -> None:
+        for object_id, state in canonical_tuple(receipts.items()):
+            if state[0]() is None:
+                receipts.pop(object_id, None)
+
+    def execute(
+        client: object,
+        request: object,
+        query_binding: AuthenticatedReadQueryBinding,
+    ) -> AuthenticatedReadWireResponse:
+        if canonical_type(client) is not client_type:
+            raise transport_error(
+                "canonical direct authenticated-read urllib client is required"
+            )
+        if canonical_type(request) is not request_type:
+            raise transport_error(
+                "exact authenticated-read HTTP request is required"
+            )
+        try:
+            require_direct_client(client)
+        except transport_error as error:
+            raise transport_error(
+                "canonical direct authenticated-read network authority is unavailable"
+            ) from error
+        require_query(query_binding)
+        query_digest = object_getattribute(query_binding, "query_digest")
+        semantics_sha256 = semantics_digest(request, query_binding)
+        request_sha256 = request_digest(request)
+        response = send_impl(client, request)
+        # The provider call is an unbounded concurrency window. Revalidate the
+        # closure-owned query authority before its identity can enter a receipt.
+        require_query(query_binding)
+        if object_getattribute(query_binding, "query_digest") != query_digest:
+            raise transport_error(
+                "authenticated-read query authority changed during direct wire execution"
+            )
+        if canonical_type(response) is not response_type:
+            raise transport_error(
+                "direct authenticated-read wire must return exact status/body response"
+            )
+        status = object_getattribute(response, "http_status")
+        raw = object_getattribute(response, "body")
+        response_sha256 = "sha256:" + canonical_sha256(raw).hexdigest()
+        receipt = canonical_object.__new__(receipt_type)
+        values = (
+            transport_identity,
+            network_policy_identity,
+            query_digest,
+            request_sha256,
+            semantics_sha256,
+            status,
+            response_sha256,
+        )
+        for field_name, field_value in canonical_zip(
+            (
+                "transport_identity",
+                "network_policy_identity",
+                "query_digest",
+                "request_sha256",
+                "request_semantics_sha256",
+                "http_status",
+                "response_sha256",
+            ),
+            values,
+        ):
+            canonical_object.__setattr__(receipt, field_name, field_value)
+        prune()
+        receipts[canonical_id(receipt)] = (
+            weakref(receipt),
+            weakref(response),
+            values,
+        )
+        canonical_object.__setattr__(
+            response,
+            "_direct_authenticated_read_execution_receipt",
+            receipt,
+        )
+        return response
+
+    def snapshot(
+        receipt: object,
+    ) -> tuple[str, str, str, str, str, int, str, object | None]:
+        if canonical_type(receipt) is not receipt_type:
+            raise transport_error(
+                "canonical direct authenticated-read execution receipt is required"
+            )
+        prune()
+        state = receipts.get(canonical_id(receipt))
+        if state is None or state[0]() is not receipt:
+            raise transport_error(
+                "direct authenticated-read receipt construction authority is unavailable"
+            )
+        values = state[2]
+        current = canonical_tuple(
+            object_getattribute(receipt, name)
+            for name in (
+                "transport_identity",
+                "network_policy_identity",
+                "query_digest",
+                "request_sha256",
+                "request_semantics_sha256",
+                "http_status",
+                "response_sha256",
+            )
+        )
+        if current != values:
+            raise transport_error(
+                "direct authenticated-read receipt changed after wire execution"
+            )
+        return (*values, state[1]())
+
+    return execute, snapshot
+
+
+(
+    _execute_direct_bybit_authenticated_read_wire,
+    _direct_authenticated_read_execution_receipt_state,
+) = _install_direct_authenticated_read_execution_authority(
+    require_direct_trading_write_client,
+    UrllibJsonWireClient.send,
+    _direct_authenticated_read_request_digest,
+    _validated_bybit_authenticated_read_wire_semantics_digest,
+    _require_authenticated_read_query_binding_authority,
+)
+del _install_direct_authenticated_read_execution_authority
+
+
+def _bind_direct_authenticated_read_receipt_access(snapshot_impl):
+    receipt_type = DirectAuthenticatedReadExecutionReceipt
+    response_type = AuthenticatedReadWireResponse
+    canonical_type = type
+    canonical_getattr = getattr
+    canonical_sha256 = sha256
+    mapping_proxy = MappingProxyType
+    transport_error = ProviderTransportError
+    object_getattribute = object.__getattribute__
+
+    def direct_authenticated_read_execution_receipt(
+        response: AuthenticatedReadWireResponse,
+    ) -> DirectAuthenticatedReadExecutionReceipt:
+        if canonical_type(response) is not response_type:
+            raise transport_error(
+                "exact authenticated-read wire response is required"
+            )
+        receipt = canonical_getattr(
+            response,
+            "_direct_authenticated_read_execution_receipt",
+            None,
+        )
+        values = snapshot_impl(receipt)
+        if values[7] is not response:
+            raise transport_error(
+                "direct authenticated-read receipt is not bound to exact response"
+            )
+        status = object_getattribute(response, "http_status")
+        raw = object_getattribute(response, "body")
+        if (
+            values[5] != status
+            or values[6] != "sha256:" + canonical_sha256(raw).hexdigest()
+        ):
+            raise transport_error(
+                "direct authenticated-read receipt does not match exact response"
+            )
+        return receipt
+
+    def direct_authenticated_read_execution_receipt_snapshot(
+        receipt: DirectAuthenticatedReadExecutionReceipt,
+    ) -> Mapping[str, object]:
+        values = snapshot_impl(receipt)
+        return mapping_proxy(
+            {
+                "transport_identity": values[0],
+                "network_policy_identity": values[1],
+                "query_digest": values[2],
+                "request_sha256": values[3],
+                "request_semantics_sha256": values[4],
+                "http_status": values[5],
+                "response_sha256": values[6],
+            }
+        )
+
+    return (
+        direct_authenticated_read_execution_receipt,
+        direct_authenticated_read_execution_receipt_snapshot,
+    )
+
+
+(
+    direct_authenticated_read_execution_receipt,
+    direct_authenticated_read_execution_receipt_snapshot,
+) = _bind_direct_authenticated_read_receipt_access(
+    _direct_authenticated_read_execution_receipt_state
+)
+del _bind_direct_authenticated_read_receipt_access
+del _direct_authenticated_read_execution_receipt_state
+
+
+def _install_direct_authenticated_read_observation_authority(
+    receipt_reader,
+    receipt_snapshot_reader,
+):
+    """Carry direct-wire authority onto the exact parsed read observation."""
+
+    states: dict[int, tuple[object, object, tuple[object, ...]]] = {}
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_object = object
+    canonical_weakref = weakref_ref
+    canonical_reader = receipt_reader
+    canonical_reader_code = canonical_reader.__code__
+    canonical_snapshot_reader = receipt_snapshot_reader
+    canonical_snapshot_reader_code = canonical_snapshot_reader.__code__
+    canonical_projection = provider_response_observation_projection
+    canonical_projection_code = canonical_projection.__code__
+    canonical_sha256 = sha256
+
+    client_type = UrllibJsonWireClient
+    response_type = AuthenticatedReadWireResponse
+    observation_type = ProviderResponseObservation
+    receipt_type = DirectAuthenticatedReadExecutionReceipt
+    transport_error = ProviderTransportError
+    core_error = ProviderCoreError
+
+    def require_projection(observation: object):
+        try:
+            return canonical_projection(observation)
+        except core_error as error:
+            raise transport_error(
+                "canonical provider response observation authority is unavailable"
+            ) from error
+
+    def prune() -> None:
+        for object_id, state in canonical_tuple(states.items()):
+            if state[0]() is None:
+                states.pop(object_id, None)
+
+    def bind(
+        client: object,
+        response: object,
+        observation: object,
+    ) -> ProviderResponseObservation:
+        if canonical_type(observation) is not observation_type:
+            raise transport_error(
+                "exact provider response observation is required"
+            )
+        if (
+            canonical_reader.__code__ is not canonical_reader_code
+            or canonical_snapshot_reader.__code__
+            is not canonical_snapshot_reader_code
+            or canonical_projection.__code__ is not canonical_projection_code
+        ):
+            raise transport_error(
+                "direct authenticated-read observation authority changed"
+            )
+        projection = require_projection(observation)
+        # Custom/injected clients remain useful test seams but receive no
+        # production direct-wire provenance.
+        if canonical_type(client) is not client_type:
+            return observation
+        if canonical_type(response) is not response_type:
+            raise transport_error(
+                "exact authenticated-read wire response is required"
+            )
+
+        receipt = canonical_reader(response)
+        if canonical_type(receipt) is not receipt_type:
+            raise transport_error(
+                "canonical direct authenticated-read execution receipt is required"
+            )
+        snapshot = canonical_snapshot_reader(receipt)
+        values = (
+            snapshot["transport_identity"],
+            snapshot["network_policy_identity"],
+            snapshot["request_sha256"],
+            snapshot["http_status"],
+            snapshot["response_sha256"],
+        )
+        status = projection["http_status"]
+        response_sha256 = projection["response_sha256"]
+        raw = canonical_object.__getattribute__(response, "body")
+        if (
+            values[3] != status
+            or values[4] != response_sha256
+            or values[4] != "sha256:" + canonical_sha256(raw).hexdigest()
+        ):
+            raise transport_error(
+                "direct authenticated-read receipt conflicts with parsed "
+                "provider response"
+            )
+        prune()
+        object_id = canonical_id(observation)
+        current = states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise transport_error(
+                "direct authenticated-read observation authority collision"
+            )
+        states[object_id] = (
+            canonical_weakref(observation),
+            receipt,
+            values,
+        )
+        return observation
+
+    def require(
+        observation: object,
+    ) -> DirectAuthenticatedReadExecutionReceipt:
+        if canonical_type(observation) is not observation_type:
+            raise transport_error(
+                "exact provider response observation is required"
+            )
+        if (
+            canonical_snapshot_reader.__code__
+            is not canonical_snapshot_reader_code
+            or canonical_projection.__code__ is not canonical_projection_code
+        ):
+            raise transport_error(
+                "direct authenticated-read observation authority changed"
+            )
+        projection = require_projection(observation)
+        prune()
+        state = states.get(canonical_id(observation))
+        if state is None or state[0]() is not observation:
+            raise transport_error(
+                "provider response lacks direct authenticated-read wire authority"
+            )
+        receipt = state[1]
+        if canonical_type(receipt) is not receipt_type:
+            raise transport_error(
+                "direct authenticated-read observation receipt changed"
+            )
+        snapshot = canonical_snapshot_reader(receipt)
+        current = (
+            snapshot["transport_identity"],
+            snapshot["network_policy_identity"],
+            snapshot["request_sha256"],
+            snapshot["http_status"],
+            snapshot["response_sha256"],
+        )
+        if current != state[2]:
+            raise transport_error(
+                "direct authenticated-read observation receipt changed"
+            )
+        if (
+            projection["http_status"] != current[3]
+            or projection["response_sha256"] != current[4]
+        ):
+            raise transport_error(
+                "provider response changed after direct-wire binding"
+            )
+        return receipt
+
+    return bind, require
+
+
+(
+    _bind_direct_authenticated_read_observation,
+    direct_authenticated_read_observation_receipt,
+) = _install_direct_authenticated_read_observation_authority(
+    direct_authenticated_read_execution_receipt,
+    direct_authenticated_read_execution_receipt_snapshot,
+)
+del _install_direct_authenticated_read_observation_authority
+
+def _install_direct_trading_exact_response_authority(
+    receipt_reader,
+    receipt_snapshot,
+):
+    """Transfer live direct-wire proof without adding forgeable DTO fields."""
+
+    states: dict[int, tuple[object, object, tuple[object, ...]]] = {}
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_dict = dict
+    canonical_set = set
+    canonical_frozenset = frozenset
+    canonical_int = int
+    canonical_bytes = bytes
+    canonical_str = str
+    canonical_bool = bool
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    weakref = weakref_ref
+    exact_type = ExactJsonTransportResponse
+    wire_type = TradingWireResponse
+    transport_error = ProviderTransportError
+    canonical_sha256 = sha256
+    receipt_reader_code = receipt_reader.__code__
+    receipt_snapshot_code = receipt_snapshot.__code__
+    exact_field_names = canonical_frozenset(
+        {
+            "response_bytes",
+            "http_status",
+            "requires_reconciliation",
+            "ambiguity_reason",
+        }
+    )
+
+    def implementation_changed() -> bool:
+        return (
+            ExactJsonTransportResponse is not exact_type
+            or TradingWireResponse is not wire_type
+            or type is not canonical_type
+            or id is not canonical_id
+            or tuple is not canonical_tuple
+            or dict is not canonical_dict
+            or set is not canonical_set
+            or frozenset is not canonical_frozenset
+            or int is not canonical_int
+            or bytes is not canonical_bytes
+            or str is not canonical_str
+            or bool is not canonical_bool
+            or object is not canonical_object
+            or weakref_ref is not weakref
+            or sha256 is not canonical_sha256
+            or receipt_reader.__code__ is not receipt_reader_code
+            or receipt_snapshot.__code__ is not receipt_snapshot_code
+        )
+
+    def exact_snapshot(value: ExactJsonTransportResponse) -> tuple[object, ...]:
+        if implementation_changed() or canonical_type(value) is not exact_type:
+            raise transport_error(
+                "exact trading response authority is unavailable"
+            )
+        state = object_getattribute(value, "__dict__")
+        if canonical_type(state) is not canonical_dict:
+            raise transport_error(
+                "exact trading response state is not canonical"
+            )
+        if canonical_frozenset(state) != exact_field_names:
+            raise transport_error(
+                "exact trading response shape changed"
+            )
+        raw = state["response_bytes"]
+        status = state["http_status"]
+        reconciliation = state["requires_reconciliation"]
+        reason = state["ambiguity_reason"]
+        if (
+            canonical_type(raw) is not canonical_bytes
+            or (status is not None and canonical_type(status) is not canonical_int)
+            or canonical_type(reconciliation) is not canonical_bool
+            or (reason is not None and canonical_type(reason) is not canonical_str)
+        ):
+            raise transport_error(
+                "exact trading response scalar authority changed"
+            )
+        return (raw, status, reconciliation, reason)
+
+    def prune() -> None:
+        for object_id, state in canonical_tuple(states.items()):
+            if state[0]() is None:
+                states.pop(object_id, None)
+
+    def inherit(
+        source: object,
+        exact: ExactJsonTransportResponse,
+    ) -> ExactJsonTransportResponse:
+        if canonical_type(source) is not wire_type:
+            return exact
+        try:
+            receipt = receipt_reader(source)
+        except transport_error:
+            return exact
+        receipt_values = receipt_snapshot(receipt)
+        exact_values = exact_snapshot(exact)
+        raw = exact_values[0]
+        status = exact_values[1]
+        if (
+            status != receipt_values["http_status"]
+            or "sha256:" + canonical_sha256(raw).hexdigest()
+            != receipt_values["response_sha256"]
+        ):
+            raise transport_error(
+                "direct trading-write receipt differs from exact response"
+            )
+        prune()
+        states[canonical_id(exact)] = (
+            weakref(exact),
+            receipt,
+            exact_values,
+        )
+        return exact
+
+    def require(
+        exact: ExactJsonTransportResponse,
+    ) -> DirectTradingWriteExecutionReceipt:
+        if implementation_changed() or canonical_type(exact) is not exact_type:
+            raise transport_error(
+                "exact direct trading-write response is required"
+            )
+        prune()
+        state = states.get(canonical_id(exact))
+        if state is None or state[0]() is not exact:
+            raise transport_error(
+                "exact response lacks direct trading-write execution authority"
+            )
+        current = exact_snapshot(exact)
+        if current != state[2]:
+            raise transport_error(
+                "exact direct trading-write response changed after wire execution"
+            )
+        receipt = state[1]
+        receipt_values = receipt_snapshot(receipt)
+        if (
+            current[1] != receipt_values["http_status"]
+            or "sha256:" + canonical_sha256(current[0]).hexdigest()
+            != receipt_values["response_sha256"]
+        ):
+            raise transport_error(
+                "direct trading-write receipt no longer matches exact response"
+            )
+        return receipt
+
+    return inherit, require
+
+
+(
+    _inherit_direct_trading_write_receipt,
+    direct_trading_write_exact_response_receipt,
+) = _install_direct_trading_exact_response_authority(
+    direct_trading_write_execution_receipt,
+    direct_trading_write_execution_receipt_snapshot,
+)
+del _install_direct_trading_exact_response_authority
+
+
+def _direct_trading_exact_response(
+    source: object,
+    response_bytes: bytes,
+    *,
+    http_status: int | None = None,
+    requires_reconciliation: bool = False,
+    ambiguity_reason: str | None = None,
+) -> ExactJsonTransportResponse:
+    exact = ExactJsonTransportResponse(
+        response_bytes,
+        http_status=http_status,
+        requires_reconciliation=requires_reconciliation,
+        ambiguity_reason=ambiguity_reason,
+    )
+    return _inherit_direct_trading_write_receipt(source, exact)
+
+
 def _trading_response_evidence(
     value: object,
 ) -> tuple[bytes, int | None]:
-    """Validate exact post-SEND bytes/status without assuming a JSON body.
-
-    Provider-specific classifiers must be able to preserve an already observed
-    ambiguous HTTP result even when a gateway or upstream proxy returned HTML
-    or arbitrary opaque bytes. Definitive responses still pass through the
-    strict ExactJsonTransportResponse JSON contract below.
-    """
+    """Validate exact post-SEND bytes/status without assuming a JSON body."""
 
     if type(value) is TradingWireResponse:
-        # Frozen dataclasses can still be built without __init__ or modified
-        # through object.__setattr__. Revalidate the nested HTTP status at
-        # the actual post-SEND authority boundary, before virtual comparisons.
         status = value.http_status
         if type(status) is not int or not 100 <= status <= 599:
             raise ProviderTransportError("invalid trading HTTP response status")
+        _require_canonical_response_resource_authority()
         try:
-            raw = require_provider_response_bytes(
+            raw = _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES(
                 value.body,
-                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                max_bytes=_CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES,
                 allow_empty=True,
             )
         except (TypeError, ValueError) as error:
@@ -1836,10 +3379,12 @@ def _trading_response_evidence(
             ) from error
         return raw, status
     if type(value) is bytes:
+        _require_canonical_response_resource_authority()
         try:
-            raw = require_provider_response_bytes(
+            raw = _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES(
                 value,
-                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                max_bytes=_CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
             )
         except (TypeError, ValueError) as error:
             raise ProviderTransportError(
@@ -1861,7 +3406,11 @@ def _exact_trading_response(
     """
 
     raw, status = _trading_response_evidence(value)
-    return ExactJsonTransportResponse(raw, http_status=status)
+    return _direct_trading_exact_response(
+        value,
+        raw,
+        http_status=status,
+    )
 
 
 def _bybit_exact_trading_response(
@@ -1876,33 +3425,49 @@ def _bybit_exact_trading_response(
 
     raw, status = _trading_response_evidence(value)
     if status is None:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+            value,
             raw,
             requires_reconciliation=True,
             ambiguity_reason="bybit_http_status_unavailable_execution_unknown",
         )
     if 500 <= status <= 599:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+            value,
             raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="bybit_http_5xx_execution_unknown",
         )
     if status < 200 or status > 299:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+            value,
             raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="bybit_http_non_2xx_execution_unknown",
         )
-    exact = ExactJsonTransportResponse(raw, http_status=status)
+    if not raw:
+        return _direct_trading_exact_response(
+            value,
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="bybit_empty_response_execution_unknown",
+        )
+    exact = _direct_trading_exact_response(
+        value,
+        raw,
+        http_status=status,
+    )
     parsed = exact.payload
     if (
         type(parsed) is dict
         and type(parsed.get("retCode")) is int
         and parsed["retCode"] in _BYBIT_AMBIGUOUS_RESPONSE_CODES
     ):
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+            value,
             raw,
             http_status=status,
             requires_reconciliation=True,
@@ -1918,21 +3483,36 @@ def _kraken_spot_exact_trading_response(
 
     raw, status = _trading_response_evidence(value)
     if status is None:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+            value,
             raw,
             requires_reconciliation=True,
             ambiguity_reason="kraken_spot_http_status_unavailable_execution_unknown",
         )
     if 500 <= status <= 599:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+            value,
             raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="kraken_spot_http_5xx_execution_unknown",
         )
-    exact = ExactJsonTransportResponse(raw, http_status=status)
+    if not raw:
+        return _direct_trading_exact_response(
+            value,
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="kraken_spot_empty_response_execution_unknown",
+        )
+    exact = _direct_trading_exact_response(
+        value,
+        raw,
+        http_status=status,
+    )
     if spot_submission_requires_reconciliation(exact.payload):
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+            value,
             raw,
             http_status=status,
             requires_reconciliation=True,
@@ -1948,19 +3528,33 @@ def _alpaca_exact_trading_response(
 
     raw, status = _trading_response_evidence(value)
     if status is None:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+            value,
             raw,
             requires_reconciliation=True,
             ambiguity_reason="alpaca_http_status_unavailable_execution_unknown",
         )
     if 500 <= status <= 599:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+            value,
             raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="alpaca_http_5xx_execution_unknown",
         )
-    return ExactJsonTransportResponse(raw, http_status=status)
+    if not raw:
+        return _direct_trading_exact_response(
+            value,
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="alpaca_empty_response_execution_unknown",
+        )
+    return _direct_trading_exact_response(
+        value,
+        raw,
+        http_status=status,
+    )
 
 
 def _binance_exact_trading_response(
@@ -1978,26 +3572,41 @@ def _binance_exact_trading_response(
 
     raw, status = _trading_response_evidence(value)
     if status is None:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+            value,
             raw,
             requires_reconciliation=True,
             ambiguity_reason="binance_spot_http_status_unavailable_execution_unknown",
         )
     if 500 <= status <= 599:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+            value,
             raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="binance_spot_http_5xx_execution_unknown",
         )
-    exact = ExactJsonTransportResponse(raw, http_status=status)
+    if not raw:
+        return _direct_trading_exact_response(
+            value,
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="binance_spot_empty_response_execution_unknown",
+        )
+    exact = _direct_trading_exact_response(
+        value,
+        raw,
+        http_status=status,
+    )
     parsed = exact.payload
     if (
         type(parsed) is dict
         and type(parsed.get("code")) is int
         and parsed["code"] == -1007
     ):
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+            value,
             raw,
             http_status=status,
             requires_reconciliation=True,
@@ -2018,7 +3627,8 @@ def _whitebit_exact_trading_response(
 
     raw, status = _trading_response_evidence(value)
     if status is None:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+            value,
             raw,
             requires_reconciliation=True,
             ambiguity_reason="whitebit_http_status_unavailable_execution_unknown",
@@ -2029,13 +3639,26 @@ def _whitebit_exact_trading_response(
         request_class="WRITE",
     )
     if decision.requires_reconciliation:
-        return ExactJsonTransportResponse(
+        return _direct_trading_exact_response(
+            value,
             raw,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="whitebit_" + decision.classification.lower(),
         )
-    return ExactJsonTransportResponse(raw, http_status=status)
+    if not raw:
+        return _direct_trading_exact_response(
+            value,
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="whitebit_empty_response_execution_unknown",
+        )
+    return _direct_trading_exact_response(
+        value,
+        raw,
+        http_status=status,
+    )
 
 
 @dataclass(frozen=True)
@@ -2045,7 +3668,7 @@ class WhiteBitCredential:
 
     @classmethod
     def parse(cls, plaintext: object) -> "WhiteBitCredential":
-        if not isinstance(plaintext, str) or not plaintext:
+        if type(plaintext) is not str or not plaintext:
             raise ProviderTransportScopeError(
                 "WhiteBIT credential material is unavailable"
             )
@@ -3116,7 +4739,7 @@ class KrakenSpotCredential:
 
     @classmethod
     def parse(cls, plaintext: object) -> "KrakenSpotCredential":
-        if not isinstance(plaintext, str) or not plaintext:
+        if type(plaintext) is not str or not plaintext:
             raise ProviderTransportScopeError(
                 "Kraken Spot credential material is unavailable"
             )
@@ -3824,7 +5447,7 @@ class AlpacaTradingCredential:
 
     @classmethod
     def parse(cls, plaintext: object) -> "AlpacaTradingCredential":
-        if not isinstance(plaintext, str) or not plaintext:
+        if type(plaintext) is not str or not plaintext:
             raise ProviderTransportScopeError(
                 "Alpaca credential material is unavailable"
             )
@@ -4106,7 +5729,7 @@ class BybitV5Credential:
 
     @classmethod
     def parse(cls, plaintext: object) -> "BybitV5Credential":
-        if not isinstance(plaintext, str) or not plaintext:
+        if type(plaintext) is not str or not plaintext:
             raise ProviderTransportScopeError(
                 "Bybit credential material is unavailable"
             )
@@ -4578,6 +6201,13 @@ class BybitV5AuthenticatedReadSigner:
             raise ProviderTransportScopeError(
                 "authenticated-read binding provider/environment mismatch"
             )
+        canonical_policy = BYBIT_V5_ENDPOINT_POLICIES.get(
+            query_binding.provider_environment
+        )
+        if canonical_policy is None or policy != canonical_policy:
+            raise ProviderTransportScopeError(
+                "authenticated-read binding provider environment mismatch"
+            )
         _bybit_authenticated_read_rule(query_binding)
         if (
             isinstance(timestamp_ms, bool)
@@ -4600,7 +6230,7 @@ class BybitV5AuthenticatedReadSigner:
         query: dict[str, str] = {}
         for raw_key, raw_value in query_binding.query.items():
             key = _canonical_text(raw_key, name="query parameter")
-            if not isinstance(raw_value, str) or raw_value != raw_value.strip():
+            if type(raw_value) is not str or raw_value != raw_value.strip():
                 raise ProviderTransportScopeError(
                     "Bybit authenticated-read query values must be canonical strings"
                 )
@@ -4772,7 +6402,7 @@ class BybitV5AuthenticatedReadTransport:
                 account_id=self.account_id,
                 entity_id=query_binding.entity_id,
                 environment=self.policy.environment,
-                provider_environment=self.provider_environment,
+                provider_environment=query_binding.provider_environment,
                 instrument_version=query_binding.instrument_version,
                 at=point,
             )
@@ -4787,6 +6417,8 @@ class BybitV5AuthenticatedReadTransport:
             or current.account_id != self.account_id
             or current.entity_id != query_binding.entity_id
             or current.environment != self.policy.environment
+            or current.provider_environment != query_binding.provider_environment
+            or current.provider_environment != self.provider_environment
             or current.instrument_version != query_binding.instrument_version
             or current.status != "VERIFIED"
             or not (current.observed_at <= point < current.expires_at)
@@ -4802,14 +6434,16 @@ class BybitV5AuthenticatedReadTransport:
         self,
         query_binding: AuthenticatedReadQueryBinding,
     ) -> ProviderResponseObservation:
-        if not isinstance(query_binding, AuthenticatedReadQueryBinding):
+        if type(query_binding) is not AuthenticatedReadQueryBinding:
             raise TypeError(
-                "query_binding must be AuthenticatedReadQueryBinding"
+                "query_binding must be exact AuthenticatedReadQueryBinding"
             )
+        _require_authenticated_read_query_binding_authority(query_binding)
         if (
             query_binding.provider_id != "BYBIT"
             or query_binding.account_id != self.account_id
             or query_binding.environment != self.policy.environment
+            or query_binding.provider_environment != self.provider_environment
             or query_binding.capability_snapshot_id != self.capability_snapshot_id
         ):
             raise ProviderTransportScopeError(
@@ -4866,6 +6500,217 @@ class BybitV5AuthenticatedReadTransport:
                 response_bytes=wire_response.body,
                 observed_at=self.clock_utc(),
             )
+
+
+def _install_bybit_direct_authenticated_read_executor(
+    transport_type,
+    query_type,
+    response_type,
+    rule_resolver,
+    require_query,
+    require_direct_client,
+    direct_send,
+    receipt_reader,
+    receipt_snapshot,
+    signer,
+    observer,
+    bind_observation,
+    require_current_capability,
+    validate_query_rule,
+    canonical_sha256,
+):
+    canonical_type = type
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    transport_error = ProviderTransportError
+    scope_error = ProviderTransportScopeError
+
+    def execute_direct(
+        self,
+        query_binding: AuthenticatedReadQueryBinding,
+    ) -> tuple[ProviderResponseObservation, DirectAuthenticatedReadExecutionReceipt]:
+        if canonical_type(self) is not transport_type:
+            raise TypeError(
+                "direct Bybit authenticated read requires exact transport type"
+            )
+        if canonical_type(query_binding) is not query_type:
+            raise TypeError(
+                "query_binding must be exact AuthenticatedReadQueryBinding"
+            )
+        require_query(query_binding)
+
+        policy = object_getattribute(self, "policy")
+        provider_environment = object_getattribute(self, "provider_environment")
+        account_id = object_getattribute(self, "account_id")
+        capability_snapshot_id = object_getattribute(self, "capability_snapshot_id")
+        capability_registry = object_getattribute(self, "capability_registry")
+        secret_resolver = object_getattribute(self, "secret_resolver")
+        credential_handle = object_getattribute(self, "credential_handle")
+        session_token = object_getattribute(self, "session_token")
+        origin = object_getattribute(self, "origin")
+        execution_identity = object_getattribute(self, "execution_identity")
+        clock_millis = object_getattribute(self, "clock_millis")
+        clock_utc = object_getattribute(self, "clock_utc")
+        quota_gate = object_getattribute(self, "quota_gate")
+        wire_client = object_getattribute(self, "wire_client")
+        recv_window_ms = object_getattribute(self, "recv_window_ms")
+
+        def require_transport_unchanged() -> None:
+            if (
+                object_getattribute(self, "policy") is not policy
+                or object_getattribute(self, "provider_environment")
+                != provider_environment
+                or object_getattribute(self, "account_id") != account_id
+                or object_getattribute(self, "capability_snapshot_id")
+                != capability_snapshot_id
+                or object_getattribute(self, "capability_registry")
+                is not capability_registry
+                or object_getattribute(self, "secret_resolver") is not secret_resolver
+                or object_getattribute(self, "credential_handle") is not credential_handle
+                or object_getattribute(self, "session_token") != session_token
+                or object_getattribute(self, "origin") != origin
+                or object_getattribute(self, "execution_identity") != execution_identity
+                or object_getattribute(self, "clock_millis") is not clock_millis
+                or object_getattribute(self, "clock_utc") is not clock_utc
+                or object_getattribute(self, "quota_gate") is not quota_gate
+                or object_getattribute(self, "wire_client") is not wire_client
+                or object_getattribute(self, "recv_window_ms") != recv_window_ms
+            ):
+                raise transport_error(
+                    "Bybit direct authenticated-read transport authority changed"
+                )
+
+        if (
+            query_binding.provider_id != "BYBIT"
+            or query_binding.account_id != account_id
+            or query_binding.environment != policy.environment
+            or query_binding.provider_environment != provider_environment
+            or query_binding.capability_snapshot_id != capability_snapshot_id
+        ):
+            raise scope_error(
+                "Bybit authenticated-read query scope mismatch"
+            )
+        rule = rule_resolver(query_binding)
+
+        # Reject injected/replaced clients before quota waits or credential access.
+        require_direct_client(wire_client)
+        require_transport_unchanged()
+
+        if quota_gate is not None:
+            quota_gate(
+                "BYBIT",
+                account_id,
+                policy.environment,
+                "AUTHENTICATED_READ",
+            )
+        require_transport_unchanged()
+
+        require_current_capability(self, query_binding, rule)
+        require_transport_unchanged()
+
+        with secret_resolver.lease_for_execution(
+            session_token,
+            origin=origin,
+            handle=credential_handle,
+            execution_identity=execution_identity,
+            account_id=account_id,
+            provider="BYBIT",
+            environment=policy.environment,
+            purpose="READ",
+            provider_environment=provider_environment,
+        ) as credential_plaintext:
+            try:
+                signed = signer(
+                    policy=policy,
+                    query_binding=query_binding,
+                    credential_plaintext=credential_plaintext,
+                    timestamp_ms=clock_millis(),
+                    recv_window_ms=recv_window_ms,
+                )
+            finally:
+                credential_plaintext = None
+
+            require_transport_unchanged()
+            require_current_capability(self, query_binding, rule)
+            require_transport_unchanged()
+            wire_response = direct_send(
+                wire_client,
+                signed,
+                query_binding,
+            )
+            require_transport_unchanged()
+            # Provider I/O is an unbounded concurrency window. Re-resolve
+            # both capability and endpoint-rule authority after the response
+            # before any status/body can become accepted provider state.
+            require_current_capability(self, query_binding, rule)
+            require_transport_unchanged()
+            validate_query_rule(query_binding)
+            if canonical_type(wire_response) is not response_type:
+                raise transport_error(
+                    "Bybit direct authenticated-read wire must preserve HTTP status"
+                )
+            if wire_response.http_status not in rule.success_statuses:
+                raise transport_error(
+                    "Bybit direct authenticated read returned unexpected HTTP status "
+                    + str(wire_response.http_status)
+                )
+            receipt = receipt_reader(wire_response)
+            receipt_values = receipt_snapshot(receipt)
+            if (
+                receipt_values["query_digest"] != query_binding.query_digest
+                or receipt_values["http_status"] != wire_response.http_status
+                or receipt_values["response_sha256"]
+                != "sha256:" + canonical_sha256(wire_response.body).hexdigest()
+            ):
+                raise transport_error(
+                    "Bybit direct authenticated-read receipt differs from exact wire result"
+                )
+            observed_at = clock_utc()
+            require_transport_unchanged()
+            observation = observer(
+                query_binding=query_binding,
+                http_status=wire_response.http_status,
+                response_bytes=wire_response.body,
+                observed_at=observed_at,
+            )
+            if (
+                observation.query_binding is not query_binding
+                or observation.http_status != receipt_values["http_status"]
+                or observation.response_sha256 != receipt_values["response_sha256"]
+            ):
+                raise transport_error(
+                    "Bybit direct authenticated-read observation differs from wire receipt"
+                )
+            observation = bind_observation(
+                wire_client,
+                wire_response,
+                observation,
+            )
+            return observation, receipt
+
+    return execute_direct
+
+
+BybitV5AuthenticatedReadTransport.execute_direct = (
+    _install_bybit_direct_authenticated_read_executor(
+        BybitV5AuthenticatedReadTransport,
+        AuthenticatedReadQueryBinding,
+        AuthenticatedReadWireResponse,
+        _bybit_authenticated_read_rule,
+        _require_authenticated_read_query_binding_authority,
+        require_direct_trading_write_client,
+        _execute_direct_bybit_authenticated_read_wire,
+        direct_authenticated_read_execution_receipt,
+        direct_authenticated_read_execution_receipt_snapshot,
+        BybitV5AuthenticatedReadSigner.sign,
+        observe_authenticated_json_response,
+        _bind_direct_authenticated_read_observation,
+        BybitV5AuthenticatedReadTransport._require_current_capability,
+        _canonical_bybit_authenticated_read_query,
+        sha256,
+    )
+)
+del _install_bybit_direct_authenticated_read_executor
 
 
 @dataclass(frozen=True)
@@ -5164,7 +7009,7 @@ class BinanceSpotCredential:
 
     @classmethod
     def parse(cls, plaintext: object) -> "BinanceSpotCredential":
-        if not isinstance(plaintext, str) or not plaintext:
+        if type(plaintext) is not str or not plaintext:
             raise ProviderTransportScopeError(
                 "Binance credential material is unavailable"
             )
@@ -5217,7 +7062,7 @@ class BinanceSpotSigner:
         canonical: dict[str, str] = {}
         for raw_key, raw_value in body.items():
             key = _canonical_text(raw_key, name="order parameter")
-            if not isinstance(raw_value, str) or raw_value != raw_value.strip():
+            if type(raw_value) is not str or raw_value != raw_value.strip():
                 raise ProviderTransportScopeError(
                     "Binance order parameters must be canonical strings"
                 )
@@ -5386,7 +7231,7 @@ class BinanceSpotHttpTransport:
         normalized: dict[str, str] = {}
         for raw_key, raw_value in body.items():
             key = _canonical_text(raw_key, name="order parameter")
-            if not isinstance(raw_value, str) or raw_value != raw_value.strip():
+            if type(raw_value) is not str or raw_value != raw_value.strip():
                 raise ProviderTransportScopeError(
                     "prepared Binance body values must be canonical strings"
                 )
@@ -5508,7 +7353,7 @@ class BinanceSpotAuthenticatedReadSigner:
         canonical: dict[str, str] = {}
         for raw_key, raw_value in query_binding.query.items():
             key = _canonical_text(raw_key, name="query parameter")
-            if not isinstance(raw_value, str) or raw_value != raw_value.strip():
+            if type(raw_value) is not str or raw_value != raw_value.strip():
                 raise ProviderTransportScopeError(
                     "authenticated-read query values must be canonical strings"
                 )

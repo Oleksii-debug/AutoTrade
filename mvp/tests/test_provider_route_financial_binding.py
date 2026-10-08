@@ -2,6 +2,7 @@ from dataclasses import replace
 from tempfile import TemporaryDirectory
 import unittest
 
+from mvp.autotrade_mvp.financial_send_authority import FinancialSendAuthorityError
 from mvp.autotrade_mvp.persistence import payload_digest
 from mvp.autotrade_mvp.provider_route_financial_binding import (
     ProviderRouteFinancialBindingError,
@@ -311,8 +312,8 @@ class ProviderRouteFinancialBindingTests(unittest.TestCase):
             binding = self._matching_binding(route)
             object.__setattr__(route.candidate, "account_id", "retargeted-account")
             with self.assertRaisesRegex(
-                ProviderRouteFinancialBindingError,
-                "accepted qualification|capability authority",
+                FinancialSendAuthorityError,
+                "selected provider route authority changed",
             ):
                 require_financial_binding_matches_selected_route(binding, route)
 
@@ -326,8 +327,8 @@ class ProviderRouteFinancialBindingTests(unittest.TestCase):
                 "provider-qualification:sha256:" + "c" * 64,
             )
             with self.assertRaisesRegex(
-                ProviderRouteFinancialBindingError,
-                "internally inconsistent",
+                FinancialSendAuthorityError,
+                "selected provider route authority changed",
             ):
                 require_financial_binding_matches_selected_route(binding, route)
 

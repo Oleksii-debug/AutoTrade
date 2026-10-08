@@ -356,6 +356,8 @@ class FinancialProductionHostRuntime:
                 self.__recovery_controller,
                 source=result.source_owner,
                 target=result.target_owner,
+                takeover=result,
+                vault=vault,
             )
             if activated != result.target_owner:
                 raise RuntimeError(

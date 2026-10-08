@@ -1188,6 +1188,7 @@ def assess_windows_update_restart(
     trust: WindowsUpdateTrustContext,
     observed_windows_package_sha256: str,
     observed_journal_schema_version: int,
+    pending_intent: WindowsUpdateStepIntent | None = None,
 ) -> WindowsUpdateRestartAssessment:
     """Classify crash/restart state from independently observed durable facts.
 
@@ -1202,6 +1203,20 @@ def assess_windows_update_restart(
         raise TypeError("checkpoint must be WindowsUpdateCheckpoint")
     if checkpoint.plan_sha256 != plan.plan_sha256:
         raise WindowsUpdateError("checkpoint belongs to a different update plan")
+    if pending_intent is not None:
+        # An unresolved write-ahead effect supersedes ordinary restart advice.
+        _windows_update_intent_payload(pending_intent)
+        if pending_intent.plan_sha256 != checkpoint.plan_sha256:
+            raise WindowsUpdateError("pending intent belongs to a different plan")
+        retained = restore_update_checkpoint(
+            plan, pending_intent.checkpoint_json, trust=trust,
+        )
+        if retained != checkpoint:
+            raise WindowsUpdateError("pending intent checkpoint differs from restart")
+        return WindowsUpdateRestartAssessment(
+            disposition="BLOCKED_UNKNOWN_STATE",
+            reasons=("UNRESOLVED_UPDATE_STEP_EFFECT_NEEDS_INDEPENDENT_RECONCILIATION",),
+        )
     expected_update = _step_sequence(document, rollback=False)
     expected_rollback = _step_sequence(document, rollback=True)
     _validate_prefix(

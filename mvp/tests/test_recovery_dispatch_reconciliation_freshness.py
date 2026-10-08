@@ -58,6 +58,7 @@ class RecoveryDispatchReconciliationFreshnessTests(unittest.TestCase):
                 journal,
                 environment="PAPER",
                 account_id="acct",
+                bybit_provider_environment="TESTNET",
             )
             self._mark_ready(
                 recovery,

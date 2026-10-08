@@ -899,6 +899,15 @@ def _detached_instrument_version(version: InstrumentVersion) -> InstrumentVersio
         field.name: getattr(version, field.name)
         for field in fields(InstrumentVersion)
     }
+    # The canonical, already-validated instance holds immutable proxy metadata.
+    # Its strict constructor deliberately accepts only exact builtin dicts.
+    # Rehydrate detached builtin snapshots at this one trusted boundary;
+    # do not relax the public constructor or accept arbitrary mapping subclasses.
+    payload["metadata_evidence"] = tuple(
+        dict(item) for item in version.metadata_evidence
+    )
+    if version.funding_schedule is not None:
+        payload["funding_schedule"] = _thaw_jsonish(version.funding_schedule)
     return InstrumentVersion(**payload)
 
 

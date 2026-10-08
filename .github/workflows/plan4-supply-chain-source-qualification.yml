@@ -58,6 +58,9 @@ jobs:
         run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
       - name: Compile canonical provenance and supply-chain authorities
         run: python -m compileall -q mvp/autotrade_mvp/qualification_attestation.py mvp/autotrade_mvp/supply_chain_qualification.py mvp/autotrade_mvp/release_candidate.py mvp/autotrade_mvp/release_qualification.py tools/build_provenance_manifest.py
+      - name: Diagnose generated-manifest differences without exposing evidence values
+        run: |
+          python -c "import json; from tools.build_provenance_manifest import OUTPUT, rendered_manifest; actual=json.loads(OUTPUT.read_text(encoding='utf-8')); expected=json.loads(rendered_manifest()); print('MISMATCH_TOP_LEVEL', sorted(k for k in set(actual) | set(expected) if actual.get(k) != expected.get(k))); print('MISMATCH_SOURCE_INVENTORY', sorted(k for k in set(actual.get('source_inventory', {})) | set(expected.get('source_inventory', {})) if actual.get('source_inventory', {}).get(k) != expected.get('source_inventory', {}).get(k))); print('MISMATCH_BLOCKER_CODES', [v.get('code') for v in actual.get('blocking_issues', [])] != [v.get('code') for v in expected.get('blocking_issues', [])]); print('MISMATCH_DOTNET_PACKAGES', actual.get('dotnet_package_dependencies') != expected.get('dotnet_package_dependencies')); print('MISMATCH_PYTHON_PACKAGES', actual.get('python_development_dependencies') != expected.get('python_development_dependencies')); print('MISMATCH_INSPECTED_COMPONENTS', actual.get('inspected_components') != expected.get('inspected_components'))"
       - name: Check deterministic source-controlled dependency and rights manifest
         run: python tools/build_provenance_manifest.py --check
       - name: Test fixture SBOM, provenance, exact-source signatures and fail-closed policy

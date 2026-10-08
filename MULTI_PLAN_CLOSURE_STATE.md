@@ -51,7 +51,7 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 | 2 | DONE | legacy Section 4 |
 | 3 | DONE | legacy Section 7 |
 | 4 | DONE | legacy Section 24; canonical PR #2324 merged to `main` as `e67a532b053f03b463bd6f08f5b19c56d12d606f`; exact frozen candidate `3cd756ad124942bdf228d685ea4ad50dcd3dae05`; scoped CI [37726712635](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37726712635) SUCCESS on ubuntu-22.04 and windows-2025 (62 recovery/UNKNOWN/sender-fence/takeover/failure tests on Ubuntu); merged recovery_dispatch.py and recovery_takeover.py blob identities match candidate; premerge main-diff overlap was empty; no PAPER/LIVE/provider claim; terminal Plan-3 Section-4 engineering readback verified on 2026-10-08 |
-| 5 | OPEN | legacy Section 25 |
+| 5 | QUALIFYING | legacy Section 25; canonical finisher [PR #2328](https://github.com/Oleksii-debug/AutoTrade/pull/2328), frozen candidate `25825d647c9c4a3fac0f4b07b734a31f4e9a808f` on branch `plan3/section5-backup-consistent-inventory-20261008`; inherited backup/restore and quarantine authority reused, full pre-SQLite side-file inventory freeze plus post-fsync recheck, five adversarial source race tests; scoped dual-OS CI [37728689117](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37728689117) QUEUED at this readback (NOT PASS). NOT DONE until qualification, merge and exact main + Drive readback |
 | 6 | PARTIAL_EXISTING | legacy Section 28 |
 | 7 | OPEN | legacy Section 29 |
 | 8 | OPEN | plan-level qualification |

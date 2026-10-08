@@ -317,9 +317,13 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 "      - run: echo no-op\n",
                 encoding="utf-8",
             )
+            blockers = package_rights_blockers(root)
+            # Neither fake root-level steps nor a missing verifier in jobs
+            # can attest restored-package rights.  Both failures are required.
+            self.assertIn("DOTNET_PACKAGE_RIGHTS_VERIFY_COMMAND_INVALID:5", blockers)
             self.assertIn(
-                "DOTNET_PACKAGE_RIGHTS_VERIFY_ORDER_INVALID:src/App/App.csproj",
-                package_rights_blockers(root),
+                "DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_MISSING:src/App/App.csproj",
+                blockers,
             )
 
 

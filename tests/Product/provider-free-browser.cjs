@@ -63,7 +63,7 @@ from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.simulation_commands import _protocol
 from mvp.autotrade_mvp.simulation_runtime_checkpoint import _runtime_scope_snapshot,_stable_runtime_components,checkpoint_path
 from mvp.autotrade_mvp.replay import CompositeReplayCheckpoint
-root=Path(sys.argv[1]);store=JournalStore(root/'journal.sqlite3');protocol=_protocol(store)
+root=Path(sys.argv[1]).resolve();store=JournalStore(root/'journal.sqlite3');protocol=_protocol(store)
 completed=[event['payload'] for event in store.load_events('canonical_autonomous_simulation',protocol['run_id'])
     if event['event_type']=='AutonomousEpisodeCompleted']
 saved=CompositeReplayCheckpoint.from_canonical_json(checkpoint_path(root).read_text())
@@ -508,7 +508,7 @@ from pathlib import Path
 import mvp.autotrade_mvp.simulation_session as s
 from mvp.autotrade_mvp.simulation_commands import _protocol
 from mvp.autotrade_mvp.persistence import JournalStore
-root=Path(sys.argv[1]);p=_protocol(JournalStore(root/'journal.sqlite3'))
+root=Path(sys.argv[1]).resolve();p=_protocol(JournalStore(root/'journal.sqlite3'))
 original=s.commit_order_fill_with_reservation_consumption
 def die(*a,**kw):
     original(*a,**kw)

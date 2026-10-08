@@ -1,0 +1,66 @@
+name: plan5-windows-fixture-install-assembly
+
+on:
+  pull_request:
+    paths:
+      - "tools/windows_fixture_install_assembly.py"
+      - "tools/build_windows_install_manifest.py"
+      - "tools/build_windows_bundle.py"
+      - "mvp/tests/test_windows_fixture_install_assembly.py"
+      - ".github/workflows/plan5-windows-fixture-install-assembly.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+
+jobs:
+  isolated-nonexecuting-fixture:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Prove exact source checkout
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$AUTOTRADE_SOURCE_SHA"
+      - name: Compile reusable fixture assembly and exact adversarial scenarios
+        run: >-
+          python -m py_compile
+          tools/windows_fixture_install_assembly.py
+          mvp/tests/test_windows_fixture_install_assembly.py
+      - name: Install existing test dependencies
+        run: python -m pip install --require-hashes -r requirements-dev.txt
+      - name: Existing canonical release verifier and actual fixture install/update/uninstall/reinstall
+        run: >-
+          python -m unittest
+          mvp.tests.test_windows_install_manifest
+          mvp.tests.test_windows_fixture_install_assembly
+          -v
+      - name: Emit exact-source component-only receipt on actually executed tests
+        run: >-
+          python tools/write_ci_evidence.py
+          --suite plan5-section6-installer-fixture
+          --command "verified bundle + nonexecuting per-user fixture install update rollback uninstall reinstall + negative tests"
+          --output artifacts/plan5-section6-fixture.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan5-section6-${{ runner.os }}-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/plan5-section6-fixture.json
+          if-no-files-found: error

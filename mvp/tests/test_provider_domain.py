@@ -3,6 +3,7 @@ import unittest
 from mvp.autotrade_mvp.provider_domain import (
     ProviderDomainError,
     ProviderFinancialScope,
+    provider_financial_scope,
 )
 
 
@@ -60,6 +61,35 @@ class ProviderFinancialScopeTests(unittest.TestCase):
             scope.content_digest.startswith("provider-financial-scope:sha256:")
         )
 
+    def test_compatibility_facade_reuses_exact_canonical_identity(self):
+        canonical = ProviderFinancialScope(
+            provider_id="BYBIT",
+            runtime_environment="PAPER",
+            provider_environment="TESTNET",
+            entity_policy_id="LINEAR_ORDER_V1",
+        )
+        compatible = provider_financial_scope(
+            provider_id="bybit",
+            environment="paper",
+            provider_environment="testnet",
+            route_policy_id="linear_order_v1",
+        )
+
+        self.assertEqual(compatible, canonical)
+        self.assertEqual(compatible.content_digest, canonical.content_digest)
+        self.assertEqual(compatible.environment, canonical.runtime_environment)
+        self.assertEqual(compatible.route_policy_id, canonical.entity_policy_id)
+        self.assertEqual(
+            set(compatible.payload()),
+            {
+                "schema_version",
+                "provider_id",
+                "runtime_environment",
+                "provider_environment",
+                "entity_policy_id",
+            },
+        )
+
     def test_runtime_environment_is_not_provider_environment(self):
         scope = ProviderFinancialScope(
             provider_id="BYBIT",
@@ -113,6 +143,13 @@ class ProviderFinancialScopeTests(unittest.TestCase):
                 runtime_environment="PAPER",
                 provider_environment="TEST NET",
                 entity_policy_id="LINEAR_ORDER_V1",
+            )
+        with self.assertRaises(ProviderDomainError):
+            provider_financial_scope(
+                provider_id=Text("BYBIT"),
+                environment="PAPER",
+                provider_environment="TESTNET",
+                route_policy_id="LINEAR_ORDER_V1",
             )
 
 

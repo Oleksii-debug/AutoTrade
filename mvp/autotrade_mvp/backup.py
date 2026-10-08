@@ -1657,13 +1657,25 @@ def create_backup(
                 checkpoint_document = (stage / evidence_relative).read_text(
                     encoding="utf-8"
                 )
-                snapshot_store = JournalStore(journal_target)
-                verify_autonomous_runtime_checkpoint_backup_evidence(
-                    state,
-                    snapshot_store,
-                    source_store_identity=runtime_checkpoint_source_store_identity,
-                    checkpoint_document=checkpoint_document,
-                )
+                # JournalStore initialization enables WAL and can rewrite the
+                # database header. Validate on a disposable exact SQLite copy,
+                # never on the immutable staged backup journal whose digest was
+                # already recorded above.
+                with tempfile.TemporaryDirectory(
+                    prefix=".autotrade-checkpoint-verification-",
+                    dir=target.parent,
+                ) as verification_directory:
+                    verification_journal = (
+                        Path(verification_directory) / "journal.sqlite3"
+                    )
+                    _copy_file_durable(journal_target, verification_journal)
+                    snapshot_store = JournalStore(verification_journal)
+                    verify_autonomous_runtime_checkpoint_backup_evidence(
+                        state,
+                        snapshot_store,
+                        source_store_identity=runtime_checkpoint_source_store_identity,
+                        checkpoint_document=checkpoint_document,
+                    )
             except (
                 AutonomousRuntimeCheckpointError,
                 OSError,

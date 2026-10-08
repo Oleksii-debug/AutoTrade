@@ -28,7 +28,7 @@ BASE_VERIFIED_COMMANDS = (
         "os.chdir(tempfile.gettempdir()); "
         "import autotrade_numeric.dataset_manifest as d; "
         "assert m.version('autotrade-exact-numeric') == '0.0.2'; "
-        "assert d.CONTRACT_VERSION == '6.0.0'; "
+        "assert d.CONTRACT_VERSION == '7.0.0'; "
         "assert d.DATASET_MANIFEST_SEMANTIC_VALIDATOR_ID == "
         "'dataset-manifest-content-authority-v1'\""
     ),

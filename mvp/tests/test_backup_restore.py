@@ -455,6 +455,63 @@ class BackupRestoreTests(unittest.TestCase):
                     self.assertFalse(destination.exists())
                     self.assertEqual(list(root.glob(".autotrade-backup-*")), [])
 
+    def test_symlinked_backup_bundle_components_fail_verification_and_restore(self):
+        for relative in (
+            "state",
+            "artifacts",
+            "backup-manifest.json",
+            "backup-manifest.sha256",
+        ):
+            with self.subTest(relative=relative):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    state, artifacts = self._build_sources(root)
+                    bundle = create_backup(state, artifacts, root / "backup")
+                    original = bundle / relative
+                    external = root / "outside-backup"
+                    is_directory = original.is_dir()
+                    original.rename(external)
+                    try:
+                        original.symlink_to(
+                            external, target_is_directory=is_directory
+                        )
+                    except (OSError, NotImplementedError):
+                        self.skipTest("symlink creation is unavailable")
+                    with self.assertRaisesRegex(BackupIntegrityError, "symlink"):
+                        verify_backup(bundle)
+                    target = root / "restored"
+                    with self.assertRaises(BackupIntegrityError):
+                        restore_backup(bundle, target)
+                    self.assertFalse(target.exists())
+
+    def test_restore_rechecks_symlinks_after_initial_bundle_verification(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            bundle = create_backup(state, artifacts, root / "backup")
+            original_verify = backup_module.verify_backup
+
+            def replace_after_verification(source):
+                manifest = original_verify(source)
+                payload_root = bundle / "artifacts"
+                external = root / "outside-backup"
+                payload_root.rename(external)
+                try:
+                    payload_root.symlink_to(external, target_is_directory=True)
+                except (OSError, NotImplementedError):
+                    self.skipTest("directory symlink creation is unavailable")
+                return manifest
+
+            target = root / "restored"
+            with patch(
+                "mvp.autotrade_mvp.backup.verify_backup",
+                side_effect=replace_after_verification,
+            ):
+                with self.assertRaisesRegex(BackupIntegrityError, "symlink"):
+                    restore_backup(bundle, target)
+            self.assertFalse(target.exists())
+            self.assertEqual(list(root.glob(".autotrade-restore-*")), [])
+
     def test_manifest_paths_reject_windows_and_noncanonical_forms(self):
         self.assertEqual(
             _safe_relative_path("state/journal.sqlite3").as_posix(),

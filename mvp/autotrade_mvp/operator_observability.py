@@ -13,7 +13,7 @@ from types import MappingProxyType
 from .diagnostics import DiagnosticSnapshot
 from .host_network import _SNAPSHOT_FIELDS
 from .readiness import RuntimeSafetySignals, evaluate_readiness
-from .recovery import HostState, RecoveryController
+from .recovery import HostState, OwnerFence, RecoveryController
 
 
 _DOMAINS = (
@@ -157,6 +157,12 @@ def build_operator_observability(
     reason_codes_before = frozenset(recovery.reason_codes)
     unresolved_before = len(recovery.unresolved_attempts)
     recovery_reasons = _codes(reason_codes_before, name="recovery reason_codes")
+    owner_before = recovery.owner
+    reconciled_before = recovery.provider_reconciled
+    if owner_before is not None and type(owner_before) is not OwnerFence:
+        raise ValueError("recovery owner is noncanonical")
+    if type(reconciled_before) is not bool:
+        raise ValueError("recovery reconciliation state is noncanonical")
     readiness = evaluate_readiness(signals)
     readiness_reasons = _codes(readiness.blockers, name="readiness blockers")
     warnings = _codes(readiness.warnings, name="readiness warnings")
@@ -165,7 +171,11 @@ def build_operator_observability(
         HostState.BLOCKED: "BLOCKED",
         HostState.RECOVERING: "RECOVERING",
         HostState.DEGRADED: "DEGRADED",
-        HostState.READY: ("READY" if readiness.ready and not ui_reasons else "DEGRADED"),
+        HostState.READY: (
+            "READY"
+            if readiness.ready and reconciled_before and owner_before is not None and not ui_reasons
+            else "DEGRADED"
+        ),
     }[recovery.state]
     reasons = set(ui_reasons + recovery_reasons + readiness_reasons)
     if recovery.state is HostState.STOPPED:
@@ -207,6 +217,8 @@ def build_operator_observability(
     }
     if (
         recovery.state is not state_before
+        or recovery.owner is not owner_before
+        or recovery.provider_reconciled is not reconciled_before
         or frozenset(recovery.reason_codes) != reason_codes_before
         or len(recovery.unresolved_attempts) != unresolved_before
     ):

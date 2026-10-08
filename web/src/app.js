@@ -1826,6 +1826,10 @@ function renderOperation(operation) {
       ) {
         return;
       }
+      if (isSnapshotBusy(error)) {
+        reportSnapshotBusy();
+        return;
+      }
       if (error.status === 409 || error.status === 410) {
         try {
           await refreshSnapshot({announceRefresh: true});
@@ -2170,7 +2174,7 @@ function renderOperation(operation) {
         invalidateSnapshotAuthority();
         text("command-result",
           "Command " + commandId +
-            " was not accepted because the authenticated host session was rejected before command acceptance. Its fresh command identity was discarded; re-establish a valid session and canonical snapshot before trying again.");
+            " was not accepted because the authenticated host session was rejected before command acceptance. Its fresh command identity was discarded; re-establish a valid session and canonical snapshot before trying again. A retry is different: its prior attempt may already be durable.");
       } else if (isSnapshotBusy(error) && commandContextMatchesCurrentSnapshot(payload, submittedHostId)) {
         invalidateSnapshotAuthority();
         reportSnapshotBusy();
@@ -2202,8 +2206,8 @@ function renderOperation(operation) {
     const restoreKeyboardFocus = button !== null && document.activeElement === button;
     if (button) button.disabled = true;
     try {
-      await refreshSnapshot();
-      announce("Host state refreshed from the canonical snapshot.");
+      const refreshed = await refreshSnapshot();
+      if (refreshed) announce("Host state refreshed from the canonical snapshot.");
     } catch (error) {
       if (isSnapshotBusy(error)) {
         reportSnapshotBusy();
@@ -2252,17 +2256,27 @@ function renderOperation(operation) {
       const target = hash === "#main" ? null : pages.get(id);
       for (const page of pages.values()) page.link.removeAttribute("aria-current");
       if (hash === "#main") {
-        text("page-navigation-status", "Main content. Use headings to move among AutoTrade sections.");
-        if (focusHeading) byId("main").focus({preventScroll: true});
+        const message = "Main content. Use headings to move among AutoTrade sections.";
+        text("page-navigation-status", message);
+        if (focusHeading) {
+          byId("main").focus({preventScroll: true});
+          queuePoliteAnnouncement(message);
+        }
         return;
       }
       if (!target || (hash !== "" && hash !== "#" + id)) {
-        text("page-navigation-status", "Unknown section. Select a valid page from Primary navigation. No command or provider request was issued.");
+        const message = "Unknown section. Select a valid page from Primary navigation. No command or provider request was issued.";
+        text("page-navigation-status", message);
+        if (focusHeading) queuePoliteAnnouncement(message);
         return;
       }
       target.link.setAttribute("aria-current", "location");
-      text("page-navigation-status", "Current section: " + target.heading.textContent.trim() + ". Use browser Back and Forward to revisit sections.");
-      if (focusHeading) target.heading.focus({preventScroll: true});
+      const message = "Current section: " + target.heading.textContent.trim() + ". Use browser Back and Forward to revisit sections.";
+      text("page-navigation-status", message);
+      if (focusHeading) {
+        target.heading.focus({preventScroll: true});
+        queuePoliteAnnouncement(message);
+      }
     }
     // Ordinary anchors own browser history, URLs, and scroll. This adds only
     // heading focus and an announced active-section state for keyboard/NVDA.
@@ -2324,8 +2338,8 @@ function renderOperation(operation) {
     state.environment = null;
     setCommandAvailability(false);
     try {
-      await refreshSnapshot();
-      announce("Host state refreshed after page restoration.");
+      const restored = await refreshSnapshot();
+      if (restored) announce("Host state refreshed after page restoration.");
     } catch (error) {
       if (isSnapshotBusy(error)) {
         reportSnapshotBusy();

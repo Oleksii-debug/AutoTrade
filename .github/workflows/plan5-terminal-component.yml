@@ -11,6 +11,8 @@ on:
       - 'mvp/autotrade_mvp/windows_update.py'
       - 'mvp/tests/test_plan5_terminal_source_contract.py'
       - 'mvp/tests/test_plan5_ci_evidence.py'
+      - 'mvp/tests/test_plan5_component_evidence.py'
+      - 'tools/check_plan5_component_evidence.py'
       - 'mvp/tests/test_semantic_web_client_contract.py'
       - 'mvp/tests/test_desktop_shell_contract.py'
       - 'mvp/tests/test_windows_bundle.py'
@@ -54,6 +56,7 @@ jobs:
           PYTHONPATH="research:." python -m unittest \
             mvp.tests.test_plan5_terminal_source_contract \
             mvp.tests.test_plan5_ci_evidence \
+            mvp.tests.test_plan5_component_evidence \
             mvp.tests.test_semantic_web_client_contract \
             mvp.tests.test_desktop_shell_contract \
             mvp.tests.test_embedded_web \
@@ -163,9 +166,43 @@ jobs:
       - keyboard-semantic-browser
       - windows-desktop-native-emergency
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Verify final-gate code is the same exact source SHA
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$AUTOTRADE_SOURCE_SHA"
+      - name: Retrieve exact-source Host/security/update component evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: plan5-terminal-source-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/plan5-evidence/source
+      - name: Retrieve same-run keyboard browser evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: plan5-terminal-browser-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/plan5-evidence/browser
+      - name: Retrieve same-run real Windows Desktop emergency evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: plan5-terminal-desktop-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/plan5-evidence/desktop
+      - name: Fail closed on missing, stale, wrong-run, wrong-OS or forged fields
+        shell: bash
+        run: >-
+          python tools/check_plan5_component_evidence.py
+          --evidence-dir artifacts/plan5-evidence
+          --source-sha "$AUTOTRADE_SOURCE_SHA"
+          --run-id "$GITHUB_RUN_ID"
+          --run-attempt "$GITHUB_RUN_ATTEMPT"
+          --event "$GITHUB_EVENT_NAME"
       - name: Explicit evidence class and outstanding terminal prerequisites
         run: |
-          echo 'Plan 5 Section 7: this is exact-SHA component qualification.'
+          echo 'Plan 5 Section 7: consistent exact-run CI receipts; structural only.'
+          echo 'Existing writer reports cannot independently authenticate GitHub API.'
           echo 'Requires separate exact-SHA provider-free packaged candidate proof,'
           echo 'terminal Sections 1-6, main integration/readback and Drive/GitHub registry.'
           echo 'This workflow cannot self-issue DONE, physical NVDA or final-release PASS.'

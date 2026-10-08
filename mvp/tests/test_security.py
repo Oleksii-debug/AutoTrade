@@ -62,6 +62,18 @@ class SecurityBoundaryTests(unittest.TestCase):
             secret_value="top-secret",
         )
 
+    def _read_credential(self):
+        return self.boundary.register_secret(
+            self.owner.token,
+            origin=self.owner.origin,
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="READ",
+            secret_value="top-secret",
+        )
+
     def test_empty_identity_and_scope_are_rejected(self):
         for field, overrides in (
             ("owner_identity", {"owner_identity": ""}),
@@ -820,7 +832,7 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("[REDACTED]", repr(redacted))
 
     def test_rotated_and_revoked_secret_values_remain_redacted(self):
-        old_handle = self._credential()
+        old_handle = self._read_credential()
         new_handle = self.boundary.rotate_secret(
             self.owner.token,
             origin=self.owner.origin,

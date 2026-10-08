@@ -26,6 +26,7 @@ class RecoveryDispatchReconciliationFreshnessTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="acct",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         record_reconciliation_checkpoint(
             journal,

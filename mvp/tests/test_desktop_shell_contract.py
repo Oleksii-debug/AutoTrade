@@ -69,7 +69,7 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         )[0]
         self.assertIn("DesktopHostClientFactory.CreateConnection()", constructor)
         self.assertIn("private MainWindow(DesktopHostConnection connection)", constructor)
-        self.assertIn("connection.Client", constructor)
+        self.assertIn("(connection ?? throw new ArgumentNullException(nameof(connection))).Client", constructor)
         self.assertIn("connection.SessionProvider", constructor)
         self.assertNotIn("DesktopHostClientFactory.Create()", constructor)
 
@@ -160,7 +160,7 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
     def test_webview2_process_failure_revokes_trust_and_recreates_control_outside_handler(self):
         xaml = XAML.read_text(encoding="utf-8")
         code = CODE.read_text(encoding="utf-8")
-        self.assertIn('Content="_Reload application web interface"', xaml)
+        self.assertIn('Content="Reload application _web interface"', xaml)
         self.assertIn('AutomationProperties.Name="Reload application web interface"', xaml)
         self.assertIn(
             "core.ProcessFailed += (_, e) =>\n                WebView_ProcessFailed(webView, generation, e);",
@@ -261,11 +261,11 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("private static void Main(string[] args)", app_text)
         self.assertLess(
             app_text.index("private static void Main(string[] args)"),
-            app_text.index("protected override void OnStartup"),
+            app_text.index("protected override async void OnStartup"),
         )
         main_body = app_text.split(
             "private static void Main(string[] args)", 1
-        )[1].split("protected override void OnStartup", 1)[0]
+        )[1].split("protected override async void OnStartup", 1)[0]
         self.assertIn("App app = new();", main_body)
         self.assertIn("app.InitializeComponent();", main_body)
         self.assertIn("app.Run();", main_body)
@@ -466,7 +466,7 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn('src/**/*.xaml', workflow)
         self.assertIn("desktop-build:", workflow)
-        self.assertIn("runs-on: windows-latest", workflow)
+        self.assertIn("runs-on: windows-2025", workflow)
         self.assertIn(
             "dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj",
             workflow,

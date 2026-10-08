@@ -16,6 +16,10 @@ from mvp.autotrade_mvp.reconciliation import (
 )
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
+from mvp.autotrade_mvp.recovery_dispatch import (
+    activate_recovery_takeover_target,
+    mark_recovery_takeover_source,
+)
 from mvp.autotrade_mvp.recovery_takeover import (
     DurableTakeoverError,
     execute_durable_takeover,
@@ -230,6 +234,48 @@ class DurableRecoveryTakeoverTests(unittest.TestCase):
             environment="PAPER",
             purpose="TRADE",
         ))
+
+    def test_production_activation_accepts_issuer_verified_takeover_only(self):
+        source = self.controller.owner
+        mark_recovery_takeover_source(self.controller, source)
+        result = self._takeover()
+        activated = activate_recovery_takeover_target(
+            self.controller,
+            source=source,
+            target=result.target_owner,
+            takeover=result,
+            vault=self.vault,
+        )
+        self.assertEqual(activated, result.target_owner)
+        self.assertNotIn("takeover_source_only", self.controller.reason_codes)
+        self.assertEqual(self.controller.state, HostState.RECOVERING)
+        self._assert_old_credential_revoked()
+
+    def test_manual_advance_cannot_clear_production_takeover_source(self):
+        from mvp.autotrade_mvp.recovery_takeover import DurableTakeoverResult
+        source = self.controller.owner
+        mark_recovery_takeover_source(self.controller, source)
+        target = type(source)("host-b", source.epoch + 1)
+        self.controller._append_durable_owner(target)
+        self.controller.owner = target
+        forged = DurableTakeoverResult(
+            takeover_id="recovery-takeover/sha256:" + "0" * 64,
+            source_owner=source,
+            target_owner=target,
+            credential_transition_receipt_id="fake",
+            takeover_evidence_event_id="fake",
+            recovery_owner_event_id="fake",
+            completion_event_id="fake",
+        )
+        with self.assertRaises(DurableTakeoverError):
+            activate_recovery_takeover_target(
+                self.controller,
+                source=source,
+                target=target,
+                takeover=forged,
+                vault=self.vault,
+            )
+        self.assertIn("takeover_source_only", self.controller.reason_codes)
 
     def test_direct_restart_start_cannot_mint_next_durable_owner_epoch(self):
         restarted = RecoveryController(

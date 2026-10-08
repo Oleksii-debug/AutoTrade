@@ -1,0 +1,32 @@
+name: Plan 3 recovery qualification
+
+on:
+  pull_request:
+    paths:
+      - 'mvp/autotrade_mvp/recovery.py'
+      - 'mvp/autotrade_mvp/recovery_dispatch.py'
+      - 'mvp/autotrade_mvp/recovery_takeover.py'
+      - 'mvp/autotrade_mvp/production_financial_host.py'
+      - 'mvp/tests/test_recovery_takeover.py'
+      - 'mvp/tests/test_recovery_takeover_source_sender_fence.py'
+      - '.github/workflows/plan3-recovery-qualification.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recovery:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Canonical recovery crash, restart, owner fencing and negative tests
+        run: |
+          python -m unittest -v mvp.tests.test_recovery_takeover mvp.tests.test_recovery_takeover_source_sender_fence mvp.tests.test_recovery_durable_unknown_restart mvp.tests.test_recovery_takeover_stale_sender mvp.tests.test_runtime_failure_control

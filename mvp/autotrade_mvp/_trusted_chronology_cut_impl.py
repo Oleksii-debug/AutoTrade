@@ -46,6 +46,7 @@ from .qualification_attestation import (
     verify_canonical_qualification_attestation,
 )
 from .recovery import RecoveryController
+from .store_identity import same_journal_backing_object
 from .sender_gate import journal_sender_gate
 from .trusted_chronology import (
     ChronologyChallenge,
@@ -878,7 +879,9 @@ def _require_runtime_binding(
         runtime.journal,
         subject="trusted chronology production runtime JournalStore",
     )
-    if runtime_identity != selected_identity:
+    # Require the same physical journal, not identical Windows path spelling.
+    # The existing handle identity validator is fail-closed across generations.
+    if not same_journal_backing_object(runtime_identity, selected_identity):
         raise PermissionError(
             "production runtime does not share trusted chronology JournalStore"
         )

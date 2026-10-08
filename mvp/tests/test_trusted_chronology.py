@@ -607,17 +607,23 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
                         owner_store=store,
                         owner_scope=owner_scope,
                     )
-                    recovery.start("owner-a")
-                    with self.assertRaisesRegex(
-                        PermissionError,
-                        "environment-scoped recovery owner",
-                    ):
-                        prepare_chronology_challenge(
-                            store=store,
-                            recovery=recovery,
-                            source_sha=SOURCE_SHA,
-                            scope=ChronologyScope.SOURCE_QUALIFICATION,
-                        )
+                    if owner_scope == "PAPER:":
+                        # Recovery now rejects an empty account before a trusted
+                        # chronology challenge can even be attempted.
+                        with self.assertRaisesRegex(ValueError, "account_id is required"):
+                            recovery.start("owner-a")
+                    else:
+                        recovery.start("owner-a")
+                        with self.assertRaisesRegex(
+                            PermissionError,
+                            "environment-scoped recovery owner",
+                        ):
+                            prepare_chronology_challenge(
+                                store=store,
+                                recovery=recovery,
+                                source_sha=SOURCE_SHA,
+                                scope=ChronologyScope.SOURCE_QUALIFICATION,
+                            )
 
     def test_challenge_rejects_shadowed_second_store_on_same_physical_journal(self):
         with TemporaryDirectory() as directory:

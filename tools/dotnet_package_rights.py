@@ -215,7 +215,7 @@ def package_rights_records(root: Path = ROOT) -> list[dict[str, str]]:
             "content_hash_sha512_base64": str(content_hash),
             "license_id": license_id,
             "license_file": license_file,
-            "expected_license_text_path": expected_path.relative_to(root).as_posix(),
+            "expected_license_text_path": expected_path.relative_to(root.resolve(strict=True)).as_posix(),
             "notice_file": notice_file,
         }
         key = _artifact_key(record)
@@ -576,7 +576,7 @@ def _locked_nupkg_root_evidence(
     are allowed to support a rights decision.
     """
 
-    if type(nupkg_path) is not Path:
+    if type(nupkg_path) is not type(Path()):
         raise TypeError("nupkg_path must be exact Path")
     for value, label in (
         (license_file, "license_file"),

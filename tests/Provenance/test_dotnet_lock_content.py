@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -1072,6 +1073,55 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             self.assertEqual(
                 dotnet_imported_package_reference_blockers(root),
                 [],
+            )
+
+    def test_generated_nuget_import_is_excluded_only_when_untracked(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            project = root / 'src' / 'App' / 'App.csproj'
+            project.parent.mkdir(parents=True)
+            project.write_text('<Project Sdk="Microsoft.NET.Sdk" />', encoding='utf-8')
+            generated = project.parent / 'obj'
+            generated.mkdir()
+            props = generated / 'App.csproj.nuget.g.props'
+            targets = generated / 'App.csproj.nuget.g.targets'
+            for path in (props, targets):
+                path.write_text(
+                    '<Project><Import Project="untrusted.targets" /></Project>',
+                    encoding='utf-8',
+                )
+            # Restore-produced sidecars cannot redefine source authority.
+            self.assertEqual(dotnet_imported_package_reference_blockers(root), [])
+            # Tracked sidecars ARE source and must remain fail closed.
+            subprocess.run(
+                ['git', 'add', '--', 'src/App/obj/App.csproj.nuget.g.targets'],
+                cwd=root, check=True,
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                ['DOTNET_EXPLICIT_MSBUILD_IMPORT_UNSUPPORTED:'
+                 'src/App/obj/App.csproj.nuget.g.targets'],
+            )
+
+    def test_non_nuget_obj_targets_cannot_hide_msbuild_import(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            project = root / 'src' / 'App' / 'App.csproj'
+            project.parent.mkdir(parents=True)
+            project.write_text('<Project Sdk="Microsoft.NET.Sdk" />', encoding='utf-8')
+            obj = project.parent / 'obj'
+            obj.mkdir()
+            (obj / 'Injected.targets').write_text(
+                '<Project><ItemGroup>'
+                '<PackageReference Include="Unauthorized" Version="1.0.0"/>'
+                '</ItemGroup></Project>', encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                ['DOTNET_IMPORTED_PACKAGE_REFERENCE_UNSUPPORTED:'
+                 'src/App/obj/Injected.targets'],
             )
 
     def test_explicit_project_import_fails_closed(self):

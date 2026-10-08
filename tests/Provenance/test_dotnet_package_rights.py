@@ -498,6 +498,18 @@ class DotnetPackageRightsTests(unittest.TestCase):
                     normalized,
                 )
 
+    def test_locked_archive_rejects_non_path_inputs_before_reading(self):
+        from tools.dotnet_package_rights import _locked_nupkg_root_evidence
+
+        for invalid in ("archive.nupkg", None, b"archive.nupkg"):
+            with self.subTest(invalid=repr(invalid)):
+                with self.assertRaisesRegex(TypeError, "nupkg_path must be exact Path"):
+                    _locked_nupkg_root_evidence(
+                        invalid,
+                        license_file="LICENSE.txt",
+                        notice_file="NOTICE.txt",
+                    )
+
     def test_exact_locked_package_and_reviewed_license_pass(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

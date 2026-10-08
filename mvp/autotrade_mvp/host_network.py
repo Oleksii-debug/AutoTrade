@@ -16,7 +16,7 @@ import ipaddress
 import json
 import re
 import ssl
-from threading import Lock
+from threading import BoundedSemaphore, Lock
 from types import MappingProxyType
 from typing import Callable, Mapping
 from urllib.parse import unquote, urlsplit
@@ -69,6 +69,7 @@ _SNAPSHOT_FIELDS = {
 _PERMISSION_SUMMARY_FIELDS = {"actor", "session", "role", "capabilities"}
 _PERMISSION_SUMMARY_REQUIRED_FIELDS = {"actor", "session", "role"}
 _SINGLETON_REQUEST_HEADERS = (
+    "Cookie",
     "Authorization",
     "X-AutoTrade-Actor",
     "Origin",
@@ -761,38 +762,44 @@ class _HostRequestHandler(BaseHTTPRequestHandler):
         if not isinstance(server, AuthenticatedHostServer):
             self.send_error(500)
             return
-        try:
-            for name in _SINGLETON_REQUEST_HEADERS:
-                if len(self.headers.get_all(name, [])) > 1:
-                    raise ValueError("Duplicate singleton request header")
-            host_values = self.headers.get_all("Host", [])
-            if len(host_values) != 1:
-                raise ValueError("Exactly one Host header is required")
-            scheme = urlsplit(server.application.public_origin).scheme
-            request_origin = _authenticated_origin(
-                f"{scheme}://{host_values[0]}"
-            )
-            if request_origin != server.application.public_origin:
-                raise PermissionError("Host header does not match public origin")
-            if self.headers.get("Transfer-Encoding") is not None:
-                raise ValueError("Transfer-Encoding is not supported")
-            length_text = self.headers.get("Content-Length", "0")
-            length = int(length_text)
-            if length < 0 or length > _MAX_BODY_BYTES:
-                response = _error(413, "REQUEST_TOO_LARGE")
-            else:
-                body = self.rfile.read(length) if length else b""
-                header_map = {key: value for key, value in self.headers.items()}
-                response = server.application.dispatch(
-                    method=self.command,
-                    target=self.path,
-                    headers=header_map,
-                    body=body,
+        acquired = server._request_slots.acquire(blocking=False)
+        if not acquired:
+            response = _json_response(503, {"error": "HOST_OVERLOADED", "accepted": False})
+        else:
+            try:
+                for name in _SINGLETON_REQUEST_HEADERS:
+                    if len(self.headers.get_all(name, [])) > 1:
+                        raise ValueError("Duplicate singleton request header")
+                host_values = self.headers.get_all("Host", [])
+                if len(host_values) != 1:
+                    raise ValueError("Exactly one Host header is required")
+                scheme = urlsplit(server.application.public_origin).scheme
+                request_origin = _authenticated_origin(
+                    f"{scheme}://{host_values[0]}"
                 )
-        except PermissionError:
-            response = _error(403, "AUTHENTICATION_OR_AUTHORIZATION_FAILED")
-        except (ValueError, OverflowError):
-            response = _error(400, "INVALID_REQUEST")
+                if request_origin != server.application.public_origin:
+                    raise PermissionError("Host header does not match public origin")
+                if self.headers.get("Transfer-Encoding") is not None:
+                    raise ValueError("Transfer-Encoding is not supported")
+                length_text = self.headers.get("Content-Length", "0")
+                length = int(length_text)
+                if length < 0 or length > _MAX_BODY_BYTES:
+                    response = _error(413, "REQUEST_TOO_LARGE")
+                else:
+                    body = self.rfile.read(length) if length else b""
+                    header_map = {key: value for key, value in self.headers.items()}
+                    response = server.application.dispatch(
+                        method=self.command,
+                        target=self.path,
+                        headers=header_map,
+                        body=body,
+                    )
+            except PermissionError:
+                response = _error(403, "AUTHENTICATION_OR_AUTHORIZATION_FAILED")
+            except (ValueError, OverflowError):
+                response = _error(400, "INVALID_REQUEST")
+            finally:
+                server._request_slots.release()
         self.send_response(response.status)
         self.send_header("Content-Type", response.content_type)
         self.send_header("Content-Length", str(len(response.body)))
@@ -853,6 +860,8 @@ class AuthenticatedHostServer(ThreadingHTTPServer):
             self.server_close()
             raise ValueError("public_origin port does not match the bound listener")
         self.application = application
+        # Bound concurrent HTTP admissions before command dispatch.
+        self._request_slots = BoundedSemaphore(value=16)
         try:
             # Repair the acceptance/execution crash boundary before serving new
             # traffic. Canonical authority mutation is idempotent and evidence

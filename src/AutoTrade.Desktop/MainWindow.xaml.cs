@@ -59,6 +59,13 @@ public partial class MainWindow : Window
 
     internal MainWindow(
         IEmergencyHostClient hostClient,
+        IEmergencyHostSessionProvider? sessionProvider)
+        : this(hostClient, sessionProvider, null)
+    {
+    }
+
+    internal MainWindow(
+        IEmergencyHostClient hostClient,
         IEmergencyHostSessionProvider? sessionProvider = null,
         IAsyncDisposable? ownedRuntime = null)
     {

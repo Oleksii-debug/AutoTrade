@@ -326,7 +326,7 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
         from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
         with TemporaryDirectory() as directory:
             run_autonomous_simulation(['100', '101', '103', '102', '100'], directory,
-                run_id='historical-cut', now='2026-10-04T00:00:00Z', execution_profile='TWO_EQUAL_PARTIALS')
+                run_id='historical-cut', now='2026-10-04T00:00:00Z', execution_profile='TWO_EQUAL_PARTIALS', target_quantity='2')
             journal = JournalStore(Path(directory) / 'journal.sqlite3')
             risk = journal.load_events_by_aggregate_type('risk_decision')[0]
             evidence = risk['payload']['reservation_availability_evidence']
@@ -943,7 +943,7 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 boundary._now = lambda: issued_at + 599
                 status, body, _ = client.request('GET', '/api/v1/state')
                 self.assertEqual(status, 403)
-                self.assertEqual(body, {'error': 'FORBIDDEN'})
+                self.assertEqual(body, {'error': 'AUTHENTICATION_OR_AUTHORIZATION_FAILED'})
             finally:
                 client.close()
 
@@ -968,7 +968,7 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                     response = connection.getresponse()
                     body = json.loads(response.read())
                     self.assertEqual(response.status, 403)
-                    self.assertEqual(body, {'error': 'FORBIDDEN'})
+                    self.assertEqual(body, {'error': 'AUTHENTICATION_OR_AUTHORIZATION_FAILED'})
                 finally:
                     connection.close()
 

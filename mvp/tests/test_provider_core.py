@@ -182,8 +182,8 @@ class ProviderCoreTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             # A historical weak decoder can no longer be injected to mint a
             # definitive durable response. The post-SEND transport response
-            # authority detects the decoder retarget before the response can be
-            # consumed as SENT and leaves the attempt reconciliation-required.
+            # authority rejects the retarget at the post-SEND binding boundary.
+            # The attempt must durably become UNKNOWN, never a trusted SENT.
             legacy_raw = b'{"orderId":"provider-1","price":1e256}'
             store = JournalStore(f"{directory}/journal.sqlite3")
             dispatcher = GuardedDispatcher(
@@ -230,7 +230,7 @@ class ProviderCoreTests(unittest.TestCase):
                 )
 
             self.assertEqual(outcome.status, "UNKNOWN")
-            self.assertEqual(outcome.reason, "transport_result_ambiguous")
+            self.assertEqual(outcome.reason, "sent_response_persistence_failed")
             events = store.load_events(
                 "submission_attempt",
                 dispatcher._aggregate_id("sealed-decoder-a1"),
@@ -241,7 +241,7 @@ class ProviderCoreTests(unittest.TestCase):
             )
             self.assertEqual(
                 events[-1]["payload"]["reason"],
-                "transport_exception_after_send_barrier:ValueError",
+                "sent_response_persistence_failed:ValueError",
             )
 
     def test_oversized_raw_bytes_fail_before_utf8_decode_or_json_materialization(self):

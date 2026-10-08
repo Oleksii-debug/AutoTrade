@@ -81,8 +81,8 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 ### Plan 6 — Providers (offline/source engineering; no owner input required)
 | Section | State | Existing evidence / note |
 | ---: | --- | --- |
-| 1 | QUALIFYING_OFFLINE / ACTIONABLE_OFFLINE | current source reused; BYBIT direct PAPER/LIVE provider-domain guard + negative tests; PR #2326 head f58578a3; Linux/Windows exact-head offline suite pending. NOT DONE until CI+integration/readback |
-| 2 | QUALIFYING_OFFLINE / ACTIONABLE_OFFLINE | existing read/signing/dispatch/UNKNOWN/reconciliation adapters reused; ACK-not-fill negative test; PR #2326 head f58578a3; exact-head offline suite pending. NOT DONE until CI+integration/readback |
+| 1 | QUALIFYING_OFFLINE / ACTIONABLE_OFFLINE | canonical PR #2326; BYBIT PAPER/LIVE guard and negative tests implemented; initial Linux/Windows offline run 37725452108 FAILED at f58578a3 (missing canonical submission-response projection import plus capability/provenance negatives). Regression test repair on head 2185f640; exact-head rerun 37726827766 queued at readback. NOT DONE: repair remaining failures, qualify, integrate/read back |
+| 2 | QUALIFYING_OFFLINE / ACTIONABLE_OFFLINE | canonical PR #2326; reuse signing, reads, durable UNKNOWN/reconciliation and ACK-not-fill tests. Initial exact-head offline run 37725452108 FAILED at Section 1, so Section 2 did not execute. Head 2185f640 rerun 37726827766 queued; requires Section 1 pass, Section 2 exact-head Linux/Windows pass, integration/readback. NOT DONE |
 | 3 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | legacy Section 39 provider-family adapters |
 | 4 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | engineering slice of legacy Section 40; real provider financial truth remains Plan 9 |
 | 5 | PARTIAL_EXISTING / ACTIONABLE_OFFLINE | provider qualification harness using non-secret fixtures/test vectors |

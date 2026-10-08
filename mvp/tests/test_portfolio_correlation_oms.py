@@ -9,7 +9,7 @@ import pytest
 
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.order_projection import OrderBookProjection, OrderSnapshot
+from mvp.autotrade_mvp.order_projection import OrderBookProjection, OrderSnapshot, OrderProjectionConflict
 from mvp.autotrade_mvp.portfolio_correlation import CorrelationConcentrationError
 import mvp.autotrade_mvp.portfolio_correlation_oms as correlation_oms
 from mvp.autotrade_mvp.portfolio_correlation_oms import (

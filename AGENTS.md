@@ -1,3 +1,55 @@
+# Multi-Plan Parallel Closure Protocol v4 — owner directive 2026-10-08
+
+**This v4 directive overrides every older conflicting global-sequential / one-mutation-front / earliest-monolithic-Section rule in this repository.**
+
+## Canonical work-selection authority
+
+Before mutation read:
+- `PROJECT_PLAN_INDEX.md`
+- `MULTI_PLAN_PARALLELISM_CONTRACT.md`
+- `MULTI_PLAN_CLOSURE_STATE.md`
+- the numbered Drive plan assigned by the owner
+- live GitHub PR/branch/main state.
+
+The former 48-Section monolithic plan and `SEQUENTIAL_CLOSURE_STATE.md` are audit/history only for work selection.
+
+## Independent plan law
+
+- Plans 1–7 are independent engineering plans.
+- There is no priority order between Plans 1–7.
+- Plan 7 may finish before Plan 1; Plan 5 may start while Plan 1 / Section 10 is still QUALIFYING.
+- Inside the assigned plan use `MULTI_PLAN_CLOSURE_STATE.md` as the live status authority, skip terminal DONE, and take the first ACTIONABLE unfinished Section.
+- Drive status lines are migration snapshots only.
+- Existing PR/branches/source must be REUSE -> REPAIR -> CONVERGE before creating duplicate scope.
+- Obey mutation ownership/conflict keys in `MULTI_PLAN_PARALLELISM_CONTRACT.md`.
+- Cross-plan fixtures/contracts may prove component behavior but never M1/PAPER/LIVE/physical/final-release evidence.
+
+## Provider defer
+
+Plan 6 is architecturally independent but OWNER-DEFERRED.
+This v4 reorganization is **not** provider reauthorization.
+Do not start new provider execution/qualification work unless the owner explicitly reauthorizes it.
+
+## Convergence
+
+- Plan 8 is provider-free M1 convergence. It depends on terminal M1-required outputs from Plans 1,2,3,4,5,7. Plan 6 is not required for M1.
+- Plan 9 is a dependency-aware final DAG. WAITING_UPSTREAM / WAITING_EXTERNAL / WAITING_OWNER Sections may be skipped without false DONE; take the first ACTIONABLE Section whose named gates are met.
+- Real provider/PAPER/LIVE/bounded-real evidence classes remain distinct and cannot be fabricated from source/simulation/replay evidence.
+
+## Migrated closed work
+
+Accepted legacy Sections 0–1 and 3–14 retain their terminal engineering evidence in their new plan owners.
+Legacy Section 2 is split: its repository-controllable engineering is internally complete in Plan 4 / Section 2; its unresolved external/final-release facts move to Plan 9 / Section 1.
+Legacy Section 15 is Plan 1 / Section 10 QUALIFYING; reuse canonical PR #2318.
+Legacy Section 16 is Plan 2 / Section 2 PARTIAL_EXISTING; reuse PR #1631.
+Legacy Section 17 is Plan 1 / Section 11 PARTIAL_EXISTING; reuse PR #1628.
+
+## Closure semantics
+
+Simplified Section Closure Protocol v3 remains binding inside every new plan.
+A DONE Section is terminally skipped unless there is a demonstrated regression, invalid evidence, materially changed acceptance contract, or breaking integration.
+Manual owner/NVDA testing remains final-product work and does not block intermediate engineering Sections.
+
 # AGENTS.md
 
 ## Simplified Section Closure Protocol v3 — owner directive 2026-10-07

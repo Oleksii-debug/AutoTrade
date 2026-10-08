@@ -33,14 +33,15 @@ Conflict keys: persistence-runtime, recovery, host-runtime, observability.
 Primary: security.py, credential/session/vault boundaries, trusted_chronology*.py, provenance/**, supply_chain_qualification.py, qualification_attestation/trust/signature policy.
 Conflict keys: security, chronology, supply-chain-trust.
 
-### Plan 5 — Web / Desktop / accessibility / packaging
-Primary: web/**, src/AutoTrade.Desktop/**, accessibility.py, embedded_web.py, packaging/windows/**, windows_update.py, product-shell composition.
-Conflict keys: web-ui, desktop, accessibility-source, packaging-update.
+### Plan 5 — canonical Web UI / thin Desktop / accessibility / packaging
+Primary: `web/**` as the canonical browser-like navigation/product UI; `src/AutoTrade.Desktop/**` only as a thin wrapper over the same Web artifact plus native emergency fallback; accessibility.py, embedded_web.py, packaging/windows/**, windows_update.py and product-shell composition.
+The Desktop plan must not fork a second menus/pages/business-logic UX.
+Conflict keys: web-ui, desktop-shell, accessibility-source, packaging-update.
 
-### Plan 6 — providers
+### Plan 6 — providers (offline engineering)
 Primary: provider_*.py, bybit*, kraken*, whitebit*, binance*, alpaca*, ibkr*, provider transport/read/dispatch/reconciliation adapters.
 Conflict keys: provider-core, provider-families, provider-qualification.
-This plan is OWNER-DEFERRED; no new mutations until explicit reauthorization.
+This plan is ACTIONABLE without owner credentials. Use existing code, public specifications, recorded/synthetic fixtures, mocks and canonical test vectors. Real authenticated provider/account binding and PAPER/LIVE/bounded-real evidence live only in Plan 9.
 
 ### Plan 7 — scientific qualification / evidence / performance
 Primary: science_qualification.py, qualification/strategy_economics/**, performance_qualification.py, runtime_load_*.py, target-host qualification/evidence mapping.
@@ -51,8 +52,9 @@ Owns only integration bindings/scenarios/freeze required to assemble terminal Pl
 A generic component defect must be repaired in its owning plan rather than forked inside Plan 8.
 Conflict key: m1-integration.
 
-### Plan 9 — external/final
-Owns real account/provider binding evidence, PAPER/forward/bounded-real campaigns, exact delivered release evidence, physical NVDA, final matrix and M2 freeze.
+### Plan 9 — final release + optional provider activation
+Owns exact delivered release evidence, physical NVDA, final matrix and M2-PF freeze, plus a separately parked optional track for real account/provider binding, PAPER/forward/bounded-real campaigns.
+The optional provider track does not block a provider-free release whose capability matrix explicitly marks providers/PAPER/LIVE NOT_ACTIVATED/NOT_CLAIMED.
 It does not fork generic source subsystems from Plans 1–7.
 Conflict keys: external-qualification, final-release, m2-freeze.
 

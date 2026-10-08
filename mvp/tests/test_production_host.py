@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import Mock, patch
 
-from _test_production_host_impl import (
+from mvp.tests._test_production_host_impl import (
     CommandAdmissionGateTests,
     ProductionHostConfigTests,
     ProductionHostRuntimeTests,

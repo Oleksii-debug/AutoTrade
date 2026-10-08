@@ -34,6 +34,7 @@ from mvp.autotrade_mvp.dispatch import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_core import (
+    ProviderCoreError,
     AuthenticatedReadQueryBinding,
     Surface,
     observe_authenticated_json_response,
@@ -3397,7 +3398,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
             authenticated_read_binding()
         )
         with self.assertRaisesRegex(
-            ProviderTransportScopeError,
+            ProviderCoreError,
             "construction authority is unavailable",
         ):
             BinanceSpotAuthenticatedReadSigner.sign(
@@ -3943,7 +3944,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
             )
         )
         with self.assertRaisesRegex(
-            ProviderTransportScopeError,
+            ProviderCoreError,
             "construction authority is unavailable",
         ):
             KrakenSpotAuthenticatedReadSigner.sign(

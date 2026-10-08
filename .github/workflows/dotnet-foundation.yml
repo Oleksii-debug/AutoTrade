@@ -111,9 +111,9 @@ jobs:
         with:
           dotnet-version: "10.0.100"
       - run: python tools/dotnet_package_rights.py --check-policy
-      - run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --locked-mode
+      - run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj -r win-x64 --locked-mode
       - run: python tools/dotnet_package_rights.py --verify-restored --packages-root "${{ env.NUGET_PACKAGES }}" --project src/AutoTrade.Desktop/AutoTrade.Desktop.csproj
-      - run: dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --configuration Release --no-restore
+      - run: dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --configuration Release -r win-x64 --no-restore
       - run: dotnet restore tests/Desktop.Client/Desktop.Client.csproj --locked-mode
       - run: dotnet run --project tests/Desktop.Client/Desktop.Client.csproj --configuration Release --no-restore
       - name: Write exact-head desktop foundation evidence

@@ -40,7 +40,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.12.10'
       - name: Compile canonical Host/recovery/security/readiness code
         run: python -m compileall -q mvp/autotrade_mvp/production_host.py mvp/autotrade_mvp/production_financial_host.py mvp/autotrade_mvp/host_network.py mvp/autotrade_mvp/readiness.py mvp/autotrade_mvp/product_runtime.py
       - name: Host lifecycle, exact journal, takeover, crash/restart and negative qualification
@@ -67,7 +67,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.12.10'
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.100'

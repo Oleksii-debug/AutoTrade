@@ -62,14 +62,18 @@ def _read_checked(path: Path, *, limit: int = 2_000_000) -> dict:
     if path.is_symlink():
         raise FixtureAssemblyError("fixture record must not be a symlink")
     try:
-        info = path.stat(follow_symlinks=False)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
-            raise FixtureAssemblyError("fixture record must be one bounded regular file")
-        content = path.read_bytes()
-        if len(content) != info.st_size:
-            raise FixtureAssemblyError("fixture record changed during read")
+        with _open_stable_regular_file(path, name="fixture record") as held:
+            before = os.fstat(held.fileno())
+            if before.st_size > limit:
+                raise FixtureAssemblyError("fixture record exceeds bounded envelope")
+            content = held.read(limit + 1)
+            after = _assert_open_file_identity(path, held, name="fixture record")
+            if len(content) > limit or len(content) != before.st_size or (
+                before.st_size, before.st_mtime_ns, before.st_ctime_ns
+            ) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                raise FixtureAssemblyError("fixture record changed during read")
         obj = json.loads(content.decode("utf-8"), object_pairs_hook=_unique_pairs)
-    except (OSError, ValueError, UnicodeError) as error:
+    except (OSError, ValueError, UnicodeError, InstallerManifestError) as error:
         raise FixtureAssemblyError("fixture record is unavailable or malformed") from error
     if type(obj) is not dict:
         raise FixtureAssemblyError("fixture record must be an object")
@@ -146,13 +150,19 @@ def _check_inventory(root: Path, version: str) -> dict:
         if any(p.is_symlink() for p in (f, *list(f.parents)[:len(Path(rel).parts)])):
             raise FixtureAssemblyError("fixture installed file path is a symlink")
         try:
-            st = f.stat(follow_symlinks=False)
-            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-                raise FixtureAssemblyError("fixture file is not regular")
-            digest = "sha256:" + sha256(f.read_bytes()).hexdigest()
-        except OSError as error:
-            raise FixtureAssemblyError("fixture file cannot be inspected") from error
-        if st.st_size != item["size"] or digest != item["sha256"]:
+            with _open_stable_regular_file(f, name="fixture payload") as held:
+                before = os.fstat(held.fileno())
+                digest = "sha256:" + _sha256_stream(held)
+                after = _assert_open_file_identity(f, held, name="fixture payload")
+                if (
+                    before.st_size, before.st_mtime_ns, before.st_ctime_ns
+                ) != (
+                    after.st_size, after.st_mtime_ns, after.st_ctime_ns
+                ):
+                    raise FixtureAssemblyError("installed fixture payload changed during read")
+        except (OSError, InstallerManifestError) as error:
+            raise FixtureAssemblyError("fixture file is not regular") from error
+        if before.st_size != item["size"] or digest != item["sha256"]:
             raise FixtureAssemblyError("installed fixture payload differs from verified bytes")
     allowed = {str(Path("payload") / p) for p in seen} | {_MANIFEST}
     found = {f.relative_to(product).as_posix() for f in product.rglob("*") if f.is_file() or f.is_symlink()}

@@ -138,8 +138,38 @@ def _looks_like_credential_vault(data: bytes) -> bool:
     return False
 
 
+def _source_without_known_marker_literals(relative: str, data: bytes) -> bytes:
+    """Ignore only an exact source-code declaration, never private-key material.
+
+    The diagnostic redactor enumerates PEM begin markers as harmless Python
+    string constants.  All other occurrences, including additional markers
+    in that same source file, continue to fail closed before publication.
+    """
+    if relative not in {
+        "mvp/autotrade_mvp/decision_trace.py",
+        "mvp/autotrade_mvp/diagnostics.py",
+    }:
+        return data
+    before, opening, tail = data.partition(b"_PRIVATE_KEY_MARKERS = (\n")
+    if not opening:
+        return data
+    declaration, closing, after = tail.partition(b")\n")
+    if not closing:
+        return data
+    known_markers = (
+        PRIVATE_KEY_MARKERS[:3]
+        + (b"-----BEGIN DSA PRIVATE KEY-----",)
+        + PRIVATE_KEY_MARKERS[3:]
+    )
+    expected = b"".join(b'    "' + marker + b'",\n' for marker in known_markers)
+    if declaration != expected:
+        return data
+    return before + after
+
+
 def _reject_sensitive_content(relative: str, data: bytes) -> None:
-    if any(marker in data for marker in PRIVATE_KEY_MARKERS):
+    scanned = _source_without_known_marker_literals(relative, data)
+    if any(marker in scanned for marker in PRIVATE_KEY_MARKERS):
         raise BundleError(
             f"private-key material is forbidden in bundles: {relative}"
         )

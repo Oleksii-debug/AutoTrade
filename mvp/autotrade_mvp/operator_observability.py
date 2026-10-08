@@ -163,6 +163,22 @@ def build_operator_observability(
         raise ValueError("recovery owner is noncanonical")
     if type(reconciled_before) is not bool:
         raise ValueError("recovery reconciliation state is noncanonical")
+    # An authenticated Host snapshot and a durable recovery checkpoint must
+    # describe exactly the same account, environment and owning Host. A proof
+    # from a different account must never be presented as operator READY.
+    for field in ("account_id", "environment", "host_id"):
+        if type(snapshot[field]) is not str or not snapshot[field]:
+            raise ValueError("Host identity must be exact non-empty text")
+    owner_scope_before = recovery.owner_scope
+    durable_before = recovery.durable_owner_store_identity
+    scoped_snapshot = snapshot["environment"] + ":" + snapshot["account_id"]
+    scope_mismatch = (
+        durable_before is not None
+        and (
+            owner_scope_before != scoped_snapshot
+            or (owner_before is not None and owner_before.owner_id != snapshot["host_id"])
+        )
+    )
     unknown_count = signals.unknown_send_count
     external_uncertainty = signals.unresolved_external_uncertainty
     if type(unknown_count) is not int or unknown_count < 0:
@@ -184,11 +200,13 @@ def build_operator_observability(
         HostState.DEGRADED: "DEGRADED",
         HostState.READY: (
             "READY"
-            if readiness.ready and reconciled_before and owner_before is not None and not ui_reasons
+            if readiness.ready and reconciled_before and owner_before is not None and not ui_reasons and not scope_mismatch
             else "DEGRADED"
         ),
     }[recovery.state]
     reasons = set(ui_reasons + recovery_reasons + readiness_reasons)
+    if scope_mismatch:
+        reasons.add("host_recovery_scope_mismatch")
     if recovery.state is HostState.STOPPED:
         reasons.add("host_stopped")
     if recovery.state is HostState.READY and mode != "READY":
@@ -231,6 +249,8 @@ def build_operator_observability(
         recovery.state is not state_before
         or recovery.owner is not owner_before
         or recovery.provider_reconciled is not reconciled_before
+        or recovery.owner_scope != owner_scope_before
+        or recovery.durable_owner_store_identity != durable_before
         or frozenset(recovery.reason_codes) != reason_codes_before
         or len(recovery.unresolved_attempts) != unresolved_before
         or signals.unknown_send_count is not unknown_count

@@ -723,8 +723,20 @@ def verify_restored_package_rights(
         )
         restored_hash = sha_path.read_text(encoding="ascii").strip()
         if restored_hash != artifact["content_hash_sha512_base64"]:
+            # Diagnostic evidence is never an alternate trust root. Read the
+            # payload only to identify a stale/misrouted NuGet cache; still
+            # reject the package before any license/rights acceptance.
+            observed_package_hash = base64.b64encode(
+                sha512(nupkg_path.read_bytes()).digest()
+            ).decode("ascii")
+            observed_sidecar_hash = (
+                restored_hash if _valid_content_hash(restored_hash) else "INVALID"
+            )
             raise ValueError(
-                f"restored NuGet package content hash mismatch: {package_name}@{package_version}"
+                f"restored NuGet package content hash mismatch: {package_name}@{package_version}; "
+                f"locked_sha512={artifact['content_hash_sha512_base64']}; "
+                f"sidecar_sha512={observed_sidecar_hash}; "
+                f"payload_sha512={observed_package_hash}"
             )
         actual_nupkg_hash = base64.b64encode(
             sha512(nupkg_path.read_bytes()).digest()

@@ -138,9 +138,9 @@ def _write_restored_package(root: Path, *, license_text: str = _LICENSE) -> Path
         encoding="ascii",
     )
     (package / "example.package.1.2.3.nupkg").write_bytes(_NUPKG_BYTES)
-    (package / "LICENSE.txt").write_text(license_text, encoding="utf-8")
-    (package / "NOTICE.txt").write_text(_NOTICE, encoding="utf-8")
-    (package / "example.package.nuspec").write_text(_NUSPEC, encoding="utf-8")
+    (package / "LICENSE.txt").write_bytes(license_text.encode("utf-8"))
+    (package / "NOTICE.txt").write_bytes(_NOTICE.encode("utf-8"))
+    (package / "example.package.nuspec").write_bytes(_NUSPEC.encode("utf-8"))
     return packages
 
 
@@ -497,6 +497,68 @@ class DotnetPackageRightsTests(unittest.TestCase):
                     f"--project {project}",
                     normalized,
                 )
+
+    def test_native_path_exact_type_and_subclass_rejection(self):
+        from tools.dotnet_package_rights import _locked_nupkg_root_evidence
+
+        with TemporaryDirectory() as directory:
+            packages = _write_restored_package(Path(directory))
+            nupkg_path = (
+                packages / "example.package" / "1.2.3"
+                / "example.package.1.2.3.nupkg"
+            )
+            self.assertEqual(
+                _locked_nupkg_root_evidence(
+                    nupkg_path, license_file="LICENSE.txt", notice_file="NOTICE.txt"
+                ),
+                (_LICENSE.encode("utf-8"), _NOTICE.encode("utf-8"), _NUSPEC.encode("utf-8")),
+            )
+
+            class UntrustedPath(type(Path())):
+                pass
+
+            with self.assertRaisesRegex(TypeError, "exact Path"):
+                _locked_nupkg_root_evidence(
+                    UntrustedPath(str(nupkg_path)),
+                    license_file="LICENSE.txt",
+                    notice_file="NOTICE.txt",
+                )
+
+
+    def test_sidecar_mismatch_exposes_bounded_hash_evidence_and_still_rejects(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            packages = _write_restored_package(root)
+            sidecar = packages / "example.package" / "1.2.3" / "example.package.1.2.3.nupkg.sha512"
+            foreign_hash = base64.b64encode(bytes(range(64))).decode("ascii")
+            self.assertNotEqual(foreign_hash, _HASH)
+            sidecar.write_text(foreign_hash, encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "content hash mismatch") as raised:
+                verify_restored_package_rights(packages, root=root, projects=[project])
+            message = str(raised.exception)
+            self.assertIn("locked_sha512=" + _HASH, message)
+            self.assertIn("sidecar_sha512=" + foreign_hash, message)
+            self.assertIn("payload_sha512=" + _HASH, message)
+            self.assertEqual(sidecar.read_text(encoding="ascii"), foreign_hash)
+
+
+    def test_noncanonical_sidecar_never_reflects_raw_untrusted_text(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            packages = _write_restored_package(root)
+            sidecar = packages / "example.package" / "1.2.3" / "example.package.1.2.3.nupkg.sha512"
+            sidecar.write_text("HOSTILE\nVALUE", encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "content hash mismatch") as raised:
+                verify_restored_package_rights(packages, root=root, projects=[project])
+            message = str(raised.exception)
+            self.assertIn("sidecar_sha512=INVALID", message)
+            self.assertNotIn("HOSTILE", message)
+            self.assertIn("payload_sha512=" + _HASH, message)
+
 
     def test_locked_archive_rejects_non_path_inputs_before_reading(self):
         from tools.dotnet_package_rights import _locked_nupkg_root_evidence

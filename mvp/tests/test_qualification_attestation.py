@@ -161,6 +161,10 @@ def attestation(trust_root, **overrides):
 
 
 def verify(receipt, store, trust_policy, *, evidence_root=None, **overrides):
+    # Do not touch caller-controlled subclass properties before the production
+    # exact-type ingress guard is reached.  The test helper must be inert too.
+    if type(trust_policy) is not QualificationTrustPolicy:
+        raise TypeError("policy must be QualificationTrustPolicy")
     values = dict(
         expected_policy_id=trust_policy.policy_id,
         expected_policy_version=trust_policy.policy_version,
@@ -211,7 +215,7 @@ class QualificationAttestationTests(unittest.TestCase):
 
         self.assertFalse(executable.called)
 
-    def test_verifier_snapshots_attestation_before_reader_construction_callback(self):
+    def test_invalid_signature_is_rejected_before_reader_construction_callback(self):
         trust_root = root()
         original = attestation(trust_root)
         mutated = attestation(
@@ -245,8 +249,9 @@ class QualificationAttestationTests(unittest.TestCase):
             ):
                 verify(receipt, store, trust_policy)
 
-        self.assertEqual(callback_calls, 1)
-        self.assertEqual(original.runner_id, mutated.runner_id)
+        # A bad signature is rejected before an untrusted reader hook can execute.
+        self.assertEqual(callback_calls, 0)
+        self.assertEqual(original.runner_id, "qualification-runner-1")
 
     def test_verified_snapshot_is_prebuilt_before_evidence_callback_rebinds_constructor(self):
         trust_root = root()
@@ -1766,13 +1771,10 @@ class QualificationAttestationTests(unittest.TestCase):
                 "release_artifact_sha256",
             )
         })
-        receipt = SignedQualificationAttestation(forged, signature)
-
-        with TemporaryDirectory() as directory:
-            store = ArtifactStore(directory)
-            publish(store)
-            with self.assertRaisesRegex(TypeError, "exact canonical QualificationAttestation"):
-                verify(receipt, store, policy(trust_root))
+        # Reject subclass dispatch at the receipt constructor, before a signer,
+        # evidence reader, or attacker-controlled canonical_bytes can be used.
+        with self.assertRaisesRegex(TypeError, "attestation must be QualificationAttestation"):
+            SignedQualificationAttestation(forged, signature)
 
     def test_altered_signed_payload_fails_signature(self):
         trust_root = root()

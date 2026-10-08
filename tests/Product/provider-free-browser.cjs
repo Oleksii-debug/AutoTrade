@@ -103,25 +103,38 @@ async function command(page, action, index) {
   await page.keyboard.press("Tab");
   assert.equal(await page.evaluate(() => document.activeElement.id), "submit-command", action);
   const before = await page.locator("#operations-body tr[data-operation-id]").count();
+  const acceptedResponse = page.waitForResponse(response =>
+    response.request().method() === "POST" &&
+    new URL(response.url()).pathname === "/api/v1/commands");
   await page.keyboard.press("Enter");
+  const accepted = await (await acceptedResponse).json();
+  assert.equal(accepted.status, "ACCEPTED");
+  assert.match(accepted.operation_id, /^[0-9a-f-]{36}$/);
   await page.waitForFunction(() => document.activeElement?.id === "command-result");
   assert.equal(
     await page.evaluate(() => document.activeElement.id),
     "command-result",
     action + " command feedback focus");
-  await page.waitForFunction(count => document.querySelectorAll("#operations-body tr[data-operation-id]").length > count
-    && ["SUCCEEDED", "UNKNOWN"].includes(
-      document.querySelector("#operations-body").lastElementChild?.children[1]?.textContent), before,
+  await page.waitForFunction(({count, operationId}) =>
+    document.querySelectorAll("#operations-body tr[data-operation-id]").length > count &&
+    ["SUCCEEDED", "UNKNOWN"].includes(
+      [...document.querySelectorAll("#operations-body tr[data-operation-id]")]
+        .find(row => row.dataset.operationId === operationId)?.children[1]?.textContent),
+    {count: before, operationId: accepted.operation_id},
     {timeout: 240000});
-  const phase = await page.locator("#operations-body tr[data-operation-id]").last()
+  const phase = await page.locator(`#operations-body tr[data-operation-id="${accepted.operation_id}"]`)
     .locator("td").first().innerText();
   const diagnostic = path.join(data, "worker-stage-diagnostic.txt");
   const hostDiagnostic = path.join(data, "host-fault-diagnostic.txt");
+  const operationDiagnostic = path.join(data, "host-operation-stage-diagnostic.txt");
   assert.equal(phase, "SUCCEEDED", [
+    `Operation: ${accepted.operation_id}`,
     fs.existsSync(diagnostic)
       ? `Worker stage: ${fs.readFileSync(diagnostic, "utf8")}` : "No worker stage diagnostic",
     fs.existsSync(hostDiagnostic)
       ? `Host fault: ${fs.readFileSync(hostDiagnostic, "utf8")}` : "No host fault diagnostic",
+    fs.existsSync(operationDiagnostic)
+      ? `Host stage: ${fs.readFileSync(operationDiagnostic, "utf8")}` : "No host stage diagnostic",
   ].join("; "));
   await page.keyboard.press("Shift+Tab");
   assert.equal(

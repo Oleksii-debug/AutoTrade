@@ -293,16 +293,18 @@ class AuthenticatedHostApplication:
                     import os
                     if os.environ.get("AUTOTRADE_TEST_DIAGNOSTIC") == "1":
                         from pathlib import Path
+                        import sys
                         frame = error.__traceback__
                         while frame is not None and frame.tb_next is not None:
                             frame = frame.tb_next
+                        safe_fault = (
+                            type(error).__name__ + ":" +
+                            (frame.tb_frame.f_code.co_name if frame is not None else "UNKNOWN")
+                        )
+                        print("host_authority_fault=" + safe_fault, file=sys.stderr, flush=True)
                         Path(self.store._journal.path).parent.parent.joinpath(
                             "host-fault-diagnostic.txt"
-                        ).write_text(
-                            type(error).__name__ + ":" +
-                            (frame.tb_frame.f_code.co_name if frame is not None else "UNKNOWN"),
-                            encoding="utf-8",
-                        )
+                        ).write_text(safe_fault, encoding="utf-8")
                     current = self.store.get_operation(operation_id)
                     if (
                         current.phase in self.store.TERMINAL_PHASES

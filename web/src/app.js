@@ -2206,6 +2206,7 @@ function renderOperation(operation) {
     const restoreKeyboardFocus = button !== null && document.activeElement === button;
     if (button) button.disabled = true;
     try {
+      if (!(await pairLocalSessionFromFragment())) return;
       const refreshed = await refreshSnapshot();
       if (refreshed) announce("Host state refreshed from the canonical snapshot.");
     } catch (error) {
@@ -2298,6 +2299,40 @@ function renderOperation(operation) {
     activate({focusHeading: window.location.hash !== ""});
   }
 
+  // The launch fragment is never a Host session or an authorization grant.
+  // Send its one-time code only in the same-origin POST body; retain it on
+  // rejection so keyboard users can retry after a transient native handoff
+  // failure. Only the Host's successful PAIR response permits scrubbing it.
+  async function pairLocalSessionFromFragment() {
+    if (!window.location.hash.startsWith("#pair=")) return true;
+    const pairingCode = window.location.hash.slice("#pair=".length);
+    if (!/^[A-Za-z0-9_-]{43}$/.test(pairingCode)) {
+      invalidateSnapshotAuthority();
+      text("freshness", "Local owner session pairing code is invalid; commands remain blocked.");
+      announce("Local owner session pairing code is invalid.", true);
+      return false;
+    }
+    try {
+      const paired = await jsonFetch(HOST_API.route("pairLocalSession"), {
+        method: "POST",
+        body: JSON.stringify({pairing_code: pairingCode})
+      });
+      if (!paired || paired.status !== "PAIRED") {
+        throw new Error("Local Host pairing was not confirmed");
+      }
+      // No fragment bytes in history, query strings, logs or status text.
+      window.history.replaceState(null, "", window.location.pathname);
+      window.dispatchEvent(new Event("hashchange"));
+      return true;
+    } catch {
+      invalidateSnapshotAuthority();
+      const message = "Local owner pairing was not confirmed; use Refresh host state to retry the same one-time code. Commands remain blocked.";
+      text("freshness", message);
+      announce(message, true);
+      return false;
+    }
+  }
+
   async function start() {
     bindPageNavigation();
     bindTableTools();
@@ -2310,7 +2345,7 @@ function renderOperation(operation) {
     byId("refresh-state").addEventListener("click", refreshStateFromUser);
     setCommandAvailability(false);
     try {
-      await refreshSnapshot();
+      if (await pairLocalSessionFromFragment()) await refreshSnapshot();
     } catch (error) {
       if (isSnapshotBusy(error)) {
         reportSnapshotBusy();

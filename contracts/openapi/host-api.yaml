@@ -9,31 +9,6 @@ security:
   - AutoTradeSession: []
     AutoTradeActor: []
 paths:
-  /api/v1/session:
-    post:
-      operationId: pairLocalSession
-      description: One-time local owner session bootstrap from the launch URL fragment. No credential may enter query strings, durable state or Host logs.
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [pairing_code]
-              properties:
-                pairing_code:
-                  type: string
-                  minLength: 43
-                  maxLength: 43
-      responses:
-        "200":
-          description: Owner session cookie issued after exact one-time code and native handoff; response body contains no bearer token.
-        "403":
-          description: Pairing code rejected and no session authority granted.
-        "503":
-          description: Owner session handoff could not be made durable; token revoked, code remains retryable.
   /api/v1/state:
     get:
       operationId: getState

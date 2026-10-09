@@ -891,11 +891,12 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
 
     def test_browser_keeps_retryable_pairing_fragment_until_pairing_succeeds(self):
         app = (ROOT / 'web' / 'src' / 'app.js').read_text(encoding='utf-8')
-        pairing = 'await jsonFetch(HOST_API.route("pairLocalSession"), {'
+        pairing = 'await jsonFetch(LOCAL_PAIRING_ROUTE, {'
         scrub = 'window.history.replaceState(null, "", window.location.pathname);'
         self.assertIn(pairing, app)
         self.assertIn(scrub, app)
         self.assertLess(app.index(pairing), app.index(scrub))
+        self.assertIn('const LOCAL_PAIRING_ROUTE = "/api/v1/session";', app)
         self.assertIn('if (!paired || paired.status !== "PAIRED")', app)
         self.assertLess(app.index('paired.status !== "PAIRED"'), app.index(scrub))
         self.assertIn('if (!(await pairLocalSessionFromFragment())) return;', app)

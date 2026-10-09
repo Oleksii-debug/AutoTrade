@@ -74,7 +74,14 @@ class HostApiRouteCodegenTests(unittest.TestCase):
         desktop = DESKTOP.read_text(encoding="utf-8")
         web = WEB_APP.read_text(encoding="utf-8")
         self.assertNotIn('"api/v1/', desktop)
-        self.assertNotIn('"/api/v1', web)
+        # The one-time local owner pairing endpoint is a non-contract Host
+        # bootstrap route, not an authenticated UI/trading API operation.
+        # Keep that one exception visible and reject redeclaration of every
+        # versioned Host API operation elsewhere in the Web consumer.
+        bootstrap = 'const LOCAL_PAIRING_ROUTE = "/api/v1/session";'
+        self.assertEqual(web.count(bootstrap), 1)
+        self.assertNotIn('"/api/v1', web.replace(bootstrap, ''))
+        self.assertIn('await jsonFetch(LOCAL_PAIRING_ROUTE, {', web)
         self.assertIn("HostApiRoutes.GetState", desktop)
         self.assertIn("HostApiRoutes.SubmitCommand", desktop)
         self.assertIn("HostApiRoutes.GetOperation(canonicalId)", desktop)

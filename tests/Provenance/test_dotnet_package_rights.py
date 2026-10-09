@@ -878,7 +878,7 @@ class DotnetPackageRightsTests(unittest.TestCase):
             self.assertIn("reviewed_line=", detail)
             self.assertIn("restored_line=", detail)
             self.assertNotIn(chr(27), detail)
-            self.assertIn(r"\\x1b", detail)
+            self.assertIn(r"\x1b", detail)
 
     def test_restored_license_drift_fails_even_with_same_policy(self):
         with TemporaryDirectory() as directory:

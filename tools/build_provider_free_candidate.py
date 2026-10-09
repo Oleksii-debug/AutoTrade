@@ -28,7 +28,8 @@ from research.autotrade_research.artifacts.durable_publish import atomic_write_j
 ROOT = Path(__file__).resolve().parents[1]
 _PATH_TYPE = type(Path("."))
 SOURCE_PREFIXES = ('mvp/autotrade_mvp/', 'research/autotrade_research/',
-                   'autotrade_numeric/', 'autotrade_foundation/')
+                   'autotrade_numeric/', 'autotrade_foundation/',
+                   'autotrade_runtime/')
 REVIEWED_LICENSE_PREFIX = 'provenance/licenses/'
 STATIC = ('web/src/index.html', 'web/src/app.js', 'web/src/host-api-routes.js', 'web/src/styles.css',
           'contracts/openapi/host-api.yaml', 'contracts/bindings/python/common_scalars.py',

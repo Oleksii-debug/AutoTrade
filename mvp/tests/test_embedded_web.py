@@ -735,6 +735,12 @@ class EmbeddedWebTests(unittest.TestCase):
         )
         self.assertEqual(ui.getheader("X-Content-Type-Options"), "nosniff")
         self.assertEqual(
+            sum(name.lower() == "x-content-type-options"
+                for name, _ in ui.getheaders()),
+            1,
+            "Host must not repeat app security header on the HTTP wire",
+        )
+        self.assertEqual(
             ui.getheader("X-AutoTrade-Web-Bundle"),
             self.web_bundle.bundle_sha256,
         )

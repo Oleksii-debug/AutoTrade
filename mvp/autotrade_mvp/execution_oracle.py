@@ -21,6 +21,7 @@ from .exact_decimal import (
 )
 from .execution_realism import (
     ExecutionModel,
+    ExecutionPriceGrid,
     ExecutionRealismError,
     LiquidityObservation,
     SimulatedExecution,
@@ -53,6 +54,42 @@ def _oracle_bounded_rational(value: Fraction, *, name: str) -> Fraction:
         ) from error
 
 
+def _oracle_market_price_grid(
+    order: SimulatedOrder,
+    model: ExecutionModel,
+) -> ExecutionPriceGrid:
+    """Independently reconcile sealed MARKET grid authority against the model."""
+
+    projection = model.price_projection
+    if projection is None:
+        raise ExecutionOracleError(
+            "MARKET execution requires authoritative price projection policy"
+        )
+    grid = model.price_grid
+    if grid is None:
+        raise ExecutionOracleError(
+            "MARKET execution requires canonical InstrumentRegistry price grid"
+        )
+    try:
+        grid.validate()
+    except (ExecutionRealismError, TypeError) as error:
+        raise ExecutionOracleError(
+            "MARKET execution price-grid authority is invalid"
+        ) from error
+    if (
+        projection.instrument_version != order.instrument_version
+        or grid.instrument_version != order.instrument_version
+        or grid.instrument_version != projection.instrument_version
+        or grid.price_quantum != projection.price_quantum
+        or grid.projection_policy_id != projection.policy_id
+        or grid.projection_policy_version != projection.policy_version
+        or grid.instrument_metadata_binding
+        != projection.instrument_metadata_binding
+    ):
+        raise ExecutionOracleError("MARKET model/grid authority mismatch")
+    return grid
+
+
 def _oracle_market_price_bound(
     *,
     order: SimulatedOrder,
@@ -62,19 +99,11 @@ def _oracle_market_price_bound(
     base_price: Decimal,
     additional_spread_bps: Decimal,
 ) -> Decimal:
-    projection = model.price_projection
-    if projection is None:
-        raise ExecutionOracleError(
-            "MARKET execution requires authoritative price projection policy"
-        )
-    if projection.instrument_version != order.instrument_version:
-        raise ExecutionOracleError(
-            "price projection instrument_version must match order instrument_version"
-        )
+    grid = _oracle_market_price_grid(order, model)
     try:
         reference_is_on_grid = is_exact_decimal_multiple(
             base_price,
-            projection.price_quantum,
+            grid.price_quantum,
         )
     except ExactDecimalError as error:
         raise ExecutionOracleError(
@@ -131,7 +160,7 @@ def _oracle_market_price_bound(
     try:
         return round_fraction_to_quantum(
             unrounded,
-            projection.price_quantum,
+            grid.price_quantum,
             mode="CEILING" if order.side == "BUY" else "FLOOR",
         )
     except ExactDecimalError as error:
@@ -302,15 +331,7 @@ def assert_conservative_execution(
     if observation.instrument_version != order.instrument_version:
         raise ExecutionOracleError("instrument identity mismatch")
     if order.order_type == "MARKET":
-        projection = model.price_projection
-        if projection is None:
-            raise ExecutionOracleError(
-                "MARKET execution requires authoritative price projection policy"
-            )
-        if projection.instrument_version != order.instrument_version:
-            raise ExecutionOracleError(
-                "price projection instrument_version must match order instrument_version"
-            )
+        _oracle_market_price_grid(order, model)
     if result.model_fingerprint != model.fingerprint:
         raise ExecutionOracleError("result model fingerprint mismatch")
     if result.data_fidelity != model.data_fidelity or result.scenario != model.scenario:

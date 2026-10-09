@@ -145,6 +145,20 @@ jobs:
           Expand-Archive -LiteralPath artifacts/AutoTrade-ZERO-win-x64.zip -DestinationPath 'artifacts/installed candidate with spaces'
           dotnet run --project tests/Product/InventoryProbe/InventoryProbe.csproj -c Release -- 'artifacts/installed candidate with spaces/payload' --exercise
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify exact extracted Python imports canonical product before Desktop bootstrap
+        shell: pwsh
+        run: |
+          $pythonExe = (Resolve-Path 'artifacts/installed candidate with spaces/payload/runtime/python/python.exe').Path
+          $product = (Resolve-Path 'artifacts/installed candidate with spaces/payload/product').Path
+          Push-Location -LiteralPath $product
+          try {
+            # No host/session is created: report the actual import failure
+            # against this installed, signature/hash-checked Python layout.
+            & $pythonExe -B -c "import mvp.autotrade_mvp.product_runtime; print('INSTALLED_PRODUCT_IMPORT_OK')"
+            if ($LASTEXITCODE -ne 0) { throw 'Extracted Python product import failed closed.' }
+          } finally {
+            Pop-Location
+          }
       - name: Exercise packaged Desktop owned-runtime bootstrap
         shell: pwsh
         run: |

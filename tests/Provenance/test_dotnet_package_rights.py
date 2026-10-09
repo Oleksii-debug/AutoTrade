@@ -307,9 +307,13 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 "      - run: echo no-op\n",
                 encoding="utf-8",
             )
+            # Steps hidden in top-level fake metadata cannot count as jobs.
+            # Fail closed on both invalid scope and missing real verification.
+            blockers = package_rights_blockers(root)
+            self.assertIn("DOTNET_PACKAGE_RIGHTS_VERIFY_COMMAND_INVALID:5", blockers)
             self.assertIn(
-                "DOTNET_PACKAGE_RIGHTS_VERIFY_ORDER_INVALID:src/App/App.csproj",
-                package_rights_blockers(root),
+                "DOTNET_PACKAGE_RIGHTS_VERIFY_PROJECT_MISSING:src/App/App.csproj",
+                blockers,
             )
 
 
@@ -490,6 +494,12 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 "<Project Sdk=\"Microsoft.NET.Sdk\">"
                 "<PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>"
                 "</Project>\n",
+                encoding="utf-8",
+            )
+            # A project with zero packages needs no NuGet package cache,
+            # but cannot bypass the mandatory locked dependency graph.
+            (project.parent / "packages.lock.json").write_text(
+                json.dumps({"version": 1, "dependencies": {"net10.0": {}}}),
                 encoding="utf-8",
             )
             verify_restored_package_rights(

@@ -1,7 +1,8 @@
+import base64
 import copy
 import json
 import os
-from hashlib import sha256
+from hashlib import sha256, sha512
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory

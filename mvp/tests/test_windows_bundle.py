@@ -41,7 +41,28 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
                     / module_name
                 ).read_bytes()
                 relative = f"mvp/autotrade_mvp/{module_name}"
+                bundled = f"product/{relative}"
                 _reject_sensitive_content(relative, source)
+                _reject_sensitive_content(bundled, source)
+                # Both source and assembled product layouts must retain the
+                # same exact source-declaration exception and reject true keys.
+                with self.assertRaisesRegex(BundleError, "private-key material"):
+                    _reject_sensitive_content(
+                        bundled,
+                        source + b"\n-----BEGIN PRIVATE KEY-----\nsecret-payload\n",
+                    )
+                with self.assertRaisesRegex(BundleError, "private-key material"):
+                    _reject_sensitive_content(
+                        f"other/{bundled}", source,
+                    )
+                with self.assertRaisesRegex(BundleError, "private-key material"):
+                    _reject_sensitive_content(
+                        bundled,
+                        source.replace(
+                            b'    "-----BEGIN PRIVATE KEY-----",',
+                            b'    "-----BEGIN PRIVATE KEY-----", # injected declaration',
+                        ),
+                    )
                 with self.assertRaisesRegex(BundleError, "private-key material"):
                     _reject_sensitive_content(
                         relative,

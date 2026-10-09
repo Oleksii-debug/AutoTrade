@@ -802,7 +802,7 @@ def verify_restored_package_rights(
             nupkg_files[0],
             label="nupkg payload",
         )
-        nupkg_payload, actual_nupkg_hash = verified_locked_nupkg_bytes(
+        nupkg_payload, _ = verified_locked_nupkg_bytes(
             nupkg_path,
             locked_hash=artifact["content_hash_sha512_base64"],
             sidecar_path=sha_path,

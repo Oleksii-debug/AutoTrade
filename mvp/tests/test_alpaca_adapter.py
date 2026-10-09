@@ -1324,7 +1324,7 @@ class AlpacaAdapterTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 AlpacaAdapterError,
-                "prepared request authority changed",
+                "prepared response authority is unavailable",
             ):
                 parse_submission_response(
                     attempt_id=str(uuid4()),

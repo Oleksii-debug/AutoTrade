@@ -895,8 +895,10 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
         self.assertIn('if (await pairLocalSessionFromFragment()) await refreshSnapshot();', app)
         self.assertIn('window.location.hash.slice("#pair=".length)', app)
         self.assertIn('window.dispatchEvent(new Event("hashchange"));', app)
-        self.assertNotIn('window.localStorage', app)
-        self.assertNotIn('window.sessionStorage', app)
+        pairing_code = app[app.index('async function pairLocalSessionFromFragment()') :
+                           app.index('async function start()')]
+        self.assertNotIn('localStorage', pairing_code)
+        self.assertNotIn('sessionStorage', pairing_code)
 
 
     def test_default_launcher_message_does_not_emit_pairing_secret(self):

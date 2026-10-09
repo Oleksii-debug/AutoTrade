@@ -1912,7 +1912,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         }
         observation = execution_observation([row])
 
-        with self.assertRaisesRegex(BinanceSpotAdapterError, "must be a mapping"):
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "must be an exact dict"):
             parse_account_trades(
                 observation,
                 instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
@@ -2007,6 +2007,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         provider_fill = parse_account_trades(
             execution_observation([row]),
             instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+            client_ids_by_order_id={44: "spot-client-9"},
         )[0]
         self.assertIsNone(provider_fill.position_side)
         projected = ProjectedFillEvidence.create(

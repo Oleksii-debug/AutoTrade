@@ -845,6 +845,41 @@ class DotnetPackageRightsTests(unittest.TestCase):
                     projects=[project],
                 )
 
+    def test_different_reviewed_license_emits_bounded_auditable_diff_and_still_fails(self):
+        from hashlib import sha256
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            packages = _write_restored_package(root)
+            reviewed = root / "provenance" / "licenses" / "Example.Package.LICENSE.txt"
+            original = reviewed.read_text(encoding="utf-8")
+            # The reviewed-policy text is wrong; the locked .nupkg,
+            # extracted license, signature/hash authorities are unchanged.
+            foreign = original.replace("Example Corporation", "UNKNOWN\\x1b[2J Corporation")
+            reviewed.write_text(foreign, encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError, "license differs from reviewed text"
+            ) as raised:
+                verify_restored_package_rights(
+                    packages, root=root, projects=[project],
+                )
+            detail = str(raised.exception)
+            self.assertIn("first_difference_line=1", detail)
+            self.assertIn(
+                "reviewed_sha256=" + sha256(foreign.encode("utf-8")).hexdigest(),
+                detail,
+            )
+            self.assertIn(
+                "restored_sha256=" + sha256(original.encode("utf-8")).hexdigest(),
+                detail,
+            )
+            self.assertIn("reviewed_line=", detail)
+            self.assertIn("restored_line=", detail)
+            self.assertNotIn("\\x1b", detail)
+            self.assertIn(r"\\x1b", detail.replace("\\\\", "\\"))
+
     def test_restored_license_drift_fails_even_with_same_policy(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

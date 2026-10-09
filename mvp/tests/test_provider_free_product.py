@@ -95,12 +95,22 @@ class ProductClient:
         status, accepted, _ = self.request('POST', '/api/v1/commands', request)
         assert status == 200 and accepted['status'] == 'ACCEPTED', (status, accepted)
         operation = accepted['operation_id']
-        for _ in range(300):
+        # This test client follows the REAL isolated worker, not an in-process
+        # mock. Its multi-episode source-verified subprocess can exceed the
+        # former six-second (300 * 20ms) poll window on hosted shared runners.
+        # An operation is never marked successful just because time elapsed:
+        # only a durable terminal Host projection is acceptable.
+        deadline = time.monotonic() + 45.0
+        last_phase = 'NOT_OBSERVED'
+        while time.monotonic() < deadline:
             status, result, _ = self.request('GET', '/api/v1/operations/' + operation)
-            if status == 200 and result['phase'] in {'SUCCEEDED', 'FAILED', 'UNKNOWN'}:
+            if status != 200:
+                raise AssertionError(('operation lookup did not succeed', status))
+            last_phase = result.get('phase', 'MISSING')
+            if last_phase in {'SUCCEEDED', 'FAILED', 'UNKNOWN'}:
                 return command_id, result
             time.sleep(.02)
-        raise AssertionError('operation failed to finish')
+        raise AssertionError(f'operation failed to finish: last durable phase {last_phase}')
 
     def close(self):
         self.runtime.close(); self.worker.join(timeout=10)

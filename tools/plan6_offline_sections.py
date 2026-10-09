@@ -84,6 +84,23 @@ SECTION_MODULES = {
         "mvp.tests.test_alpaca_options",
         "mvp.tests.test_provider_selection",
     ),
+    # Provider-financial domain adapter contracts, not Plan-1 economic truth.
+    # Fail-closed source tests cover the seven lifecycle families using fixtures.
+    4: (
+        "mvp.tests.test_provider_domain_settlement_authority",
+        "mvp.tests.test_futures_settlement_convention_authority",
+        "mvp.tests.test_futures_lifecycle_registry_authority",
+        "mvp.tests.test_bybit_position_margin",
+        "mvp.tests.test_perpetual_funding_frozen_cut",
+        "mvp.tests.test_reconciliation_borrow_completion_gate",
+        "mvp.tests.test_corporate_action_evidence",
+        "mvp.tests.test_option_lifecycle_registry_authority",
+        "mvp.tests.test_provider_economic_historical_cut",
+        "mvp.tests.test_provider_cash_snapshot_replay",
+        "mvp.tests.test_durable_provider_economic_book_authority",
+        "mvp.tests.test_provider_activity_accounting",
+        "mvp.tests.test_alpaca_options",
+    ),
 }
 
 

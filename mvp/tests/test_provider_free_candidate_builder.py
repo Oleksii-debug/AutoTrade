@@ -101,6 +101,16 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
             collected = {path for path, _absolute, _content in candidate._collect(root / 'product')}
             self.assertIn('mvp/autotrade_mvp/diagnostics.py', collected)
             self.assertIn('mvp/autotrade_mvp/decision_trace.py', collected)
+            self.assertIn('autotrade_runtime/artifacts/__init__.py', selected)
+            self.assertIn('autotrade_runtime/artifacts/store.py', collected)
+            self.assertIn('autotrade_runtime/resource_lock.py', collected)
+
+    def test_canonical_runtime_source_selector_only_adds_python_modules(self):
+        self.assertTrue(candidate._source_path_selected('autotrade_runtime/artifacts/store.py'))
+        self.assertTrue(candidate._source_path_selected('autotrade_runtime/resource_lock.py'))
+        self.assertFalse(candidate._source_path_selected('autotrade_runtime/private-key.pem'))
+        self.assertFalse(candidate._source_path_selected('autotrade_runtime/credentials.json'))
+        self.assertFalse(candidate._source_path_selected('other/autotrade_runtime/artifacts/store.py'))
 
     def test_archive_replacement_after_digest_check_cannot_change_extracted_bytes(self):
         with TemporaryDirectory() as directory:

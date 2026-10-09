@@ -447,7 +447,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
         }
         observation = execution_observation([row])
 
-        with self.assertRaisesRegex(BinanceUsdmAdapterError, "must be a mapping"):
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "must be an exact dict"):
             parse_account_trades(
                 observation,
                 instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
@@ -745,7 +745,7 @@ class BinanceUsdmTemporalIngressTests(unittest.TestCase):
                 raise AssertionError("hostile timestamp callback executed")
 
         with self.assertRaisesRegex(
-            BinanceUsdmAdapterError, "integer millisecond timestamp"
+            BinanceUsdmAdapterError, "order ACK response must contain only exact decoded JSON values"
         ):
             parse_order_ack(
                 attempt_id=str(uuid4()),

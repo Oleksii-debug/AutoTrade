@@ -1,6 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
+    <!-- Keep RID-less and -r win-x64 locked restores on one declared NuGet graph. -->
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <AssemblyName>AutoTrade.Contracts</AssemblyName>
     <RootNamespace>AutoTrade.Contracts</RootNamespace>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>

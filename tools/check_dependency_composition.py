@@ -36,6 +36,7 @@ else:
         dotnet_restore_targets_project,
         dotnet_restore_tokens_are_locked,
         dotnet_restore_workflow_commands,
+        dotnet_restore_workflow_environment_authority_lines,
     )
 
 
@@ -328,6 +329,7 @@ def _ci_runtime_blockers(root: Path) -> list[str]:
         text = path.read_text(encoding="utf-8")
         if "actions/setup-python@" not in text:
             continue
+        relative_path = path.relative_to(root).as_posix()
         for raw in text.splitlines():
             stripped = raw.strip()
             if not stripped.startswith("python-version:"):
@@ -335,7 +337,7 @@ def _ci_runtime_blockers(root: Path) -> list[str]:
             value = stripped.split(":", 1)[1].strip()
             if value.startswith("${{"):
                 blockers.append(
-                    f"UNRESOLVED_CI_PYTHON_VERSION:{path.relative_to(root)}:{value}"
+                    f"UNRESOLVED_CI_PYTHON_VERSION:{relative_path}:{value}"
                 )
                 continue
             literals: list[str]
@@ -344,7 +346,7 @@ def _ci_runtime_blockers(root: Path) -> list[str]:
                     parsed = json.loads(value.replace("'", '"'))
                 except json.JSONDecodeError:
                     blockers.append(
-                        f"UNREADABLE_CI_PYTHON_VERSION:{path.relative_to(root)}:{value}"
+                        f"UNREADABLE_CI_PYTHON_VERSION:{relative_path}:{value}"
                     )
                     continue
                 literals = [str(item) for item in parsed]
@@ -353,7 +355,7 @@ def _ci_runtime_blockers(root: Path) -> list[str]:
             for literal in literals:
                 if not exact_python.fullmatch(literal):
                     blockers.append(
-                        f"NON_EXACT_CI_PYTHON_VERSION:{path.relative_to(root)}:{literal}"
+                        f"NON_EXACT_CI_PYTHON_VERSION:{relative_path}:{literal}"
                     )
     return blockers
 

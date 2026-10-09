@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import Mock, patch
 
-from _test_production_host_impl import (
+from mvp.tests._test_production_host_impl import (
     CommandAdmissionGateTests,
     ProductionHostConfigTests,
     ProductionHostRuntimeTests,
@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.host_network import TransportResponse
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.production_host import (
     ProductionHostConfig,
+    ProductionHostRuntime,
     _InstanceFence,
     _StoreIdentityGate,
     build_production_host,
@@ -78,21 +79,12 @@ class ProductionHostCompositionTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             config = self._config(directory)
             security = self.DummySecurityBoundary()
-            identity = object()
-            journal = Mock()
-            journal.path = config.journal_path
-            journal.store_identity = identity
             application = Mock()
             server = Mock()
             fence = Mock()
             with (
                 patch.object(production_host, "SecurityBoundary", self.DummySecurityBoundary),
                 patch.object(production_host, "_InstanceFence") as fence_type,
-                patch.object(
-                    production_host,
-                    "JournalStore",
-                    return_value=journal,
-                ) as journal_factory,
                 patch.object(
                     production_host,
                     "AuthenticatedHostApplication",
@@ -112,11 +104,11 @@ class ProductionHostCompositionTests(unittest.TestCase):
                     snapshot_provider=Mock(),
                 )
             try:
-                journal_factory.assert_called_once_with(config.journal_path)
+                self.assertIs(type(runtime.journal), JournalStore)
+                self.assertEqual(runtime.journal.path, config.journal_path)
                 app_factory.assert_called_once()
                 server_factory.assert_called_once()
-                self.assertIs(runtime.journal, journal)
-                self.assertIs(runtime.store_identity, identity)
+                self.assertEqual(runtime.store_identity, runtime.journal.store_identity)
                 self.assertIs(runtime.application, application)
                 self.assertIs(runtime.server, server)
                 self.assertFalse(server.daemon_threads)

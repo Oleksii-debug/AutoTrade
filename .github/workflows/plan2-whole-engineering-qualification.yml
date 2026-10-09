@@ -1,0 +1,108 @@
+name: plan2-whole-engineering-qualification
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "mvp/autotrade_mvp/product_agent.py"
+      - "mvp/autotrade_mvp/product_research.py"
+      - "mvp/autotrade_mvp/model_*.py"
+      - "mvp/tests/test_zero_model_qualification.py"
+      - "mvp/tests/test_autonomous_simulation.py"
+      - "mvp/tests/test_zero_runtime_financial_scope.py"
+      - "mvp/tests/test_model*.py"
+      - "mvp/tests/test_untrusted_research_boundary.py"
+      - "research/**"
+      - ".github/workflows/plan2-whole-engineering-qualification.yml"
+  push:
+    branches: [main]
+    paths:
+      - "mvp/autotrade_mvp/product_agent.py"
+      - "mvp/autotrade_mvp/product_research.py"
+      - "mvp/autotrade_mvp/model_*.py"
+      - "mvp/tests/test_zero_model_qualification.py"
+      - "mvp/tests/test_autonomous_simulation.py"
+      - "mvp/tests/test_zero_runtime_financial_scope.py"
+      - "mvp/tests/test_model*.py"
+      - "mvp/tests/test_untrusted_research_boundary.py"
+      - "research/**"
+      - ".github/workflows/plan2-whole-engineering-qualification.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+        scope: [agent-zero, research-learning-champion, model-gateway]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_SOURCE_SHA }}
+      - name: Preserve exact Git objects on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          git config --local core.autocrlf false
+          git -c core.autocrlf=false reset --hard "$EXPECTED_SOURCE_SHA"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Exact source identity before running
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Install pinned offline qualification dependencies
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check --force-reinstall --no-deps --only-binary=:all: --require-hashes -r requirements-dev.txt
+          python -m pip install --no-deps --no-build-isolation -e .
+          python -m pip install --no-deps --no-build-isolation -e research
+      - name: ZERO Agent / restart / fail-closed financial scope
+        if: matrix.scope == 'agent-zero'
+        shell: bash
+        run: |
+          python -m unittest -v \
+            mvp.tests.test_zero_model_qualification \
+            mvp.tests.test_autonomous_simulation \
+            mvp.tests.test_zero_runtime_financial_scope
+      - name: Research / ablation / learning / champion / rollback
+        if: matrix.scope == 'research-learning-champion'
+        shell: bash
+        run: |
+          python -m unittest -v \
+            research.tests.test_jobs \
+            research.tests.test_ablation \
+            research.tests.test_ablation_exact_rational \
+            research.tests.test_update_producer \
+            research.tests.test_learning_waves \
+            research.tests.test_online_learning \
+            research.tests.test_champion_control \
+            research.tests.test_science_registry \
+            research.tests.test_protocol_registry
+      - name: Model modes / cost / UNKNOWN / advisory authority
+        if: matrix.scope == 'model-gateway'
+        shell: bash
+        run: |
+          python -m unittest -v \
+            mvp.tests.test_model_gateway \
+            mvp.tests.test_model_call \
+            mvp.tests.test_model_budget_journal \
+            mvp.tests.test_model_production_composition \
+            mvp.tests.test_model_billing_evidence \
+            mvp.tests.test_model_pricing_evidence \
+            mvp.tests.test_model_observation_evidence \
+            mvp.tests.test_untrusted_research_boundary
+      - name: Exact source identity after running
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"

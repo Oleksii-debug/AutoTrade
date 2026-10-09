@@ -836,7 +836,11 @@ class AblationTests(unittest.TestCase):
                 return authority, science, memory, artifacts
 
             authority, science, _memory, _artifacts = issued()
-            science.path = root / "retargeted-science.sqlite3"
+            object.__setattr__(
+                science,
+                "_path",
+                root / "retargeted-science.sqlite3",
+            )
             with self.assertRaisesRegex(ValueError, "database path changed after issuance"):
                 authority.resolve([], outcome_refs=[])
 

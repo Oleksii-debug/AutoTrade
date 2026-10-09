@@ -1,0 +1,54 @@
+name: plan5-windows-update-intent-component
+
+on:
+  pull_request:
+    paths:
+      - "mvp/autotrade_mvp/windows_update.py"
+      - "mvp/tests/test_windows_update.py"
+      - "mvp/tests/test_windows_update_intent.py"
+      - ".github/workflows/plan5-windows-update-intent-component.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+
+jobs:
+  canonical-update-checkpoint:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Exact source head / no synthetic merge checkout
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$AUTOTRADE_SOURCE_SHA"
+      - name: Install existing pinned project test dependencies
+        run: python -m pip install --require-hashes -r requirements-dev.txt
+      - name: Compile canonical update planning, checkpoint and write-ahead intent
+        run: python -m py_compile mvp/autotrade_mvp/windows_update.py mvp/tests/test_windows_update_intent.py
+      - name: Execute existing update rollback plus new interruption and duplicate-host-intent negatives
+        run: python -m unittest mvp.tests.test_windows_update mvp.tests.test_windows_update_intent -v
+      - name: Emit real executed exact-head component evidence
+        run: python tools/write_ci_evidence.py --suite plan5-section5-update-intent --command "canonical update and write-ahead diskfull/symlink/duplicate/restart tests" --output artifacts/plan5-section5-update.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan5-section5-update-${{ runner.os }}-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/plan5-section5-update.json
+          if-no-files-found: error

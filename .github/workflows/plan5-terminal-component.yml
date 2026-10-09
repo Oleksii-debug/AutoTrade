@@ -1,0 +1,218 @@
+name: plan5-terminal-component-qualification
+
+on:
+  pull_request:
+    paths:
+      - 'web/**'
+      - 'src/AutoTrade.Desktop/**'
+      - 'src/AutoTrade.Host/**'
+      - 'mvp/autotrade_mvp/accessibility.py'
+      - 'mvp/autotrade_mvp/embedded_web.py'
+      - 'mvp/autotrade_mvp/windows_update.py'
+      - 'mvp/tests/test_plan5_terminal_source_contract.py'
+      - 'mvp/tests/test_plan5_ci_evidence.py'
+      - 'mvp/tests/test_plan5_component_evidence.py'
+      - 'tools/check_plan5_component_evidence.py'
+      - 'mvp/tests/test_semantic_web_client_contract.py'
+      - 'mvp/tests/test_desktop_shell_contract.py'
+      - 'mvp/tests/test_windows_bundle.py'
+      - 'mvp/tests/test_windows_update.py'
+      - 'mvp/tests/test_windows_update_intent.py'
+      - 'mvp/tests/test_windows_fixture_install_assembly.py'
+      - 'mvp/autotrade_mvp/windows_update.py'
+      - 'tools/windows_fixture_install_assembly.py'
+      - '.github/workflows/plan5-windows-update-intent-component.yml'
+      - '.github/workflows/plan5-windows-fixture-install-assembly.yml'
+      - 'mvp/tests/test_windows_install_manifest.py'
+      - 'tests/Product/plan5-navigation.cjs'
+      - 'tools/build_windows_bundle.py'
+      - 'tools/build_windows_install_manifest.py'
+      - 'tools/build_provider_free_candidate.py'
+      - '.github/workflows/plan5-terminal-component.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+
+jobs:
+  source-security-accessibility-update:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Exact source identity
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$AUTOTRADE_SOURCE_SHA"
+      - name: Reused source accessibility and cross-surface/negative checks
+        shell: bash
+        run: |
+          PYTHONPATH="research:." python -m unittest \
+            mvp.tests.test_plan5_terminal_source_contract \
+            mvp.tests.test_plan5_ci_evidence \
+            mvp.tests.test_plan5_component_evidence \
+            mvp.tests.test_semantic_web_client_contract \
+            mvp.tests.test_desktop_shell_contract \
+            mvp.tests.test_embedded_web \
+            mvp.tests.test_host_network \
+            mvp.tests.test_windows_secrets \
+            mvp.tests.test_windows_secrets_handle_reseal \
+            mvp.tests.test_accessible_status -v
+      - name: Reused packaging, secrets, update, rollback and recovery checks
+        shell: bash
+        run: |
+          PYTHONPATH="research:." python -m unittest \
+            mvp.tests.test_windows_bundle \
+            mvp.tests.test_windows_install_manifest \
+            mvp.tests.test_windows_update \
+            mvp.tests.test_windows_update_intent \
+            mvp.tests.test_windows_fixture_install_assembly \
+            mvp.tests.test_runtime_locality_packaging \
+            mvp.tests.test_provider_free_candidate_builder -v
+      - name: Emit exact-head source/negative evidence after successful execution
+        run: python tools/write_ci_evidence.py --suite plan5-terminal-source-and-recovery --command "source accessibility + Desktop/Host/vault + verified fixture installer + update writeahead crash/diskfull/restart + rollback negatives" --output artifacts/plan5-terminal-source.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan5-terminal-source-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/plan5-terminal-source.json
+          if-no-files-found: error
+      - name: No final-release or live-provider assertion
+        run: echo 'SOURCE COMPONENT TESTS ONLY; physical NVDA, real provider and signed final release NOT CLAIMED'
+
+  keyboard-semantic-browser:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Exact source identity
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$AUTOTRADE_SOURCE_SHA"
+      - name: Parse canonical Web JavaScript and browser harness
+        run: |
+          node --check web/src/app.js
+          node --check tests/Product/plan5-navigation.cjs
+      - name: Install pinned browser harness
+        working-directory: tests/Product
+        run: |
+          npm ci --ignore-scripts
+          npx playwright install --with-deps chromium
+      - name: Real headless keyboard-only navigation, focus, history, outage and fail-closed checks
+        working-directory: tests/Product
+        run: node plan5-navigation.cjs
+      - name: Emit exact-head browser navigation evidence
+        run: python tools/write_ci_evidence.py --suite plan5-terminal-keyboard-browser --command "Playwright chromium real keyboard + hash history + unknown route + Host outage" --output artifacts/plan5-terminal-browser.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan5-terminal-browser-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/plan5-terminal-browser.json
+          if-no-files-found: error
+
+  windows-desktop-native-emergency:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.100'
+      - name: Exact source identity
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD).Trim() -ne $env:AUTOTRADE_SOURCE_SHA) { throw 'Source SHA mismatch' }
+      - name: Windows source parity, native emergency and accessibility
+        run: >-
+          python -m unittest mvp.tests.test_plan5_terminal_source_contract
+          mvp.tests.test_plan5_ci_evidence
+          mvp.tests.test_desktop_shell_contract
+          mvp.tests.test_windows_update_intent
+          mvp.tests.test_windows_fixture_install_assembly
+          mvp.tests.test_windows_secrets
+          mvp.tests.test_windows_secrets_handle_reseal -v
+      - name: Restore locked canonical Desktop dependencies
+        run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --locked-mode
+      - name: Build thin WebView2 desktop, not a second UX
+        run: dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj -c Release --no-restore
+      - name: Native emergency, restart and policy-negative regression
+        run: |
+          dotnet restore tests/Desktop.Client/Desktop.Client.csproj --locked-mode
+          dotnet run --project tests/Desktop.Client/Desktop.Client.csproj -c Release --no-restore
+      - name: Emit exact-head Windows Desktop native recovery evidence
+        run: python tools/write_ci_evidence.py --suite plan5-terminal-desktop-native --command "locked Desktop WPF build + Windows DPAPI and vault + verified fixture installer + update intent crash/restart + native emergency negatives" --output artifacts/plan5-terminal-desktop.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan5-terminal-desktop-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/plan5-terminal-desktop.json
+          if-no-files-found: error
+
+  component-gate:
+    runs-on: ubuntu-22.04
+    needs:
+      - source-security-accessibility-update
+      - keyboard-semantic-browser
+      - windows-desktop-native-emergency
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Verify final-gate code is the same exact source SHA
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$AUTOTRADE_SOURCE_SHA"
+      - name: Retrieve exact-source Host/security/update component evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: plan5-terminal-source-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/plan5-evidence/source
+      - name: Retrieve same-run keyboard browser evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: plan5-terminal-browser-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/plan5-evidence/browser
+      - name: Retrieve same-run real Windows Desktop emergency evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: plan5-terminal-desktop-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/plan5-evidence/desktop
+      - name: Fail closed on missing, stale, wrong-run, wrong-OS or forged fields
+        shell: bash
+        run: >-
+          python tools/check_plan5_component_evidence.py
+          --evidence-dir artifacts/plan5-evidence
+          --source-sha "$AUTOTRADE_SOURCE_SHA"
+          --run-id "$GITHUB_RUN_ID"
+          --run-attempt "$GITHUB_RUN_ATTEMPT"
+          --event "$GITHUB_EVENT_NAME"
+      - name: Explicit evidence class and outstanding terminal prerequisites
+        run: |
+          echo 'Plan 5 Section 7: consistent exact-run CI receipts; structural only.'
+          echo 'Existing writer reports cannot independently authenticate GitHub API.'
+          echo 'Requires separate exact-SHA provider-free packaged candidate proof,'
+          echo 'terminal Sections 1-6, main integration/readback and Drive/GitHub registry.'
+          echo 'This workflow cannot self-issue DONE, physical NVDA or final-release PASS.'

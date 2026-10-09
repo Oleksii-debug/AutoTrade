@@ -1,0 +1,61 @@
+name: plan2-section7-champion-lifecycle
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "research/autotrade_research/learning/champion.py"
+      - "research/autotrade_research/science/registry.py"
+      - "research/tests/test_champion_control.py"
+      - "research/tests/test_protocol_registry.py"
+      - ".github/workflows/plan2-section7-champion-lifecycle.yml"
+  push:
+    branches: [main]
+    paths:
+      - "research/autotrade_research/learning/champion.py"
+      - "research/autotrade_research/science/registry.py"
+      - "research/tests/test_champion_control.py"
+      - "research/tests/test_protocol_registry.py"
+      - ".github/workflows/plan2-section7-champion-lifecycle.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PYTHONPATH: research:.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_SOURCE_SHA }}
+      - name: Preserve exact Git source bytes on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          git config --local core.autocrlf false
+          git -c core.autocrlf=false reset --hard "$EXPECTED_SOURCE_SHA"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Verify exact candidate and clean tracked source
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Qualify immutable evidence, CAS, rollback and restart
+        shell: bash
+        run: |
+          python -m unittest -v research.tests.test_champion_control research.tests.test_protocol_registry
+      - name: Recheck source identity
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"

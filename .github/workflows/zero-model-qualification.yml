@@ -5,19 +5,19 @@ on:
   pull_request:
     paths:
       - "qualification/zero_model/**"
-      - "mvp/autotrade_mvp/model_gateway.py"
-      - "mvp/autotrade_mvp/pipeline.py"
-      - "mvp/autotrade_mvp/economics.py"
+      - "mvp/autotrade_mvp/**"
+      - "research/autotrade_research/**"
       - "mvp/tests/test_zero_model_qualification.py"
+      - "mvp/tests/test_zero_model_economics.py"
       - ".github/workflows/zero-model-qualification.yml"
   push:
     branches: [main]
     paths:
       - "qualification/zero_model/**"
-      - "mvp/autotrade_mvp/model_gateway.py"
-      - "mvp/autotrade_mvp/pipeline.py"
-      - "mvp/autotrade_mvp/economics.py"
+      - "mvp/autotrade_mvp/**"
+      - "research/autotrade_research/**"
       - "mvp/tests/test_zero_model_qualification.py"
+      - "mvp/tests/test_zero_model_economics.py"
       - ".github/workflows/zero-model-qualification.yml"
 
 concurrency:
@@ -36,14 +36,24 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PYTHONPATH: ${{ github.workspace }}/research
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.EXPECTED_SOURCE_SHA }}
+      - name: Preserve exact Git blob bytes on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # GitHub Windows global autocrlf rewrites tracked text. The qualifier
+          # intentionally compares runtime bytes to the frozen Git blob.
+          git config --local core.autocrlf false
+          git -c core.autocrlf=false reset --hard "$EXPECTED_SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12.10"
-      - run: python -m unittest mvp.tests.test_zero_model_qualification -v
+      - run: python -m unittest mvp.tests.test_zero_model_qualification mvp.tests.test_zero_model_economics -v
       - name: Assert and generate exact-head qualification evidence
         shell: bash
         run: |

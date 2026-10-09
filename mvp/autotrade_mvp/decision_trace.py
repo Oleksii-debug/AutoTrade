@@ -376,10 +376,13 @@ def _read_trace_text_descriptor_bound(path: Path) -> str | None:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
             raise ValueError("Corrupt decision trace store: unsafe path alias")
+        # Compare path/file-descriptor identity and size here. Windows path
+        # stat and descriptor fstat may report different creation-time
+        # generations for the same file; compare temporal generations only
+        # within matching syscall families below.
         if (
             _trace_entry_identity(initial) != _trace_entry_identity(opened)
-            or _trace_generation_identity(initial)
-            != _trace_generation_identity(opened)
+            or initial.st_size != opened.st_size
         ):
             raise ValueError(
                 "Corrupt decision trace store: path changed before descriptor read"
@@ -411,9 +414,10 @@ def _read_trace_text_descriptor_bound(path: Path) -> str | None:
             or _trace_entry_identity(opened) != _trace_entry_identity(after)
             or _trace_generation_identity(opened)
             != _trace_generation_identity(after)
-            or _trace_entry_identity(opened) != _trace_entry_identity(current)
-            or _trace_generation_identity(opened)
+            or _trace_entry_identity(initial) != _trace_entry_identity(current)
+            or _trace_generation_identity(initial)
             != _trace_generation_identity(current)
+            or _trace_entry_identity(opened) != _trace_entry_identity(current)
             or copied != expected_bytes
         ):
             raise ValueError(
@@ -633,14 +637,26 @@ class DecisionTraceStore:
             return True
 
     def records(self) -> list[dict[str, Any]]:
-        with durable_path_lock(self.path):
-            try:
-                records = self._load()
-            except ValueError as error:
-                raise ValueError("Decision trace chain is corrupt") from error
-            if records and not self._records_are_valid(records):
-                raise ValueError("Decision trace chain is corrupt")
-            return records
+        # A missing trace is an empty read, never an invitation to create its
+        # parent directory or a writer lock. The read linearizes before any
+        # concurrent writer that creates the parent after this existence check.
+        if not os.path.lexists(self.path.parent):
+            return []
+        try:
+            with durable_path_lock(self.path):
+                try:
+                    records = self._load()
+                except ValueError as error:
+                    raise ValueError("Decision trace chain is corrupt") from error
+                if records and not self._records_are_valid(records):
+                    raise ValueError("Decision trace chain is corrupt")
+                return records
+        except DurablePublishLockError as error:
+            # Preserve fail-closed source and do not follow symlink or
+            # hard-link aliases merely because the shared writer lock refused.
+            raise ValueError(
+                "Decision trace chain is corrupt: unsafe publication path"
+            ) from error
 
     def reconstruct(
         self,

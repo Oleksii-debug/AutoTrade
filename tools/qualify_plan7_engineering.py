@@ -168,10 +168,25 @@ def main() -> int:
         str(ROOT), str(ROOT / "research"), env.get("PYTHONPATH", "")
     )))
     for name in selected:
-        command = [sys.executable, "-m", "unittest", "-v", *campaigns[name]]
-        if subprocess.run(command, cwd=ROOT, env=env, check=False).returncode:
-            print(f"PLAN7_ENGINEERING_CAMPAIGN_FAIL: {name}", file=sys.stderr)
-            return 1
+        commands = []
+        if name == "science":
+            commands.append([sys.executable, "-m", "unittest", "discover", "-s",
+                             "tests/Science", "-p", "test_science_qualification.py", "-v"])
+        elif name == "ablation":
+            commands.append([sys.executable, "-m", "unittest", "-v",
+                             "research.tests.test_ablation",
+                             "research.tests.test_ablation_exact_rational"])
+            commands.append([sys.executable, "-m", "unittest", "discover", "-s",
+                             "tests/Science", "-p", "test_ablation_component_qualification.py", "-v"])
+        elif name == "economics":
+            commands.append([sys.executable, "-m", "unittest", "discover", "-s",
+                             "tests/Science", "-p", "test_strategy_economics*.py", "-v"])
+        else:
+            commands.append([sys.executable, "-m", "unittest", "-v", *campaigns[name]])
+        for command in commands:
+            if subprocess.run(command, cwd=ROOT, env=env, check=False).returncode:
+                print(f"PLAN7_ENGINEERING_CAMPAIGN_FAIL: {name}", file=sys.stderr)
+                return 1
         print(f"PLAN7_ENGINEERING_CAMPAIGN_PASS: {name}", flush=True)
     print("PLAN7_ENGINEERING_TESTS_PASS_ONLY: no scientific edge, provider/PAPER/LIVE or release qualification")
     return 0

@@ -4,7 +4,11 @@ import unittest
 from research.autotrade_research.learning.retention import (
     RegimeMetric,
     RetentionPolicy,
+    evaluate_population_bound_retention,
     evaluate_retention,
+)
+from research.autotrade_research.learning.population_coverage import (
+    PopulationCoverageManifest,
 )
 
 
@@ -184,6 +188,185 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(result.status, "FAIL")
         self.assertFalse(result.promotable)
 
+
+    def test_executable_text_subclass_is_rejected_before_strip(self):
+        calls = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("hostile strip executed")
+
+        with self.assertRaisesRegex(TypeError, "exact text"):
+            metric(HostileText("new"), "0.10", "0.11")
+        self.assertEqual(calls, [])
+
+    def test_executable_regime_container_is_rejected_before_iteration(self):
+        calls = []
+
+        class HostileList(list):
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("hostile iteration executed")
+
+        with self.assertRaisesRegex(TypeError, "exact list or tuple"):
+            policy(recent_regimes=HostileList(["new"]))
+        self.assertEqual(calls, [])
+
+    def test_executable_metrics_mapping_is_rejected_before_callbacks(self):
+        calls = []
+
+        class HostileDict(dict):
+            def items(self):
+                calls.append("items")
+                raise AssertionError("hostile items executed")
+
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("hostile iteration executed")
+
+        metrics = HostileDict(
+            {
+                "old": metric("old", "0.10", "0.10"),
+                "new": metric("new", "0.05", "0.20"),
+            }
+        )
+        with self.assertRaisesRegex(TypeError, "metrics must be an exact dict"):
+            evaluate_retention(metrics, policy())
+        self.assertEqual(calls, [])
+
+    def test_polymorphic_numeric_inputs_are_rejected_before_conversion(self):
+        calls = []
+
+        class HostileInt(int):
+            def __str__(self):
+                calls.append("str")
+                raise AssertionError("hostile str executed")
+
+            def __lt__(self, other):
+                calls.append("lt")
+                raise AssertionError("hostile comparison executed")
+
+        with self.assertRaisesRegex(TypeError, "exact Decimal, string or integer"):
+            metric("new", HostileInt(1), "0.11")
+        self.assertEqual(calls, [])
+
+    def test_mutated_policy_is_resealed_before_retention_math(self):
+        valid = policy()
+        object.__setattr__(valid, "recent_regimes", ["new"])
+        result = evaluate_retention(
+            {
+                "old": metric("old", "0.10", "0.10"),
+                "new": metric("new", "0.05", "0.20"),
+            },
+            valid,
+        )
+        self.assertEqual(result.status, "PASS")
+        self.assertTrue(result.promotable)
+
+        class HostileList(list):
+            def __iter__(self):
+                raise AssertionError("hostile iteration executed")
+
+        object.__setattr__(valid, "recent_regimes", HostileList(["new"]))
+        with self.assertRaisesRegex(TypeError, "exact list or tuple"):
+            evaluate_retention(
+                {
+                    "old": metric("old", "0.10", "0.10"),
+                    "new": metric("new", "0.05", "0.20"),
+                },
+                valid,
+            )
+
+    def test_mutated_metric_is_resealed_before_retention_math(self):
+        changed = metric("new", "0.05", "0.20")
+        object.__setattr__(changed, "candidate_net_score", Decimal("999"))
+        result = evaluate_retention(
+            {
+                "old": metric("old", "0.10", "0.10"),
+                "new": changed,
+            },
+            policy(),
+        )
+        self.assertEqual(result.recent_improvement, Decimal("998.95"))
+
+        class HostileDecimal(Decimal):
+            pass
+
+        object.__setattr__(changed, "candidate_net_score", HostileDecimal("0.20"))
+        with self.assertRaisesRegex(TypeError, "exact Decimal"):
+            evaluate_retention(
+                {
+                    "old": metric("old", "0.10", "0.10"),
+                    "new": changed,
+                },
+                policy(),
+            )
+
+
+    def test_mutated_population_manifest_is_rejected_before_container_callbacks(self):
+        calls = []
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("hostile population iteration executed")
+
+        forged = object.__new__(PopulationCoverageManifest)
+        values = {
+            "candidate_hash": "sha256:" + "1" * 64,
+            "frozen_protocol_hash": "sha256:" + "2" * 64,
+            "input_snapshot_hash": "sha256:" + "3" * 64,
+            "causal_cutoff": "2026-10-06T00:00:00Z",
+            "permission_classes": ("RESEARCH",),
+            "task": None,
+            "instrument_family": None,
+            "eligible_episode_ids": (),
+            "included_episode_ids": (),
+            "exclusions": (),
+            "episode_digests": (),
+            "eligible_outcomes": (),
+            "included_outcomes": (),
+            "eligible_no_trade_count": 0,
+            "included_no_trade_count": 0,
+            "included_regime_counts": HostileTuple((("new", 1),)),
+            "included_labels_complete_by_regime": (),
+            "digest": "sha256:" + "4" * 64,
+        }
+        for name, value in values.items():
+            object.__setattr__(forged, name, value)
+
+        with self.assertRaisesRegex(TypeError, "exact inert manifest values"):
+            evaluate_population_bound_retention(
+                {
+                    "old": metric("old", "0.10", "0.10"),
+                    "new": metric("new", "0.05", "0.20"),
+                },
+                policy(),
+                forged,
+            )
+        self.assertEqual(calls, [])
+
+
+    def test_metric_class_descriptor_drift_fails_before_descriptor_execution(self):
+        calls = []
+        metrics = {
+            "old": metric("old", "0.10", "0.10"),
+            "new": metric("new", "0.05", "0.20"),
+        }
+
+        def hostile_get(_self):
+            calls.append("get")
+            raise AssertionError("hostile metric descriptor executed")
+
+        self.assertNotIn("candidate_net_score", RegimeMetric.__dict__)
+        setattr(RegimeMetric, "candidate_net_score", property(hostile_get))
+        try:
+            with self.assertRaisesRegex(TypeError, "class field descriptors changed"):
+                evaluate_retention(metrics, policy())
+        finally:
+            delattr(RegimeMetric, "candidate_net_score")
+        self.assertEqual(calls, [])
 
 if __name__ == "__main__":
     unittest.main()

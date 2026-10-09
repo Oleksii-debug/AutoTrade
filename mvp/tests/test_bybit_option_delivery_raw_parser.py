@@ -135,12 +135,12 @@ def observation(
     query=None,
     include_time_window=True,
 ):
+    # Keep the missing-time-window negative case genuinely unbounded.
+    # When requested, the ordinary fixture adds the explicit range below.
     effective_query = (
         {
             "category": "option",
             "symbol": "BTC-29DEC22-16000-P",
-            "startTime": str(DELIVERY_TIME_MS - 1000),
-            "endTime": str(DELIVERY_TIME_MS + 1000),
         }
         if query is None
         else dict(query)

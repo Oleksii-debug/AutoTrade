@@ -1,0 +1,62 @@
+name: Plan 6 Section 5 offline provider qualification harness
+
+on:
+  pull_request:
+    paths:
+      - 'tools/plan6_offline_sections.py'
+      - '.github/workflows/plan6-section5-qualification-harness.yml'
+      - 'mvp/tests/test_provider_qualification_authority.py'
+      - 'mvp/tests/test_provider_qualification_identity.py'
+      - 'mvp/tests/test_provider_qualification_time_ingress.py'
+      - 'mvp/tests/test_capabilities.py'
+      - 'mvp/tests/test_durable_capabilities.py'
+      - 'mvp/tests/test_provider_environment_credential_scope.py'
+      - 'mvp/tests/test_signed_http_request_envelope.py'
+      - 'mvp/tests/test_authenticated_read_http_request.py'
+      - 'mvp/tests/test_dispatch_intent_fence.py'
+      - 'mvp/tests/test_reconciliation_journal.py'
+      - 'mvp/tests/test_provider_route_financial_binding.py'
+      - 'mvp/tests/test_recovery_durable_unknown_restart.py'
+      - 'mvp/tests/test_provider_route_recovery_provenance.py'
+      - 'mvp/tests/test_qualification_attestation_authority_ingress.py'
+      - 'mvp/tests/test_plan6_offline_harness.py'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/plan6_offline_sections.py'
+      - '.github/workflows/plan6-section5-qualification-harness.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  qualification-harness:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    timeout-minutes: 45
+    env:
+      AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Install pinned, non-provider development requirements
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Section 5 - offline provider qualification and negative/restart tests
+        run: python tools/plan6_offline_sections.py --section 5
+      - name: Generate exact-SHA test receipt only following successful qualification
+        run: python tools/write_ci_evidence.py --suite plan6-section5-offline --command "python tools/plan6_offline_sections.py --section 5" --output "artifacts/plan6-section5-${{ runner.os }}.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: plan6-section5-${{ runner.os }}
+          path: artifacts/plan6-section5-${{ runner.os }}.json
+          if-no-files-found: warn

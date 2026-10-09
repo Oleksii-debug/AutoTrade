@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
-from hashlib import sha512
+from hashlib import sha256, sha512
 from io import BytesIO
 import json
 from pathlib import Path, PurePosixPath
@@ -878,8 +878,41 @@ def verify_restored_package_rights(
         expected = _normalized_license_text(root / record["expected_license_text_path"])
         actual = _normalized_license_text(license_path)
         if actual != expected:
+            # The exact source-locked, signature-verified archive and extracted
+            # license are already bound above. Emit bounded, escaped, PUBLIC
+            # license evidence for an auditable rights-policy correction,
+            # rather than weakening comparison or guessing publisher text.
+            expected_lines = expected.splitlines()
+            actual_lines = actual.splitlines()
+            difference_line = next(
+                (
+                    index
+                    for index in range(max(len(expected_lines), len(actual_lines)))
+                    if (
+                        (expected_lines[index] if index < len(expected_lines) else None)
+                        != (actual_lines[index] if index < len(actual_lines) else None)
+                    )
+                ),
+                None,
+            )
+            if difference_line is None:
+                raise ValueError("normalized license mismatch without line difference")
+
+            def bounded_line(lines: list[str]) -> str:
+                if difference_line >= len(lines):
+                    return "<MISSING>"
+                # ascii() escapes control characters and non-ASCII payloads;
+                # the actual public license line is capped at 96 characters.
+                return ascii(lines[difference_line][:96])
+
             raise ValueError(
-                f"restored NuGet package license differs from reviewed text: {artifact['name']}@{artifact['version']}"
+                "restored NuGet package license differs from reviewed text: "
+                f"{artifact['name']}@{artifact['version']}; "
+                f"reviewed_sha256={sha256(expected.encode('utf-8')).hexdigest()}; "
+                f"restored_sha256={sha256(actual.encode('utf-8')).hexdigest()}; "
+                f"first_difference_line={difference_line + 1}; "
+                f"reviewed_line={bounded_line(expected_lines)}; "
+                f"restored_line={bounded_line(actual_lines)}"
             )
         nuspecs = tuple(package_dir.glob("*.nuspec"))
         if len(nuspecs) != 1:

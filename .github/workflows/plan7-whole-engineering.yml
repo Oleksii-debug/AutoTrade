@@ -7,6 +7,7 @@ on:
     paths:
       - "tools/qualify_plan7_engineering.py"
       - "mvp/tests/test_plan7_engineering_qualification.py"
+      - "tools/test_qualify_plan7_engineering.py"
       - "mvp/autotrade_mvp/evidence_class_matrix.py"
       - "mvp/tests/test_evidence_class_matrix.py"
       - "mvp/autotrade_mvp/science_qualification.py"
@@ -22,6 +23,7 @@ on:
     paths:
       - "tools/qualify_plan7_engineering.py"
       - "mvp/tests/test_plan7_engineering_qualification.py"
+      - "tools/test_qualify_plan7_engineering.py"
       - "mvp/autotrade_mvp/evidence_class_matrix.py"
       - "mvp/tests/test_evidence_class_matrix.py"
       - "mvp/autotrade_mvp/science_qualification.py"
@@ -63,14 +65,14 @@ jobs:
       - name: Lock source inventory and named negative/recovery oracles
         run: python tools/qualify_plan7_engineering.py --check
       - name: Prove failure and non-promotion behavior of orchestration
-        run: python -m unittest -v mvp.tests.test_plan7_engineering_qualification
+        run: python -m unittest -v mvp.tests.test_plan7_engineering_qualification tools.test_qualify_plan7_engineering
       - name: Run all scientific, ablation, trust, economics, matrix and performance harnesses
         run: python tools/qualify_plan7_engineering.py --suite all
       - name: Retain exact-head receipt only after all campaigns actually PASS
         run: >-
           python tools/write_ci_evidence.py
           --suite plan7-whole-engineering
-          --command "python -m unittest -v mvp.tests.test_plan7_engineering_qualification && python tools/qualify_plan7_engineering.py --suite all"
+          --command "python -m unittest -v mvp.tests.test_plan7_engineering_qualification tools.test_qualify_plan7_engineering && python tools/qualify_plan7_engineering.py --suite all"
           --output "artifacts/plan7-whole-${{ runner.os }}.json"
       - uses: actions/upload-artifact@v4
         with:

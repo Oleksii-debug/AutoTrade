@@ -53,6 +53,9 @@ jobs:
           PYTHONPATH: research:.
       - run: npm test
         working-directory: tests/Product
+      - name: Same-source keyboard semantic route/focus/history/host-outage qualification
+        run: node plan5-navigation.cjs
+        working-directory: tests/Product
       - run: python tools/write_ci_evidence.py --suite provider-free-whole-product-browser --command "real host + keyboard + half-fill process crash + restart + backup + restore" --output artifacts/product-browser.json
       - uses: actions/upload-artifact@v4
         with:
@@ -185,3 +188,102 @@ jobs:
           name: plan8-m1-s4-recovery-${{ env.AUTOTRADE_SOURCE_SHA }}
           path: artifacts/m1-s4-recovery.json
           if-no-files-found: error
+
+  m1-s5-source-web-update-load:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Exact frozen source and clean tracked files
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$AUTOTRADE_SOURCE_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - run: python -m pip install --require-hashes -r requirements-dev.txt
+      - name: Real same-origin Host/Web composition plus source accessibility and Desktop parity
+        run: >-
+          python -m unittest
+          mvp.tests.test_plan8_m1_s5_composed_surface
+          mvp.tests.test_plan5_terminal_source_contract
+          mvp.tests.test_semantic_web_client_contract
+          mvp.tests.test_desktop_shell_contract
+          mvp.tests.test_embedded_web
+          mvp.tests.test_accessible_status
+          -v
+        env:
+          PYTHONPATH: research:.
+      - name: Canonical update/rollback, installed fixture and fail-closed security negatives
+        run: >-
+          python -m unittest
+          mvp.tests.test_windows_update
+          mvp.tests.test_windows_update_intent
+          mvp.tests.test_windows_fixture_install_assembly
+          mvp.tests.test_windows_bundle
+          mvp.tests.test_windows_install_manifest
+          mvp.tests.test_runtime_locality_packaging
+          -v
+        env:
+          PYTHONPATH: research:.
+      - name: Reuse Plan 7 source load/budget and event-conservation negative tests
+        run: >-
+          python -m unittest
+          mvp.tests.test_performance_qualification
+          mvp.tests.test_runtime_resource_budget
+          -v
+        env:
+          PYTHONPATH: research:.
+      - name: Reuse durable restart/backlog, slow disk and target-host load evidence tests
+        shell: bash
+        run: |
+          PYTHONPATH=research:. python -m unittest discover -s mvp/tests -p 'test_runtime_load_*.py' -v
+          PYTHONPATH=research:. python -m unittest discover -s mvp/tests -p 'test_runtime_target_host_*.py' -v
+      - name: Evidence only after actual source/update/load execution succeeds
+        run: >-
+          python tools/write_ci_evidence.py
+          --suite plan8-m1-s5-web-desktop-update-load
+          --command "real ZERO Host immutable Web, Desktop source parity, update rollback, fail closed, durable load and target-host fixture suites"
+          --output artifacts/m1-s5-surface-load.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan8-m1-s5-surface-load-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/m1-s5-surface-load.json
+          if-no-files-found: error
+
+  m1-s5-composed-gate:
+    runs-on: ubuntu-22.04
+    needs:
+      - browser-scenario
+      - windows-candidate
+      - m1-recovery-negative-qualification
+      - m1-s5-source-web-update-load
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Refuse mismatched source after same-run successful upstream product gates
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$AUTOTRADE_SOURCE_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Retain NON-RELEASE whole-product engineering gate only after all needed jobs succeed
+        run: >-
+          python tools/write_ci_evidence.py
+          --suite plan8-m1-s5-composed-engineering
+          --command "same source CI run: real Host keyboard browser, Windows installed provider-free candidate, crash/restore, accessibility/update/rollback and load suites"
+          --output artifacts/m1-s5-composed.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan8-m1-s5-composed-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/m1-s5-composed.json
+          if-no-files-found: error
+      - name: Remain explicit about unavailable external release evidence
+        run: echo 'SOURCE/CI ENGINEERING ONLY; no signed release, physical NVDA, target-host performance, real provider, PAPER/LIVE or profitability asserted'

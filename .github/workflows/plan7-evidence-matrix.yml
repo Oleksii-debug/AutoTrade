@@ -1,0 +1,56 @@
+name: Plan 7 evidence-class matrix contract
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "mvp/autotrade_mvp/evidence_class_matrix.py"
+      - "mvp/tests/test_evidence_class_matrix.py"
+      - ".github/workflows/plan7-evidence-matrix.yml"
+  pull_request:
+    paths:
+      - "mvp/autotrade_mvp/evidence_class_matrix.py"
+      - "mvp/tests/test_evidence_class_matrix.py"
+      - ".github/workflows/plan7-evidence-matrix.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    env:
+      AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Prove exact source and clean tracked checkout
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$AUTOTRADE_SOURCE_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Class isolation, stale source, forged PASS and restart negatives
+        run: python -m unittest -v mvp.tests.test_evidence_class_matrix
+      - name: Exact SHA receipt only after gate succeeds
+        run: >-
+          python tools/write_ci_evidence.py
+          --suite plan7-evidence-class-matrix
+          --command "python -m unittest -v mvp.tests.test_evidence_class_matrix"
+          --output "artifacts/plan7-evidence-matrix-${{ runner.os }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan7-evidence-matrix-${{ runner.os }}
+          path: artifacts/plan7-evidence-matrix-${{ runner.os }}.json
+          if-no-files-found: error
+
+# Mapping/reference presence is diagnostic, not authenticated Plan-9 release proof.

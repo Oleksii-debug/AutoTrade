@@ -13,9 +13,10 @@ import re
 import subprocess
 import sys
 
-from tools.plan6_offline_sections import SECTION_MODULES
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from tools.plan6_offline_sections import SECTION_MODULES
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _SECTIONS = (1, 2, 3, 4, 5)
 _EXTERNAL_PENDING = "EXTERNAL_ACTIVATION_PENDING"

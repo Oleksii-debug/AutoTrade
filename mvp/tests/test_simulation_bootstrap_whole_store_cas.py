@@ -219,6 +219,7 @@ class SimulationBootstrapWholeStoreCasTests(unittest.TestCase):
                         now=NOW,
                     )
 
+            self.assertTrue(injected, "negative must execute the foreign-writer race")
             store = self._store(directory)
             self.assertEqual(
                 [
@@ -278,6 +279,7 @@ class SimulationBootstrapWholeStoreCasTests(unittest.TestCase):
                         now=NOW,
                     )
 
+            self.assertTrue(injected, "negative must execute the foreign-writer race")
             store = self._store(directory)
             self.assertEqual(
                 [

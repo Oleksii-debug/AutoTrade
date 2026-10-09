@@ -18,6 +18,7 @@ import shutil
 import sqlite3
 import tempfile
 from typing import Any, Sequence
+from uuid import UUID
 
 from .diagnostics import build_diagnostic_snapshot
 from .persistence import JournalStore, payload_digest
@@ -1193,6 +1194,17 @@ def _expected_kind(path: str) -> str:
         and parts[3] == parts[4][:-5][:2]
     ):
         return "artifact-manifest"
+    if (
+        len(parts) == 3
+        and parts[:2] == ("artifacts", "manifests")
+        and parts[2].endswith(".json")
+    ):
+        try:
+            artifact_id = parts[2][:-5]
+            if str(UUID(artifact_id)) == artifact_id:
+                return "artifact-manifest-v1"
+        except (ValueError, AttributeError):
+            pass
     raise BackupIntegrityError(f"Backup payload path is outside the canonical inventory: {path}")
 
 
@@ -1341,6 +1353,11 @@ def _artifact_source_files(root: Path) -> list[tuple[Path, str]]:
         for path in sorted(manifests_root.rglob("*.json")):
             if path.is_file():
                 files.append((path, "artifact-manifest"))
+    # The current signed ArtifactStore stores ID-addressed manifests directly
+    # beneath manifests/, not beneath the older SHA-addressed manifest tree.
+    for path in sorted((root / "manifests").glob("*.json")):
+        if path.is_file() or path.is_symlink():
+            files.append((path, "artifact-manifest-v1"))
     return files
 
 
@@ -1429,6 +1446,51 @@ def _assert_mutable_sources_unchanged(
             ) from error
 
 
+def _verify_v1_artifact_manifest(
+    root: Path,
+    path: Path,
+    *,
+    present_paths: set[str] | None = None,
+) -> None:
+    """Require real hash-bound UUID evidence and matching content-addressed bytes.
+
+    An outer backup SHA alone authenticates copied bytes, not the rights or
+    settlement claims embedded in their artifact metadata. Reuse the canonical
+    ArtifactStore v1 contract and integrity digest before admitting the source.
+    """
+    from autotrade_runtime.artifacts.store import (
+        ArtifactStore, _verify_manifest_integrity,
+    )
+
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise BackupIntegrityError("Artifact v1 manifest is not a regular file")
+        from autotrade_runtime.artifacts.store import strict_json_loads
+        payload = strict_json_loads(path.read_text(encoding="utf-8"))
+        if type(payload) is not dict:
+            raise ValueError("Artifact v1 manifest is not a JSON object")
+        _verify_manifest_integrity(payload, required=True)
+        ArtifactStore._validate_manifest_contract(payload, authenticated=True)
+        if path.name != payload["artifact_id"] + ".json":
+            raise ValueError("Artifact v1 manifest filename mismatches its identity")
+        digest = payload["sha256"][7:]
+        object_relative = f"artifacts/objects/sha256/{digest[:2]}/{digest}"
+        if present_paths is not None and object_relative not in present_paths:
+            raise ValueError("Artifact v1 manifest has no backed-up object")
+        object_path = root / "objects" / "sha256" / digest[:2] / digest
+        if (
+            object_path.is_symlink()
+            or not object_path.is_file()
+            or _sha256_file(object_path) != digest
+            or object_path.stat().st_size != payload["bytes"]
+        ):
+            raise ValueError("Artifact v1 manifest references a missing or changed object")
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError) as error:
+        raise BackupIntegrityError(
+            "Artifact v1 manifest fails exact rights, integrity or object verification"
+        ) from error
+
+
 def _validate_artifact_source(root: Path) -> None:
     _require_safe_artifact_source_dirs(root)
     manifests_root = root / "manifests" / "sha256"
@@ -1445,6 +1507,8 @@ def _validate_artifact_source(root: Path) -> None:
                 or _sha256_file(path) != digest
             ):
                 raise BackupIntegrityError("Artifact object is not content-addressed correctly")
+    for path in (root / "manifests").glob("*.json"):
+        _verify_v1_artifact_manifest(root, path)
     if manifests_root.exists():
         for path in manifests_root.rglob("*.json"):
             try:
@@ -1931,6 +1995,13 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
         for item in entries
         if item["kind"] == "artifact-manifest"
     ]
+    for item in entries:
+        if item["kind"] == "artifact-manifest-v1":
+            _verify_v1_artifact_manifest(
+                root / "artifacts",
+                root / _safe_relative_path(item["path"]),
+                present_paths=expected_paths,
+            )
     for path in artifact_manifests:
         try:
             artifact_manifest = json.loads(path.read_text(encoding="utf-8"))

@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.capabilities import (
 )
 from mvp.autotrade_mvp.provider_core import (
     AuthenticatedReadQueryBinding,
+    ProviderCoreError,
     Surface,
     prepare_authenticated_read_query,
 )
@@ -35,7 +36,7 @@ class _StringSubclass(str):
 
 
 
-def option_delivery_capability():
+def option_delivery_capability(*, permission_scopes=("ACCOUNT.READ",)):
     observed = NOW - timedelta(minutes=2)
     expires = NOW + timedelta(minutes=10)
     claims = tuple(
@@ -51,7 +52,7 @@ def option_delivery_capability():
             expires_at=expires,
             supported_order_types=frozenset({"LIMIT"}),
             time_in_force=frozenset({"GTC"}),
-            permission_scopes=frozenset({"ACCOUNT.READ"}),
+            permission_scopes=frozenset(permission_scopes),
             position_mode="NET",
             native_protection=frozenset(),
             rate_limit_policy_id="bybit-option-delivery-test-v1",
@@ -79,7 +80,11 @@ def delivery_binding(
     permission_scope="ACCOUNT.READ",
 ):
     return prepare_authenticated_read_query(
-        capability=option_delivery_capability(),
+        # Admit this fixture's requested permission so signer-policy negatives
+        # reach the endpoint policy, instead of stopping at a prior Q fence.
+        capability=option_delivery_capability(
+            permission_scopes=("ACCOUNT.READ", permission_scope),
+        ),
         surface=surface,
         endpoint=ENDPOINT,
         query=query,
@@ -122,8 +127,8 @@ class BybitOptionDeliveryReadPolicyTests(unittest.TestCase):
             object.__setattr__(forged, field, getattr(prepared, field))
 
         with self.assertRaisesRegex(
-            ProviderTransportScopeError,
-            "construction authority is unavailable",
+            ProviderCoreError,
+            "authenticated-read construction authority is unavailable",
         ):
             BybitV5AuthenticatedReadSigner.sign(
                 policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
@@ -169,11 +174,19 @@ class BybitOptionDeliveryReadPolicyTests(unittest.TestCase):
             ({"symbol": "BTC-29DEC22-16000-P"}, "requires category=option"),
             ({"category": "linear"}, "requires category=option"),
             ({"category": "OPTION"}, "requires category=option"),
-            ({"category": _StringSubclass("option")}, "requires category=option"),
+            (
+                {"category": _StringSubclass("option")},
+                "authenticated-read query values must be canonical strings",
+            ),
         )
         for query, message in cases:
             with self.subTest(query=query):
-                with self.assertRaisesRegex(ProviderTransportScopeError, message):
+                error_type = (
+                    ProviderCoreError
+                    if type(query.get("category")) is _StringSubclass
+                    else ProviderTransportScopeError
+                )
+                with self.assertRaisesRegex(error_type, message):
                     sign(query)
 
     def test_unknown_query_fields_fail_closed(self):
@@ -279,10 +292,14 @@ class BybitOptionDeliveryReadPolicyTests(unittest.TestCase):
             "%",
         ):
             with self.subTest(cursor=repr(cursor)):
-                with self.assertRaisesRegex(
-                    ProviderTransportScopeError,
-                    "cursor must be canonical opaque percent-encoded text",
-                ):
+                early_reject = cursor != cursor.strip()
+                error_type = ProviderCoreError if early_reject else ProviderTransportScopeError
+                message = (
+                    "authenticated-read query values must be canonical strings"
+                    if early_reject
+                    else "cursor must be canonical opaque percent-encoded text"
+                )
+                with self.assertRaisesRegex(error_type, message):
                     sign({"category": "option", "cursor": cursor})
 
     def test_delivery_endpoint_requires_activity_surface_and_account_read_permission(self):

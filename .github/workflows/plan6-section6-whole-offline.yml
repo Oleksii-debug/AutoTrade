@@ -1,0 +1,53 @@
+name: Plan 6 Section 6 exact-source whole offline qualification
+
+on:
+  pull_request:
+    paths:
+      - 'tools/qualify_plan6_whole_offline.py'
+      - 'mvp/tests/test_plan6_whole_offline.py'
+      - 'tools/plan6_offline_sections.py'
+      - '.github/workflows/plan6-section6-whole-offline.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/qualify_plan6_whole_offline.py'
+      - 'mvp/tests/test_plan6_whole_offline.py'
+      - 'tools/plan6_offline_sections.py'
+      - '.github/workflows/plan6-section6-whole-offline.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  whole-provider-offline:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    timeout-minutes: 90
+    env:
+      AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Install pinned test dependencies (no real provider SDK/account/credentials)
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Reject forged/stale/failed receipts, check recovery and atomic publication
+        run: python -m unittest mvp.tests.test_plan6_whole_offline -v
+      - name: Whole Plan 6 existing Sections 1-5, no network, no credentials, no real money
+        run: python tools/qualify_plan6_whole_offline.py --output "artifacts/plan6-whole-${{ runner.os }}.json"
+      - name: Bind PASS-only non-secret whole qualification to exact source SHA
+        run: python tools/write_ci_evidence.py --suite plan6-whole-offline --command "python tools/qualify_plan6_whole_offline.py --output artifacts/plan6-whole-${{ runner.os }}.json" --output "artifacts/plan6-whole-ci-${{ runner.os }}.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: plan6-whole-${{ runner.os }}
+          path: artifacts/plan6-whole*-${{ runner.os }}.json
+          if-no-files-found: warn

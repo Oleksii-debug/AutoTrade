@@ -1,0 +1,61 @@
+name: Plan 7 independent ablation component qualification
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "tests/Science/test_ablation_component_qualification.py"
+      - "research/autotrade_research/evaluation/ablation.py"
+      - "research/tests/test_ablation*.py"
+      - "mvp/autotrade_mvp/science_qualification.py"
+      - ".github/workflows/plan7-ablation-component.yml"
+  push:
+    branches: [main]
+    paths:
+      - "tests/Science/test_ablation_component_qualification.py"
+      - "research/autotrade_research/evaluation/ablation.py"
+      - "research/tests/test_ablation*.py"
+      - "mvp/autotrade_mvp/science_qualification.py"
+      - ".github/workflows/plan7-ablation-component.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONPATH: research
+      AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Reject checkout identity drift and dirty tracked source
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$AUTOTRADE_SOURCE_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Reuse Plan 2 matched-causal exact-rational engine tests
+        run: python -m unittest -v research.tests.test_ablation research.tests.test_ablation_exact_rational
+      - name: Verify Plan 7 independent consumer and science negative gates
+        run: python -m unittest discover -s tests/Science -p "test_*.py" -v
+      - name: Record exact-source test receipt only after both test steps succeeded
+        run: >-
+          python tools/write_ci_evidence.py
+          --suite plan7-ablation-component
+          --command "python -m unittest -v research.tests.test_ablation research.tests.test_ablation_exact_rational && python -m unittest discover -s tests/Science -p test_*.py -v"
+          --output "artifacts/plan7-ablation-${{ runner.os }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan7-ablation-evidence-${{ runner.os }}
+          path: artifacts/plan7-ablation-${{ runner.os }}.json
+          if-no-files-found: error

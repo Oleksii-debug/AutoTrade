@@ -105,7 +105,18 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
             self.assertEqual(first.start_journal_sequence, 1)
             self.assertEqual(first.end_journal_sequence, 4)
             self.assertEqual(first.recovered_financial_event_ids, ("fin-1", "fin-2"))
-            self.assertEqual(evaluate_runtime_campaign(spec, first).status, "PASS")
+            # This legacy campaign records numeric latency/staleness series
+            # without their one-to-one event identity bindings. The current
+            # fail-closed evaluator must not promote such anonymous samples to
+            # a terminal PASS even when journal event counts are conserved.
+            decision = evaluate_runtime_campaign(spec, first)
+            self.assertEqual(decision.status, "INCONCLUSIVE")
+            self.assertIn(
+                "incomplete_recovered_financial_event_identity",
+                decision.reasons,
+            )
+            self.assertIn("unbound_financial_latency_samples", decision.reasons)
+            self.assertIn("unbound_financial_staleness_samples", decision.reasons)
 
             reopened = JournalStore(path)
             second = collect_runtime_campaign_evidence(journal=reopened, **kwargs)

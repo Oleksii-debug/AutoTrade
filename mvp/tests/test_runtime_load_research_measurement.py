@@ -498,9 +498,17 @@ class RuntimeLoadResearchMeasurementTests(unittest.TestCase):
                 )
             )
             self.assertEqual(decision.status, "INCONCLUSIVE")
+            # Actual monotonic samples and committed journal events are
+            # preserved, but this helper has no measured throughput window or
+            # staleness-to-event bindings. These specific omissions must keep
+            # source-only provider-free qualification INCONCLUSIVE.
             self.assertEqual(
                 decision.reasons,
-                ("unverified_runtime_measurement_provenance",),
+                (
+                    "missing_throughput_measurement",
+                    "unbound_financial_staleness_samples",
+                    "incomplete_financial_staleness_coverage",
+                ),
             )
             self.assertEqual(
                 tuple(value.latency_us for value in financial_samples),

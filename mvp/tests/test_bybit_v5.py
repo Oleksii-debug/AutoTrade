@@ -856,9 +856,12 @@ class BybitV5AdapterTests(unittest.TestCase):
             submission_scope=partial_scope,
             submission_scope_hash=payload_digest(partial_scope),
         )
+        # A replaced binding has no journal issuer identity, even if its
+        # recomputed scope digest looks consistent. Reject at the earlier
+        # canonical authority fence, before downstream scope validation.
         with self.assertRaisesRegex(
-            ProviderCoreError,
-            "financial route submission scope is incomplete",
+            ValueError,
+            "submission response binding authority is unavailable",
         ):
             observe_submission_json_response(
                 response_binding=rebound,
@@ -883,9 +886,12 @@ class BybitV5AdapterTests(unittest.TestCase):
             submission_scope=expanded_scope,
             submission_scope_hash=payload_digest(expanded_scope),
         )
+        # A replaced binding has no journal issuer identity, even if its
+        # recomputed scope digest looks consistent. Reject at the earlier
+        # canonical authority fence, before downstream scope validation.
         with self.assertRaisesRegex(
-            ProviderCoreError,
-            "unknown authority axes",
+            ValueError,
+            "submission response binding authority is unavailable",
         ):
             observe_submission_json_response(
                 response_binding=rebound,
@@ -1608,7 +1614,8 @@ class BybitV5AdapterTests(unittest.TestCase):
                     observation=None,
                     transport_ambiguous=True,
                 )
-        rebound.assert_not_called()
+        # patch.object(..., forged) returns the exact function, not a Mock.
+        # The closed-over callback ledger proves the hostile function was not run.
         self.assertEqual(callbacks, [])
 
     def test_transport_ambiguity_requires_boolean_flag(self):
@@ -1767,11 +1774,13 @@ class BybitV5AdapterTests(unittest.TestCase):
         def forged_uuid5(_namespace, _name):
             raise AssertionError("mutated uuid5 code executed")
 
-        with patch.object(
-            bybit_v5_module.uuid5,
-            "__code__",
-            forged_uuid5.__code__,
-        ):
+        # unittest.mock.patch.object tries delattr on function.__code__ after
+        # a successful patch (the descriptor is not owned by __dict__).
+        # That raises TypeError and leaves a process-wide poisoned uuid5.
+        # Restore the exact original code unconditionally.
+        original_code = bybit_v5_module.uuid5.__code__
+        try:
+            bybit_v5_module.uuid5.__code__ = forged_uuid5.__code__
             with self.assertRaisesRegex(
                 ProviderCoreError,
                 "submission response parser authority changed",
@@ -1781,6 +1790,8 @@ class BybitV5AdapterTests(unittest.TestCase):
                     prepared_request=prepared,
                     observation=observation,
                 )
+        finally:
+            bybit_v5_module.uuid5.__code__ = original_code
 
     def test_submission_consumer_rejects_subclass_before_virtual_callback(self):
         attempt, prepared, _observation = self._durable_write_observation(
@@ -2387,7 +2398,51 @@ class BybitV5AdapterTests(unittest.TestCase):
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )
         self.assertEqual((fills[0].account_id, fills[0].environment), ("account-a", "PAPER"))
+        self.assertEqual(fills[0].provider_environment, "TESTNET")
+        self.assertEqual(observation.query_binding.provider_environment, "TESTNET")
         self.assertEqual(observation.query_binding.account_id, "account-a")
+
+    def test_execution_provider_environment_is_sealed_and_nonforgeable(self):
+        row = {
+            "execId": "env-guard-fill", "orderLinkId": "",
+            "symbol": "BTCUSDT", "side": "Buy", "execQty": "1",
+            "execPrice": "10", "execFee": "0",
+            "feeCurrency": "USDT", "execTime": "1790280000000",
+        }
+        for runtime_environment, provider_environment in (
+            ("PAPER", "TESTNET"),
+            ("LIVE", "MAINNET"),
+        ):
+            with self.subTest(runtime_environment=runtime_environment):
+                observation = bound_execution_response(
+                    {"retCode": 0, "result": {"list": [row]}},
+                    environment=runtime_environment,
+                )
+                fill = parse_executions(
+                    observation,
+                    instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                )[0]
+                self.assertEqual(fill.environment, runtime_environment)
+                self.assertEqual(fill.provider_environment, provider_environment)
+                binding = observation.query_binding
+                try:
+                    # A forged post-read retarget must be rejected before any
+                    # financial fill can be projected.
+                    object.__setattr__(
+                        binding, "provider_environment",
+                        "MAINNET" if provider_environment == "TESTNET" else "TESTNET",
+                    )
+                    with self.assertRaisesRegex(
+                        ProviderCoreError, "binding changed after preparation"
+                    ):
+                        parse_executions(
+                            observation,
+                            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                        )
+                finally:
+                    object.__setattr__(
+                        binding, "provider_environment", provider_environment
+                    )
 
     def test_execution_rejects_noncanonical_present_fee_currency(self):
         base = {
@@ -2706,7 +2761,9 @@ class BybitV5AdapterTests(unittest.TestCase):
             consistency_horizon_satisfied=True,
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
+        self.assertEqual(evidence.provider_environment, "TESTNET")
         self.assertFalse(evidence.provider_semantics_exclude_execution)
         self.assertFalse(
             evidence.proves_absence_for(
@@ -2727,6 +2784,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 qualified_exclusion_semantics=True,
                 account_id="paper-1",
                 environment="PAPER",
+                provider_environment="TESTNET",
             )
 
 

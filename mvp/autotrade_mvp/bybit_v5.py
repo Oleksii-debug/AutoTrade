@@ -1485,6 +1485,9 @@ def parse_executions(
     account_id = projection["account_id"]
     entity_id = projection["entity_id"]
     environment = projection["environment"]
+    # This provider identity is sealed at authenticated-read preparation;
+    # PAPER alone cannot distinguish Bybit TESTNET from DEMO.
+    provider_environment = projection["provider_environment"]
     capability_snapshot_id = projection["capability_snapshot_id"]
     admitted_instrument_version = projection["instrument_version"]
     observation_evidence_ref = projection["evidence_ref"]
@@ -1715,7 +1718,11 @@ def parse_executions(
                     category=query_category,
                     instrument_version=instrument,
                     provider_symbol=symbol,
-                    trade_time=trade_time,
+                    # This consumer requires an exact aware datetime; the
+                    # canonical fill/journal still uses the original UTC text.
+                    trade_time=datetime.fromisoformat(
+                        trade_time.replace("Z", "+00:00")
+                    ),
                 )
             except BybitFeeCurrencyAuthorityError as error:
                 raise ProviderCoreError(str(error)) from error
@@ -1750,6 +1757,7 @@ def parse_executions(
             provider_id="BYBIT",
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=instrument,
@@ -2351,6 +2359,7 @@ def coverage_evidence(
     pagination_complete: bool,
     consistency_horizon_satisfied: bool,
     qualified_exclusion_semantics: bool = False,
+    provider_environment: str | None = None,
 ) -> CoverageSurfaceEvidence:
     """Create diagnostic Bybit coverage without minting absence authority.
 
@@ -2385,6 +2394,7 @@ def coverage_evidence(
         provider_id="BYBIT",
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         surface=normalized,
         coverage_start=coverage_start,
         coverage_end=coverage_end,

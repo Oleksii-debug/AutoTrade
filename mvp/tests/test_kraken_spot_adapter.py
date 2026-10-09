@@ -51,6 +51,7 @@ from mvp.autotrade_mvp.kraken_spot import (
     verify_kraken_spot_v2_book_checksum,
 )
 
+from mvp.tests.capability_test_support import fresh_test_admission
 
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
@@ -157,12 +158,12 @@ def capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
+    return fresh_test_admission(derive_capability_snapshot(
         snapshot_id=str(uuid4()),
         claims=claims,
         observed_at=observed_at,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-    )
+    ))
 
 
 class KrakenSpotAdapterTests(unittest.TestCase):
@@ -762,7 +763,8 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                     source_uri="https://api.kraken.com/0/private/AddOrder",
                     observation=observation,
                 )
-        rebound.assert_not_called()
+        # A patched plain function has no Mock assertions. Its callback
+        # ledger is the exact no-invocation oracle.
         self.assertEqual(callbacks, [])
 
     def test_submission_consumer_rejects_rebound_response_helpers_without_callback(self):

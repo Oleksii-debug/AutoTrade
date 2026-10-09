@@ -652,6 +652,11 @@ class BybitFeeCurrencyAuthorityTests(unittest.TestCase):
         version_one = linear_instrument()
         version_two = replace(
             version_one,
+            # The canonical first version freezes this JSON metadata into a
+            # MappingProxyType. dataclasses.replace re-runs __post_init__,
+            # which deliberately admits only an exact built-in dict here.
+            # Reconstruct fixture input; never relax instrument authority.
+            funding_schedule=dict(version_one.funding_schedule),
             version=2,
             effective_from=datetime(2026, 10, 3, tzinfo=timezone.utc),
             metadata_evidence=(

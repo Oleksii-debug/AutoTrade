@@ -16,7 +16,7 @@ from mvp.autotrade_mvp.capabilities import (
     EvidenceVerification,
     derive_capability_snapshot,
 )
-from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
+from mvp.autotrade_mvp.instruments import DeliverableLeg, InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
     Surface,
@@ -24,6 +24,7 @@ from mvp.autotrade_mvp.provider_core import (
     prepare_authenticated_read_query,
 )
 
+from mvp.tests.capability_test_support import fresh_test_admission
 
 NOW = datetime(2026, 10, 6, 0, 0, tzinfo=timezone.utc)
 ENDPOINT = "/v5/asset/delivery-record"
@@ -73,6 +74,8 @@ def option_registry(
         strike=Decimal("16000"),
         option_right="PUT",
         exercise_style="EUROPEAN",
+        # Synthetic contract metadata, not a provider-backed delivery truth.
+        deliverable=(DeliverableLeg(asset_id="BTC", quantity=Decimal("1")),),
     )
     return InstrumentRegistry(versions=(version,))
 
@@ -115,12 +118,12 @@ def capability():
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
+    return fresh_test_admission(derive_capability_snapshot(
         snapshot_id="99999999-9999-4999-8999-999999999999",
         claims=claims,
         observed_at=NOW - timedelta(minutes=1),
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-    )
+    ))
 
 
 def observation(
@@ -132,12 +135,12 @@ def observation(
     query=None,
     include_time_window=True,
 ):
+    # Keep the missing-time-window negative case genuinely unbounded.
+    # When requested, the ordinary fixture adds the explicit range below.
     effective_query = (
         {
             "category": "option",
             "symbol": "BTC-29DEC22-16000-P",
-            "startTime": str(DELIVERY_TIME_MS - 1000),
-            "endTime": str(DELIVERY_TIME_MS + 1000),
         }
         if query is None
         else dict(query)
@@ -419,7 +422,7 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
                         "symbol": "BTC-29DEC22-16000-C",
                     }
                 },
-                "violates bound instrument symbol",
+                "symbol does not match canonical instrument_version",
             ),
         )
         for kwargs, message in cases:

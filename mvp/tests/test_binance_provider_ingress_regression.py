@@ -568,7 +568,7 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
                 callbacks.append(("lt", other))
                 raise AssertionError("hostile integer comparison executed")
 
-        with self.assertRaisesRegex(BinanceUsdmAdapterError, "non-negative integer"):
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "order ACK response must contain only exact decoded JSON values"):
             parse_usdm_order_ack(
                 attempt_id=str(uuid4()),
                 client_order_id="usdm-client-8",

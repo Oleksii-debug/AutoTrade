@@ -25,6 +25,7 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 
+from mvp.tests.capability_test_support import fresh_test_admission
 
 NOW = datetime(2026, 9, 25, 0, tzinfo=timezone.utc)
 
@@ -114,12 +115,12 @@ def capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
+    return fresh_test_admission(derive_capability_snapshot(
         snapshot_id=str(uuid4()),
         claims=claims,
         observed_at=observed_at,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-    )
+    ))
 
 
 class BinanceUsdmFoundationTests(unittest.TestCase):
@@ -446,7 +447,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
         }
         observation = execution_observation([row])
 
-        with self.assertRaisesRegex(BinanceUsdmAdapterError, "must be a mapping"):
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "must be an exact dict"):
             parse_account_trades(
                 observation,
                 instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
@@ -744,7 +745,7 @@ class BinanceUsdmTemporalIngressTests(unittest.TestCase):
                 raise AssertionError("hostile timestamp callback executed")
 
         with self.assertRaisesRegex(
-            BinanceUsdmAdapterError, "integer millisecond timestamp"
+            BinanceUsdmAdapterError, "order ACK response must contain only exact decoded JSON values"
         ):
             parse_order_ack(
                 attempt_id=str(uuid4()),

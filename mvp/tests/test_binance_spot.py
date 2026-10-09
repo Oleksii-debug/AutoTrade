@@ -47,6 +47,7 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 
+from mvp.tests.capability_test_support import fresh_test_admission
 
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 DEPTH_EVIDENCE = {
@@ -182,12 +183,12 @@ def capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
+    return fresh_test_admission(derive_capability_snapshot(
         snapshot_id=str(uuid4()),
         claims=claims,
         observed_at=observed_at,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-    )
+    ))
 
 
 def symbol_rules(
@@ -1911,7 +1912,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         }
         observation = execution_observation([row])
 
-        with self.assertRaisesRegex(BinanceSpotAdapterError, "must be a mapping"):
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "must be an exact dict"):
             parse_account_trades(
                 observation,
                 instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
@@ -2006,6 +2007,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         provider_fill = parse_account_trades(
             execution_observation([row]),
             instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+            client_ids_by_order_id={44: "spot-client-9"},
         )[0]
         self.assertIsNone(provider_fill.position_side)
         projected = ProjectedFillEvidence.create(

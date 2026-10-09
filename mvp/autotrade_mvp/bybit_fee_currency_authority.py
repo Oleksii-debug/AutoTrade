@@ -289,6 +289,14 @@ def _qualification_semantics(
         raise BybitFeeCurrencyAuthorityError(
             "provider qualification scope is non-canonical"
         )
+    # Identity.content_digest serializes identity.provider_scope.  Validate its
+    # exact source type before evaluating that computed property: a mutated Q
+    # must never be able to invoke an attacker-supplied .payload() callback.
+    identity_provider_scope = object.__getattribute__(identity, "provider_scope")
+    if type(identity_provider_scope) is not ProviderFinancialScope:
+        raise BybitFeeCurrencyAuthorityError(
+            "provider qualification financial scope is non-canonical"
+        )
     provider_scope = object.__getattribute__(scope, "provider_scope")
     if type(provider_scope) is not ProviderFinancialScope:
         raise BybitFeeCurrencyAuthorityError(

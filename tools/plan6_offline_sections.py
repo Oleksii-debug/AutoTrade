@@ -64,6 +64,26 @@ SECTION_MODULES = {
         "mvp.tests.test_reconciliation_negative_resolution_authority",
         "mvp.tests.test_recovery_durable_unknown_restart",
     ),
+    3: (
+        "mvp.tests.test_plan6_family_contracts",
+        "mvp.tests.test_bybit_v5",
+        "mvp.tests.test_bybit_position_margin",
+        "mvp.tests.test_bybit_fee_currency_authority",
+        "mvp.tests.test_bybit_option_delivery_raw_parser",
+        "mvp.tests.test_bybit_option_delivery_read_policy",
+        "mvp.tests.test_kraken_spot_adapter",
+        "mvp.tests.test_kraken_futures",
+        "mvp.tests.test_kraken_spot_stream",
+        "mvp.tests.test_whitebit_adapter",
+        "mvp.tests.test_binance_spot",
+        "mvp.tests.test_binance_usdm",
+        "mvp.tests.test_binance_provider_ingress_regression",
+        "mvp.tests.test_ibkr_web_adapter",
+        "mvp.tests.test_ibkr_provider_response_ingress",
+        "mvp.tests.test_alpaca_adapter",
+        "mvp.tests.test_alpaca_options",
+        "mvp.tests.test_provider_selection",
+    ),
 }
 
 

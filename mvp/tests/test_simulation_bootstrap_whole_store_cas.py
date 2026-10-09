@@ -186,15 +186,12 @@ class SimulationBootstrapWholeStoreCasTests(unittest.TestCase):
 
     def test_foreign_projection_before_started_blocks_session_start(self):
         episode_id = "cas-before-started"
-        real_append = JournalStore.append_event
+        real_event = simulation_session._event
         injected = False
 
-        def race_append(store, envelope, **kwargs):
+        def race_event(store, kind, episode_id, payload, now, *, expected_cut=None):
             nonlocal injected
-            if (
-                not injected
-                and envelope.get("event_type") == "SimulationSessionStarted"
-            ):
+            if not injected and kind == "SimulationSessionStarted":
                 injected = True
                 store.save_projection_checkpoint(
                     projection_name="foreign-bootstrap-projection",
@@ -203,14 +200,14 @@ class SimulationBootstrapWholeStoreCasTests(unittest.TestCase):
                     aggregate_version=1,
                     state={"foreign": True},
                 )
-            return real_append(store, envelope, **kwargs)
+            return real_event(
+                store, kind, episode_id, payload, now, expected_cut=expected_cut,
+            )
 
         with TemporaryDirectory() as directory:
-            with patch.object(
-                JournalStore,
-                "append_event",
-                new=race_append,
-            ):
+            # Inject at the caller boundary; never replace the canonical
+            # reconciliation-protected JournalStore.append_event authority.
+            with patch.object(simulation_session, "_event", new=race_event):
                 with self.assertRaisesRegex(
                     ValueError,
                     "whole-store state changed after bootstrap validation",
@@ -222,6 +219,7 @@ class SimulationBootstrapWholeStoreCasTests(unittest.TestCase):
                         now=NOW,
                     )
 
+            self.assertTrue(injected, "negative must execute the foreign-writer race")
             store = self._store(directory)
             self.assertEqual(
                 [
@@ -254,25 +252,22 @@ class SimulationBootstrapWholeStoreCasTests(unittest.TestCase):
 
     def test_foreign_command_before_hold_completed_blocks_terminal_append(self):
         episode_id = "cas-before-hold-completed"
-        real_append = JournalStore.append_event
+        real_event = simulation_session._event
         injected = False
 
-        def race_append(store, envelope, **kwargs):
+        def race_event(store, kind, episode_id, payload, now, *, expected_cut=None):
             nonlocal injected
-            if (
-                not injected
-                and envelope.get("event_type") == "SimulationSessionCompleted"
-            ):
+            if not injected and kind == "SimulationSessionCompleted":
                 injected = True
                 _foreign_command(store, "hold-completed")
-            return real_append(store, envelope, **kwargs)
+            return real_event(
+                store, kind, episode_id, payload, now, expected_cut=expected_cut,
+            )
 
         with TemporaryDirectory() as directory:
-            with patch.object(
-                JournalStore,
-                "append_event",
-                new=race_append,
-            ):
+            # Preserve the reconciliation trust root while racing the
+            # canonical episode publisher at its existing call boundary.
+            with patch.object(simulation_session, "_event", new=race_event):
                 with self.assertRaisesRegex(
                     ValueError,
                     "whole-store state changed after bootstrap validation",
@@ -284,6 +279,7 @@ class SimulationBootstrapWholeStoreCasTests(unittest.TestCase):
                         now=NOW,
                     )
 
+            self.assertTrue(injected, "negative must execute the foreign-writer race")
             store = self._store(directory)
             self.assertEqual(
                 [

@@ -449,7 +449,7 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 self.assertEqual(len(research['proposals']), len(protocol['prices']))
                 for episode, proposal in enumerate(research['proposals'], start=1):
                     self.assertEqual(proposal['episode'], episode)
-                    self.assertEqual(proposal['economic_edge_claim'], 'UNPROVEN_SIMULATION_ONLY')
+                    self.assertEqual(proposal['economic_edge_claim'], 'UNPROVEN')
                     self.assertEqual(proposal['model_calls'], 0)
                     # Future observations cannot enter this episode's input.
                     for ref in proposal['input_event_ids']:

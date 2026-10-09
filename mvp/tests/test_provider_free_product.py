@@ -562,8 +562,10 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             self.assertTrue(restore_requires_reconciliation(restored))
 
     def test_product_restore_checkpoint_rebind_failure_retries_exact_backup(self):
-        # The restored checkpoint is path-bound. Failed post-publication signing
-        # must withdraw the destination, never leave a seemingly valid product.
+        # The portable backup quarantines its old checkpoint and never
+        # copies a source-local signing key; there may be no checkpoint to
+        # re-sign. Inject failure at the actual post-publication fsync gate,
+        # after os.replace, and prove the destination is withdrawn.
         with TemporaryDirectory() as directory:
             data = Path(directory) / 'product'
             client = ProductClient(data)
@@ -578,11 +580,17 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             backup = data / 'backups' / backup_id
             verify_backup(backup)
             restored = Path(directory) / 'retryable-rebind-restored'
-            with patch(
-                'mvp.autotrade_mvp.simulation_runtime_checkpoint.persist_autonomous_runtime_checkpoint',
-                side_effect=RuntimeError('injected checkpoint rebind failure'),
-            ):
-                with self.assertRaisesRegex(RuntimeError, 'injected checkpoint rebind failure'):
+            from mvp.autotrade_mvp import backup as backup_module
+            original_sync_tree = backup_module._fsync_directory_tree
+
+            def fail_only_after_publication(path):
+                if Path(path) == restored:
+                    raise OSError('injected post-publication durable sync failure')
+                return original_sync_tree(path)
+
+            with patch.object(backup_module, '_fsync_directory_tree',
+                              new=fail_only_after_publication):
+                with self.assertRaisesRegex(OSError, 'injected post-publication durable sync failure'):
                     restore_product_backup(backup, restored)
             self.assertFalse(restored.exists())
             verify_backup(backup)

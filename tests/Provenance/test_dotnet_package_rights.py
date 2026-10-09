@@ -670,13 +670,60 @@ class DotnetPackageRightsTests(unittest.TestCase):
             )
 
     def test_signed_nuget_archive_keeps_separate_locked_and_physical_hashes(self):
+        from unittest.mock import patch
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            packages = _write_restored_package(root)
+            package = packages / "example.package" / "1.2.3"
+            _signed_fixture_package(package)
+            raw = (package / "example.package.1.2.3.nupkg").read_bytes()
+            calls = []
+
+            def qualified_signature_check(command, **kwargs):
+                self.assertEqual(command[:3], ["dotnet", "nuget", "verify"])
+                self.assertEqual(command[-1], "--all")
+                self.assertNotEqual(Path(command[3]), package)
+                self.assertEqual(Path(command[3]).read_bytes(), raw)
+                self.assertTrue(kwargs["check"])
+                self.assertEqual(kwargs["stdout"], -1)
+                self.assertEqual(kwargs["stderr"], -1)
+                calls.append(command)
+                return None  # Simulated CLI exit only; not a real CMS PASS.
+
+            with patch(
+                "tools.dotnet_package_rights.subprocess.run",
+                side_effect=qualified_signature_check,
+            ):
+                verify_restored_package_rights(
+                    packages, root=root, projects=[project],
+                )
+            self.assertEqual(len(calls), 1)
+
+    def test_signed_nuget_archive_requires_real_signature_cli_success(self):
+        from unittest.mock import patch
+        import subprocess
+
         with TemporaryDirectory() as directory:
             root = Path(directory)
             project = _write_project(root)
             _write_policy(root)
             packages = _write_restored_package(root)
             _signed_fixture_package(packages / "example.package" / "1.2.3")
-            verify_restored_package_rights(packages, root=root, projects=[project])
+            with patch(
+                "tools.dotnet_package_rights.subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, ["dotnet", "nuget", "verify"]),
+            ) as verified:
+                with self.assertRaisesRegex(
+                    ValueError, "signature verification failed"
+                ):
+                    verify_restored_package_rights(
+                        packages, root=root, projects=[project],
+                    )
+            verified.assert_called_once()
+
 
     def test_signed_nuget_archive_rejects_wrong_or_duplicate_content_metadata(self):
         with TemporaryDirectory() as directory:

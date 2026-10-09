@@ -763,7 +763,8 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                     source_uri="https://api.kraken.com/0/private/AddOrder",
                     observation=observation,
                 )
-        rebound.assert_not_called()
+        # A patched plain function has no Mock assertions. Its callback
+        # ledger is the exact no-invocation oracle.
         self.assertEqual(callbacks, [])
 
     def test_submission_consumer_rejects_rebound_response_helpers_without_callback(self):

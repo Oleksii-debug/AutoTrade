@@ -10,6 +10,18 @@ on:
       - "web/**"
       - "src/**"
       - "tools/plan8_m1_freeze_gate.py"
+      - "tools/build_provider_free_candidate.py"
+      - "tools/release_scope_mapping.py"
+      - "tools/dotnet_package_rights.py"
+      - "tools/dotnet_lock.py"
+      - "research/autotrade_research/**"
+      - "autotrade_*/**"
+      - "contracts/**"
+      - "provenance/**"
+      - "packaging/windows/**"
+      - "tests/Provenance/**"
+      - "tests/Product/**"
+      - "tests/Host.Process/**"
       - ".github/workflows/provider-free-product.yml"
   pull_request:
     paths:

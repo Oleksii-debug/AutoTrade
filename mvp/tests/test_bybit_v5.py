@@ -856,9 +856,12 @@ class BybitV5AdapterTests(unittest.TestCase):
             submission_scope=partial_scope,
             submission_scope_hash=payload_digest(partial_scope),
         )
+        # A replaced binding has no journal issuer identity, even if its
+        # recomputed scope digest looks consistent. Reject at the earlier
+        # canonical authority fence, before downstream scope validation.
         with self.assertRaisesRegex(
-            ProviderCoreError,
-            "financial route submission scope is incomplete",
+            ValueError,
+            "submission response binding authority is unavailable",
         ):
             observe_submission_json_response(
                 response_binding=rebound,
@@ -883,9 +886,12 @@ class BybitV5AdapterTests(unittest.TestCase):
             submission_scope=expanded_scope,
             submission_scope_hash=payload_digest(expanded_scope),
         )
+        # A replaced binding has no journal issuer identity, even if its
+        # recomputed scope digest looks consistent. Reject at the earlier
+        # canonical authority fence, before downstream scope validation.
         with self.assertRaisesRegex(
-            ProviderCoreError,
-            "unknown authority axes",
+            ValueError,
+            "submission response binding authority is unavailable",
         ):
             observe_submission_json_response(
                 response_binding=rebound,

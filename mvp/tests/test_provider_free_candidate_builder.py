@@ -524,10 +524,19 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
             metadata.write_text(
                 json.dumps({"version": 2, "contentHash": locked}), encoding="utf-8"
             )
-            observed, digest = verified_locked_nupkg_bytes(
-                path, locked_hash=locked, sidecar_path=sidecar,
-                metadata_path=metadata,
-            )
+            with patch(
+                "tools.dotnet_package_rights.subprocess.run",
+                side_effect=lambda command, **kw: (
+                    self.assertEqual(command[:3], ["dotnet", "nuget", "verify"]),
+                    self.assertEqual(Path(command[3]).read_bytes(), raw.getvalue()),
+                    self.assertTrue(kw["check"]),
+                ),
+            ) as verify_signature:
+                observed, digest = verified_locked_nupkg_bytes(
+                    path, locked_hash=locked, sidecar_path=sidecar,
+                    metadata_path=metadata,
+                )
+            verify_signature.assert_called_once()
             self.assertEqual(observed, raw.getvalue())
             self.assertEqual(digest, actual)
             metadata.write_text(

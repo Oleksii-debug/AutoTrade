@@ -9,6 +9,8 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import shlex
+import subprocess
+from tempfile import TemporaryDirectory
 import zipfile
 import xml.etree.ElementTree as ET
 
@@ -723,6 +725,25 @@ def verified_locked_nupkg_bytes(
                     raise ValueError("signed NuGet archive lacks one signature")
         except (zipfile.BadZipFile, OSError) as error:
             raise ValueError("signed NuGet archive is unreadable") from error
+        # The sidecar and .nupkg.metadata are not signing authorities. A
+        # forged sidecar, metadata and ZIP signature entry must not convert a
+        # mutated archive into a trusted package. Verify exact already-hashed
+        # bytes in a private temporary snapshot, not a mutable caller path.
+        try:
+            with TemporaryDirectory(prefix="autotrade-nuget-signature-") as scratch:
+                snapshot = Path(scratch) / "verified.nupkg"
+                snapshot.write_bytes(payload)
+                subprocess.run(
+                    ["dotnet", "nuget", "verify", str(snapshot), "--all"],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=120,
+                )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ValueError(
+                "signed NuGet package signature verification failed"
+            ) from error
     return payload, raw_hash
 
 

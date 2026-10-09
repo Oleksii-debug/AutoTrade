@@ -25,7 +25,7 @@ class Plan8M1RecoveryContinuation(unittest.TestCase):
                 before = client.state()
                 self.assertEqual(before["portfolio"]["status"]["session_status"], "COMPLETED")
                 self.assertEqual(before["risk"]["real_order_submission"], "UNAVAILABLE")
-                aggregates = ("settlement_book", "risk_decision", "simulation_agent_decision")
+                aggregates = ("settlement_book", "reservation_book", "risk_decision", "simulation_agent_decision")
                 counts = {
                     name: len(client.runtime.journal.load_events_by_aggregate_type(name))
                     for name in aggregates

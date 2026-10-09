@@ -1,6 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
+    <!-- The same source-locked Contracts graph is restored directly on Linux/Windows
+         and transitively under the win-x64 Desktop candidate. NuGet locked mode
+         requires both paths to advertise the same RID matrix. This class
+         library remains net10.0 and introduces no NuGet package dependency. -->
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <AssemblyName>AutoTrade.Contracts</AssemblyName>
     <RootNamespace>AutoTrade.Contracts</RootNamespace>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>

@@ -1,0 +1,60 @@
+name: Plan 6 Section 4 offline provider-financial contracts
+
+on:
+  pull_request:
+    paths:
+      - 'tools/plan6_offline_sections.py'
+      - 'mvp/tests/test_provider_domain_settlement_authority.py'
+      - 'mvp/tests/test_futures_settlement_convention_authority.py'
+      - 'mvp/tests/test_futures_lifecycle_registry_authority.py'
+      - 'mvp/tests/test_bybit_position_margin.py'
+      - 'mvp/tests/test_perpetual_funding_frozen_cut.py'
+      - 'mvp/tests/test_reconciliation_borrow_completion_gate.py'
+      - 'mvp/tests/test_corporate_action_evidence.py'
+      - 'mvp/tests/test_option_lifecycle_registry_authority.py'
+      - 'mvp/tests/test_provider_economic_historical_cut.py'
+      - 'mvp/tests/test_provider_cash_snapshot_replay.py'
+      - 'mvp/tests/test_durable_provider_economic_book_authority.py'
+      - 'mvp/tests/test_provider_activity_accounting.py'
+      - 'mvp/tests/test_alpaca_options.py'
+      - '.github/workflows/plan6-section4-financial-contracts.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/plan6_offline_sections.py'
+      - '.github/workflows/plan6-section4-financial-contracts.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  provider-financial-contracts:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    timeout-minutes: 45
+    env:
+      AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Install pinned development test requirements
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Section 4 provider financial-domain contracts, negative and recovery fixtures
+        run: python tools/plan6_offline_sections.py --section 4
+      - name: Bind non-secret PASS receipt to checked-out exact source SHA
+        run: python tools/write_ci_evidence.py --suite plan6-section4-offline --command "python tools/plan6_offline_sections.py --section 4" --output "artifacts/plan6-section4-${{ runner.os }}.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: plan6-section4-${{ runner.os }}
+          path: artifacts/plan6-section4-${{ runner.os }}.json
+          if-no-files-found: warn

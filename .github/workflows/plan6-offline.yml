@@ -41,10 +41,6 @@ jobs:
         run: python tools/plan6_offline_sections.py --section 3
       - name: Section 3 exact-head non-secret qualification receipt
         run: python tools/write_ci_evidence.py --suite plan6-section3-offline --command "python tools/plan6_offline_sections.py --section 3" --output "artifacts/plan6-section3-${{ runner.os }}.json"
-      - name: Section 4 - financial-domain provider adapter contracts (network denied)
-        run: python tools/plan6_offline_sections.py --section 4
-      - name: Section 4 exact-head non-secret qualification receipt
-        run: python tools/write_ci_evidence.py --suite plan6-section4-offline --command "python tools/plan6_offline_sections.py --section 4" --output "artifacts/plan6-section4-${{ runner.os }}.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

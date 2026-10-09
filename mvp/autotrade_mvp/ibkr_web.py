@@ -1094,7 +1094,7 @@ class IbkrNormalizedOrder:
     documentation_refs: tuple[str, ...]
     provider_serialization_qualified: bool = False
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _decimal_text_value=_decimal_text) -> None:
         if type(self.fields) is not dict:
             raise TypeError("normalized order fields must be an exact dict")
         if type(self.provider_serialization_qualified) is not bool:
@@ -1233,17 +1233,17 @@ class IbkrNormalizedOrder:
         object.__setattr__(
             self,
             "exact_quantity_text",
-            _decimal_text(quantity),
+            _decimal_text_value(quantity),
         )
         object.__setattr__(
             self,
             "exact_limit_price_text",
-            None if limit is None else _decimal_text(limit),
+            None if limit is None else _decimal_text_value(limit),
         )
         object.__setattr__(
             self,
             "exact_stop_price_text",
-            None if stop is None else _decimal_text(stop),
+            None if stop is None else _decimal_text_value(stop),
         )
         object.__setattr__(
             self,

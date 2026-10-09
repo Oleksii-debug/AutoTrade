@@ -82,6 +82,13 @@ class ProductionFoundationPackagingTests(unittest.TestCase):
                 ROOT / "autotrade_numeric",
                 staging / "autotrade_numeric",
             )
+            # The real installed provider-free product ships the exact v6
+            # common scalar binding as contracts/bindings/python/common_scalars.py.
+            # Its canonical persistence module requires that file even with
+            # no Research runtime; exercise that same installed dependency set.
+            binding = Path("contracts/bindings/python/common_scalars.py")
+            (staging / binding).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / binding, staging / binding)
             self.assertFalse((staging / "research").exists())
             self.assertFalse((staging / "autotrade_local_filesystem.py").exists())
 

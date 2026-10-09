@@ -320,12 +320,12 @@ def extract_pinned(archive_path, destination, expected_digest, *, digest_algorit
         if missing_overrides: raise ValueError('archive override path is absent: ' + ','.join(sorted(missing_overrides)))
 
 
-def _build_candidate_sbom(source_sha, inventory, inputs, webview_archive_sha512):
+def _build_candidate_sbom(source_sha, inventory, inputs, webview_content_hash):
     if type(inventory) is not list:
         raise TypeError('candidate inventory must be a list')
     try:
         webview_sha512 = base64.b64decode(
-            webview_archive_sha512,
+            webview_content_hash,
             validate=True,
         ).hex()
     except (ValueError, binascii.Error) as error:
@@ -822,7 +822,7 @@ def build_candidate(*, source_root, source_sha, desktop, host, python_archive, w
         source_sha,
         inventory,
         inputs,
-        webview_physical_hash,
+        webview_content_hash,
     )
     _write_new_payload_json(payload / 'sbom.json', sbom)
     files = _collect(payload)

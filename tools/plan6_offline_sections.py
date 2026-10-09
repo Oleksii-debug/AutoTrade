@@ -101,6 +101,30 @@ SECTION_MODULES = {
         "mvp.tests.test_provider_activity_accounting",
         "mvp.tests.test_alpaca_options",
     ),
+    # Plan-6 Section 5: reuse canonical Q+C issuers, signed-campaign
+    # validators, durable receipts, exact scope, response binding, and
+    # reconciliation/restart suites. Never issue a production provider Q.
+    5: (
+        "mvp.tests.test_plan6_offline_qualification_plane",
+        "mvp.tests.test_plan6_offline_harness",
+        "mvp.tests.test_provider_qualification_identity",
+        "mvp.tests.test_provider_qualification_authority",
+        "mvp.tests.test_provider_qualification_time_ingress",
+        "mvp.tests.test_provider_account_cut",
+        "mvp.tests.test_capabilities",
+        "mvp.tests.test_durable_capabilities",
+        "mvp.tests.test_provider_environment_credential_scope",
+        "mvp.tests.test_provider_route_authority_composition",
+        "mvp.tests.test_provider_route_recovery_provenance",
+        "mvp.tests.test_provider_route_transitive_authority",
+        "mvp.tests.test_signed_http_request_envelope",
+        "mvp.tests.test_authenticated_read_http_request",
+        "mvp.tests.test_provider_evidence_authenticated_snapshot",
+        "mvp.tests.test_reconciliation_journal",
+        "mvp.tests.test_reconciliation_negative_resolution_authority",
+        "mvp.tests.test_recovery_durable_unknown_restart",
+        "mvp.tests.test_qualification_attestation_authority_ingress",
+    ),
 }
 
 
@@ -129,6 +153,41 @@ def install_network_deny(stack: ExitStack) -> None:
             stack.enter_context(patch.object(socket, resolver, deny_network))
 
 
+def reject_provider_credentials(environment: object) -> None:
+    """No credential-looking variable name is allowed, including CI prefixes.
+
+    Report neither names nor values to stdout, stderr or test artifacts.
+    The CI runner exports no provider secrets; synthetic signing vectors live
+    only in source-controlled, non-secret test fixtures.
+    """
+    if type(environment) is not dict and environment is not os.environ:
+        # tests may supply an ordinary dict, but never a caller-defined
+        # Mapping with executable iteration/property behavior.
+        raise RuntimeError("PLAN6_OFFLINE_ENVIRONMENT_INVALID")
+    sensitive = (
+        "API_KEY", "API_SECRET", "ACCESS_TOKEN", "PRIVATE_KEY",
+        "PROVIDER_PASSWORD", "TRADING_PASSWORD",
+    )
+    if any(
+        type(key) is not str or any(fragment in key.upper() for fragment in sensitive)
+        for key in environment
+    ):
+        raise RuntimeError(
+            "PLAN6_OFFLINE_CREDENTIAL_ENV_PRESENT (names and values suppressed)"
+        )
+
+
+def offline_section5_capability_status() -> dict[str, str]:
+    """Non-authorizing engineering status, not an account capability receipt."""
+    return {
+        "account_environment_binding": "EXTERNAL_ACTIVATION_PENDING",
+        "authenticated_provider_transport": "EXTERNAL_ACTIVATION_PENDING",
+        "provider_capability_attestation": "EXTERNAL_ACTIVATION_PENDING",
+        "paper_live_campaign": "EXTERNAL_ACTIVATION_PENDING",
+        "financial_trading_authority": "NOT_CLAIMED",
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--section", type=int, choices=sorted(SECTION_MODULES), required=True)
@@ -137,17 +196,7 @@ def main() -> int:
     # Credentials must never be imported into test fixtures. The GitHub Actions
     # workflow exposes no secrets and gives only read-only repository access.
     # Fail if a CI environment accidentally supplies provider credential names.
-    sensitive = ("API_KEY", "API_SECRET", "ACCESS_TOKEN", "PRIVATE_KEY",
-                 "PROVIDER_PASSWORD", "TRADING_PASSWORD")
-    leaked_names = sorted(
-        key for key in os.environ
-        if any(fragment in key.upper() for fragment in sensitive)
-        and not key.startswith(("GITHUB_", "ACTIONS_", "RUNNER_"))
-    )
-    if leaked_names:
-        raise RuntimeError(
-            "PLAN6_OFFLINE_CREDENTIAL_ENV_PRESENT (names suppressed)"
-        )
+    reject_provider_credentials(os.environ)
 
     modules = tuple(dict.fromkeys(SECTION_MODULES[args.section]))
     # Test discovery imports modules and can run module-level code. Enforce the
@@ -172,6 +221,10 @@ def main() -> int:
         "provider_credentials": "ABSENT",
         "provider_account_activation": "NOT_CLAIMED",
         "paper_live": "NOT_CLAIMED",
+        "external_activation": (
+            offline_section5_capability_status()
+            if args.section == 5 else "NOT_CLAIMED"
+        ),
     }, sort_keys=True))
     return 0 if ok else 1
 

@@ -498,6 +498,12 @@ class DotnetPackageRightsTests(unittest.TestCase):
             )
             # A project with zero packages needs no NuGet package cache,
             # but cannot bypass the mandatory locked dependency graph.
+            with self.assertRaisesRegex(ValueError, "DOTNET_PROJECT_LOCK_MISSING"):
+                verify_restored_package_rights(
+                    root / "missing-nuget-cache",
+                    root=root,
+                    projects=[project],
+                )
             (project.parent / "packages.lock.json").write_text(
                 json.dumps({"version": 1, "dependencies": {"net10.0": {}}}),
                 encoding="utf-8",

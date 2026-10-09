@@ -1,0 +1,82 @@
+name: Plan 7 whole provider-free engineering qualification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "tools/qualify_plan7_engineering.py"
+      - "mvp/tests/test_plan7_engineering_qualification.py"
+      - "mvp/autotrade_mvp/evidence_class_matrix.py"
+      - "mvp/tests/test_evidence_class_matrix.py"
+      - "mvp/autotrade_mvp/science_qualification.py"
+      - "mvp/autotrade_mvp/qualification_attestation.py"
+      - "mvp/autotrade_mvp/performance_qualification.py"
+      - "mvp/autotrade_mvp/runtime_load_*.py"
+      - "mvp/autotrade_mvp/runtime_target_host_*.py"
+      - "qualification/strategy_economics/**"
+      - "tests/Science/**"
+      - "research/tests/test_ablation*.py"
+      - ".github/workflows/plan7-whole-engineering.yml"
+  pull_request:
+    paths:
+      - "tools/qualify_plan7_engineering.py"
+      - "mvp/tests/test_plan7_engineering_qualification.py"
+      - "mvp/autotrade_mvp/evidence_class_matrix.py"
+      - "mvp/tests/test_evidence_class_matrix.py"
+      - "mvp/autotrade_mvp/science_qualification.py"
+      - "mvp/autotrade_mvp/qualification_attestation.py"
+      - "mvp/autotrade_mvp/performance_qualification.py"
+      - "mvp/autotrade_mvp/runtime_load_*.py"
+      - "mvp/autotrade_mvp/runtime_target_host_*.py"
+      - "qualification/strategy_economics/**"
+      - "tests/Science/**"
+      - "research/tests/test_ablation*.py"
+      - ".github/workflows/plan7-whole-engineering.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    env:
+      AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+      PYTHONPATH: research
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Exact SHA and clean tracked checkout
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$AUTOTRADE_SOURCE_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Lock source inventory and named negative/recovery oracles
+        run: python tools/qualify_plan7_engineering.py --check
+      - name: Prove failure and non-promotion behavior of orchestration
+        run: python -m unittest -v mvp.tests.test_plan7_engineering_qualification
+      - name: Run all scientific, ablation, trust, economics, matrix and performance harnesses
+        run: python tools/qualify_plan7_engineering.py --suite all
+      - name: Retain exact-head receipt only after all campaigns actually PASS
+        run: >-
+          python tools/write_ci_evidence.py
+          --suite plan7-whole-engineering
+          --command "python -m unittest -v mvp.tests.test_plan7_engineering_qualification && python tools/qualify_plan7_engineering.py --suite all"
+          --output "artifacts/plan7-whole-${{ runner.os }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan7-whole-engineering-${{ runner.os }}
+          path: artifacts/plan7-whole-${{ runner.os }}.json
+          if-no-files-found: error
+
+# This qualifies provider-free engineering tests only. Never infer economic
+# edge, trading authority, target-host acceptance, PAPER/LIVE or final release.

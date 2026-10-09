@@ -123,12 +123,12 @@ def publish_receipt(path: Path, receipt: dict[str, object]) -> None:
     temporary: Path | None = None
     try:
         with NamedTemporaryFile(
-            mode="w", encoding="utf-8", newline="\\n",
+            mode="w", encoding="utf-8", newline="\n",
             prefix=".plan6-whole-", suffix=".tmp",
             dir=path.parent, delete=False,
         ) as handle:
             temporary = Path(handle.name)
-            handle.write(json.dumps(receipt, sort_keys=True) + "\\n")
+            handle.write(json.dumps(receipt, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)

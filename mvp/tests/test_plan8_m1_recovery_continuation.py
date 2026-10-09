@@ -15,6 +15,58 @@ from mvp.tests.test_provider_free_product import ProductClient
 
 
 class Plan8M1RecoveryContinuation(unittest.TestCase):
+    def test_backup_inventory_captures_only_verified_uuid_manifests_and_objects(self):
+        from autotrade_runtime.artifacts.store import ArtifactStore
+        from mvp.autotrade_mvp.backup import (
+            _artifact_source_files, _expected_kind, _verify_v1_artifact_manifest,
+            BackupIntegrityError,
+        )
+        from hashlib import sha256
+        import json
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "artifacts"
+            store = ArtifactStore(root)
+            manifest = store.publish_bytes(
+                artifact_id="399b5809-1985-59f0-a8b1-3204decdaaf2",
+                data=b"immutable SETTLEMENT rule evidence",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                source_refs=[],
+                metadata={"purpose": "signed-settlement-rule"},
+            )
+            manifest_path = root / "manifests" / (manifest["artifact_id"] + ".json")
+            sources = {(p.relative_to(root).as_posix(), kind)
+                       for p, kind in _artifact_source_files(root)}
+            self.assertIn(("manifests/" + manifest["artifact_id"] + ".json",
+                           "artifact-manifest-v1"), sources)
+            self.assertIn(
+                ("objects/sha256/" + manifest["sha256"][7:9] + "/" +
+                 manifest["sha256"][7:], "artifact-object"),
+                sources,
+            )
+            self.assertEqual(
+                _expected_kind("artifacts/manifests/" + manifest["artifact_id"] + ".json"),
+                "artifact-manifest-v1",
+            )
+            _verify_v1_artifact_manifest(root, manifest_path)
+            with self.assertRaises(BackupIntegrityError):
+                _verify_v1_artifact_manifest(root, manifest_path,
+                    present_paths=set())
+            raw = manifest_path.read_bytes()
+            changed = json.loads(raw)
+            changed["rights"]["export"] = True
+            manifest_path.write_text(json.dumps(changed), encoding="utf-8")
+            with self.assertRaises(BackupIntegrityError):
+                _verify_v1_artifact_manifest(root, manifest_path)
+            manifest_path.write_bytes(raw)
+            digest = sha256(b"immutable SETTLEMENT rule evidence").hexdigest()
+            (root / "objects" / "sha256" / digest[:2] / digest).write_bytes(
+                b"tampered SETTLEMENT rule evidence"
+            )
+            with self.assertRaises(BackupIntegrityError):
+                _verify_v1_artifact_manifest(root, manifest_path)
+
     def test_restored_product_repeated_recovery_and_restart_conserve_financial_effects(self):
         with TemporaryDirectory() as directory:
             source = Path(directory) / "source"

@@ -16,7 +16,7 @@ import ipaddress
 import json
 import re
 import ssl
-from threading import Lock
+from threading import Lock, BoundedSemaphore
 from types import MappingProxyType
 from typing import Callable, Mapping
 from urllib.parse import unquote, urlsplit
@@ -69,6 +69,7 @@ _SINGLETON_REQUEST_HEADERS = (
     "Content-Length",
     "Content-Type",
     "Accept",
+    "Cookie",
 )
 
 
@@ -357,7 +358,11 @@ class AuthenticatedHostApplication:
                     result = self.store.execute_authority_operation(operation_id)
                 except (TypeError, ValueError, OverflowError):
                     current = self.store.get_operation(operation_id)
-                    if current.phase in self.store.TERMINAL_PHASES:
+                    if current.phase in self.store.TERMINAL_PHASES or current.phase == "UNKNOWN":
+                        # UNKNOWN is a durable uncertainty state, not a new
+                        # UNKNOWN event on every failed worker restart.
+                        # A later successful replay still uses the original
+                        # accepted command and canonical evidence checks.
                         result = current
                     else:
                         result = self.store.update_operation(
@@ -415,25 +420,32 @@ class AuthenticatedHostApplication:
         principal: HostPrincipal,
         authenticated_role: str,
     ) -> Mapping[str, object]:
-        """Admit only a stable durable journal cut, with bounded retry."""
-        def cut_identity(durable: Mapping[str, object]) -> tuple[object, ...]:
+        """Admit only a stable whole-journal cut, with bounded retry.
+
+        Host aggregate version alone cannot detect concurrent financial,
+        research or ZERO writes in the same canonical JournalStore while the
+        snapshot provider projects those other aggregates.
+        """
+        def cut_identity() -> tuple[object, ...]:
+            durable = self.store.snapshot()
             return (
                 durable["state_version"],
                 durable["event_cursor"],
                 durable["account_id"],
                 durable["environment"],
+                self.store._journal.current_journal_sequence(),
             )
 
         for _ in range(4):
-            before = self.store.snapshot()
+            before = cut_identity()
             try:
                 candidate = self._snapshot_once(principal, authenticated_role)
             except ValueError:
                 # Do not hide malformed snapshots; retry only a proven journal race.
-                if cut_identity(self.store.snapshot()) != cut_identity(before):
+                if cut_identity() != before:
                     continue
                 raise
-            if cut_identity(self.store.snapshot()) == cut_identity(before):
+            if cut_identity() == before:
                 return candidate
         raise SnapshotTemporarilyUnavailable("canonical journal snapshot cut is changing")
 
@@ -843,9 +855,13 @@ class AuthenticatedHostServer(ThreadingHTTPServer):
         application: AuthenticatedHostApplication,
         *,
         tls_context: ssl.SSLContext | None = None,
+        max_concurrent_requests: int = 32,
     ) -> None:
         if not isinstance(application, AuthenticatedHostApplication):
             raise TypeError("application must be AuthenticatedHostApplication")
+        if type(max_concurrent_requests) is not int or not 1 <= max_concurrent_requests <= 1024:
+            raise ValueError("max_concurrent_requests must be a bounded positive integer")
+        self._request_slots = BoundedSemaphore(max_concurrent_requests)
         host, _ = server_address
         if tls_context is None and not _is_loopback_bind(host):
             raise ValueError("Plain HTTP host transport must bind to loopback only")
@@ -874,3 +890,44 @@ class AuthenticatedHostServer(ThreadingHTTPServer):
             # when startup recovery or TLS setup fails closed.
             self.server_close()
             raise
+
+    def process_request(self, request, client_address):
+        if not self._request_slots.acquire(blocking=False):
+            # Reject before parsing/admission. The client retains its exact
+            # command identity and may recover/retry it after backpressure.
+            body = b'{"error":"HOST_OVERLOADED","accepted":false}'
+            response = (b'HTTP/1.0 503 Service Unavailable\r\nContent-Type: application/json\r\n'
+                b'Cache-Control: no-store\r\nRetry-After: 1\r\nConnection: close\r\nContent-Length: '
+                + str(len(body)).encode() + b'\r\n\r\n' + body)
+            try:
+                import socket
+                import time
+                request.settimeout(0.1)
+                request.sendall(response)
+                request.shutdown(socket.SHUT_WR)
+                # Leave the receive half open briefly while the client finishes
+                # its already-sent request. Closing with unread POST bytes can
+                # reset TCP and erase the explicit overload response.
+                deadline = time.monotonic() + 0.1
+                remaining = _MAX_BODY_BYTES + 65536
+                while remaining > 0 and time.monotonic() < deadline:
+                    chunk = request.recv(min(65536, remaining))
+                    if not chunk: break
+                    remaining -= len(chunk)
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            request.settimeout(10)
+            super().process_request(request, client_address)
+        except BaseException:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()

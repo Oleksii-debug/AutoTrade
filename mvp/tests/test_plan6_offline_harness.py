@@ -4,11 +4,15 @@ No real endpoints, provider accounts, secrets, or trading operations are used.
 """
 from __future__ import annotations
 
+import os
 import socket
+import sys
 import unittest
 from contextlib import ExitStack
 from tempfile import TemporaryFile
+from unittest.mock import patch
 
+from tools import plan6_offline_sections
 from tools.plan6_offline_sections import deny_network, install_network_deny
 
 
@@ -110,6 +114,29 @@ class OfflineSocketBoundaryTests(unittest.TestCase):
         for name, original in originals.items():
             with self.subTest(name=name):
                 self.assertIs(getattr(socket, name), original)
+
+
+    def test_credentials_are_rejected_before_discovery_even_with_ci_prefix(self) -> None:
+        # No imports, test execution or provider calls may occur when an
+        # accidentally injected credential-shaped env key is present.
+        for name in (
+            "PROVIDER_API_KEY", "GITHUB_PROVIDER_API_KEY",
+            "ACTIONS_ACCESS_TOKEN", "RUNNER_API_SECRET",
+        ):
+            with self.subTest(name=name):
+                with patch.dict(os.environ, {name: "synthetic-fixture-only"}, clear=True):
+                    with patch.object(sys, "argv", ["offline", "--section", "5"]):
+                        with patch.object(
+                            plan6_offline_sections.unittest.defaultTestLoader,
+                            "loadTestsFromNames",
+                            side_effect=AssertionError("must not import tests"),
+                        ):
+                            with self.assertRaisesRegex(
+                                RuntimeError, "PLAN6_OFFLINE_CREDENTIAL_ENV_PRESENT"
+                            ) as denied:
+                                plan6_offline_sections.main()
+                self.assertNotIn(name, str(denied.exception))
+                self.assertNotIn("synthetic-fixture-only", str(denied.exception))
 
 
 if __name__ == "__main__":

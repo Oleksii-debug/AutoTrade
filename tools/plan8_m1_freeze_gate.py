@@ -15,7 +15,7 @@ import stat
 import subprocess
 from zipfile import ZipFile, BadZipFile
 
-GIT_SHA = re.compile(r"[0-9a-f]{40}\\Z")
+GIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
 REQUIRED = {
     "browser": ("provider-free-whole-product-browser", "Linux"),
     "packaged": ("provider-free-packaged-windows-browser", "Windows"),
@@ -65,7 +65,7 @@ def freeze(*, source_sha: str, tree_sha: str, run_id: str, run_attempt: str,
     bundle = _file(bundle_path)
     digest = sha256(bundle).hexdigest()
     sidecar = _file(windows / "AutoTrade-ZERO-win-x64.zip.sha256")
-    if sidecar != f"{digest}  {bundle_path.name}\\n".encode("ascii"):
+    if sidecar != f"{digest}  {bundle_path.name}\n".encode("ascii"):
         raise M1FreezeError("Windows bundle hash sidecar mismatch")
     result = _json(_file(windows / "candidate-work" / "candidate-result.json"), label="candidate")
     if (type(result) is not dict or result.get("source_sha") != source_sha

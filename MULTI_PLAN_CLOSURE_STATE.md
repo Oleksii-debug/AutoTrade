@@ -156,6 +156,9 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 | 6 | OPEN | evidence-class matrix |
 | 7 | OPEN | plan-level qualification |
 
+
+**Plan-7 Section-1 live readback 2026-10-09 — NONTERMINAL (not DONE).** Canonical PR #2327 exact head `857aee915cc4b7beec60df170be05d931256b219`, OPEN/DRAFT/UNMERGED. At main `fd4f90e7cb78ab1b023a0173d90891b704199f87`, the effective diff is **ahead 630 / behind 0, 146 changed paths**, including peer Plan-1/2/3/5/6 source and workflows; mergeability is not safe isolated Plan-7 integration. Source science blob `d1f45fb933387ea3553ab396f82874f9d18822fb`, Science test blob `f2398b21cbb54158a90a4d1fa99fcd49c499b4da`; current main science blob `b101d8a802d2da989c15f274363069ae94f030f0` (not integrated). Exact-head workflows science `37867390614`, baseline `37867390752`, Verify `37867390744`, provider-free `37867390871`, zero-model `37867390690`, Plan-6 offline `37867390625`: Ubuntu/Windows QUEUED/null, NOT PASS. Earlier heads had real Verify/dotnet/provider-free failures; do not transfer any prior green to this head. Do not merge multi-plan diff without owner-preserving convergence; no `DONE`, no Section-2 activation. Canonical [PR evidence comment](https://github.com/Oleksii-debug/AutoTrade/pull/2327#issuecomment-6072182422); Drive Plan 7 paired nonterminal note. No independent scientific/economic PASS, PAPER/LIVE, NVDA or release claim.
+
 ### Plan 8 — M1 convergence
 Sections 1–6: WAITING_UPSTREAM until Plans 1,2,3,4,5,7 provide required terminal outputs.
 

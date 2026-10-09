@@ -422,7 +422,7 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
                         "symbol": "BTC-29DEC22-16000-C",
                     }
                 },
-                "violates bound instrument symbol",
+                "symbol does not match canonical instrument_version",
             ),
         )
         for kwargs, message in cases:

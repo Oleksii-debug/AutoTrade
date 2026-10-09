@@ -358,7 +358,11 @@ class AuthenticatedHostApplication:
                     result = self.store.execute_authority_operation(operation_id)
                 except (TypeError, ValueError, OverflowError):
                     current = self.store.get_operation(operation_id)
-                    if current.phase in self.store.TERMINAL_PHASES:
+                    if current.phase in self.store.TERMINAL_PHASES or current.phase == "UNKNOWN":
+                        # UNKNOWN is a durable uncertainty state, not a new
+                        # UNKNOWN event on every failed worker restart.
+                        # A later successful replay still uses the original
+                        # accepted command and canonical evidence checks.
                         result = current
                     else:
                         result = self.store.update_operation(
@@ -416,25 +420,32 @@ class AuthenticatedHostApplication:
         principal: HostPrincipal,
         authenticated_role: str,
     ) -> Mapping[str, object]:
-        """Admit only a stable durable journal cut, with bounded retry."""
-        def cut_identity(durable: Mapping[str, object]) -> tuple[object, ...]:
+        """Admit only a stable whole-journal cut, with bounded retry.
+
+        Host aggregate version alone cannot detect concurrent financial,
+        research or ZERO writes in the same canonical JournalStore while the
+        snapshot provider projects those other aggregates.
+        """
+        def cut_identity() -> tuple[object, ...]:
+            durable = self.store.snapshot()
             return (
                 durable["state_version"],
                 durable["event_cursor"],
                 durable["account_id"],
                 durable["environment"],
+                self.store._journal.current_journal_sequence(),
             )
 
         for _ in range(4):
-            before = self.store.snapshot()
+            before = cut_identity()
             try:
                 candidate = self._snapshot_once(principal, authenticated_role)
             except ValueError:
                 # Do not hide malformed snapshots; retry only a proven journal race.
-                if cut_identity(self.store.snapshot()) != cut_identity(before):
+                if cut_identity() != before:
                     continue
                 raise
-            if cut_identity(self.store.snapshot()) == cut_identity(before):
+            if cut_identity() == before:
                 return candidate
         raise SnapshotTemporarilyUnavailable("canonical journal snapshot cut is changing")
 

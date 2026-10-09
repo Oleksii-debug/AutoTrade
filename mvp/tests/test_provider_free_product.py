@@ -601,56 +601,63 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 blocked_at=blocked_at,
                 command_id='block-command-1',
             )
-            host_events = [
-                {'event_type': 'COMMAND_ACCEPTED',
-                 'payload': {'action': 'BLOCK_NEW_EXPOSURE',
-                             'operation_id': 'block-operation-1'}},
-                {'event_type': 'OPERATION_UPDATED',
-                 'payload': {'operation_id': 'block-operation-1',
-                             'phase': 'RUNNING'}},
-                {'event_type': 'OPERATION_UPDATED',
-                 'payload': {'operation_id': 'block-operation-1',
-                             'phase': 'SUCCEEDED'}},
-            ]
-            original_load = store.load_events_by_aggregate_type
 
-            def load_events(aggregate_type):
-                if aggregate_type == 'HOST_CONTROL':
-                    return list(host_events)
-                return original_load(aggregate_type)
-
-            with patch.object(store, 'load_events_by_aggregate_type', side_effect=load_events):
-                self.assertTrue(_host_emergency_pause_required(store))
-                authority.restore_new_exposure(
-                    account_id=ACCOUNT,
-                    environment=ENVIRONMENT,
-                    reason='host_operator_command:SET_AUTHORITY:RESTORE_NEW_EXPOSURE:POLICY_REVIEW',
-                    restored_at='2026-10-04T00:00:01Z',
-                    command_id='restore-command-1',
-                    expected_block_command_id='block-command-1',
-                    expected_block_reason=block_reason,
-                    expected_blocked_at=blocked_at,
-                )
-                self.assertFalse(_host_emergency_pause_required(store))
-
-                host_events.append({
-                    'event_type': 'COMMAND_ACCEPTED',
-                    'payload': {'action': 'BLOCK_NEW_EXPOSURE',
-                                'operation_id': 'block-operation-2'},
+            def host_event(event_type, payload):
+                # Use the real immutable JournalStore, not a patched instance
+                # method. Security checks reject arbitrary instance shadows.
+                aggregate_type = 'HOST_CONTROL'
+                aggregate_id = 'worker-emergency-test'
+                event_id = str(uuid4())
+                store.append_event({
+                    'event_id': event_id,
+                    'event_type': event_type,
+                    'aggregate_type': aggregate_type,
+                    'aggregate_id': aggregate_id,
+                    'aggregate_version': str(store.next_aggregate_version(
+                        aggregate_type, aggregate_id,
+                    )),
+                    'payload': payload,
+                    'payload_hash': payload_digest(payload),
+                    'committed_at': '2026-10-04T00:00:00Z',
                 })
-                self.assertTrue(_host_emergency_pause_required(store))
-                host_events.append({
-                    'event_type': 'OPERATION_UPDATED',
-                    'payload': {'operation_id': 'block-operation-2', 'phase': 'FAILED'},
-                })
-                self.assertFalse(_host_emergency_pause_required(store))
 
-                host_events.append({
-                    'event_type': 'COMMAND_ACCEPTED',
-                    'payload': {'action': 'REVOKE_AUTHORITY',
-                                'operation_id': 'revoke-operation-1'},
-                })
-                self.assertTrue(_host_emergency_pause_required(store))
+            host_event('COMMAND_ACCEPTED', {
+                'action': 'BLOCK_NEW_EXPOSURE',
+                'operation_id': 'block-operation-1',
+            })
+            host_event('OPERATION_UPDATED', {
+                'operation_id': 'block-operation-1', 'phase': 'RUNNING',
+            })
+            host_event('OPERATION_UPDATED', {
+                'operation_id': 'block-operation-1', 'phase': 'SUCCEEDED',
+            })
+            self.assertTrue(_host_emergency_pause_required(store))
+            authority.restore_new_exposure(
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                reason='host_operator_command:SET_AUTHORITY:RESTORE_NEW_EXPOSURE:POLICY_REVIEW',
+                restored_at='2026-10-04T00:00:01Z',
+                command_id='restore-command-1',
+                expected_block_command_id='block-command-1',
+                expected_block_reason=block_reason,
+                expected_blocked_at=blocked_at,
+            )
+            self.assertFalse(_host_emergency_pause_required(store))
+
+            host_event('COMMAND_ACCEPTED', {
+                'action': 'BLOCK_NEW_EXPOSURE',
+                'operation_id': 'block-operation-2',
+            })
+            self.assertTrue(_host_emergency_pause_required(store))
+            host_event('OPERATION_UPDATED', {
+                'operation_id': 'block-operation-2', 'phase': 'FAILED',
+            })
+            self.assertFalse(_host_emergency_pause_required(store))
+            host_event('COMMAND_ACCEPTED', {
+                'action': 'REVOKE_AUTHORITY',
+                'operation_id': 'revoke-operation-1',
+            })
+            self.assertTrue(_host_emergency_pause_required(store))
 
     def test_worker_rejects_unaccepted_lifecycle_invocation(self):
         with TemporaryDirectory() as directory:

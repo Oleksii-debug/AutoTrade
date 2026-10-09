@@ -1248,11 +1248,15 @@ def _canonical_database_path_binding(
     """Bind one exact SQLite pathname without claiming physical-file identity."""
 
     state = object.__getattribute__(value, "__dict__")
-    if type(state) is not dict or "path" not in state:
+    if type(state) is not dict or not ({"path", "_path"} & state.keys()):
         raise ProtocolViolation(
             f"ablation qualification {label} database path is unavailable"
         )
-    path = state["path"]
+    # ScientificRegistry freezes its authority in a private ``_path`` and
+    # exposes a read-only ``path`` property.  ExperienceMemory still retains
+    # the canonical path directly.  Bind the stored field without invoking a
+    # caller-replaceable property or descriptor.
+    path = state["_path"] if "_path" in state else state["path"]
     if type(path) is not _path_type:
         raise ProtocolViolation(
             f"ablation qualification {label} database path is not canonical"

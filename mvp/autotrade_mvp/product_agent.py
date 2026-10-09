@@ -47,7 +47,11 @@ def decide(journal, protocol, *, episode, strategy_side, position, timestamp):
         'host_id': 'local-simulation', 'owner_epoch': '1', 'environment': 'SIMULATION',
         'occurred_at': timestamp, 'observed_at': timestamp, 'committed_at': timestamp,
         'correlation_id': event_id, 'causation_id': None, 'payload': data,
-        'payload_hash': payload_digest(data), 'evidence_refs': list(result.evidence_refs)}
+        # Specialist DAG references are advisory string labels.  The canonical
+        # JournalStore envelope accepts only EvidenceRef objects, so retain the
+        # labels in the diagnostic payload and do not misrepresent them as
+        # verified artifact references.
+        'payload_hash': payload_digest(data), 'evidence_refs': []}
     existing = journal.get_event(event_id)
     if existing is None:
         journal.append_event(event)

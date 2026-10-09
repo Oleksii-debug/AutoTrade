@@ -539,6 +539,27 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
                     metadata_path=metadata,
                 )
 
+    def test_signed_archive_sbom_uses_physical_hash_not_signature_neutral_lock(self):
+        unsigned_lock_hash = base64.b64encode(sha512(b'unsigned').digest()).decode('ascii')
+        signed_archive = base64.b64encode(sha512(b'signed').digest()).decode('ascii')
+        self.assertNotEqual(unsigned_lock_hash, signed_archive)
+        inputs = {
+            'python': {'version': '3.12.10', 'sha256': 'a' * 64},
+            'webview2_sdk': {'version': '1.0.4258.31',
+                             'content_hash_sha512_base64': unsigned_lock_hash},
+        }
+        sbom = candidate._build_candidate_sbom('b' * 40, [], inputs, signed_archive)
+        webview = next(p for p in sbom['packages']
+                       if p['SPDXID'] == 'SPDXRef-Package-WebView2')
+        self.assertEqual(webview['checksums'], [{
+            'algorithm': 'SHA512',
+            'checksumValue': base64.b64decode(signed_archive, validate=True).hex(),
+        }])
+        self.assertNotEqual(
+            webview['checksums'][0]['checksumValue'],
+            base64.b64decode(unsigned_lock_hash, validate=True).hex(),
+        )
+
     def test_candidate_still_rejects_altered_restored_webview_archive(self):
         lock = json.loads(
             (candidate.ROOT / 'src/AutoTrade.Desktop/packages.lock.json')

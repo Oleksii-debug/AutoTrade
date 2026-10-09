@@ -1,7 +1,8 @@
+import base64
 import copy
 import json
 import os
-from hashlib import sha256
+from hashlib import sha256, sha512
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
@@ -494,8 +495,69 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
             "'artifacts/webview.nupkg' -ErrorAction Stop",
             workflow,
         )
+        self.assertIn("dotnet nuget verify $archive --all", workflow)
+        self.assertIn("'artifacts/webview.nupkg.sha512'", workflow)
+        self.assertIn("'artifacts/webview.nupkg.metadata'", workflow)
         self.assertNotIn(
             'Invoke-WebRequest $inputs.webview2_sdk.url', workflow
+        )
+
+    def test_candidate_verifies_signed_archive_physical_digest_separately(self):
+        # The lock has an unsigned contentHash; the copied signed .nupkg
+        # carries a different raw SHA-512 and NuGet-generated metadata.
+        from tools.dotnet_package_rights import verified_locked_nupkg_bytes
+        import io
+        import zipfile
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = io.BytesIO()
+            with zipfile.ZipFile(raw, "w") as archive:
+                archive.writestr(".signature.p7s", b"TEST-ONLY-NOT-CMS")
+            path = root / "webview.nupkg"
+            path.write_bytes(raw.getvalue())
+            actual = base64.b64encode(sha512(raw.getvalue()).digest()).decode("ascii")
+            locked = base64.b64encode(sha512(b"original-unsigned").digest()).decode("ascii")
+            self.assertNotEqual(actual, locked)
+            sidecar = root / "webview.nupkg.sha512"
+            sidecar.write_text(actual, encoding="ascii")
+            metadata = root / "webview.nupkg.metadata"
+            metadata.write_text(
+                json.dumps({"version": 2, "contentHash": locked}), encoding="utf-8"
+            )
+            observed, digest = verified_locked_nupkg_bytes(
+                path, locked_hash=locked, sidecar_path=sidecar,
+                metadata_path=metadata,
+            )
+            self.assertEqual(observed, raw.getvalue())
+            self.assertEqual(digest, actual)
+            metadata.write_text(
+                json.dumps({"version": 2, "contentHash": "wrong"}), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "content hash mismatch"):
+                verified_locked_nupkg_bytes(
+                    path, locked_hash=locked, sidecar_path=sidecar,
+                    metadata_path=metadata,
+                )
+
+    def test_signed_archive_sbom_uses_physical_hash_not_signature_neutral_lock(self):
+        unsigned_lock_hash = base64.b64encode(sha512(b'unsigned').digest()).decode('ascii')
+        signed_archive = base64.b64encode(sha512(b'signed').digest()).decode('ascii')
+        self.assertNotEqual(unsigned_lock_hash, signed_archive)
+        inputs = {
+            'python': {'version': '3.12.10', 'sha256': 'a' * 64},
+            'webview2_sdk': {'version': '1.0.4258.31',
+                             'content_hash_sha512_base64': unsigned_lock_hash},
+        }
+        sbom = candidate._build_candidate_sbom('b' * 40, [], inputs, signed_archive)
+        webview = next(p for p in sbom['packages']
+                       if p['SPDXID'] == 'SPDXRef-Package-WebView2')
+        self.assertEqual(webview['checksums'], [{
+            'algorithm': 'SHA512',
+            'checksumValue': base64.b64decode(signed_archive, validate=True).hex(),
+        }])
+        self.assertNotEqual(
+            webview['checksums'][0]['checksumValue'],
+            base64.b64decode(unsigned_lock_hash, validate=True).hex(),
         )
 
     def test_candidate_still_rejects_altered_restored_webview_archive(self):

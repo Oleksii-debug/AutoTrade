@@ -657,6 +657,75 @@ def _locked_nupkg_root_evidence(
     return license_bytes, notice_bytes, nuspec_bytes
 
 
+def verified_locked_nupkg_bytes(
+    nupkg_path: Path,
+    *,
+    locked_hash: str,
+    sidecar_path: Path,
+    metadata_path: Path,
+) -> tuple[bytes, str]:
+    """Preserve NuGet's distinct unsigned contentHash and signed archive hash.
+
+    The NuGet lock refers to the signature-independent contentHash. Its
+    global-packages .nupkg.sha512 sidecar hashes the actual signed archive.
+    A signed package therefore needs BOTH identities, never an exemption
+    from SHA-512 or a rewritten lock hash. Locked restore plus signature
+    verification are mandatory in the Windows CI workflow.
+    """
+    if not _valid_content_hash(locked_hash):
+        raise ValueError("invalid locked NuGet content hash")
+    for value in (nupkg_path, sidecar_path, metadata_path):
+        if type(value) is not type(Path(".")):
+            raise TypeError("NuGet archive evidence requires exact Path")
+    package_dir = nupkg_path.parent
+    actual_path = _package_regular_file(
+        package_dir, nupkg_path, label="nupkg payload"
+    )
+    actual_sidecar = _package_regular_file(
+        package_dir, sidecar_path, label="SHA-512 authority"
+    )
+    payload = actual_path.read_bytes()
+    raw_hash = base64.b64encode(sha512(payload).digest()).decode("ascii")
+    sidecar_hash = actual_sidecar.read_text(encoding="ascii").strip()
+    if not _valid_content_hash(sidecar_hash) or sidecar_hash != raw_hash:
+        # Keep distinct diagnostics for an altered sidecar vs altered payload.
+        diagnostic = sidecar_hash if _valid_content_hash(sidecar_hash) else "INVALID"
+        reason = (
+            "content hash mismatch" if sidecar_hash != locked_hash
+            else "payload hash mismatch"
+        )
+        raise ValueError(
+            "restored NuGet package " + reason
+            + "; locked_sha512=" + locked_hash
+            + "; sidecar_sha512=" + diagnostic
+            + "; payload_sha512=" + raw_hash
+        )
+    if raw_hash != locked_hash:
+        # Only a signed NuGet package may have different raw and lock hashes.
+        # The NuGet-produced metadata must bind the original unsigned hash.
+        metadata_file = _package_regular_file(
+            package_dir, metadata_path, label="NuGet signed-package metadata"
+        )
+        try:
+            metadata = _strict_json(metadata_file.read_text(encoding="utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError("signed NuGet metadata is invalid") from error
+        if (
+            type(metadata) is not dict
+            or type(metadata.get("version")) is not int
+            or metadata.get("version") not in (1, 2)
+            or metadata.get("contentHash") != locked_hash
+        ):
+            raise ValueError("signed NuGet package content hash mismatch")
+        try:
+            with zipfile.ZipFile(BytesIO(payload)) as archive:
+                if archive.namelist().count(".signature.p7s") != 1:
+                    raise ValueError("signed NuGet archive lacks one signature")
+        except (zipfile.BadZipFile, OSError) as error:
+            raise ValueError("signed NuGet archive is unreadable") from error
+    return payload, raw_hash
+
+
 def verify_restored_package_rights(
     packages_root: Path,
     *,
@@ -733,31 +802,12 @@ def verify_restored_package_rights(
             nupkg_files[0],
             label="nupkg payload",
         )
-        restored_hash = sha_path.read_text(encoding="ascii").strip()
-        if restored_hash != artifact["content_hash_sha512_base64"]:
-            # Diagnostic evidence is never an alternate trust root. Read the
-            # payload only to identify a stale/misrouted NuGet cache; still
-            # reject the package before any license/rights acceptance.
-            observed_package_hash = base64.b64encode(
-                sha512(nupkg_path.read_bytes()).digest()
-            ).decode("ascii")
-            observed_sidecar_hash = (
-                restored_hash if _valid_content_hash(restored_hash) else "INVALID"
-            )
-            raise ValueError(
-                f"restored NuGet package content hash mismatch: {package_name}@{package_version}; "
-                f"locked_sha512={artifact['content_hash_sha512_base64']}; "
-                f"sidecar_sha512={observed_sidecar_hash}; "
-                f"payload_sha512={observed_package_hash}"
-            )
-        nupkg_payload = nupkg_path.read_bytes()
-        actual_nupkg_hash = base64.b64encode(
-            sha512(nupkg_payload).digest()
-        ).decode("ascii")
-        if actual_nupkg_hash != artifact["content_hash_sha512_base64"]:
-            raise ValueError(
-                f"restored NuGet package payload hash mismatch: {package_name}@{package_version}"
-            )
+        nupkg_payload, _ = verified_locked_nupkg_bytes(
+            nupkg_path,
+            locked_hash=artifact["content_hash_sha512_base64"],
+            sidecar_path=sha_path,
+            metadata_path=package_dir / ".nupkg.metadata",
+        )
         (
             locked_license_bytes,
             locked_notice_bytes,

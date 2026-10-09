@@ -144,6 +144,27 @@ def _write_restored_package(root: Path, *, license_text: str = _LICENSE) -> Path
     return packages
 
 
+def _signed_fixture_package(package: Path) -> None:
+    """Synthetic signature tests dual-hash logic, not CMS cryptography."""
+    archive_path = package / "example.package.1.2.3.nupkg"
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(_NUPKG_BYTES)) as original:
+        with zipfile.ZipFile(out, "w") as signed:
+            for name in original.namelist():
+                signed.writestr(name, original.read(name))
+            signed.writestr(".signature.p7s", b"TEST-ONLY-NOT-VALID-CMS")
+    signed_bytes = out.getvalue()
+    raw_hash = base64.b64encode(sha512(signed_bytes).digest()).decode("ascii")
+    assert raw_hash != _HASH
+    archive_path.write_bytes(signed_bytes)
+    (package / "example.package.1.2.3.nupkg.sha512").write_text(
+        raw_hash, encoding="ascii"
+    )
+    (package / ".nupkg.metadata").write_text(
+        json.dumps({"version": 2, "contentHash": _HASH}), encoding="utf-8"
+    )
+
+
 class DotnetPackageRightsTests(unittest.TestCase):
     def test_repository_locked_graph_has_exact_rights_coverage(self):
         self.assertEqual(package_rights_blockers(ROOT), [])
@@ -647,6 +668,73 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 root=root,
                 projects=[project],
             )
+
+    def test_signed_nuget_archive_keeps_separate_locked_and_physical_hashes(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            packages = _write_restored_package(root)
+            _signed_fixture_package(packages / "example.package" / "1.2.3")
+            verify_restored_package_rights(packages, root=root, projects=[project])
+
+    def test_signed_nuget_archive_rejects_wrong_or_duplicate_content_metadata(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            packages = _write_restored_package(root)
+            package = packages / "example.package" / "1.2.3"
+            _signed_fixture_package(package)
+            metadata = package / ".nupkg.metadata"
+            metadata.write_text(
+                json.dumps({"version": 2, "contentHash": "x" * 88}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "content hash mismatch"):
+                verify_restored_package_rights(packages, root=root, projects=[project])
+            metadata.write_text(
+                '{"version":2,"contentHash":"' + _HASH
+                + '","contentHash":"' + _HASH + '"}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate JSON"):
+                verify_restored_package_rights(packages, root=root, projects=[project])
+
+    def test_signed_nuget_archive_rejects_altered_physical_payload(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            packages = _write_restored_package(root)
+            package = packages / "example.package" / "1.2.3"
+            _signed_fixture_package(package)
+            (package / "example.package.1.2.3.nupkg").write_bytes(
+                b"corrupt after signature verification"
+            )
+            with self.assertRaisesRegex(ValueError, "content hash mismatch"):
+                verify_restored_package_rights(packages, root=root, projects=[project])
+
+    def test_signed_nuget_archive_requires_signature_entry(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            packages = _write_restored_package(root)
+            package = packages / "example.package" / "1.2.3"
+            physical_hash = base64.b64encode(
+                sha512(_NUPKG_BYTES + b"arbitrary appended bytes").digest()
+            ).decode("ascii")
+            archive = package / "example.package.1.2.3.nupkg"
+            archive.write_bytes(_NUPKG_BYTES + b"arbitrary appended bytes")
+            (package / "example.package.1.2.3.nupkg.sha512").write_text(
+                physical_hash, encoding="ascii"
+            )
+            (package / ".nupkg.metadata").write_text(
+                json.dumps({"version": 2, "contentHash": _HASH}), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "lacks one signature"):
+                verify_restored_package_rights(packages, root=root, projects=[project])
 
     def test_restored_nupkg_payload_must_match_lock_hash(self):
         with TemporaryDirectory() as directory:

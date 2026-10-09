@@ -22,7 +22,7 @@ from tools.stage_windows_foundation import (
 )
 from tools.build_windows_bundle import build_bundle, _collect, _windows_path_key
 from tools.release_scope_mapping import strict_json_bytes
-from tools.dotnet_package_rights import _locked_nupkg_root_evidence
+from tools.dotnet_package_rights import _locked_nupkg_root_evidence, verified_locked_nupkg_bytes
 from research.autotrade_research.artifacts.durable_publish import atomic_write_json
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -320,12 +320,12 @@ def extract_pinned(archive_path, destination, expected_digest, *, digest_algorit
         if missing_overrides: raise ValueError('archive override path is absent: ' + ','.join(sorted(missing_overrides)))
 
 
-def _build_candidate_sbom(source_sha, inventory, inputs, webview_content_hash):
+def _build_candidate_sbom(source_sha, inventory, inputs, webview_archive_sha512):
     if type(inventory) is not list:
         raise TypeError('candidate inventory must be a list')
     try:
         webview_sha512 = base64.b64decode(
-            webview_content_hash,
+            webview_archive_sha512,
             validate=True,
         ).hex()
     except (ValueError, binascii.Error) as error:
@@ -513,10 +513,26 @@ def _require_webview2_archive_rights(
         raise TypeError('WebView2 rights verification requires exact Path values')
     if type(version) is not str or type(content_hash) is not str:
         raise TypeError('WebView2 rights identity must be exact str values')
-    actual_hash = base64.b64encode(
-        sha512(archive_path.read_bytes()).digest()
-    ).decode('ascii')
-    if actual_hash != content_hash:
+    archive_bytes = archive_path.read_bytes()
+    actual_hash = base64.b64encode(sha512(archive_bytes).digest()).decode('ascii')
+    sidecar = archive_path.with_name(archive_path.name + '.sha512')
+    metadata = archive_path.with_name(archive_path.name + '.metadata')
+    if sidecar.exists() or sidecar.is_symlink():
+        try:
+            verified_bytes, physical_hash = verified_locked_nupkg_bytes(
+                archive_path,
+                locked_hash=content_hash,
+                sidecar_path=sidecar,
+                metadata_path=metadata,
+            )
+        except (OSError, ValueError) as error:
+            raise ValueError('WebView2 archive differs from locked rights identity') from error
+        if verified_bytes != archive_bytes:
+            raise ValueError('WebView2 archive changed during hash verification')
+    elif actual_hash == content_hash:
+        # Unsigned fixture/deterministic package: both identities coincide.
+        physical_hash = actual_hash
+    else:
         raise ValueError('WebView2 archive differs from locked rights identity')
 
     policy = strict_json_bytes(
@@ -560,6 +576,7 @@ def _require_webview2_archive_rights(
         archive_path,
         license_file=license_file,
         notice_file=notice_file,
+        verified_archive_bytes=archive_bytes,
     )
     expected_license = product_root.joinpath(
         *PurePosixPath(expected_path).parts
@@ -617,6 +634,7 @@ def _require_webview2_archive_rights(
         or (license_node.text or '').strip() != license_file
     ):
         raise ValueError('WebView2 package nuspec license declaration mismatch')
+    return physical_hash
 
 
 def _require_webview2_input_identity(product_root, inputs, nuget_lock):
@@ -756,7 +774,7 @@ def build_candidate(*, source_root, source_sha, desktop, host, python_archive, w
         inputs,
         nuget_lock,
     )
-    _require_webview2_archive_rights(
+    webview_physical_hash = _require_webview2_archive_rights(
         payload / 'product',
         webview_archive,
         version=inputs['webview2_sdk']['version'],
@@ -782,7 +800,7 @@ def build_candidate(*, source_root, source_sha, desktop, host, python_archive, w
     extract_pinned(
         webview_archive,
         payload / 'notices/webview2-sdk-package',
-        webview_content_hash,
+        webview_physical_hash,
         digest_algorithm='sha512-base64',
     )
     for required in ('python.exe', 'python312.dll', 'python312.zip', 'python312._pth', 'LICENSE.txt'):
@@ -804,7 +822,7 @@ def build_candidate(*, source_root, source_sha, desktop, host, python_archive, w
         source_sha,
         inventory,
         inputs,
-        webview_content_hash,
+        webview_physical_hash,
     )
     _write_new_payload_json(payload / 'sbom.json', sbom)
     files = _collect(payload)

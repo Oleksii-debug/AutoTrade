@@ -110,7 +110,17 @@ jobs:
           Invoke-WebRequest $inputs.python.url -OutFile artifacts/python.zip
           $archive = Join-Path $env:NUGET_PACKAGES "microsoft.web.webview2/$($inputs.webview2_sdk.version)/microsoft.web.webview2.$($inputs.webview2_sdk.version).nupkg"
           if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw 'Locked WebView2 SDK archive is missing after rights-verified restore' }
+          $packageDir = Split-Path -Parent $archive
+          $rawSha = Join-Path $packageDir "microsoft.web.webview2.$($inputs.webview2_sdk.version).nupkg.sha512"
+          $contentMetadata = Join-Path $packageDir '.nupkg.metadata'
+          foreach ($verifiedInput in @($rawSha, $contentMetadata)) {
+            if (-not (Test-Path -LiteralPath $verifiedInput -PathType Leaf)) { throw 'NuGet signed-archive evidence is missing' }
+          }
+          dotnet nuget verify $archive --all
+          if ($LASTEXITCODE -ne 0) { throw 'NuGet signed package signature verification failed' }
           Copy-Item -LiteralPath $archive -Destination 'artifacts/webview.nupkg' -ErrorAction Stop
+          Copy-Item -LiteralPath $rawSha -Destination 'artifacts/webview.nupkg.sha512' -ErrorAction Stop
+          Copy-Item -LiteralPath $contentMetadata -Destination 'artifacts/webview.nupkg.metadata' -ErrorAction Stop
       - name: Compose through canonical source staging and bundle builder
         run: python -m tools.build_provider_free_candidate --source-sha ${{ env.AUTOTRADE_SOURCE_SHA }} --desktop-publish artifacts/desktop --host-publish artifacts/host --python-archive artifacts/python.zip --webview-archive artifacts/webview.nupkg --work artifacts/candidate-work --output artifacts/AutoTrade-ZERO-win-x64.zip
       - run: npm ci --ignore-scripts

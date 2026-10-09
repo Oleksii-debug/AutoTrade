@@ -1703,9 +1703,16 @@ def _loop_event(
         else expected_journal_sequence
     )
     if kind == "AutonomousEpisodeCompleted":
-        # Deliver existing publications before freezing the completion preimage.
+        # Only ZERO-owned publications may be acknowledged by ZERO.
+        # The Host shares the JournalStore but owns ui.host-events delivery:
+        # advancing that foreign outbox would forge a UI delivery receipt.
         for item in store.pending_outbox(limit=1000):
-            store.mark_outbox_delivered(item["outbox_id"], expected_envelope_hash=item["envelope_hash"])
+            if item["topic"] != "autotrade.simulation.events":
+                continue
+            store.mark_outbox_delivered(
+                item["outbox_id"],
+                expected_envelope_hash=item["envelope_hash"],
+            )
         from .simulation_runtime_checkpoint import (
             COMPLETION_RECEIPT_FIELD, prepare_autonomous_completion_receipt,
         )

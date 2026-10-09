@@ -32,6 +32,33 @@ def run(directory, prices=PRICES, **kwargs):
 
 
 class AutonomousSimulationTests(unittest.TestCase):
+    def test_host_pause_callback_stops_only_at_next_financial_boundary_and_resumes(self):
+        with TemporaryDirectory() as directory:
+            checks = []
+
+            def pause_requested():
+                checks.append(len(checks) + 1)
+                return len(checks) > 2
+
+            paused = run(directory, should_pause=pause_requested)
+            self.assertEqual(paused["status"], "PAUSED")
+            self.assertEqual(paused["completed_episodes"], 2)
+            self.assertEqual(len(checks), 3)
+            self.assertEqual(paused["new_outbound_requests"], 0)
+            # Pausing is an admission fence, not a fabricated completion or
+            # a change to the source-frozen ZERO economic protocol.
+            resumed = run(directory)
+            self.assertEqual(resumed["status"], "COMPLETED")
+            self.assertEqual(resumed["completed_episodes"], 8)
+            self.assertEqual(resumed["cash"], "895.696")
+            self.assertEqual(resumed["position"], "1")
+
+    def test_noncallable_host_pause_guard_fails_before_any_journal_mutation(self):
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(TypeError, "should_pause must be callable"):
+                run(directory, should_pause=object())
+            self.assertFalse((Path(directory) / "journal.sqlite3").exists())
+
     def test_full_buy_reduce_buy_loop_uses_canonical_oms_and_accounting(self):
         with TemporaryDirectory() as d:
             result = run(d)

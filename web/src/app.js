@@ -5,6 +5,10 @@
   if (!HOST_API || typeof HOST_API.route !== "function") {
     throw new Error("Canonical host API routes are unavailable");
   }
+  // One-time local owner bootstrap is intentionally OUTSIDE the protected,
+  // versioned Host API contract. It only trades its fragment code for an
+  // HttpOnly same-origin cookie; it cannot issue any trading operation.
+  const LOCAL_PAIRING_ROUTE = "/api/v1/session";
   const MATERIAL_EVENTS = new Set([
     "COMMAND_ACCEPTED",
     "OPERATION_UPDATED",
@@ -2313,7 +2317,7 @@ function renderOperation(operation) {
       return false;
     }
     try {
-      const paired = await jsonFetch(HOST_API.route("pairLocalSession"), {
+      const paired = await jsonFetch(LOCAL_PAIRING_ROUTE, {
         method: "POST",
         body: JSON.stringify({pairing_code: pairingCode})
       });

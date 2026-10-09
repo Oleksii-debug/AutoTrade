@@ -799,8 +799,14 @@ class _HostRequestHandler(BaseHTTPRequestHandler):
         self.send_response(response.status)
         self.send_header("Content-Type", response.content_type)
         self.send_header("Content-Length", str(len(response.body)))
+        # HTTP wire security header is owned by the Host transport exactly
+        # once, even when the same-origin Web application returns its own
+        # direct-dispatch safety headers. Never forward a second conflicting
+        # or duplicate X-Content-Type-Options from application headers.
         self.send_header("X-Content-Type-Options", "nosniff")
         for name, value in response.headers:
+            if name.lower() == "x-content-type-options":
+                continue
             self.send_header(name, value)
         self.end_headers()
         if self.command != "HEAD":

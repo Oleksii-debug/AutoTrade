@@ -48,7 +48,7 @@ jobs:
         working-directory: tests/Product
       - run: npx playwright install --with-deps chromium
         working-directory: tests/Product
-      - run: python -m unittest mvp.tests.test_provider_free_product mvp.tests.test_provider_free_candidate_builder -v
+      - run: python -m unittest mvp.tests.test_provider_free_product mvp.tests.test_provider_free_candidate_builder mvp.tests.test_autonomous_simulation mvp.tests.test_atomic_oms_financial_bust -v
         env:
           PYTHONPATH: research:.
       - run: npm test

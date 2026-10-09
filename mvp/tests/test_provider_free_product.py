@@ -435,6 +435,61 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 self.assertEqual(len(state['portfolio']['fills']), 6)
                 self.assertEqual([o['state'] for o in state['portfolio']['orders']], ['FILLED'] * 3)
                 self.assertEqual(len(store.load_events_by_aggregate_type('settlement_book')), 12)
+                # Plan 8 / S3: inspect the causal research->agent->risk->OMS
+                # chain in the *same* durable product cut, not in unrelated
+                # unit-fixture authorities. Research remains diagnostic only.
+                research_jobs = [job['result'] for job in state['jobs']
+                    if job['kind'] == 'provider-free-research']
+                self.assertEqual(len(research_jobs), 1)
+                research = research_jobs[0]
+                self.assertEqual(research['status'], 'DIAGNOSTIC_ONLY')
+                self.assertEqual(research['economic_edge_status'], 'INCONCLUSIVE')
+                protocol = _protocol(store)
+                self.assertEqual(research['protocol_digest'], payload_digest(protocol))
+                self.assertEqual(len(research['proposals']), len(protocol['prices']))
+                for episode, proposal in enumerate(research['proposals'], start=1):
+                    self.assertEqual(proposal['episode'], episode)
+                    self.assertEqual(proposal['economic_edge_claim'], 'UNPROVEN')
+                    self.assertEqual(proposal['model_calls'], 0)
+                    # Future observations cannot enter this episode's input.
+                    for ref in proposal['input_event_ids']:
+                        self.assertTrue(ref.startswith(
+                            'synthetic:' + protocol['run_id'] + ':'
+                        ), ref)
+                        self.assertLessEqual(int(ref.rsplit(':', 1)[1]), episode)
+
+                agents = state['strategy']['agent_decisions']
+                self.assertEqual(len(agents), len(protocol['prices']))
+                self.assertEqual([a['episode'] for a in agents],
+                    list(range(1, len(protocol['prices']) + 1)))
+                self.assertEqual(len({a['input_snapshot_id'] for a in agents}),
+                    len(agents))
+                for agent in agents:
+                    self.assertEqual(agent['protocol_digest'], research['protocol_digest'])
+                    self.assertEqual(agent['strategy_side'], agent['agent_side'])
+                    self.assertEqual(agent['model_calls'], 0)
+                    self.assertEqual(agent['total_cost'], '0')
+                    self.assertFalse(agent['live_authority_granted'])
+                    self.assertEqual(agent['economic_edge_status'], 'INCONCLUSIVE')
+
+                self.assertTrue(state['portfolio']['status']['replay_verified'])
+                self.assertTrue(state['portfolio']['economic_report']['reconciled'])
+                self.assertEqual(state['risk']['mode'], 'ZERO')
+                self.assertEqual(state['risk']['real_order_submission'], 'UNAVAILABLE')
+                self.assertEqual(state['strategy']['economic_edge_status'], 'INCONCLUSIVE')
+                self.assertEqual(len(store.load_events_by_aggregate_type(
+                    'simulation_agent_decision')), len(agents))
+                risk_rows = store.load_events_by_aggregate_type('risk_decision')
+                self.assertGreater(len(risk_rows), 0)
+                for decision in risk_rows:
+                    verified = decision['payload']['authoritative_risk_snapshot']
+                    self.assertEqual(
+                        verified['resolved_risk_policy']['resolved_journal_sequence_cut'],
+                        verified['journal_sequence_cut'])
+                book = DurableProviderEconomicBook(store, provider_id=PROVIDER,
+                    account_id=ACCOUNT, environment=ENVIRONMENT)
+                self.assertEqual(str(book.position(INSTRUMENT)),
+                    state['portfolio']['status']['position'])
                 before = store.current_journal_sequence()
                 _, replay = client.command('START_SIMULATION')
                 self.assertEqual(replay['phase'], 'SUCCEEDED')

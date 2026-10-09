@@ -857,7 +857,7 @@ class DotnetPackageRightsTests(unittest.TestCase):
             original = reviewed.read_text(encoding="utf-8")
             # The reviewed-policy text is wrong; the locked .nupkg,
             # extracted license, signature/hash authorities are unchanged.
-            foreign = original.replace("Example Corporation", "UNKNOWN\\x1b[2J Corporation")
+            foreign = original.replace("Example Corporation", "UNKNOWN" + chr(27) + "[2J Corporation")
             reviewed.write_text(foreign, encoding="utf-8")
             with self.assertRaisesRegex(
                 ValueError, "license differs from reviewed text"
@@ -877,8 +877,8 @@ class DotnetPackageRightsTests(unittest.TestCase):
             )
             self.assertIn("reviewed_line=", detail)
             self.assertIn("restored_line=", detail)
-            self.assertNotIn("\\x1b", detail)
-            self.assertIn(r"\\x1b", detail.replace("\\\\", "\\"))
+            self.assertNotIn(chr(27), detail)
+            self.assertIn(r"\\x1b", detail)
 
     def test_restored_license_drift_fails_even_with_same_policy(self):
         with TemporaryDirectory() as directory:

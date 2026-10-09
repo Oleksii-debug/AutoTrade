@@ -1,0 +1,76 @@
+name: Plan 7 provider-free performance and load engineering qualification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "mvp/autotrade_mvp/performance_qualification.py"
+      - "mvp/autotrade_mvp/runtime_load_*.py"
+      - "mvp/autotrade_mvp/runtime_target_host_*.py"
+      - "mvp/tests/test_performance_qualification.py"
+      - "mvp/tests/test_runtime_resource_budget.py"
+      - "mvp/tests/test_runtime_load_*.py"
+      - "mvp/tests/test_runtime_target_host_*.py"
+      - ".github/workflows/plan7-performance-load.yml"
+  pull_request:
+    paths:
+      - "mvp/autotrade_mvp/performance_qualification.py"
+      - "mvp/autotrade_mvp/runtime_load_*.py"
+      - "mvp/autotrade_mvp/runtime_target_host_*.py"
+      - "mvp/tests/test_performance_qualification.py"
+      - "mvp/tests/test_runtime_resource_budget.py"
+      - "mvp/tests/test_runtime_load_*.py"
+      - "mvp/tests/test_runtime_target_host_*.py"
+      - ".github/workflows/plan7-performance-load.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  provider-free-harness:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    env:
+      AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13.16"
+      - name: Refuse wrong checkout or dirty tracked source
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$AUTOTRADE_SOURCE_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Resource, burst, slow-disk, contention and horizon falsifiers
+        run: python -m unittest -v mvp.tests.test_performance_qualification mvp.tests.test_runtime_resource_budget
+      - name: Durable load, event conservation, backlog, restart and negative suites
+        run: python -m unittest discover -s mvp/tests -p "test_runtime_load_*.py" -v
+      - name: Predeclared target-host run, authenticated retention and tamper suites
+        run: python -m unittest discover -s mvp/tests -p "test_runtime_target_host_*.py" -v
+      - name: Retain exact-source engineering receipt only after all suites pass
+        run: >-
+          python tools/write_ci_evidence.py
+          --suite plan7-provider-free-performance-load
+          --command "python -m unittest -v mvp.tests.test_performance_qualification mvp.tests.test_runtime_resource_budget && python -m unittest discover -s mvp/tests -p test_runtime_load_*.py -v && python -m unittest discover -s mvp/tests -p test_runtime_target_host_*.py -v"
+          --output "artifacts/plan7-performance-load-${{ runner.os }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan7-performance-load-${{ runner.os }}
+          path: artifacts/plan7-performance-load-${{ runner.os }}.json
+          if-no-files-found: error
+
+# Engineering fixture/source gates only. Even a green run cannot promote
+# unpublished/interrupted host campaigns or establish target-host, PAPER/LIVE,
+# real-provider, economic-edge, signed-release or physical NVDA acceptance.

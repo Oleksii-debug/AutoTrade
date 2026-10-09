@@ -237,6 +237,8 @@ class AuthenticatedReadQueryBinding:
     prepared_at: str
     permission_scope: str
     query_digest: str
+    # Inherited from verified capability, never a caller-configured environment.
+    provider_environment: str
 
     def __init__(self, *_args, **_kwargs) -> None:
         raise ProviderCoreError(
@@ -333,6 +335,7 @@ def _prepare_authenticated_read_query_impl(
         "account_id": capability.account_id,
         "entity_id": capability.entity_id,
         "environment": capability.environment,
+        "provider_environment": capability.provider_environment,
         "capability_snapshot_id": capability.snapshot_id,
         "instrument_version": capability.instrument_version,
         "surface": surface.value if isinstance(surface, Surface) else str(surface),
@@ -353,6 +356,7 @@ def _prepare_authenticated_read_query_impl(
     object.__setattr__(binding, "account_id", capability.account_id)
     object.__setattr__(binding, "entity_id", capability.entity_id)
     object.__setattr__(binding, "environment", capability.environment)
+    object.__setattr__(binding, "provider_environment", capability.provider_environment)
     object.__setattr__(binding, "capability_snapshot_id", capability.snapshot_id)
     object.__setattr__(binding, "instrument_version", capability.instrument_version)
     object.__setattr__(binding, "surface", surface)
@@ -452,6 +456,7 @@ def _install_authenticated_provider_read_authority():
             object_getattribute(value, "prepared_at"),
             object_getattribute(value, "permission_scope"),
             object_getattribute(value, "query_digest"),
+            object_getattribute(value, "provider_environment"),
         )
 
     def register_query(value: object) -> None:
@@ -484,7 +489,7 @@ def _install_authenticated_provider_read_authority():
             )
         expected = state[1]
         current = query_snapshot(value)
-        for index in (0, 1, 2, 3, 4, 5, 7, 9, 10, 11):
+        for index in (0, 1, 2, 3, 4, 5, 7, 9, 10, 11, 12):
             if (
                 canonical_type(current[index]) is not canonical_str
                 or current[index] != expected[index]
@@ -575,6 +580,7 @@ def _install_authenticated_provider_read_authority():
                 "account_id": query[1],
                 "entity_id": query[2],
                 "environment": query[3],
+                "provider_environment": query[12],
                 "capability_snapshot_id": query[4],
                 "instrument_version": query[5],
                 "surface": query[6],

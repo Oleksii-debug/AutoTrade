@@ -19,6 +19,15 @@ class HostOpenApiRouteTests(unittest.TestCase):
             self.assertIn(f"  {route}:", text)
         self.assertNotIn("\n  /v1/", text)
 
+    def test_local_owner_pairing_is_outside_protected_versioned_host_routes(self):
+        # One-time preauthentication local bootstrap already exists in the
+        # Host but is not a versioned authenticated/trading API operation.
+        source = OPENAPI.read_text(encoding="utf-8")
+        self.assertNotIn("  /api/v1/session:", source)
+        web = (ROOT / "web" / "src" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('const LOCAL_PAIRING_ROUTE = "/api/v1/session";', web)
+        self.assertIn('await jsonFetch(LOCAL_PAIRING_ROUTE, {', web)
+
     def test_cursor_gap_description_points_to_canonical_state_route(self):
         text = OPENAPI.read_text(encoding="utf-8")
         self.assertIn("requires /api/v1/state resnapshot", text)

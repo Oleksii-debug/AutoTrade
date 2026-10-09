@@ -156,12 +156,13 @@ def main() -> int:
     # Credentials must never be imported into test fixtures. The GitHub Actions
     # workflow exposes no secrets and gives only read-only repository access.
     # Fail if a CI environment accidentally supplies provider credential names.
+    # A GITHUB_/RUNNER_/ACTIONS_ prefix must never act as an allowlist:
+    # GITHUB_PROVIDER_API_KEY is still a provider credential.
     sensitive = ("API_KEY", "API_SECRET", "ACCESS_TOKEN", "PRIVATE_KEY",
                  "PROVIDER_PASSWORD", "TRADING_PASSWORD")
     leaked_names = sorted(
         key for key in os.environ
         if any(fragment in key.upper() for fragment in sensitive)
-        and not key.startswith(("GITHUB_", "ACTIONS_", "RUNNER_"))
     )
     if leaked_names:
         raise RuntimeError(

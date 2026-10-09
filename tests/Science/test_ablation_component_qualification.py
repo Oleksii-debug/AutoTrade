@@ -8,7 +8,10 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from fractions import Fraction
 from hashlib import sha256
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
+from uuid import NAMESPACE_URL, uuid5
 
 from autotrade_research.evaluation.ablation import (
     AblationOutcome,
@@ -19,6 +22,7 @@ from autotrade_research.evaluation.ablation import (
     evaluate_qualified_incremental_value,
     verify_ablation_evidence_bundle,
 )
+from autotrade_research.artifacts.store import ArtifactConflict, ArtifactIntegrityError, ArtifactStore
 from mvp.autotrade_mvp.science_qualification import (
     QualificationGate,
     ScientificQualificationInput,
@@ -186,6 +190,31 @@ class Plan7IndependentAblationConsumerTests(unittest.TestCase):
         self.assertFalse(result.release_or_trading_authority)
         self.assertIn("SCIENCE.INDEPENDENT_ATTESTATION_MISSING", result.reason_codes)
 
+
+    def test_restart_safe_durable_receipt_and_tamper_failure(self):
+        sealed = bundle(self.pairs)
+        content = sealed.payload.encode("utf-8")
+        artifact_id = str(uuid5(NAMESPACE_URL, "plan7-ablation:" + sealed.content_digest))
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            fields = {
+                "artifact_id": artifact_id,
+                "media_type": "application/vnd.autotrade.ablation-evidence+json",
+                "rights": {"storage": True, "export": False},
+                "source_refs": ["git:" + SOURCE],
+                "metadata": {"evidence_class": "DESCRIPTIVE_FIXTURE_NOT_INDEPENDENT"},
+            }
+            store.publish_bytes(data=content, **fields)
+            restarted = ArtifactStore(directory)
+            self.assertEqual(restarted.read_bytes(artifact_id), content)
+            with self.assertRaises(ArtifactConflict):
+                restarted.publish_bytes(data=b"forged favorable result", **fields)
+            # Deliberately corrupt the content-addressed bytes after restart.
+            digest = sha256(content).hexdigest()
+            object_path = Path(directory) / "objects" / "sha256" / digest[:2] / digest
+            object_path.write_bytes(b"forged favorable result")
+            with self.assertRaises(ArtifactIntegrityError):
+                ArtifactStore(directory).read_bytes(artifact_id)
 
 if __name__ == "__main__":
     unittest.main()

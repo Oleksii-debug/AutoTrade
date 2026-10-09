@@ -496,6 +496,43 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             self.assertFalse((restored / 'artifacts').exists())
             self.assertTrue(restore_requires_reconciliation(restored))
 
+    def test_product_restore_checkpoint_rebind_failure_retries_exact_backup(self):
+        # The restored checkpoint is path-bound. Failed post-publication signing
+        # must withdraw the destination, never leave a seemingly valid product.
+        with TemporaryDirectory() as directory:
+            data = Path(directory) / 'product'
+            client = ProductClient(data)
+            try:
+                _, simulation = client.command('START_SIMULATION')
+                self.assertEqual(simulation['phase'], 'SUCCEEDED', simulation)
+                backup_id, operation = client.command('BACKUP_SIMULATION')
+                self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
+            finally:
+                client.close()
+
+            backup = data / 'backups' / backup_id
+            verify_backup(backup)
+            restored = Path(directory) / 'retryable-rebind-restored'
+            with patch(
+                'mvp.autotrade_mvp.simulation_runtime_checkpoint.persist_autonomous_runtime_checkpoint',
+                side_effect=RuntimeError('injected checkpoint rebind failure'),
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'injected checkpoint rebind failure'):
+                    restore_product_backup(backup, restored)
+            self.assertFalse(restored.exists())
+            verify_backup(backup)
+            self.assertEqual(restore_product_backup(backup, restored), restored)
+            self.assertTrue(restore_requires_reconciliation(restored))
+            reopened = ProductClient(restored)
+            try:
+                self.assertEqual(reopened.state()['risk']['real_order_submission'], 'UNAVAILABLE')
+                self.assertEqual(
+                    reopened.state()['risk']['restore_trading_gate'],
+                    'RECONCILIATION_REQUIRED',
+                )
+            finally:
+                reopened.close()
+
     def test_worker_pause_allows_exact_durable_block_restore(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / 'journal.sqlite3')

@@ -2,6 +2,15 @@ name: provider-free-product
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "mvp/**"
+      - "web/**"
+      - "src/**"
+      - "tools/plan8_m1_freeze_gate.py"
+      - ".github/workflows/provider-free-product.yml"
   pull_request:
     paths:
       - "mvp/**"
@@ -287,3 +296,70 @@ jobs:
           if-no-files-found: error
       - name: Remain explicit about unavailable external release evidence
         run: echo 'SOURCE/CI ENGINEERING ONLY; no signed release, physical NVDA, target-host performance, real provider, PAPER/LIVE or profitability asserted'
+
+  m1-s6-terminal-freeze:
+    runs-on: ubuntu-22.04
+    needs:
+      - m1-s5-composed-gate
+      - windows-candidate
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Fail-closed M1 freeze contract fixture and negative tests
+        run: python -m unittest mvp.tests.test_plan8_m1_freeze_gate -v
+        env:
+          PYTHONPATH: research:.
+      - uses: actions/download-artifact@v4
+        with:
+          name: AutoTrade-ZERO-UNQUALIFIED-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/freeze/windows
+      - uses: actions/download-artifact@v4
+        with:
+          name: provider-free-browser-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/freeze/browser
+      - uses: actions/download-artifact@v4
+        with:
+          name: plan8-m1-s4-recovery-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/freeze/recovery
+      - uses: actions/download-artifact@v4
+        with:
+          name: plan8-m1-s5-surface-load-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/freeze/surface
+      - uses: actions/download-artifact@v4
+        with:
+          name: plan8-m1-s5-composed-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: artifacts/freeze/composed
+      - name: Verify exact source/tree/package/hash/same-run PASS evidence without release assertion
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$AUTOTRADE_SOURCE_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"
+          python tools/plan8_m1_freeze_gate.py \
+            --source-sha "$AUTOTRADE_SOURCE_SHA" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --windows artifacts/freeze/windows \
+            --browser artifacts/freeze/browser/product-browser.json \
+            --recovery artifacts/freeze/recovery/m1-s4-recovery.json \
+            --surface artifacts/freeze/surface/m1-s5-surface-load.json \
+            --composed artifacts/freeze/composed/m1-s5-composed.json \
+            --output artifacts/freeze/m1-s6-nonrelease-freeze.json
+        env:
+          PYTHONPATH: research:.
+      - name: Issue same-source non-release engineering evidence only after all real jobs passed
+        run: >-
+          python tools/write_ci_evidence.py
+          --suite plan8-m1-s6-exact-source-freeze
+          --command "same-run actual browser, Windows, recovery, accessibility, update, load, verified bundle/source/tree and denied release authority"
+          --output artifacts/freeze/m1-s6-execution-evidence.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan8-m1-s6-nonrelease-freeze-${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: |
+            artifacts/freeze/m1-s6-nonrelease-freeze.json
+            artifacts/freeze/m1-s6-execution-evidence.json
+          if-no-files-found: error

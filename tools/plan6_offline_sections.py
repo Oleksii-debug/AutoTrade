@@ -101,6 +101,25 @@ SECTION_MODULES = {
         "mvp.tests.test_provider_activity_accounting",
         "mvp.tests.test_alpaca_options",
     ),
+    # Reuse the canonical Q/C, sealed request, durable journal and restart
+    # tests. This is OFFLINE fixture/source qualification, never an account Q.
+    5: (
+        "mvp.tests.test_plan6_offline_harness",
+        "mvp.tests.test_provider_qualification_authority",
+        "mvp.tests.test_provider_qualification_identity",
+        "mvp.tests.test_provider_qualification_time_ingress",
+        "mvp.tests.test_capabilities",
+        "mvp.tests.test_durable_capabilities",
+        "mvp.tests.test_provider_environment_credential_scope",
+        "mvp.tests.test_signed_http_request_envelope",
+        "mvp.tests.test_authenticated_read_http_request",
+        "mvp.tests.test_dispatch_intent_fence",
+        "mvp.tests.test_reconciliation_journal",
+        "mvp.tests.test_provider_route_financial_binding",
+        "mvp.tests.test_recovery_durable_unknown_restart",
+        "mvp.tests.test_provider_route_recovery_provenance",
+        "mvp.tests.test_qualification_attestation_authority_ingress",
+    ),
 }
 
 

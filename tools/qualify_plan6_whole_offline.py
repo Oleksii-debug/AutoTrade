@@ -6,12 +6,14 @@ A receipt is emitted ONLY after every child suite really exited successfully.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+from tempfile import NamedTemporaryFile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -115,10 +117,35 @@ def qualify_sections(source_sha: str) -> dict[str, object]:
     }
 
 
+def publish_receipt(path: Path, receipt: dict[str, object]) -> None:
+    """Atomic receipt publication on the same filesystem, after full PASS."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            mode="w", encoding="utf-8", newline="\\n",
+            prefix=".plan6-whole-", suffix=".tmp",
+            dir=path.parent, delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(json.dumps(receipt, sort_keys=True) + "\\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
     expected = os.environ.get("AUTOTRADE_SOURCE_SHA", "")
     try:
+        args.output.unlink(missing_ok=True)  # stale artifacts never claim PASS
         receipt = qualify_sections(expected)
+        publish_receipt(args.output, receipt)
     except (Plan6WholeQualificationError, subprocess.CalledProcessError, OSError) as error:
         # Never print subprocess stdout/stderr: secret-shaped data in a broken
         # test must never be promoted into a public CI log/artifact.

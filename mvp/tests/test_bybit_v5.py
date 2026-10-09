@@ -2392,7 +2392,51 @@ class BybitV5AdapterTests(unittest.TestCase):
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )
         self.assertEqual((fills[0].account_id, fills[0].environment), ("account-a", "PAPER"))
+        self.assertEqual(fills[0].provider_environment, "TESTNET")
+        self.assertEqual(observation.query_binding.provider_environment, "TESTNET")
         self.assertEqual(observation.query_binding.account_id, "account-a")
+
+    def test_execution_provider_environment_is_sealed_and_nonforgeable(self):
+        row = {
+            "execId": "env-guard-fill", "orderLinkId": "",
+            "symbol": "BTCUSDT", "side": "Buy", "execQty": "1",
+            "execPrice": "10", "execFee": "0",
+            "feeCurrency": "USDT", "execTime": "1790280000000",
+        }
+        for runtime_environment, provider_environment in (
+            ("PAPER", "TESTNET"),
+            ("LIVE", "MAINNET"),
+        ):
+            with self.subTest(runtime_environment=runtime_environment):
+                observation = bound_execution_response(
+                    {"retCode": 0, "result": {"list": [row]}},
+                    environment=runtime_environment,
+                )
+                fill = parse_executions(
+                    observation,
+                    instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                )[0]
+                self.assertEqual(fill.environment, runtime_environment)
+                self.assertEqual(fill.provider_environment, provider_environment)
+                binding = observation.query_binding
+                try:
+                    # A forged post-read retarget must be rejected before any
+                    # financial fill can be projected.
+                    object.__setattr__(
+                        binding, "provider_environment",
+                        "MAINNET" if provider_environment == "TESTNET" else "TESTNET",
+                    )
+                    with self.assertRaisesRegex(
+                        ProviderCoreError, "binding changed after preparation"
+                    ):
+                        parse_executions(
+                            observation,
+                            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                        )
+                finally:
+                    object.__setattr__(
+                        binding, "provider_environment", provider_environment
+                    )
 
     def test_execution_rejects_noncanonical_present_fee_currency(self):
         base = {

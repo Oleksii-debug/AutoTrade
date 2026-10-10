@@ -87,10 +87,10 @@ class PublicHistoryTests(unittest.TestCase):
         lines[0] = ",".join(parts)
         out = BytesIO()
         with ZipFile(out, "w") as z:
-            z.writestr(name, "\\n".join(lines) + "\\n")
+            z.writestr(name, "\n".join(lines) + "\n")
         invalid = out.getvalue()
         with self.assertRaisesRegex(HistoricalArchiveError, "close time"):
-            verify_archive(invalid, f"{sha256(invalid).hexdigest()}  BTCUSDT-1h-2024-01.zip\\n".encode(),
+            verify_archive(invalid, f"{sha256(invalid).hexdigest()}  BTCUSDT-1h-2024-01.zip\n".encode(),
                            symbol="BTCUSDT", interval="1h", month="2024-01")
 
     def test_compressed_zip_bomb_and_redirect_prevented(self):
@@ -103,7 +103,7 @@ class PublicHistoryTests(unittest.TestCase):
             z.writestr("BTCUSDT-1h-2024-01.csv", raw_file)
         raw = out.getvalue()
         with self.assertRaisesRegex(HistoricalArchiveError, "compression ratio unsafe"):
-            verify_archive(raw, f"{sha256(raw).hexdigest()}  BTCUSDT-1h-2024-01.zip\\n".encode(),
+            verify_archive(raw, f"{sha256(raw).hexdigest()}  BTCUSDT-1h-2024-01.zip\n".encode(),
                            symbol="BTCUSDT", interval="1h", month="2024-01")
 
     def test_provenance_rights_and_interrupted_publication_recover_without_partial_archive(self):

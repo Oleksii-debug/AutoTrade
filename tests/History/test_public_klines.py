@@ -248,7 +248,7 @@ class PublicHistoryTests(unittest.TestCase):
         malformed = (
             monthly.replace("BTCUSDT-1h-", "ETHUSDT-1h-"),
             monthly.replace("/1h/BTCUSDT-", "/5m/BTCUSDT-"),
-            monthly.replace("/2024-01.zip", "/../2024-01.zip"),
+            monthly.replace("/BTCUSDT-1h-2024-01.zip", "/../BTCUSDT-1h-2024-01.zip"),
             monthly.replace("/BTCUSDT/1h/", "/BTCUSDT/%31h/"),
             monthly.replace("https://", "http://"),
             monthly.replace("data.binance.vision", "data.binance.vision.evil.test"),

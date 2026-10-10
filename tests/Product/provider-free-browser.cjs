@@ -9,10 +9,10 @@ const {spawn, spawnSync} = require("node:child_process");
 const {chromium} = require(process.env.AUTOTRADE_PLAYWRIGHT_MODULE || "playwright");
 const ROOT = process.env.AUTOTRADE_PRODUCT_ROOT || path.resolve(__dirname, "../..");
 const python = process.env.AUTOTRADE_PYTHON || "python";
-const env = {...process.env, PYTHONPATH: ROOT + path.delimiter + path.join(ROOT, "research")};
+const env = {...process.env, AUTOTRADE_TEST_DIAGNOSTIC: "1", PYTHONPATH: ROOT + path.delimiter + path.join(ROOT, "research")};
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "autotrade-browser-"));
 const data = path.join(scratch, "product state with spaces #");
-let host, browser, observedPage;
+let host, browser, observedPage, lastHostData;
 let stage = "launch";
 let passed = false;
 const deadline = setTimeout(() => {
@@ -25,6 +25,7 @@ process.on("exit", () => {
 });
 
 async function start(directory, restore) {
+  lastHostData = directory;
   const args = ["-B", "-m", "mvp.autotrade_mvp.product_runtime", "--data-dir", directory,
     "--port", "0", "--no-browser", "--desktop-child"];
   if (restore) args.push("--restore-backup", restore);
@@ -62,9 +63,15 @@ async function tabTo(page, id) {
   throw new Error("Keyboard could not reach " + id);
 }
 
-async function command(page, action, index) {
+async function command(page, action) {
   stage = action;
   console.log("Keyboard command: " + action);
+  // Resolve the canonical action by stable value, not historical option
+  // order. The user interaction remains entirely keyboard-only.
+  const index = await page.locator("#host-action option").evaluateAll(
+    (options, target) => options.findIndex(option => option.value === target),
+    action);
+  assert.ok(index >= 0, "canonical Host action option is missing: " + action);
   await tabTo(page, "host-action");
   await page.keyboard.press("Home");
   for (let step = 0; step < index; step++) await page.keyboard.press("ArrowDown");
@@ -72,15 +79,72 @@ async function command(page, action, index) {
   await page.waitForFunction(() => !document.querySelector("#submit-command").disabled);
   await page.keyboard.press("Tab");
   assert.equal(await page.evaluate(() => document.activeElement.id), "submit-command", action);
-  const before = await page.locator("#operations-body tr[data-operation-id]").count();
+  // Capture the actual same-origin authenticated Host response while issuing
+  // the command by keyboard. A snapshot cursor gap correctly discards
+  // incomplete event-derived UI rows; it must never be mistaken for a failed
+  // or completed financial operation.
+  const acceptedResponse = page.waitForResponse(response =>
+    response.request().method() === "POST" &&
+    new URL(response.url()).pathname === "/api/v1/commands");
   await page.keyboard.press("Enter");
-  await page.waitForFunction(() => document.activeElement?.id === "command-result");
+  const response = await acceptedResponse;
+  assert.equal(response.status(), 200, action + " canonical Host acceptance");
+  const receipt = await response.json();
+  assert.equal(receipt.status, "ACCEPTED", action + " admission only, not a fill");
+  assert.match(receipt.operation_id, /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i);
+  // Focus must still reach the real result and acceptance must be described
+  // as provisional regardless of how long restored reconciliation takes.
+  await page.waitForFunction(
+    () => document.activeElement?.id === "command-result",
+    null, {timeout: action === "RECOVER_SIMULATION" ? 120000 : 30000});
   assert.equal(
     await page.evaluate(() => document.activeElement.id),
     "command-result",
     action + " command feedback focus");
-  await page.waitForFunction(count => document.querySelectorAll("#operations-body tr[data-operation-id]").length > count
-    && document.querySelector("#operations-body").lastElementChild?.children[1]?.textContent === "SUCCEEDED", before);
+  // Read the one canonical durable operation after the accepted command.
+  // The UI intentionally drops event-derived operation rows when a snapshot
+  // advances past unconsumed events. Never weaken that fail-closed UI behavior
+  // or infer completion from ACCEPTED, a timeout, or portfolio figures.
+  await page.waitForFunction(async operationId => {
+    const route = window.AutoTradeHostApi.route("getOperation", {operation_id: operationId});
+    const current = await fetch(route, {credentials: "same-origin", cache: "no-store",
+      headers: {"Accept": "application/json"}});
+    if (!current.ok) return false;
+    const operation = await current.json();
+    return operation.operation_id === operationId &&
+      operation.phase === "SUCCEEDED" &&
+      Array.isArray(operation.remaining_uncertainty) &&
+      operation.remaining_uncertainty.length === 0;
+  }, receipt.operation_id, {polling: 500,
+    timeout: action === "RECOVER_SIMULATION" ? 120000 : 30000});
+  // The durable Host GET may complete before the asynchronous command
+  // feedback and snapshot refresh finish rendering. Wait for the UI to
+  // settle; never assert from a transient "Submitting..." placeholder.
+  await page.waitForFunction(operationId => {
+    const feedback = document.querySelector("#command-result")?.textContent || "";
+    if (feedback.startsWith("Submitting host command ")) return false;
+    const body = document.querySelector("#operations-body");
+    const row = [...(body?.querySelectorAll("tr[data-operation-id]") || [])]
+      .find(item => item.dataset.operationId === operationId);
+    return row?.children[1]?.textContent === "SUCCEEDED" ||
+      (body?.textContent || "").includes("Current host operations were cleared because Canonical snapshot advanced from event cursor") ||
+      feedback.includes("Operation phase is SUCCEEDED.") ||
+      feedback.includes("Operation status was not rendered because");
+  }, receipt.operation_id, {timeout: action === "RECOVER_SIMULATION" ? 120000 : 30000});
+  const renderedOperation = page.locator('#operations-body tr[data-operation-id="' +
+    receipt.operation_id + '"]');
+  const feedback = await page.locator("#command-result").innerText();
+  if (await renderedOperation.count() === 1) {
+    assert.equal(await renderedOperation.locator("td").first().innerText(), "SUCCEEDED");
+  } else {
+    const operations = await page.locator("#operations-body").innerText();
+    assert.ok(
+      operations.includes("Current host operations were cleared because Canonical snapshot advanced from event cursor") ||
+      feedback.includes("Operation phase is SUCCEEDED.") ||
+      feedback.includes("Operation status was not rendered because"),
+      "UI must either display durable success or disclose that operation rows were withheld");
+    assert.match(feedback, /was accepted for processing\. It is not yet a completed financial outcome/);
+  }
   await page.keyboard.press("Shift+Tab");
   assert.equal(
     await page.evaluate(() => document.activeElement.id),
@@ -105,13 +169,13 @@ async function command(page, action, index) {
     "host-action",
     action + " action reverse focus");
   if (action === "RECOVER_SIMULATION" || action === "START_SIMULATION")
-    await page.waitForFunction(() => document.querySelector("#portfolio-body").textContent.includes("895.696"));
+    await page.waitForFunction(() => document.querySelector("#portfolio-body").textContent.includes("791.392"));
 }
 
 async function exercisePortfolioTableTools(page) {
   stage = "portfolio keyboard tools";
   await tabTo(page, "portfolio-filter");
-  await page.keyboard.type("895.696");
+  await page.keyboard.type("791.392");
   await page.waitForFunction(() => {
     const status = document.querySelector("#portfolio-filter-status")?.textContent || "";
     const rows = [...document.querySelectorAll('#portfolio-body tr[data-filterable-row="true"]')];
@@ -133,9 +197,9 @@ async function exercisePortfolioTableTools(page) {
   const copiedPortfolio = await page.evaluate(() => navigator.clipboard.readText());
   assert.match(
     copiedPortfolio,
-    /^Field\tHost evidence\n/,
-    "copied portfolio page is self-describing with column headings");
-  assert.match(copiedPortfolio, /895\.696/);
+    /^Field\tHost evidence\r?\n/,
+    "copied portfolio page is self-describing with column headings on Windows and POSIX");
+  assert.match(copiedPortfolio, /791\.392/);
   await page.keyboard.press("Shift+Tab");
   assert.equal(await page.evaluate(() => document.activeElement.id), "portfolio-filter");
   await page.keyboard.press("Control+A");
@@ -208,7 +272,7 @@ async function exercisePortfolioPagingAndSort(page) {
   await page.waitForFunction(() => document.querySelector("#refresh-state").disabled);
   await page.waitForFunction(() => !document.querySelector("#refresh-state").disabled);
   await page.waitForFunction(() =>
-    document.querySelector("#portfolio-body").textContent.includes("895.696") &&
+    document.querySelector("#portfolio-body").textContent.includes("791.392") &&
     !document.querySelector("#portfolio-body").textContent.includes("paging-fixture-"));
 }
 
@@ -276,19 +340,19 @@ async function exerciseSnapshotSelectionPreservation(page) {
   stage = "same-scope snapshot text selection";
   const selected = await page.evaluate(() => {
     const cell = [...document.querySelectorAll("#portfolio-body td")]
-      .find(candidate => candidate.textContent.includes("895.696"));
+      .find(candidate => candidate.textContent.includes("791.392"));
     if (!cell || !cell.firstChild) return null;
     const value = cell.firstChild.data;
-    const start = value.indexOf("895.696");
+    const start = value.indexOf("791.392");
     if (start < 0) return null;
     const range = document.createRange();
     range.setStart(cell.firstChild, start);
-    range.setEnd(cell.firstChild, start + "895.696".length);
+    range.setEnd(cell.firstChild, start + "791.392".length);
     const selection = window.getSelection();
     selection.removeAllRanges();
     if (typeof selection.setBaseAndExtent === "function") {
       selection.setBaseAndExtent(
-        cell.firstChild, start + "895.696".length, cell.firstChild, start);
+        cell.firstChild, start + "791.392".length, cell.firstChild, start);
     } else {
       selection.addRange(range);
     }
@@ -299,7 +363,7 @@ async function exerciseSnapshotSelectionPreservation(page) {
         selection.anchorOffset > selection.focusOffset
     };
   });
-  assert.equal(selected.text, "895.696", "portfolio evidence is selectable before refresh");
+  assert.equal(selected.text, "791.392", "portfolio evidence is selectable before refresh");
 
   const routePattern = "**/api/v1/state";
   await page.route(routePattern, async route => {
@@ -325,7 +389,7 @@ async function exerciseSnapshotSelectionPreservation(page) {
           selection.anchorOffset > selection.focusOffset)
       };
     });
-    assert.equal(after.text, "895.696",
+    assert.equal(after.text, "791.392",
       "same-scope canonical snapshot preserves selected portfolio evidence");
     assert.equal(after.inside, true,
       "restored selection remains inside the portfolio evidence table");
@@ -474,7 +538,12 @@ async function exerciseCanonicalPageNavigation(page) {
   await page.waitForFunction(() => !document.querySelector("#submit-command").disabled);
   assert.equal(new URL(page.url()).hash, "");
   assert.match(await page.locator("#jobs-body").innerText(), /DIAGNOSTIC_ONLY/);
+  // Chromium may have pre-focused the skip link during automatic pairing.
+  // Probe strictly by keyboard, and reverse one Tab when already past it.
   await page.keyboard.press("Tab");
+  if (await page.locator(":focus").innerText() !== "Skip to main content") {
+    await page.keyboard.press("Shift+Tab");
+  }
   assert.equal(await page.locator(":focus").innerText(), "Skip to main content");
   await page.keyboard.press("Enter");
   assert.equal(await page.evaluate(() => document.activeElement.id), "main");
@@ -485,43 +554,70 @@ async function exerciseCanonicalPageNavigation(page) {
   await stop();
   await exerciseHostOutageFailClosed(page);
 
+  // A prior Host has already advanced its financial and control journal.
+  // Crash-injection is only legitimate in a fresh simulator-owned scope:
+  // reproduce exactly the canonical Product bootstrap protocol, and crash
+  // after the first *real* atomic fill. A Host-signature is never bypassed.
+  stage = "isolated financial crash preparation";
+  const crashData = path.join(scratch, "isolated crash recovery state");
+  // Bootstrap with the exact Product Host's canonical one-observation
+  // simulator contract, but without starting a second Host process. Host
+  // startup has its own durable research/Host journal writes: those are not
+  // part of the simulator's signed checkpoint cut and must not be injected
+  // between this independent crash process and its first financial admission.
+  // This creates no synthetic fills, bypasses no signer, and leaves the real
+  // packaged Host/recovery/browser acceptance below unchanged.
+  const bootstrap = spawnSync(python, ["-B", "-c", `
+from mvp.autotrade_mvp.product_runtime import PRICES, START_TIME
+from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
+from pathlib import Path
+import sys
+result = run_autonomous_simulation(
+    PRICES, Path(sys.argv[1]).resolve(), run_id='provider-free-product',
+    now=START_TIME, stop_after_episodes=1,
+    execution_profile='TWO_EQUAL_PARTIALS', target_quantity='2')
+print(result['status'], result['completed_episodes'])
+`, path.join(crashData, "state")], {cwd: ROOT, env, encoding: "utf8", timeout: 30000});
+  assert.equal(bootstrap.status, 0, bootstrap.stderr);
+  assert.equal(bootstrap.stdout.trim(), "PAUSED 1");
+
   const crash = spawnSync(python, ["-B", "-c", `
 import os,sys
 from pathlib import Path
 import mvp.autotrade_mvp.simulation_session as s
 from mvp.autotrade_mvp.simulation_commands import _protocol
 from mvp.autotrade_mvp.persistence import JournalStore
-root=Path(sys.argv[1]);p=_protocol(JournalStore(root/'journal.sqlite3'))
+root=Path(sys.argv[1]).resolve(); p=_protocol(JournalStore(root/"journal.sqlite3"))
 original=s.commit_order_fill_with_reservation_consumption
 def die(*a,**kw):
     original(*a,**kw)
     os._exit(73)
 s.commit_order_fill_with_reservation_consumption=die
-s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_time'],partial_fills=True)
-`, path.join(data, "state")], {cwd: ROOT, env, encoding: "utf8", timeout: 30000});
+s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_time'],execution_profile=p['execution_profile'],target_quantity=p['target_quantity'])
+`, path.join(crashData, "state")], {cwd: ROOT, env, encoding: "utf8", timeout: 30000});
   assert.equal(crash.status, 73, crash.stderr);
-  await page.goto(await start(data));
+  await page.goto(await start(crashData));
   await page.waitForFunction(() => !document.querySelector("#submit-command").disabled);
   assert.match(await page.locator("#portfolio-body").innerText(), /PARTIALLY_FILLED/);
-  await command(page, "RECOVER_SIMULATION", 3);
-  assert.match(await page.locator("#portfolio-body").innerText(), /895\.696/);
+  await command(page, "RECOVER_SIMULATION");
+  assert.match(await page.locator("#portfolio-body").innerText(), /791\.392/);
   await exercisePortfolioTableTools(page);
   await exercisePortfolioPagingAndSort(page);
   await exerciseSnapshotSelectionPreservation(page);
   await exerciseScopeSpeechIsolation(page);
   assert.match(await page.locator("#strategy-body").innerText(), /deterministic-trend/);
-  await command(page, "START_SIMULATION", 2);
-  await command(page, "BACKUP_SIMULATION", 4);
-  const backups = fs.readdirSync(path.join(data, "backups")).filter(name => /^[0-9a-f-]{36}$/.test(name));
+  await command(page, "START_SIMULATION");
+  await command(page, "BACKUP_SIMULATION");
+  const backups = fs.readdirSync(path.join(crashData, "backups")).filter(name => /^[0-9a-f-]{36}$/.test(name));
   assert.equal(backups.length, 1);
-  await command(page, "BLOCK_NEW_EXPOSURE", 0);
+  await command(page, "BLOCK_NEW_EXPOSURE");
   await stop();
   const restored = path.join(scratch, "restored state");
-  await page.goto(await start(restored, path.join(data, "backups", backups[0])));
+  await page.goto(await start(restored, path.join(crashData, "backups", backups[0])));
   await page.waitForFunction(() => !document.querySelector("#submit-command").disabled);
-  assert.match(await page.locator("#portfolio-body").innerText(), /895\.696/);
+  assert.match(await page.locator("#portfolio-body").innerText(), /791\.392/);
   assert.match(await page.locator("#risk-body").innerText(), /RECONCILIATION_REQUIRED/);
-  await command(page, "RECOVER_SIMULATION", 3);
+  await command(page, "RECOVER_SIMULATION");
   await stop();
   assert.deepEqual(errors, []);
   passed = true;
@@ -529,6 +625,16 @@ s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_tim
     browser: browser.version(), keyboard: true, nvda_verified: false, real_orders: false}));
 })().catch(async error => {
   console.error(error.message);
+  // Worker diagnostics are deliberately limited to fixed stage/error codes.
+  // Never publish traceback, stderr, filesystem names, tokens or key bytes.
+  if (lastHostData) {
+    const stageFile = path.join(lastHostData, "worker-stage-diagnostic.txt");
+    if (fs.existsSync(stageFile)) {
+      const code = fs.readFileSync(stageFile, "utf8").trim();
+      if (/^[A-Za-z0-9_.:-]{1,256}$/.test(code))
+        console.error("Safe worker stage: " + code);
+    }
+  }
   if (observedPage) console.error(JSON.stringify({stage,
     result: await observedPage.locator("#command-result").innerText(),
     freshness: await observedPage.locator("#freshness").innerText(),

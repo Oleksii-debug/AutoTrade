@@ -2126,7 +2126,18 @@ function renderOperation(operation) {
           " was accepted for processing. It is not yet a completed financial outcome.";
         if (result.operationId !== null) {
           try {
-            const operation = await refreshOperation(result.operationId);
+            let operation = await refreshOperation(result.operationId);
+            if (
+              operation === null &&
+              commandContextMatchesCurrentSnapshot(payload, submittedHostId)
+            ) {
+              // An event-cursor gap can invalidate an in-flight operation read
+              // without changing this authenticated Host/account/session.
+              // Never restore a stale event row. Re-fetch the exact accepted
+              // operation ID from the canonical Host under the verified
+              // current scope; cross-scope results stay intentionally hidden.
+              operation = await refreshOperation(result.operationId);
+            }
             if (operation === null) {
               text(
                 "command-result",
@@ -2298,7 +2309,14 @@ function renderOperation(operation) {
         if (page) page.heading.focus({preventScroll: true});
       }
     });
-    window.addEventListener("hashchange", () => activate({focusHeading: true}));
+    // Pairing removes its secret fragment with a synthetic hashchange. Only
+    // browser-originated route changes move keyboard/screen-reader focus;
+    // synthetic housekeeping must leave the first skip link reachable.
+    window.addEventListener("hashchange", (event) =>
+      // Only the pairing scrub dispatches an untrusted event with empty hash.
+      // A real navigation to a section can also be script-initiated, and must
+      // still focus its semantic heading for keyboard/screen-reader users.
+      activate({focusHeading: event.isTrusted || window.location.hash !== ""}));
     // Native fragment scrolling/focus can run after DOMContentLoaded on an
     // initial deep link. Re-apply the semantic heading focus after load, so a
     // fresh browser navigation and keyboard history use the same route contract.

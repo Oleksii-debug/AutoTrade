@@ -178,8 +178,15 @@ jobs:
         run: |
           $hostExe = (Resolve-Path 'artifacts/installed candidate with spaces/payload/host/AutoTrade.Host.exe').Path
           $stderr = 'artifacts/host-startup-blocked.txt'
-          & $hostExe 2> $stderr
-          if ($LASTEXITCODE -ne 78) { throw "Packaged Host did not return authority-unavailable exit 78: $LASTEXITCODE" }
+          # An intentional native exit 78 must not be promoted to an
+          # unhandled PowerShell error before its explicit fail-closed check.
+          # Use the process exit code, not $LASTEXITCODE from a native pipeline.
+          $blockedHost = Start-Process -FilePath $hostExe -NoNewWindow -PassThru -Wait -RedirectStandardError $stderr
+          try {
+            if ($blockedHost.ExitCode -ne 78) { throw "Packaged Host did not return authority-unavailable exit 78: $($blockedHost.ExitCode)" }
+          } finally {
+            $blockedHost.Dispose()
+          }
           if (-not (Select-String -LiteralPath $stderr -Pattern 'AUTOTRADE_HOST_STARTUP_BLOCKED' -Quiet)) { throw 'Packaged Host did not emit the fail-closed startup marker.' }
       - name: Test the extracted isolated Python and frozen product with keyboard
         shell: pwsh
@@ -217,6 +224,8 @@ jobs:
         run: >-
           python -m unittest
           mvp.tests.test_plan8_m1_recovery_continuation
+          mvp.tests.test_autonomous_observed_fill_recovery
+          mvp.tests.test_autonomous_partial_fill_loop
           mvp.tests.test_simulation_runtime_checkpoint
           mvp.tests.test_backup_restore
           mvp.tests.test_recovery_durable_unknown_restart

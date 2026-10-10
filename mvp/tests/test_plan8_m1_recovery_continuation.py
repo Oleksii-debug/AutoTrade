@@ -5,10 +5,17 @@ A new recovery receipt is not permission to create a second order/fill/settlemen
 """
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
+import os
 import unittest
 
 from mvp.autotrade_mvp.backup import verify_backup, restore_requires_reconciliation
 from mvp.autotrade_mvp.product_runtime import restore_product_backup
+from mvp.autotrade_mvp.simulation_commands import (
+    _protocol, _completed_quarantined_restore_is_read_only,
+)
+from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.backup import BackupIntegrityError
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.simulation_session import ACCOUNT, ENVIRONMENT, PROVIDER, INSTRUMENT
 from mvp.tests.test_provider_free_product import ProductClient
@@ -124,8 +131,18 @@ class Plan8M1RecoveryContinuation(unittest.TestCase):
             try:
                 verify_cut(client)
                 for _ in range(2):
-                    _, recovered = client.command("RECOVER_SIMULATION")
-                    self.assertEqual(recovered["phase"], "SUCCEEDED", recovered)
+                    # Record only the canonical worker stage/exception class on
+                    # failure. Keep UNKNOWN fail-closed and never accept it as
+                    # a successful recovered financial state.
+                    with patch.dict(os.environ, {"AUTOTRADE_TEST_DIAGNOSTIC": "1"}):
+                        _, recovered = client.command("RECOVER_SIMULATION")
+                    diagnostic = restored / "worker-stage-diagnostic.txt"
+                    self.assertEqual(
+                        recovered["phase"], "SUCCEEDED",
+                        {"operation": recovered, "worker_stage":
+                         diagnostic.read_text(encoding="utf-8")
+                         if diagnostic.is_file() else "NO_WORKER_DIAGNOSTIC"},
+                    )
                     verify_cut(client)
             finally:
                 client.close()
@@ -137,6 +154,30 @@ class Plan8M1RecoveryContinuation(unittest.TestCase):
                 verify_cut(client)
             finally:
                 client.close()
+
+            # Read-only acknowledgement never forges the original runtime
+            # signer, never clears the restore gate, and never repeats fills.
+            state_root = restored / "state"
+            protocol = _protocol(JournalStore(state_root / "journal.sqlite3"))
+            self.assertFalse((state_root / ".autonomous-runtime-authority.key").exists())
+            self.assertFalse((state_root / "autonomous-runtime-checkpoint.json").exists())
+            self.assertTrue(restore_requires_reconciliation(restored))
+            self.assertTrue(_completed_quarantined_restore_is_read_only(state_root, protocol))
+
+            forged_key = state_root / ".autonomous-runtime-authority.key"
+            forged_key.write_bytes(b"X" * 32)
+            forged_key.chmod(0o600)
+            with self.assertRaisesRegex(ValueError, "unexpected executable runtime authority"):
+                _completed_quarantined_restore_is_read_only(state_root, protocol)
+            forged_key.unlink()
+
+            evidence = restored / "restore-evidence" / "autonomous-runtime-checkpoint.json"
+            original = evidence.read_bytes()
+            evidence.write_bytes(original + b"tamper")
+            with self.assertRaises(BackupIntegrityError):
+                _completed_quarantined_restore_is_read_only(state_root, protocol)
+            evidence.write_bytes(original)
+            self.assertTrue(_completed_quarantined_restore_is_read_only(state_root, protocol))
             verify_backup(backup)
 
 

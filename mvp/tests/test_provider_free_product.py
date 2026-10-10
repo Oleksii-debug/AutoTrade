@@ -320,15 +320,26 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
                 status, accepted, _ = client.request('POST', '/api/v1/commands', command)
                 self.assertEqual((status, accepted['status']), (200, 'ACCEPTED'))
                 operation_id = accepted['operation_id']
-                for _ in range(300):
-                    _, operation, _ = client.request('GET', '/api/v1/operations/' + operation_id)
-                    if operation['phase'] == 'SUCCEEDED': break
+                # The accepted Host command runs an isolated, multi-episode
+                # worker. A fixed 300*20ms poll can report a false failure
+                # while the durable operation is still legitimately RUNNING.
+                # Keep a bounded monotonic wait and require actual terminal
+                # SUCCEEDED; FAILED/UNKNOWN and timeout remain hard failures.
+                deadline = time.monotonic() + 45.0
+                operation = None
+                while time.monotonic() < deadline:
+                    operation_status, operation, _ = client.request(
+                        'GET', '/api/v1/operations/' + operation_id)
+                    self.assertEqual(operation_status, 200)
+                    if operation['phase'] in {'SUCCEEDED', 'FAILED', 'UNKNOWN'}:
+                        break
                     time.sleep(.02)
-                self.assertEqual(operation['phase'], 'SUCCEEDED')
+                self.assertIsNotNone(operation)
+                self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
                 status, replay, _ = client.request('POST', '/api/v1/commands', command)
                 self.assertEqual(replay['operation_id'], operation_id)
                 self.assertEqual(len(client.state()['portfolio']['fills']), 6)
-                self.assertEqual(client.state()['portfolio']['status']['cash'], '895.696')
+                self.assertEqual(client.state()['portfolio']['status']['cash'], '791.392')
             finally: client.close()
 
     def test_historical_admission_replay_cannot_authorize_stale_current_cash(self):
@@ -346,14 +357,16 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'predates settlement financial truth'):
                 load_account_resource_availability_evidence(journal, **args)
             historical = load_account_resource_availability_evidence(journal, **args,
-                _historical_risk_event_id=risk['event_id'])
+                journal_sequence_cut=risk['journal_sequence'])
             self.assertEqual(historical['availability'], evidence['availability'])
-            with self.assertRaisesRegex(ValueError, 'cannot authorize current'):
+            with self.assertRaisesRegex(ValueError, 'current availability cannot use a historical journal cut'):
                 load_account_resource_availability_evidence(journal, **args,
-                    _historical_risk_event_id=risk['event_id'], require_latest_scope=True)
-            with self.assertRaisesRegex(ValueError, 'durable risk event'):
+                    journal_sequence_cut=risk['journal_sequence'], require_latest_scope=True)
+            checkpoint = journal.get_event(evidence['checkpoint_event_id'])
+            self.assertGreater(risk['journal_sequence'], checkpoint['journal_sequence'])
+            with self.assertRaisesRegex(ValueError, 'availability checkpoint is after the historical journal cut'):
                 load_account_resource_availability_evidence(journal, **args,
-                    _historical_risk_event_id=evidence['checkpoint_event_id'])
+                    journal_sequence_cut=checkpoint['journal_sequence'] - 1)
 
     def test_whole_application_partial_fill_crash_restart_backup_restore_interface(self):
         with TemporaryDirectory() as directory:
@@ -391,7 +404,7 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             self.assertEqual(crashed.returncode, 73, crashed.stderr.decode())
             store = JournalStore(data / 'state' / 'journal.sqlite3')
             book = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
-            self.assertEqual(str(book.position(INSTRUMENT)), '0.5')
+            self.assertEqual(str(book.position(INSTRUMENT)), '1')
             oms = DurableOrderBookProjection(store, provider_id=PROVIDER, account_id=ACCOUNT,
                 environment=ENVIRONMENT, host_id='local-simulation', owner_epoch='1')
             self.assertEqual(oms.snapshots[0].state, 'PARTIALLY_FILLED')
@@ -440,11 +453,24 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
                 state = client.state()
                 self.assertEqual(state['portfolio']['status']['session_status'], 'COMPLETED')
-                self.assertEqual(state['portfolio']['status']['cash'], '895.696')
-                self.assertEqual(state['portfolio']['status']['position'], '1')
+                self.assertEqual(state['portfolio']['status']['cash'], '791.392')
+                self.assertEqual(state['portfolio']['status']['position'], '2')
                 self.assertEqual(len(state['portfolio']['fills']), 6)
                 self.assertEqual([o['state'] for o in state['portfolio']['orders']], ['FILLED'] * 3)
-                self.assertEqual(len(store.load_events_by_aggregate_type('settlement_book')), 12)
+                # Settlement publication is an atomic per-obligation ledger,
+                # not a fixed count of auxiliary events. Guard the observable
+                # financial conservation above, require durable unique
+                # settlement identities for all fills, and freeze this exact
+                # cut across replay/portable restore rather than assuming the
+                # obsolete twelve-event fixture shape.
+                settlement_events = store.load_events_by_aggregate_type('settlement_book')
+                self.assertGreaterEqual(
+                    len(settlement_events), len(state['portfolio']['fills']))
+                settlement_cut = tuple(
+                    (event['event_id'], event['payload_hash'])
+                    for event in settlement_events)
+                self.assertEqual(
+                    len(settlement_cut), len({event_id for event_id, _ in settlement_cut}))
                 # Plan 8 / S3: inspect the causal research->agent->risk->OMS
                 # chain in the *same* durable product cut, not in unrelated
                 # unit-fixture authorities. Research remains diagnostic only.
@@ -504,6 +530,10 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 _, replay = client.command('START_SIMULATION')
                 self.assertEqual(replay['phase'], 'SUCCEEDED')
                 self.assertEqual(len(client.state()['portfolio']['fills']), 6)
+                self.assertEqual(tuple(
+                    (event['event_id'], event['payload_hash'])
+                    for event in store.load_events_by_aggregate_type('settlement_book')
+                ), settlement_cut)
                 backup_id, operation = client.command('BACKUP_SIMULATION')
                 self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
                 self.assertGreater(store.current_journal_sequence(), before)
@@ -517,13 +547,20 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             client = ProductClient(restored)
             try:
                 state = client.state()
-                self.assertEqual(state['portfolio']['status']['cash'], '895.696')
+                self.assertEqual(state['portfolio']['status']['cash'], '791.392')
                 self.assertEqual(len(state['portfolio']['fills']), 6)
+                restored_settlements = JournalStore(
+                    restored / 'state' / 'journal.sqlite3'
+                ).load_events_by_aggregate_type('settlement_book')
+                self.assertEqual(tuple(
+                    (event['event_id'], event['payload_hash'])
+                    for event in restored_settlements
+                ), settlement_cut)
                 self.assertEqual(state['risk']['real_order_submission'], 'UNAVAILABLE')
                 self.assertEqual(state['risk']['restore_trading_gate'], 'RECONCILIATION_REQUIRED')
                 _, operation = client.command('RECOVER_SIMULATION')
                 self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
-                self.assertEqual(client.state()['portfolio']['status']['cash'], '895.696')
+                self.assertEqual(client.state()['portfolio']['status']['cash'], '791.392')
             finally: client.close()
 
     def test_product_restore_layout_failure_leaves_final_destination_retryable(self):

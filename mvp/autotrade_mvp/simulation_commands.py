@@ -207,6 +207,52 @@ def _inspect_completed_worker(root):
     raise AssertionError('unreachable coherent read retry state')
 
 
+
+def _completed_quarantined_restore_is_read_only(root, protocol):
+    """Only a *fully finished* portable restore can issue a read-only receipt.
+
+    Portable backups quarantine the old checkpoint and deliberately exclude its
+    private signing key. They must never mint or reuse simulation sender/runtime
+    authority just to acknowledge an already completed, verified journal.
+    Reuse the canonical restored-provenance verifier and immutable simulation
+    projector; unfinished episodes still need full recovery and fail closed.
+    """
+    from .backup import RESTORE_MARKER_NAME, _read_restore_marker
+
+    marker_path = root.parent / RESTORE_MARKER_NAME
+    if not marker_path.exists() and not marker_path.is_symlink():
+        return False
+    marker = _read_restore_marker(root.parent)
+    if marker["runtime_checkpoint_evidence"] != "QUARANTINED":
+        return False
+    if marker["runtime_checkpoint_reconstitution_required"] is not True:
+        raise ValueError("restored runtime checkpoint provenance is inconsistent")
+
+    # The original source-local signer is deliberately absent in the portable
+    # destination. Mixed or fabricated signing leaves fail closed, not a
+    # second path to resume the simulator or clear the restore trading gate.
+    from .simulation_runtime_checkpoint import checkpoint_path
+    private_key = root / ".autonomous-runtime-authority.key"
+    sidecar = checkpoint_path(root)
+    if any(p.exists() or p.is_symlink() for p in (private_key, sidecar)):
+        raise ValueError("portable restore has unexpected executable runtime authority")
+
+    inspected = _inspect_completed_worker(root)
+    status = inspected.get("status") if type(inspected) is dict else None
+    report = inspected.get("economic_report") if type(inspected) is dict else None
+    if (
+        type(status) is not dict
+        or type(report) is not dict
+        or status.get("session_status") != "COMPLETED"
+        or status.get("completed_episodes") != len(protocol["prices"])
+        or status.get("replay_verified") is not True
+        or report.get("reconciled") is not True
+        or report.get("economic_edge_status") != "INCONCLUSIVE"
+    ):
+        raise ValueError("portable restore is unfinished or lacks read-only financial proof")
+    return True
+
+
 def execute_simulation_action(journal, action, payload, accepted_at):
     from .simulation_session import run_autonomous_simulation
     from .backup import create_backup, verify_backup
@@ -236,34 +282,83 @@ def execute_simulation_action(journal, action, payload, accepted_at):
                 (root.parent / 'worker-stage-diagnostic.txt').write_text(
                     stage + (':' + detail if detail else ''), encoding='utf-8'
                 )
-        command = [sys.executable, '-B', '-m', 'mvp.autotrade_mvp.product_worker', '--state-dir', str(root), '--action', action, '--command-id', payload['command_id'], '--parent-pid', str(os.getpid())]
-        if payload['stop_after_episodes'] is not None:
-            command += ['--stop', str(payload['stop_after_episodes'])]
-        try:
-            diagnostic('worker_launch')
-            # The desktop Host owns a private stdin control pipe. Never pass
-            # that pipe to the worker process; an isolated worker has no
-            # interactive input and must not consume Host STOP control.
-            completed = subprocess.run(
-                command, stdin=subprocess.DEVNULL, capture_output=True, timeout=300
-            )
-            if completed.returncode and os.environ.get('AUTOTRADE_TEST_DIAGNOSTIC') == '1':
-                import re
-                stderr = completed.stderr.decode('utf-8', errors='replace')
-                types = re.findall(r'(?m)^([A-Za-z_][\w.]*(?:Error|Exception)):', stderr)
-                frames = re.findall(r'(?m)^\s*File "[^"]+", line \d+, in ([A-Za-z_]\w*)', stderr)
-                detail = f'{completed.returncode}:{types[-1].rsplit(".", 1)[-1] if types else "UNKNOWN"}:{frames[-1] if frames else "UNKNOWN"}'
-                diagnostic('worker_exited', detail)
-            else:
-                diagnostic('worker_exited', str(completed.returncode))
-        except (OSError, subprocess.SubprocessError) as error:
-            # Process-launch failure and timeout are recoverable execution
-            # uncertainty, not permission to strand a durable Host operation in
-            # RUNNING or make startup recovery crash. subprocess.run kills and
-            # waits for a timed-out child before raising TimeoutExpired.
-            raise ValueError('simulation worker stopped; recovery required') from error
-        if completed.returncode != 0 or len(completed.stdout) > 65536:
-            raise ValueError('simulation worker stopped; recovery required')
+        # A verified, already-completed portable restore has no private
+        # runtime signing key by design. READ BACK its canonical completed cut
+        # without executing another worker, issuing orders or clearing the
+        # mandatory restore/fencing gate. Only explicit RECOVER can acknowledge
+        # that read-only state; all incomplete or altered restores fail closed.
+        read_only_restored_completion = (
+            action == 'RECOVER_SIMULATION'
+            and _completed_quarantined_restore_is_read_only(root, protocol)
+        )
+        if read_only_restored_completion:
+            diagnostic('read_only_completed_restore_verified')
+        else:
+            command = [sys.executable, '-B', '-m', 'mvp.autotrade_mvp.product_worker', '--state-dir', str(root), '--action', action, '--command-id', payload['command_id'], '--parent-pid', str(os.getpid())]
+            if payload['stop_after_episodes'] is not None:
+                command += ['--stop', str(payload['stop_after_episodes'])]
+            try:
+                diagnostic('worker_launch')
+                # The desktop Host owns a private stdin control pipe. Never pass
+                # that pipe to the worker process; an isolated worker has no
+                # interactive input and must not consume Host STOP control.
+                completed = subprocess.run(
+                    command, stdin=subprocess.DEVNULL, capture_output=True, timeout=300
+                )
+                if completed.returncode and os.environ.get('AUTOTRADE_TEST_DIAGNOSTIC') == '1':
+                    import re
+                    stderr = completed.stderr.decode('utf-8', errors='replace')
+                    types = re.findall(r'(?m)^([A-Za-z_][\w.]*(?:Error|Exception)):', stderr)
+                    frames = re.findall(r'(?m)^\s*File "[^"]+", line \d+, in ([A-Za-z_]\w*)', stderr)
+                    detail = f'{completed.returncode}:{types[-1].rsplit(".", 1)[-1] if types else "UNKNOWN"}:{frames[-1] if frames else "UNKNOWN"}'
+                    # Never retain arbitrary stderr (which may contain secrets).
+                    # For the observed restored-key failure, preserve only a
+                    # fixed, non-sensitive classification from this authority.
+                    if 'AutonomousRuntimeCheckpointError:' in stderr:
+                        reasons = (
+                            ('runtime checkpoint authority key is unavailable', 'KEY_UNAVAILABLE'),
+                            ('runtime checkpoint authority key must have one ordinary pathname', 'KEY_NOT_SINGLE_REGULAR_FILE'),
+                            ('runtime checkpoint authority key permissions are too broad', 'KEY_PERMISSIONS'),
+                            ('runtime checkpoint authority key has invalid length', 'KEY_LENGTH'),
+                            ('runtime checkpoint authority key does not match durable session authority', 'KEY_MISMATCH'),
+                            ('runtime checkpoint authority key identity is invalid', 'KEY_IDENTITY'),
+                        )
+                        category = next((code for marker, code in reasons if marker in stderr), 'KEY_OTHER')
+                        detail += ':' + category
+                    # Only classify the proven installed recovery ValueError.
+                    # Never emit child stderr, journal content, paths or keys.
+                    if (
+                        types and types[-1].rsplit(".", 1)[-1] == 'ValueError'
+                        and frames and frames[-1] == '_recover_autonomous_observed_fill'
+                    ):
+                        retained_reasons = (
+                            ('retained fill episode is invalid', 'EPISODE'),
+                            ('retained fill observation identity differs', 'OBSERVATION_IDENTITY'),
+                            ('retained fill lacks a trade decision', 'DECISION'),
+                            ('retained fill order/target differs', 'ORDER_TARGET'),
+                            ('retained simulator history differs', 'PROVIDER_HISTORY'),
+                            ('retained fill economics differ from frozen request', 'FILL_ECONOMICS'),
+                            ('retained fill historical admission differs', 'HISTORICAL_ADMISSION'),
+                            ('retained fill lacks exact completed send evidence', 'SEND_EVIDENCE'),
+                            ('retained fill conflicts with canonical economic state', 'ECONOMIC_STATE'),
+                            ('retained fill conflicts with canonical economic history', 'ECONOMIC_HISTORY'),
+                            ('journal changed while validating retained fill', 'JOURNAL_RACE'),
+                            ('retained fill recovery did not reconcile financial owners', 'FINANCIAL_OWNERS'),
+                        )
+                        reason = next((code for marker, code in retained_reasons
+                                       if marker in stderr), 'OTHER')
+                        detail += ':RETAINED_' + reason
+                    diagnostic('worker_exited', detail)
+                else:
+                    diagnostic('worker_exited', str(completed.returncode))
+            except (OSError, subprocess.SubprocessError) as error:
+                # Process-launch failure and timeout are recoverable execution
+                # uncertainty, not permission to strand a durable Host operation in
+                # RUNNING or make startup recovery crash. subprocess.run kills and
+                # waits for a timed-out child before raising TimeoutExpired.
+                raise ValueError('simulation worker stopped; recovery required') from error
+            if completed.returncode != 0 or len(completed.stdout) > 65536:
+                raise ValueError('simulation worker stopped; recovery required')
 
         # Child stdout is not financial authority. Re-read the canonical journal
         # after the worker exits and derive the operator receipt only from the

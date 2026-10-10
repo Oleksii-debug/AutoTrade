@@ -14,8 +14,10 @@ from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from hashlib import sha256
 import json
 from pathlib import Path
+import re
 
 from tools.historical_public_klines import (
+    BASE, DATASET_LICENSE, DATASET_TERMS_URL,
     HistoricalArchiveError, INTERVAL_SECONDS, SYMBOL, _month_range,
 )
 from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
@@ -23,6 +25,11 @@ from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
 
 def _checked_month(root: Path, symbol: str, interval: str, month: str):
     base = root / "spot" / symbol / interval
+    # The collector rejects symlinked ancestors; replay must not reintroduce
+    # a redirect to an unverified local dataset after collection.
+    for parent in (root, root / "spot", root / "spot" / symbol, base):
+        if parent.is_symlink():
+            raise HistoricalArchiveError("historical replay source directory is a symlink")
     manifest_file = base / (month + ".manifest.json")
     rows_file = base / (month + ".ohlcv.csv")
     for f in (manifest_file, rows_file):
@@ -42,12 +49,28 @@ def _checked_month(root: Path, symbol: str, interval: str, month: str):
         ("market", "BINANCE_PUBLIC_ARCHIVE_SPOT_NOT_TRADING_PROVIDER"),
     )):
         raise HistoricalArchiveError("source identity conflicts with requested archive")
+    # A normalized CSV digest alone does not authenticate a locally mutable
+    # provenance manifest. Reject origin/right-scope relabeling before replay.
+    canonical_zip_url = f"{BASE}/{symbol}/{interval}/{symbol}-{interval}-{month}.zip"
+    if any(manifest.get(key) != expected for key, expected in (
+        ("day", None),
+        ("period_granularity", "MONTHLY"),
+        ("exchange", "BINANCE_SPOT"),
+        ("source_url", canonical_zip_url),
+        ("source_checksum_url", canonical_zip_url + ".CHECKSUM"),
+        ("license", DATASET_LICENSE),
+        ("license_terms_url", DATASET_TERMS_URL),
+        ("rights_scope", "PERSONAL_NON_COMMERCIAL_RESEARCH_SIMULATION_ONLY"),
+    )):
+        raise HistoricalArchiveError("source provenance metadata conflicts with selected public archive")
+    for field in ("source_zip_sha256", "source_csv_sha256", "source_checksum_sha256"):
+        value = manifest.get(field)
+        if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise HistoricalArchiveError(f"source provenance digest invalid: {field}")
     if not manifest.get("usable_as_complete_causal_interval") or manifest.get("missing_candle_intervals") != 0:
         raise HistoricalArchiveError("historical source has missing intervals; fail closed")
     if sha256(raw).hexdigest() != manifest.get("normalized_csv_sha256"):
         raise HistoricalArchiveError("normalized historical archive digest mismatch")
-    if not isinstance(manifest.get("source_zip_sha256"), str) or len(manifest["source_zip_sha256"]) != 64:
-        raise HistoricalArchiveError("missing original archive identity")
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:

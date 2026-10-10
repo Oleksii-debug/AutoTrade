@@ -110,6 +110,50 @@ class HistoricalZeroTests(unittest.TestCase):
             with self.assertRaises(HistoricalArchiveError):
                 load_verified_months(Path(tmp),"BTCUSDT","1h","2024-01","2024-02")
 
+    def test_replay_rejects_relabelled_source_rights_and_malformed_digest(self):
+        # A post-download manifest must not be relabelled as a different
+        # exchange, archive, license or supposedly verified checksum.
+        with TemporaryDirectory() as tmp:
+            self._dataset(tmp)
+            path = Path(tmp) / "spot/BTCUSDT/1h/2024-01.manifest.json"
+            trusted = json.loads(path.read_text(encoding="utf-8"))
+            bad_fields = (
+                ("source_url", "https://other.example/spot/BTCUSDT-1h-2024-01.zip"),
+                ("source_checksum_url", "https://other.example/fake.CHECKSUM"),
+                ("exchange", "UNVERIFIED_MARKET"),
+                ("license", "COMMERCIAL_REUSE_ALLOWED"),
+                ("license_terms_url", "https://other.example/terms"),
+                ("rights_scope", "COMMERCIAL_USE_ALLOWED"),
+                ("period_granularity", "DAILY"),
+                ("day", "2024-01-01"),
+                ("source_zip_sha256", "g" * 64),
+                ("source_csv_sha256", "x" * 64),
+                ("source_checksum_sha256", "z" * 64),
+            )
+            for field, forged in bad_fields:
+                with self.subTest(field=field):
+                    changed = dict(trusted)
+                    changed[field] = forged
+                    path.write_text(json.dumps(changed), encoding="utf-8")
+                    with self.assertRaisesRegex(HistoricalArchiveError, "provenance"):
+                        load_verified_months(Path(tmp), "BTCUSDT", "1h", "2024-01", "2024-01")
+            path.write_text(json.dumps(trusted), encoding="utf-8")
+            self.assertEqual(
+                len(load_verified_months(Path(tmp), "BTCUSDT", "1h", "2024-01", "2024-01")[1]),
+                744,
+            )
+
+    def test_replay_rejects_symlinked_dataset_ancestor(self):
+        with TemporaryDirectory() as tmp, TemporaryDirectory() as alias_root:
+            self._dataset(tmp)
+            alias = Path(alias_root) / "spoofed"
+            try:
+                alias.symlink_to(Path(tmp), target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation is unavailable on this host")
+            with self.assertRaisesRegex(HistoricalArchiveError, "symlink"):
+                load_verified_months(alias, "BTCUSDT", "1h", "2024-01", "2024-01")
+
     def test_wrong_market_cannot_be_relabelled(self):
         with TemporaryDirectory() as tmp:
             self._dataset(tmp)

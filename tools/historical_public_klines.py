@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import threading
 import time
 from tempfile import NamedTemporaryFile
@@ -267,6 +268,13 @@ def verify_archive(raw: bytes, checksum: bytes, *, symbol: str, interval: str, m
             entries = z.infolist()
             if len(entries) != 1 or entries[0].filename != filename[:-4] + ".csv":
                 raise HistoricalArchiveError("ZIP must have exactly its expected CSV, no path or extra entries")
+            # Reading without extraction already prevents traversal. Additionally
+            # reject Unix symlink/device metadata instead of accepting a CSV-
+            # named pseudo-file as ordinary publisher market data.
+            if entries[0].create_system == 3:
+                member_kind = stat.S_IFMT(entries[0].external_attr >> 16)
+                if member_kind not in (0, stat.S_IFREG):
+                    raise HistoricalArchiveError("ZIP market CSV must be a regular file")
             if entries[0].file_size > MAX_CSV_BYTES or entries[0].compress_size == 0:
                 raise HistoricalArchiveError("unbounded archive member")
             if entries[0].file_size > max(1, entries[0].compress_size) * 200:

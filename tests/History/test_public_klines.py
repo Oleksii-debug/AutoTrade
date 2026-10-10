@@ -6,7 +6,8 @@ from io import BytesIO, StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from zipfile import ZipFile, ZIP_DEFLATED
+from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
+import stat
 from unittest.mock import patch
 import os
 import json
@@ -146,6 +147,25 @@ class PublicHistoryTests(unittest.TestCase):
         with self.assertRaisesRegex(HistoricalArchiveError, "compression ratio unsafe"):
             verify_archive(raw, _publisher_checksum(raw, "BTCUSDT-1h-2024-01.zip"),
                            symbol="BTCUSDT", interval="1h", month="2024-01")
+
+    def test_rejects_zip_symlink_member_even_with_valid_checksum_and_csv(self):
+        # ZIP members are never extracted, but nonregular publisher metadata
+        # must also fail closed before claiming a verified ordinary CSV.
+        ordinary, _ = _bundle()
+        with ZipFile(BytesIO(ordinary)) as bundle:
+            csv_payload = bundle.read("BTCUSDT-1h-2024-01.csv")
+        pseudo = ZipInfo("BTCUSDT-1h-2024-01.csv")
+        pseudo.create_system = 3
+        pseudo.external_attr = (stat.S_IFLNK | 0o777) << 16
+        stream = BytesIO()
+        with ZipFile(stream, "w") as archive:
+            archive.writestr(pseudo, csv_payload)
+        malicious = stream.getvalue()
+        with self.assertRaisesRegex(HistoricalArchiveError, "regular file"):
+            verify_archive(
+                malicious, _publisher_checksum(malicious, "BTCUSDT-1h-2024-01.zip"),
+                symbol="BTCUSDT", interval="1h", month="2024-01",
+            )
 
     def test_provenance_rights_and_interrupted_publication_recover_without_partial_archive(self):
         archive, checksum = _bundle()

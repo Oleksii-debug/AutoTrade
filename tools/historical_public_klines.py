@@ -64,6 +64,14 @@ def _utc_day(value: str) -> datetime:
     return day
 
 
+def _require_past_month(month: str) -> None:
+    """An archive named for the current or future UTC month cannot be complete."""
+    year, mon = _utc_month(month)
+    now = datetime.now(UTC)
+    if (year, mon) >= (now.year, now.month):
+        raise HistoricalArchiveError("monthly archive requires a completed UTC month")
+
+
 def _month_range(start: str, end: str):
     year, month = _utc_month(start)
     last_year, last_month = _utc_month(end)
@@ -196,6 +204,8 @@ def verify_archive(raw: bytes, checksum: bytes, *, symbol: str, interval: str, m
     if interval not in INTERVAL_SECONDS:
         raise HistoricalArchiveError("unsupported candle interval")
     _utc_month(month)
+    if day is None:
+        _require_past_month(month)
     if day is not None:
         _utc_day(day)
         if day[:7] != month:
@@ -256,6 +266,8 @@ def collect_month(*, symbol: str, interval: str, month: str, output: Path, fetch
     if type(symbol) is not str or SYMBOL.fullmatch(symbol) is None or interval not in INTERVAL_SECONDS:
         raise HistoricalArchiveError("invalid public archive selection")
     _utc_month(month)
+    if day is None:
+        _require_past_month(month)
     if day is not None:
         _utc_day(day)
         if day[:7] != month:

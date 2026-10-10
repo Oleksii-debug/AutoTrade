@@ -2,6 +2,10 @@
 
 **This v4 directive overrides every older conflicting global-sequential / one-mutation-front / earliest-monolithic-Section rule in this repository.**
 
+## OWNER-AUTHORIZED PLAN 10 — historical simulation is ACTIONABLE NOW (2026-10-10)
+
+The owner explicitly started a separate Plan10 worker to develop autonomous historical ZERO/SIMULATION research with $1000 virtual cash and market data from 2024 onward; **NO broker/provider accounts, keys, PAPER or LIVE permission are required**. The canonical [Plan10 Drive document](https://docs.google.com/document/d/1bTDCb0yGLrOqlKClhyAD_7k7aZsP57kFRkexHz_b6d4/edit) and MULTI_PLAN_CLOSURE_STATE.md own this track. **Section10.1 ACTIONABLE_OFFLINE** is its first work-selection target. Inspect and REUSE existing [PR #2389](https://github.com/Oleksii-debug/AutoTrade/pull/2389); do not duplicate or prematurely mark DONE. Plan9 remains independently WAITING/PARKED for signed legal release and optional true providers and **DOES NOT BLOCK Plan10**; never waive final production trust/rights/signing/physical NVDA gates. The scientific simulator must enforce chronological source provenance, no future data, separate collector/market feeder/simulated exchange/strategy, conservative next-bar execution costs, independent training/validation/holdout, and honest external-profit limitations. This authorization updates plan selection only and does not certify implementation, market data, learning, profitability, builds or acceptance. Protect terminal Plans1–8.
+
 ## Canonical work-selection authority
 
 Before mutation read:

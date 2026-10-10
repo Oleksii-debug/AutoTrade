@@ -364,21 +364,22 @@ internal static class Program
         DelegateHandler handler = new((request, _, _) =>
         {
             requests++;
-            Check.True(request.RequestUri is not null
-                && request.RequestUri.Scheme == "http"
-                && request.RequestUri.Host == "127.0.0.1"
-                && request.RequestUri.Port == HostOrigin.Port,
+            Uri requestUri = request.RequestUri
+                ?? throw new InvalidOperationException("Authenticated Host request has no URI.");
+            Check.True(requestUri.Scheme == "http"
+                && requestUri.Host == "127.0.0.1"
+                && requestUri.Port == HostOrigin.Port,
                 "paired transport escaped the exact local Host origin");
             if (requests == 1)
             {
                 Check.True(request.Method == HttpMethod.Post
-                    && request.RequestUri.AbsolutePath == "/api/v1/session",
+                    && requestUri.AbsolutePath == "/api/v1/session",
                     "pairing did not precede authenticated Host requests");
                 return Task.FromResult(Json(HttpStatusCode.OK, new { paired = true }));
             }
             AssertAuth(request, token);
             Check.True(request.Method == HttpMethod.Get
-                && request.RequestUri.AbsolutePath == "/api/v1/state",
+                && requestUri.AbsolutePath == "/api/v1/state",
                 "post-pair client used an unexpected authority endpoint");
             return Task.FromResult(Json(HttpStatusCode.OK, Snapshot(token, "71")));
         });

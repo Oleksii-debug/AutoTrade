@@ -1,5 +1,10 @@
 # Multi-Plan Parallel Closure Protocol v4 — owner directive 2026-10-08
 
+## OWNER ACTIVE PLAN 10 — HISTORICAL SIMULATION WITHOUT PROVIDER ACCOUNT (2026-10-10)
+
+Plan10 is owner-approved and ACTIONABLE immediately; see https://docs.google.com/document/d/1bTDCb0yGLrOqlKClhyAD_7k7aZsP57kFRkexHz_b6d4/edit. Owner defers ALL broker/provider credentials. Do not block Plan10 with Plan9 WAITING_EXTERNAL, OPTIONAL_PROVIDER or public signed release gates. Sections1–10 status and first actionable work live in MULTI_PLAN_CLOSURE_STATE.md. First Section1: acquire lawful public historical BTCUSDT/ETHUSDT spot archive starting 2024-01, SHA-256+source/rights provenance, correct UTC milliseconds/microseconds, gap validation and incremental update, no invented data. Other sections add genuine causal feeder, simulated execution with next-bar costs, separate strategy learner, frozen walk-forward/holdout, reproducible $1000 cash/drawdown reports, accessible Windows/Web/NVDA control and an INTERNAL simulation-only artifact. Reuse canonical market data, replay, simulation, risk, OMS, accounting, agent and UI; never create second money authority. Market strategy sees as-of history only; owner/auditor sees original dates and provider-free research limitations. No real trading, no fake earnings/training, no weakened rights/trust workflow tests. Preserve terminal Plans1–8; Plan9 remains final signed/rights/NVDA and optional provider/PAPER/LIVE, not a blocker for the honest source-only Plan10 research work.
+
+
 **This v4 directive overrides every older conflicting global-sequential / one-mutation-front / earliest-monolithic-Section rule in this repository.**
 
 ## Canonical work-selection authority

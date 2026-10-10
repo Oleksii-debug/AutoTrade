@@ -16,6 +16,12 @@ from tools.historical_public_klines import (
 )
 
 
+def _publisher_checksum(raw: bytes, filename: str) -> bytes:
+    # Explicit separator and newline; never accidentally put escaped literal
+    # backslash-n into publisher CHECKSUM fixtures.
+    return sha256(raw).hexdigest().encode("ascii") + b"  " + filename.encode("ascii") + bytes((10,))
+
+
 def _bundle(month="2024-01", interval="1h", gap=False, corrupt=False, unit="ms"):
     # Synthetic data ONLY for parser/negative testing, never for trade performance.
     first = datetime.fromisoformat(month + "-01T00:00:00+00:00")
@@ -90,7 +96,7 @@ class PublicHistoryTests(unittest.TestCase):
             z.writestr(name, "\n".join(lines) + "\n")
         invalid = out.getvalue()
         with self.assertRaisesRegex(HistoricalArchiveError, "close time"):
-            verify_archive(invalid, f"{sha256(invalid).hexdigest()}  BTCUSDT-1h-2024-01.zip\n".encode(),
+            verify_archive(invalid, _publisher_checksum(invalid, "BTCUSDT-1h-2024-01.zip"),
                            symbol="BTCUSDT", interval="1h", month="2024-01")
 
     def test_compressed_zip_bomb_and_redirect_prevented(self):
@@ -103,7 +109,7 @@ class PublicHistoryTests(unittest.TestCase):
             z.writestr("BTCUSDT-1h-2024-01.csv", raw_file)
         raw = out.getvalue()
         with self.assertRaisesRegex(HistoricalArchiveError, "compression ratio unsafe"):
-            verify_archive(raw, f"{sha256(raw).hexdigest()}  BTCUSDT-1h-2024-01.zip\n".encode(),
+            verify_archive(raw, _publisher_checksum(raw, "BTCUSDT-1h-2024-01.zip"),
                            symbol="BTCUSDT", interval="1h", month="2024-01")
 
     def test_provenance_rights_and_interrupted_publication_recover_without_partial_archive(self):

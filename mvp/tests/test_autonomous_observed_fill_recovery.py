@@ -27,6 +27,60 @@ from mvp.tests.test_autonomous_simulation import PRICES, run
 
 
 class AutonomousObservedFillRecoveryTests(unittest.TestCase):
+    def test_zero_wire_rejects_forged_lifecycle_cost_without_mutation(self):
+        # A frozen HOLD/NO_TRADE event is not a new financial admission.
+        # Reconstruct its cost cut; forged transient started evidence must
+        # fail before replaying reconciliation or touching the durable store.
+        original_event = session._loop_event
+
+        def crash_after_zero_start(store, run_id, kind, key, payload, now):
+            value = original_event(store, run_id, kind, key, payload, now)
+            if kind == "AutonomousEpisodeStarted" and payload["episode"] == 4:
+                self.assertIn(payload["decision"], {"HOLD", "NO_TRADE"})
+                raise RuntimeError("zero-wire started response lost")
+            return value
+
+        with TemporaryDirectory() as directory:
+            with patch.object(session, "_loop_event", crash_after_zero_start):
+                with self.assertRaisesRegex(
+                    RuntimeError, "zero-wire started response lost",
+                ):
+                    run(directory)
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            events = store.load_events(
+                "canonical_autonomous_simulation", "acceptance",
+            )
+            active = next(
+                event["payload"] for event in events
+                if event["event_type"] == "AutonomousEpisodeStarted"
+                and event["payload"]["episode"] == 4
+            )
+            protocol = events[0]["payload"]["protocol"]
+            completed = [
+                event["payload"] for event in events
+                if event["event_type"] == "AutonomousEpisodeCompleted"
+            ]
+            prior = completed[-1]["provider_state"]
+            before = store.current_journal_sequence()
+            for key in (
+                "lifecycle_cost_digest",
+                "lifecycle_cost_requirements_ref",
+            ):
+                with self.subTest(key=key):
+                    forged = {**active, key: "forged-cost-proof"}
+                    with patch.object(
+                        SimulatedProvider,
+                        "transport_send",
+                        side_effect=AssertionError("no wire action during recovery"),
+                    ), self.assertRaisesRegex(
+                        ValueError,
+                        "zero-wire autonomous historical cost cut differs",
+                    ):
+                        session._recover_autonomous_zero_wire_completion(
+                            store, Path(directory), protocol, forged, prior,
+                        )
+                    self.assertEqual(store.current_journal_sequence(), before)
+
     def test_retained_fill_cost_identity_cannot_be_forged_during_recovery(self):
         # Reuse a real durable observed fill, but alter only the supplied
         # in-memory started-episode cost identity. Recovery must reconstruct

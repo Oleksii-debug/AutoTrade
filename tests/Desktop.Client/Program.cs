@@ -2126,6 +2126,41 @@ internal static class Program
         }
     }
 
+    static async Task AlreadyPairedHttpTransportCanBeReusedTest()
+    {
+        const string token = "session-token-prepaired-transport";
+        using HttpClient transport = new(new DelegateHandler((request, call, _) =>
+        {
+            if (call == 1)
+            {
+                Check.True(request.RequestUri == new Uri(HostOrigin, "api/v1/session"),
+                    "pairing request escaped canonical host origin");
+                return Task.FromResult(Json(HttpStatusCode.OK, new { paired = true }));
+            }
+
+            Check.True(call == 2, "unexpected additional authenticated request");
+            AssertAuth(request, token);
+            Check.True(request.RequestUri == new Uri(HostOrigin, "api/v1/state"),
+                "post-pairing request was not an absolute same-origin state URI");
+            return Task.FromResult(Json(HttpStatusCode.OK, Snapshot(token, "1")));
+        }));
+        using (HttpResponseMessage pairing = await transport.PostAsync(
+            new Uri(HostOrigin, "api/v1/session"), new StringContent("{}")))
+        {
+            Check.True(pairing.IsSuccessStatusCode, "test pairing request was not accepted");
+        }
+
+        // HttpClient has now sent its first request. BaseAddress is immutable
+        // at this point; construction must not modify it or retarget the bearer.
+        AuthenticatedEmergencyHostClient client = new(
+            transport, HostOrigin, new MutableSessionProvider(PairedSession(token)));
+        Check.True(transport.BaseAddress is null,
+            "canonical client unexpectedly mutated shared pairing transport");
+        EmergencyHostStatus status = await client.GetStatusAsync(CancellationToken.None);
+        Check.True(status.Connected && status.StateVersion == "1",
+            "post-pairing canonical state read failed");
+    }
+
     public static async Task Main(string[] args)
     {
         if (args.Length != 0)
@@ -2153,6 +2188,7 @@ internal static class Program
         CanonicalOperationIdentityVectorTest();
         CredentialTargetIsOriginBoundTest();
         await PairedOriginMismatchFailsBeforeTransportTest();
+        await AlreadyPairedHttpTransportCanBeReusedTest();
         await CanonicalStatusAndOperationTest();
         StaleSuccessorMayCarryOlderEvidenceTimeTest();
         StaleSuccessorRejectsDurableRegressionAndIdentityChangeTest();

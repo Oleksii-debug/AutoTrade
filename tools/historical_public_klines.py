@@ -19,11 +19,13 @@ from pathlib import Path
 import re
 from tempfile import NamedTemporaryFile
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener, HTTPRedirectHandler
 from zipfile import ZipFile, BadZipFile
 from io import BytesIO
 
 BASE = "https://data.binance.vision/data/spot/monthly/klines"
+DATASET_TERMS_URL = "https://github.com/binance/binance-public-data/blob/master/TERMS_AND_CONDITIONS.md"
+DATASET_LICENSE = "CC BY-NC-SA 4.0 + Binance Vision Dataset Terms (NON-COMMERCIAL ONLY)"
 SYMBOL = re.compile(r"^[A-Z0-9]{5,20}$")
 MONTH = re.compile(r"^(20\d{2})-(0[1-9]|1[0-2])$")
 INTERVAL_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
@@ -57,16 +59,22 @@ def _month_range(start: str, end: str):
         year, month = (year + 1, 1) if month == 12 else (year, month + 1)
 
 
+class _RejectRedirects(HTTPRedirectHandler):
+    """Reject redirects before following any untrusted destination."""
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        raise HistoricalArchiveError("public archive redirect denied (host pinned)")
+
+
 def _fetch(url: str, limit: int) -> bytes:
     if not url.startswith(BASE + "/") or "?" in url or "#" in url:
         raise HistoricalArchiveError("unexpected archive URL")
     req = Request(url, headers={"User-Agent": "AutoTrade-public-history-provenance/1.0"})
     try:
-        with urlopen(req, timeout=25) as response:
+        with build_opener(_RejectRedirects()).open(req, timeout=25) as response:
             if response.status != 200:
                 raise HistoricalArchiveError(f"public archive HTTP status {response.status}")
-            if not response.geturl().startswith("https://"):
-                raise HistoricalArchiveError("archive download must retain HTTPS")
+            if response.geturl() != url:
+                raise HistoricalArchiveError("archive download changed source URL")
             raw = response.read(limit + 1)
     except (HTTPError, URLError, TimeoutError, OSError) as exc:
         raise HistoricalArchiveError(f"public archive unavailable: {type(exc).__name__}") from exc
@@ -93,7 +101,7 @@ def _timestamp(raw: str) -> datetime:
     value = int(raw)
     factor = 1000 if len(raw) == 13 else 1_000_000
     try:
-        dt = datetime.fromtimestamp(value / factor, tz=UTC)
+        dt = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=value * (1000 if factor == 1000 else 1))
     except (OverflowError, OSError, ValueError) as exc:
         raise HistoricalArchiveError("timestamp out of datetime bounds") from exc
     if dt.year < 2024 or dt.year > 2100:
@@ -117,6 +125,15 @@ def _validated_rows(data: bytes, *, month: str, interval: str) -> tuple[list[tup
         if len(row) != 12:
             raise HistoricalArchiveError("spot Kline archive row must have exactly 12 fields")
         current = _timestamp(row[0])
+        # SPOT source changed milliseconds to microseconds on 2025-01-01.
+        expected_length = 13 if year < 2025 else 16
+        if len(row[0]) != expected_length:
+            raise HistoricalArchiveError("publisher timestamp unit mismatches archive month")
+        if not row[6].isdigit() or len(row[6]) != expected_length:
+            raise HistoricalArchiveError("candle close timestamp unit invalid")
+        factor = 1000 if expected_length == 13 else 1_000_000
+        if int(row[6]) != int(row[0]) + seconds * factor - 1:
+            raise HistoricalArchiveError("candle close time mismatches interval")
         if current.year != year or current.month != mon:
             raise HistoricalArchiveError("archive candle outside requested month")
         if current.minute * 60 + current.second != 0 and interval in ("1h", "1d"):
@@ -214,9 +231,28 @@ def collect_month(*, symbol: str, interval: str, month: str, output: Path, fetch
     checksum = fetch(url + ".CHECKSUM", 4096)
     result = verify_archive(raw, checksum, symbol=symbol, interval=interval, month=month)
     series = output / "spot" / symbol / interval
+    for ancestor in (output, output / "spot", output / "spot" / symbol, series):
+        if ancestor.is_symlink():
+            raise HistoricalArchiveError("dataset directory may not be a symlink")
     series.mkdir(parents=True, exist_ok=True)
     manifest = {k: v for k, v in result.items() if k != "ohlcv_rows"}
     manifest["source_checksum_url"] = url + ".CHECKSUM"
+    manifest["source_checksum_sha256"] = sha256(checksum).hexdigest()
+    manifest["exchange"] = "BINANCE_SPOT"
+    manifest["publisher"] = "Binance Vision public historical data"
+    manifest["license"] = DATASET_LICENSE
+    manifest["license_terms_url"] = DATASET_TERMS_URL
+    manifest["rights_scope"] = "PERSONAL_NON_COMMERCIAL_RESEARCH_SIMULATION_ONLY"
+    manifest["downloaded_at_utc"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    # The exact publication instant cannot be derived from the archive.
+    manifest["published_at_utc"] = None
+    manifest["time_zone"] = "UTC"
+    manifest["verification"] = {
+        "publisher_companion_sha256": "PASS",
+        "zip_member_identity_and_size": "PASS",
+        "ohlcv_and_timestamp_validation": "PASS",
+        "missing_interval_count": result["missing_candle_intervals"],
+    }
     manifest["untrusted_source_notice"] = "Historical candles only, no live quotes, spread, ticks, order book or fill proof"
     target = series / (month + ".manifest.json")
     datafile = series / (month + ".ohlcv.csv")
@@ -227,6 +263,19 @@ def collect_month(*, symbol: str, interval: str, month: str, output: Path, fetch
     writer.writerows(lines)
     csv_bytes = stream.getvalue().encode("utf-8")
     manifest["normalized_csv_sha256"] = sha256(csv_bytes).hexdigest()
+    if target.exists() and not target.is_symlink():
+        previous_bytes = target.read_bytes()
+        if len(previous_bytes) > 20_000:
+            raise HistoricalArchiveError("existing manifest has excessive size")
+        try:
+            previous = json.loads(previous_bytes)
+            recorded = previous.get("downloaded_at_utc")
+            parsed = datetime.fromisoformat(recorded.replace("Z", "+00:00"))
+            if parsed.tzinfo != UTC or parsed > datetime.now(UTC):
+                raise ValueError("invalid prior download time")
+        except (ValueError, AttributeError, TypeError, KeyError) as exc:
+            raise HistoricalArchiveError("existing provenance manifest malformed") from exc
+        manifest["downloaded_at_utc"] = recorded
     manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
     # Keep accepted bytes immutable; after process loss between the two
     # exclusive writes, repair ONLY the missing file if its peer is identical.
@@ -238,10 +287,24 @@ def collect_month(*, symbol: str, interval: str, month: str, output: Path, fetch
     for file, payload in ((datafile, csv_bytes), (target, manifest_bytes)):
         if file.exists():
             continue
-        with file.open("xb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
+        # Complete private file first; atomically publish without overwriting.
+        # A crash during write cannot expose a truncated canonical archive.
+        temp_name = None
+        try:
+            with NamedTemporaryFile(mode="wb", prefix=".autotrade-history-",
+                                    suffix=".partial", dir=series, delete=False) as stream:
+                temp_name = stream.name
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(temp_name, file)
+            except FileExistsError:
+                if file.is_symlink() or not file.is_file() or file.read_bytes() != payload:
+                    raise HistoricalArchiveError("concurrent archive revision conflict")
+        finally:
+            if temp_name is not None:
+                Path(temp_name).unlink(missing_ok=True)
     return manifest
 
 

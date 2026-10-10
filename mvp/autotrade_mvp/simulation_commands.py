@@ -253,6 +253,20 @@ def execute_simulation_action(journal, action, payload, accepted_at):
                 types = re.findall(r'(?m)^([A-Za-z_][\w.]*(?:Error|Exception)):', stderr)
                 frames = re.findall(r'(?m)^\s*File "[^"]+", line \d+, in ([A-Za-z_]\w*)', stderr)
                 detail = f'{completed.returncode}:{types[-1].rsplit(".", 1)[-1] if types else "UNKNOWN"}:{frames[-1] if frames else "UNKNOWN"}'
+                # Never retain arbitrary stderr (which may contain secrets).
+                # For the observed restored-key failure, preserve only a
+                # fixed, non-sensitive classification from this authority.
+                if 'AutonomousRuntimeCheckpointError:' in stderr:
+                    reasons = (
+                        ('runtime checkpoint authority key is unavailable', 'KEY_UNAVAILABLE'),
+                        ('runtime checkpoint authority key must have one ordinary pathname', 'KEY_NOT_SINGLE_REGULAR_FILE'),
+                        ('runtime checkpoint authority key permissions are too broad', 'KEY_PERMISSIONS'),
+                        ('runtime checkpoint authority key has invalid length', 'KEY_LENGTH'),
+                        ('runtime checkpoint authority key does not match durable session authority', 'KEY_MISMATCH'),
+                        ('runtime checkpoint authority key identity is invalid', 'KEY_IDENTITY'),
+                    )
+                    category = next((code for marker, code in reasons if marker in stderr), 'KEY_OTHER')
+                    detail += ':' + category
                 diagnostic('worker_exited', detail)
             else:
                 diagnostic('worker_exited', str(completed.returncode))

@@ -140,8 +140,8 @@ async function exercisePortfolioTableTools(page) {
   const copiedPortfolio = await page.evaluate(() => navigator.clipboard.readText());
   assert.match(
     copiedPortfolio,
-    /^Field\tHost evidence\n/,
-    "copied portfolio page is self-describing with column headings");
+    /^Field\tHost evidence\r?\n/,
+    "copied portfolio page is self-describing with column headings on Windows and POSIX");
   assert.match(copiedPortfolio, /791\.392/);
   await page.keyboard.press("Shift+Tab");
   assert.equal(await page.evaluate(() => document.activeElement.id), "portfolio-filter");

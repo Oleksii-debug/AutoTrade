@@ -9,10 +9,10 @@ const {spawn, spawnSync} = require("node:child_process");
 const {chromium} = require(process.env.AUTOTRADE_PLAYWRIGHT_MODULE || "playwright");
 const ROOT = process.env.AUTOTRADE_PRODUCT_ROOT || path.resolve(__dirname, "../..");
 const python = process.env.AUTOTRADE_PYTHON || "python";
-const env = {...process.env, PYTHONPATH: ROOT + path.delimiter + path.join(ROOT, "research")};
+const env = {...process.env, AUTOTRADE_TEST_DIAGNOSTIC: "1", PYTHONPATH: ROOT + path.delimiter + path.join(ROOT, "research")};
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "autotrade-browser-"));
 const data = path.join(scratch, "product state with spaces #");
-let host, browser, observedPage;
+let host, browser, observedPage, lastHostData;
 let stage = "launch";
 let passed = false;
 const deadline = setTimeout(() => {
@@ -25,6 +25,7 @@ process.on("exit", () => {
 });
 
 async function start(directory, restore) {
+  lastHostData = directory;
   const args = ["-B", "-m", "mvp.autotrade_mvp.product_runtime", "--data-dir", directory,
     "--port", "0", "--no-browser", "--desktop-child"];
   if (restore) args.push("--restore-backup", restore);
@@ -546,6 +547,16 @@ s.run_autonomous_simulation(PRICES,root,run_id='provider-free-product',now=START
     browser: browser.version(), keyboard: true, nvda_verified: false, real_orders: false}));
 })().catch(async error => {
   console.error(error.message);
+  // Worker diagnostics are deliberately limited to fixed stage/error codes.
+  // Never publish traceback, stderr, filesystem names, tokens or key bytes.
+  if (lastHostData) {
+    const stageFile = path.join(lastHostData, "worker-stage-diagnostic.txt");
+    if (fs.existsSync(stageFile)) {
+      const code = fs.readFileSync(stageFile, "utf8").trim();
+      if (/^[A-Za-z0-9_.:-]{1,256}$/.test(code))
+        console.error("Safe worker stage: " + code);
+    }
+  }
   if (observedPage) console.error(JSON.stringify({stage,
     result: await observedPage.locator("#command-result").innerText(),
     freshness: await observedPage.locator("#freshness").innerText(),

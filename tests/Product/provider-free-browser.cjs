@@ -105,13 +105,13 @@ async function command(page, action, index) {
     "host-action",
     action + " action reverse focus");
   if (action === "RECOVER_SIMULATION" || action === "START_SIMULATION")
-    await page.waitForFunction(() => document.querySelector("#portfolio-body").textContent.includes("895.696"));
+    await page.waitForFunction(() => document.querySelector("#portfolio-body").textContent.includes("791.392"));
 }
 
 async function exercisePortfolioTableTools(page) {
   stage = "portfolio keyboard tools";
   await tabTo(page, "portfolio-filter");
-  await page.keyboard.type("895.696");
+  await page.keyboard.type("791.392");
   await page.waitForFunction(() => {
     const status = document.querySelector("#portfolio-filter-status")?.textContent || "";
     const rows = [...document.querySelectorAll('#portfolio-body tr[data-filterable-row="true"]')];
@@ -135,7 +135,7 @@ async function exercisePortfolioTableTools(page) {
     copiedPortfolio,
     /^Field\tHost evidence\n/,
     "copied portfolio page is self-describing with column headings");
-  assert.match(copiedPortfolio, /791.392/);
+  assert.match(copiedPortfolio, /791\.392/);
   await page.keyboard.press("Shift+Tab");
   assert.equal(await page.evaluate(() => document.activeElement.id), "portfolio-filter");
   await page.keyboard.press("Control+A");
@@ -208,7 +208,7 @@ async function exercisePortfolioPagingAndSort(page) {
   await page.waitForFunction(() => document.querySelector("#refresh-state").disabled);
   await page.waitForFunction(() => !document.querySelector("#refresh-state").disabled);
   await page.waitForFunction(() =>
-    document.querySelector("#portfolio-body").textContent.includes("895.696") &&
+    document.querySelector("#portfolio-body").textContent.includes("791.392") &&
     !document.querySelector("#portfolio-body").textContent.includes("paging-fixture-"));
 }
 
@@ -276,19 +276,19 @@ async function exerciseSnapshotSelectionPreservation(page) {
   stage = "same-scope snapshot text selection";
   const selected = await page.evaluate(() => {
     const cell = [...document.querySelectorAll("#portfolio-body td")]
-      .find(candidate => candidate.textContent.includes("895.696"));
+      .find(candidate => candidate.textContent.includes("791.392"));
     if (!cell || !cell.firstChild) return null;
     const value = cell.firstChild.data;
-    const start = value.indexOf("895.696");
+    const start = value.indexOf("791.392");
     if (start < 0) return null;
     const range = document.createRange();
     range.setStart(cell.firstChild, start);
-    range.setEnd(cell.firstChild, start + "895.696".length);
+    range.setEnd(cell.firstChild, start + "791.392".length);
     const selection = window.getSelection();
     selection.removeAllRanges();
     if (typeof selection.setBaseAndExtent === "function") {
       selection.setBaseAndExtent(
-        cell.firstChild, start + "895.696".length, cell.firstChild, start);
+        cell.firstChild, start + "791.392".length, cell.firstChild, start);
     } else {
       selection.addRange(range);
     }
@@ -299,7 +299,7 @@ async function exerciseSnapshotSelectionPreservation(page) {
         selection.anchorOffset > selection.focusOffset
     };
   });
-  assert.equal(selected.text, "895.696", "portfolio evidence is selectable before refresh");
+  assert.equal(selected.text, "791.392", "portfolio evidence is selectable before refresh");
 
   const routePattern = "**/api/v1/state";
   await page.route(routePattern, async route => {
@@ -325,7 +325,7 @@ async function exerciseSnapshotSelectionPreservation(page) {
           selection.anchorOffset > selection.focusOffset)
       };
     });
-    assert.equal(after.text, "895.696",
+    assert.equal(after.text, "791.392",
       "same-scope canonical snapshot preserves selected portfolio evidence");
     assert.equal(after.inside, true,
       "restored selection remains inside the portfolio evidence table");
@@ -509,7 +509,7 @@ s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_tim
   await page.waitForFunction(() => !document.querySelector("#submit-command").disabled);
   assert.match(await page.locator("#portfolio-body").innerText(), /PARTIALLY_FILLED/);
   await command(page, "RECOVER_SIMULATION", 3);
-  assert.match(await page.locator("#portfolio-body").innerText(), /791.392/);
+  assert.match(await page.locator("#portfolio-body").innerText(), /791\.392/);
   await exercisePortfolioTableTools(page);
   await exercisePortfolioPagingAndSort(page);
   await exerciseSnapshotSelectionPreservation(page);
@@ -524,7 +524,7 @@ s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_tim
   const restored = path.join(scratch, "restored state");
   await page.goto(await start(restored, path.join(data, "backups", backups[0])));
   await page.waitForFunction(() => !document.querySelector("#submit-command").disabled);
-  assert.match(await page.locator("#portfolio-body").innerText(), /791.392/);
+  assert.match(await page.locator("#portfolio-body").innerText(), /791\.392/);
   assert.match(await page.locator("#risk-body").innerText(), /RECONCILIATION_REQUIRED/);
   await command(page, "RECOVER_SIMULATION", 3);
   await stop();

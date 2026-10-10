@@ -490,6 +490,19 @@ async function exerciseCanonicalPageNavigation(page) {
   await stop();
   await exerciseHostOutageFailClosed(page);
 
+  // The preceding STOP is a deliberate Host fencing action. Its journal
+  // cannot be reused to authorize a new simulation worker. Qualify the
+  // independent crash/restore journey on a freshly bootstrapped Host store.
+  stage = "isolated financial crash preparation";
+  const crashData = path.join(scratch, "isolated crash recovery state");
+  await page.goto(await start(crashData));
+  await page.waitForFunction(() => !document.querySelector("#submit-command").disabled);
+  const crashSeedHost = host;
+  const crashSeedExit = new Promise(resolve => crashSeedHost.once("exit", resolve));
+  crashSeedHost.kill("SIGKILL");
+  await crashSeedExit;
+  host = null;
+
   const crash = spawnSync(python, ["-B", "-c", `
 import os,sys
 from pathlib import Path
@@ -503,9 +516,9 @@ def die(*a,**kw):
     os._exit(73)
 s.commit_order_fill_with_reservation_consumption=die
 s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_time'],execution_profile=p.get('execution_profile','IMMEDIATE'),target_quantity=p.get('target_quantity','1'))
-`, path.join(data, "state")], {cwd: ROOT, env, encoding: "utf8", timeout: 30000});
+`, path.join(crashData, "state")], {cwd: ROOT, env, encoding: "utf8", timeout: 30000});
   assert.equal(crash.status, 73, crash.stderr);
-  await page.goto(await start(data));
+  await page.goto(await start(crashData));
   await page.waitForFunction(() => !document.querySelector("#submit-command").disabled);
   assert.match(await page.locator("#portfolio-body").innerText(), /PARTIALLY_FILLED/);
   await command(page, "RECOVER_SIMULATION", 3);
@@ -517,12 +530,12 @@ s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_tim
   assert.match(await page.locator("#strategy-body").innerText(), /deterministic-trend/);
   await command(page, "START_SIMULATION", 2);
   await command(page, "BACKUP_SIMULATION", 4);
-  const backups = fs.readdirSync(path.join(data, "backups")).filter(name => /^[0-9a-f-]{36}$/.test(name));
+  const backups = fs.readdirSync(path.join(crashData, "backups")).filter(name => /^[0-9a-f-]{36}$/.test(name));
   assert.equal(backups.length, 1);
   await command(page, "BLOCK_NEW_EXPOSURE", 0);
   await stop();
   const restored = path.join(scratch, "restored state");
-  await page.goto(await start(restored, path.join(data, "backups", backups[0])));
+  await page.goto(await start(restored, path.join(crashData, "backups", backups[0])));
   await page.waitForFunction(() => !document.querySelector("#submit-command").disabled);
   assert.match(await page.locator("#portfolio-body").innerText(), /791\.392/);
   assert.match(await page.locator("#risk-body").innerText(), /RECONCILIATION_REQUIRED/);

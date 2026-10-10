@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from io import StringIO
@@ -126,7 +126,8 @@ def _validated_rows(data: bytes, *, month: str, interval: str) -> tuple[list[tup
         if int(current.timestamp()) % seconds != 0:
             raise HistoricalArchiveError("candle interval misalignment")
         values = [_decimal(row[n], name, zero_allowed=n == 5)
-                  for n, name in zip(range(1, 7), ("open", "high", "low", "close", "volume", "unused"))][:5]
+                  for n, name in ((1, "open"), (2, "high"), (3, "low"),
+                                  (4, "close"), (5, "volume"))]
         opening, high, low, closing, volume = values
         if low > min(opening, closing) or high < max(opening, closing) or low > high:
             raise HistoricalArchiveError("impossible OHLC relation")
@@ -145,6 +146,15 @@ def _validated_rows(data: bytes, *, month: str, interval: str) -> tuple[list[tup
             raise HistoricalArchiveError("too many candles")
     if not normalized:
         raise HistoricalArchiveError("empty candle archive")
+    # Coverage must include the entire UTC month; a partial listing is not
+    # complete merely because every *observed* pair of rows is contiguous.
+    from calendar import monthrange
+    start_month = datetime(year, mon, 1, tzinfo=UTC)
+    end_month = start_month + timedelta(days=monthrange(year, mon)[1])
+    first = datetime.fromisoformat(normalized[0][0].replace("Z", "+00:00"))
+    last = datetime.fromisoformat(normalized[-1][0].replace("Z", "+00:00"))
+    missing_periods += int((first - start_month).total_seconds()) // seconds
+    missing_periods += max(0, int((end_month - last).total_seconds()) // seconds - 1)
     return normalized, missing_periods
 
 
@@ -218,12 +228,16 @@ def collect_month(*, symbol: str, interval: str, month: str, output: Path, fetch
     csv_bytes = stream.getvalue().encode("utf-8")
     manifest["normalized_csv_sha256"] = sha256(csv_bytes).hexdigest()
     manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    if target.exists() or datafile.exists():
-        if target.is_file() and datafile.is_file() and target.read_bytes() == manifest_bytes and datafile.read_bytes() == csv_bytes:
-            return manifest
-        raise HistoricalArchiveError("archive revision conflict; do not silently overwrite accepted data")
-    # Exclusive creation: fail closed on collision, never delete previously accepted data.
+    # Keep accepted bytes immutable; after process loss between the two
+    # exclusive writes, repair ONLY the missing file if its peer is identical.
     for file, payload in ((datafile, csv_bytes), (target, manifest_bytes)):
+        if file.is_symlink() or series.is_symlink():
+            raise HistoricalArchiveError("dataset path must not be a symlink")
+        if file.exists() and (not file.is_file() or file.read_bytes() != payload):
+            raise HistoricalArchiveError("archive revision conflict; do not silently overwrite accepted data")
+    for file, payload in ((datafile, csv_bytes), (target, manifest_bytes)):
+        if file.exists():
+            continue
         with file.open("xb") as handle:
             handle.write(payload)
             handle.flush()

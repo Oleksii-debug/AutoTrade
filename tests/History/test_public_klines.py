@@ -6,7 +6,10 @@ from io import BytesIO, StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from zipfile import ZipFile
+from zipfile import ZipFile, ZIP_DEFLATED
+from unittest.mock import patch
+import os
+import json
 
 from tools.historical_public_klines import (
     HistoricalArchiveError, _month_range, verify_archive, collect_month,
@@ -65,6 +68,68 @@ class PublicHistoryTests(unittest.TestCase):
         raw, check = _bundle(corrupt=True)
         with self.assertRaisesRegex(HistoricalArchiveError, "SHA-256"):
             verify_archive(raw, check, symbol="BTCUSDT", interval="1h", month="2024-01")
+
+    def test_rejects_cross_year_timestamp_units_and_false_close_time(self):
+        raw, check = _bundle(month="2025-01", unit="ms")
+        with self.assertRaisesRegex(HistoricalArchiveError, "unit"):
+            verify_archive(raw, check, symbol="BTCUSDT", interval="1h", month="2025-01")
+        raw, check = _bundle(month="2024-01", unit="us")
+        with self.assertRaisesRegex(HistoricalArchiveError, "unit"):
+            verify_archive(raw, check, symbol="BTCUSDT", interval="1h", month="2024-01")
+
+        raw, _ = _bundle()
+        with ZipFile(BytesIO(raw)) as z:
+            name = z.namelist()[0]
+            csv_bytes = z.read(name).decode()
+        lines = csv_bytes.splitlines()
+        parts = lines[0].split(",")
+        parts[6] = str(int(parts[6]) + 1)
+        lines[0] = ",".join(parts)
+        out = BytesIO()
+        with ZipFile(out, "w") as z:
+            z.writestr(name, "\\n".join(lines) + "\\n")
+        invalid = out.getvalue()
+        with self.assertRaisesRegex(HistoricalArchiveError, "close time"):
+            verify_archive(invalid, f"{sha256(invalid).hexdigest()}  BTCUSDT-1h-2024-01.zip\\n".encode(),
+                           symbol="BTCUSDT", interval="1h", month="2024-01")
+
+    def test_compressed_zip_bomb_and_redirect_prevented(self):
+        from tools.historical_public_klines import _RejectRedirects
+        with self.assertRaisesRegex(HistoricalArchiveError, "redirect"):
+            _RejectRedirects().redirect_request(None, None, 302, "redirect", {}, "https://evil.test")
+        raw_file = b"0" * 100_000
+        out = BytesIO()
+        with ZipFile(out, "w", compression=ZIP_DEFLATED) as z:
+            z.writestr("BTCUSDT-1h-2024-01.csv", raw_file)
+        raw = out.getvalue()
+        with self.assertRaisesRegex(HistoricalArchiveError, "compression ratio unsafe"):
+            verify_archive(raw, f"{sha256(raw).hexdigest()}  BTCUSDT-1h-2024-01.zip\\n".encode(),
+                           symbol="BTCUSDT", interval="1h", month="2024-01")
+
+    def test_provenance_rights_and_interrupted_publication_recover_without_partial_archive(self):
+        archive, checksum = _bundle()
+        def source(url, limit):
+            return checksum if url.endswith(".CHECKSUM") else archive
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with patch("tools.historical_public_klines.os.link", side_effect=OSError("interrupted")):
+                with self.assertRaises(OSError):
+                    collect_month(symbol="BTCUSDT", interval="1h", month="2024-01",
+                                  output=base, fetch=source)
+            dataset = base / "spot/BTCUSDT/1h"
+            self.assertFalse((dataset / "2024-01.ohlcv.csv").exists())
+            self.assertFalse((dataset / "2024-01.manifest.json").exists())
+            self.assertFalse(list(dataset.glob("*.partial")))
+            first = collect_month(symbol="BTCUSDT", interval="1h", month="2024-01",
+                                  output=base, fetch=source)
+            self.assertIn("NON_COMMERCIAL_ONLY", first["rights_scope"])
+            self.assertIn("NON-COMMERCIAL", first["license"])
+            self.assertIsNone(first["published_at_utc"])
+            self.assertEqual(first["verification"]["publisher_companion_sha256"], "PASS")
+            self.assertEqual(len(first["source_checksum_sha256"]), 64)
+            second = collect_month(symbol="BTCUSDT", interval="1h", month="2024-01",
+                                   output=base, fetch=source)
+            self.assertEqual(first, second)
 
     def test_wrong_archive_symbol_and_unsafe_options(self):
         raw, check = _bundle()

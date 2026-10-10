@@ -272,6 +272,20 @@ def _validated_rows(data: bytes, *, month: str, interval: str) -> tuple[list[tup
     return normalized, missing_periods
 
 
+def _read_bounded_zip_member(archive: ZipFile, member) -> bytes:
+    """Bound inflated CSV even if a malicious ZIP understates header sizes.
+
+    Metadata file_size and compression-ratio checks alone are not a memory
+    allocation boundary. Never use ZipFile.read() without a size limit on
+    externally supplied archives.
+    """
+    with archive.open(member) as stream:
+        data = stream.read(MAX_CSV_BYTES + 1)
+    if len(data) > MAX_CSV_BYTES:
+        raise HistoricalArchiveError("archive member expanded beyond CSV byte budget")
+    return data
+
+
 def verify_archive(raw: bytes, checksum: bytes, *, symbol: str, interval: str, month: str, day: str | None = None) -> dict:
     if type(symbol) is not str or SYMBOL.fullmatch(symbol) is None:
         raise HistoricalArchiveError("symbol must be uppercase bounded pair")
@@ -315,7 +329,7 @@ def verify_archive(raw: bytes, checksum: bytes, *, symbol: str, interval: str, m
                 raise HistoricalArchiveError("unbounded archive member")
             if entries[0].file_size > max(1, entries[0].compress_size) * 200:
                 raise HistoricalArchiveError("archive compression ratio unsafe")
-            data = z.read(entries[0])
+            data = _read_bounded_zip_member(z, entries[0])
     except (BadZipFile, OSError, RuntimeError) as exc:
         raise HistoricalArchiveError("invalid ZIP") from exc
     rows, gaps = _validated_rows(data, month=month, interval=interval)

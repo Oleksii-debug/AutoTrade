@@ -147,6 +147,41 @@ class PublicHistoryTests(unittest.TestCase):
                 ingest._fetch("https://example.invalid/evil.zip", 4096)
             pace.assert_not_called()
 
+    def test_zip_inflate_read_is_bounded_even_if_header_is_false(self):
+        # The archive header can understate actual decompressed output.
+        # Independently bound read() itself; no full untrusted ZIP expansion.
+        from tools import historical_public_klines as ingest
+
+        class InspectedStream(BytesIO):
+            def __init__(self, payload):
+                super().__init__(payload)
+                self.requested = []
+
+            def read(self, size=-1):
+                self.requested.append(size)
+                if size < 0:
+                    raise AssertionError("unbounded ZIP inflation")
+                return super().read(size)
+
+        class DeceptiveZip:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def open(self, _member):
+                return self.stream
+
+        oversized = InspectedStream(b"X" * 100)
+        with patch.object(ingest, "MAX_CSV_BYTES", 32):
+            with self.assertRaisesRegex(HistoricalArchiveError, "expanded beyond"):
+                ingest._read_bounded_zip_member(DeceptiveZip(oversized), object())
+        self.assertEqual(oversized.requested, [33])
+
+        exact = InspectedStream(b"Y" * 32)
+        with patch.object(ingest, "MAX_CSV_BYTES", 32):
+            self.assertEqual(ingest._read_bounded_zip_member(
+                DeceptiveZip(exact), object()), b"Y" * 32)
+        self.assertEqual(exact.requested, [33])
+
     def test_compressed_zip_bomb_and_redirect_prevented(self):
         from tools.historical_public_klines import _RejectRedirects
         with self.assertRaisesRegex(HistoricalArchiveError, "redirect"):

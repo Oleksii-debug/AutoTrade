@@ -58,6 +58,27 @@ class HistoricalZeroTests(unittest.TestCase):
             self.assertEqual(times[-1].isoformat(),"2024-01-31T23:00:00+00:00")
             self.assertEqual(len(digest),64)
 
+    def test_replay_rejects_truncated_month_even_if_manifest_hash_is_recomputed(self):
+        # A coherent-looking local manifest must not turn a missing opening
+        # candle into a COMPLETE dataset after a disk fault or tampering.
+        with TemporaryDirectory() as tmp:
+            count = self._dataset(tmp)
+            base = Path(tmp) / "spot/BTCUSDT/1h"
+            datafile = base / "2024-01.ohlcv.csv"
+            manifestfile = base / "2024-01.manifest.json"
+            lines = datafile.read_bytes().splitlines(keepends=True)
+            truncated = b"".join([lines[0], *lines[2:]])
+            datafile.write_bytes(truncated)
+            manifest = json.loads(manifestfile.read_text(encoding="utf-8"))
+            manifest["row_count"] = count - 1
+            manifest["start_open_time_utc"] = "2024-01-01T01:00:00Z"
+            manifest["missing_candle_intervals"] = 0
+            manifest["usable_as_complete_causal_interval"] = True
+            manifest["normalized_csv_sha256"] = sha256(truncated).hexdigest()
+            manifestfile.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(HistoricalArchiveError, "full UTC month"):
+                load_verified_months(Path(tmp), "BTCUSDT", "1h", "2024-01", "2024-01")
+
     def test_entrypoint_reuses_existing_zero_financial_engine_without_live_route(self):
         with TemporaryDirectory() as tmp:
             self._dataset(tmp)

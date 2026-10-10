@@ -503,19 +503,25 @@ async function exerciseCanonicalPageNavigation(page) {
   // after the first *real* atomic fill. A Host-signature is never bypassed.
   stage = "isolated financial crash preparation";
   const crashData = path.join(scratch, "isolated crash recovery state");
+  // The real Host first establishes the canonical no-trade bootstrap cut and
+  // its frozen journal/protocol. The fault must occur *after* that valid
+  // lifecycle, matching the existing real Product crash/restart acceptance.
+  await start(crashData);
+  await stop();
 
   const crash = spawnSync(python, ["-B", "-c", `
 import os,sys
 from pathlib import Path
 import mvp.autotrade_mvp.simulation_session as s
-from mvp.autotrade_mvp.product_runtime import PRICES, START_TIME
-root=Path(sys.argv[1])
+from mvp.autotrade_mvp.simulation_commands import _protocol
+from mvp.autotrade_mvp.persistence import JournalStore
+root=Path(sys.argv[1]); p=_protocol(JournalStore(root/"journal.sqlite3"))
 original=s.commit_order_fill_with_reservation_consumption
 def die(*a,**kw):
     original(*a,**kw)
     os._exit(73)
 s.commit_order_fill_with_reservation_consumption=die
-s.run_autonomous_simulation(PRICES,root,run_id='provider-free-product',now=START_TIME,execution_profile='TWO_EQUAL_PARTIALS',target_quantity='2')
+s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_time'],execution_profile=p['execution_profile'],target_quantity=p['target_quantity'])
 `, path.join(crashData, "state")], {cwd: ROOT, env, encoding: "utf8", timeout: 30000});
   assert.equal(crash.status, 73, crash.stderr);
   await page.goto(await start(crashData));

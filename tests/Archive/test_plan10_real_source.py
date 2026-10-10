@@ -73,6 +73,62 @@ class RealHistoryArchiveSample(unittest.TestCase):
                     "rows": item["row_count"], "research_only": True,
                 }, sort_keys=True), flush=True)
 
+    def test_actual_zero_engine_on_verified_publisher_btc_month(self):
+        """Use the real canonical engine, NOT a mock. This is an UNQUALIFIED smoke test.
+
+        The run is intentionally bounded to twelve completed observations; it
+        cannot establish next-bar execution, causal learning, or profitability.
+        """
+        from contextlib import redirect_stdout
+        from decimal import Decimal
+        from io import StringIO
+        from tools.run_historical_zero import main as historical_main
+
+        with TemporaryDirectory(prefix="autotrade-plan10-real-zero-") as tmp:
+            root = Path(tmp)
+            source = collect_month(symbol="BTCUSDT", interval="1h",
+                                   month="2024-01", output=root)
+            self.assertEqual(source["row_count"], 744)
+            self.assertEqual(source["missing_candle_intervals"], 0)
+            output = StringIO()
+            with redirect_stdout(output):
+                code = historical_main([
+                    "--data-root", str(root),
+                    "--symbol", "BTCUSDT",
+                    "--interval", "1h",
+                    "--from-month", "2024-01",
+                    "--through-month", "2024-01",
+                    "--state-dir", str(root / "canonical-zero-state"),
+                    "--run-id", "real-source-smoke",
+                    "--stop-after-episodes", "12",
+                ])
+            self.assertEqual(code, 0, output.getvalue()[-3000:])
+            report = json.loads(output.getvalue())
+            self.assertEqual(
+                report["label"],
+                "INTERNAL_CANDLE_CLOSE_SAME_PRICE_EXPERIMENT_NOT_PERFORMANCE_EVIDENCE",
+            )
+            self.assertEqual(report["source_market"], "BINANCE_HISTORICAL_SPOT_CANDLES")
+            self.assertEqual(report["observation_count"], 744)
+            sim = report["simulation"]
+            self.assertEqual(sim["environment"], "SIMULATION")
+            self.assertEqual(sim["mode"], "ZERO")
+            self.assertEqual(sim["status"], "PAUSED")
+            self.assertEqual(sim["completed_episodes"], 12)
+            self.assertTrue(Decimal(sim["cash"]).is_finite())
+            self.assertGreaterEqual(Decimal(sim["cash"]), Decimal("0"))
+            self.assertTrue(Decimal(sim["position"]).is_finite())
+            print("PLAN10_REAL_ZERO_AGENT_SMOKE " + json.dumps({
+                "symbol": "BTCUSDT",
+                "month": "2024-01",
+                "source_zip_sha256": source["source_zip_sha256"],
+                "observations_available": 744,
+                "observations_processed": sim["completed_episodes"],
+                "simulated_cash": sim["cash"],
+                "simulated_position": sim["position"],
+                "qualification": "UNQUALIFIED_SAME_CLOSE_NO_LEARNING_NO_ROI",
+            }, sort_keys=True), flush=True)
+
     def test_verified_historical_btc_eth_hourly_2024_onward(self):
         end = _last_published_month() if os.environ.get("GITHUB_HEAD_REF") == _CANONICAL_PR_BRANCH else "2024-01"
         months = list(_month_range("2024-01", end))

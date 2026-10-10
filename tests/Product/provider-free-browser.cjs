@@ -490,32 +490,25 @@ async function exerciseCanonicalPageNavigation(page) {
   await stop();
   await exerciseHostOutageFailClosed(page);
 
-  // The preceding STOP is a deliberate Host fencing action. Its journal
-  // cannot be reused to authorize a new simulation worker. Qualify the
-  // independent crash/restore journey on a freshly bootstrapped Host store.
+  // A prior Host has already advanced its financial and control journal.
+  // Crash-injection is only legitimate in a fresh simulator-owned scope:
+  // reproduce exactly the canonical Product bootstrap protocol, and crash
+  // after the first *real* atomic fill. A Host-signature is never bypassed.
   stage = "isolated financial crash preparation";
   const crashData = path.join(scratch, "isolated crash recovery state");
-  await page.goto(await start(crashData));
-  await page.waitForFunction(() => !document.querySelector("#submit-command").disabled);
-  const crashSeedHost = host;
-  const crashSeedExit = new Promise(resolve => crashSeedHost.once("exit", resolve));
-  crashSeedHost.kill("SIGKILL");
-  await crashSeedExit;
-  host = null;
 
   const crash = spawnSync(python, ["-B", "-c", `
 import os,sys
 from pathlib import Path
 import mvp.autotrade_mvp.simulation_session as s
-from mvp.autotrade_mvp.simulation_commands import _protocol
-from mvp.autotrade_mvp.persistence import JournalStore
-root=Path(sys.argv[1]);p=_protocol(JournalStore(root/'journal.sqlite3'))
+from mvp.autotrade_mvp.product_runtime import PRICES, START_TIME
+root=Path(sys.argv[1])
 original=s.commit_order_fill_with_reservation_consumption
 def die(*a,**kw):
     original(*a,**kw)
     os._exit(73)
 s.commit_order_fill_with_reservation_consumption=die
-s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_time'],execution_profile=p.get('execution_profile','IMMEDIATE'),target_quantity=p.get('target_quantity','1'))
+s.run_autonomous_simulation(PRICES,root,run_id='provider-free-product',now=START_TIME,execution_profile='TWO_EQUAL_PARTIALS',target_quantity='2')
 `, path.join(crashData, "state")], {cwd: ROOT, env, encoding: "utf8", timeout: 30000});
   assert.equal(crash.status, 73, crash.stderr);
   await page.goto(await start(crashData));

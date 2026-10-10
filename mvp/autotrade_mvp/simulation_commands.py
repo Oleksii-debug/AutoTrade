@@ -348,26 +348,9 @@ def execute_simulation_action(journal, action, payload, accepted_at):
                         reason = next((code for marker, code in retained_reasons
                                        if marker in stderr), 'OTHER')
                         detail += ':RETAINED_' + reason
-                    # Only test-opt-in, exact whitelisted recovery invariants may
-                    # become diagnostic labels. Never publish raw exception text,
-                    # traceback, credentials, paths or arbitrary input.
-                    if (frames and frames[-1] == '_recover_autonomous_observed_fill'
-                            and types and types[-1].rsplit('.', 1)[-1] == 'ValueError'):
-                        recovery_reasons = {
-                            'retained fill episode is invalid': 'EPISODE_INVALID',
-                            'retained fill observation identity differs': 'OBSERVATION_IDENTITY',
-                            'retained fill lacks a trade decision': 'TRADE_DECISION',
-                            'retained fill order/target differs': 'ORDER_TARGET',
-                            'retained simulator history differs': 'SIMULATOR_HISTORY',
-                            'retained fill economics differ from frozen request': 'FILL_ECONOMICS',
-                            'retained fill historical admission differs': 'HISTORICAL_ADMISSION',
-                            'retained fill lacks exact completed send evidence': 'COMPLETED_SEND',
-                            'retained fill conflicts with canonical economic state': 'ECONOMIC_STATE',
-                            'retained fill conflicts with canonical economic history': 'ECONOMIC_HISTORY',
-                            'journal changed while validating retained fill': 'PROOF_CUT_CHANGED',
-                            'retained fill recovery did not reconcile financial owners': 'FINANCIAL_OWNERS',
-                        }
-                        messages = re.findall(r'(?m)^ValueError: ([^\\r\\n]{1,180})\\r?
+                    diagnostic('worker_exited', detail)
+                else:
+                    diagnostic('worker_exited', str(completed.returncode))
             except (OSError, subprocess.SubprocessError) as error:
                 # Process-launch failure and timeout are recoverable execution
                 # uncertainty, not permission to strand a durable Host operation in

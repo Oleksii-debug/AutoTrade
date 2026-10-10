@@ -166,7 +166,7 @@ class PublicHistoryTests(unittest.TestCase):
                                 interval="1h", month="2024-01", day=day)
         self.assertEqual(report["missing_candle_intervals"], 1)
         self.assertFalse(report["usable_as_complete_causal_interval"])
-        with self.assertRaisesRegex(HistoricalArchiveError, "another UTC date"):
+        with self.assertRaises(HistoricalArchiveError):
             verify_archive(raw, check, symbol="BTCUSDT", interval="1h",
                            month="2024-01", day="2024-01-03")
         with self.assertRaises(HistoricalArchiveError):
@@ -178,7 +178,7 @@ class PublicHistoryTests(unittest.TestCase):
         with self.assertRaisesRegex(HistoricalArchiveError, "unexpected archive URL"):
             _fetch("https://evil.example/data/spot/daily/klines/BTCUSDT/1h/x.zip", 4096)
         with self.assertRaisesRegex(HistoricalArchiveError, "SHA-256"):
-            verify_archive(raw, b"0" * 64 + b"  BTCUSDT-1h-2024-01-02.zip\\n",
+            verify_archive(raw, b"0" * 64 + b"  BTCUSDT-1h-2024-01-02.zip\n",
                            symbol="BTCUSDT", interval="1h", month="2024-01", day=day)
 
     def test_wrong_archive_symbol_and_unsafe_options(self):

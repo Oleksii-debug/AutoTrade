@@ -41,6 +41,11 @@ https://docs.google.com/document/d/1pebBXU4mdFMnFpCC7cc1fStkpV1vnUNr4U4EppOKqns/
 9. Дев’ятий план — External qualification, signed release, NVDA та M2
 https://docs.google.com/document/d/1sbCFL7NeCK5AfUvZFkGJ2FbOGBAAfHqPcj5-99j9qFw/edit
 
+10. Десятий план — Автономна історична симуляція та навчання без брокерів (2024+)
+https://docs.google.com/document/d/1bTDCb0yGLrOqlKClhyAD_7k7aZsP57kFRkexHz_b6d4/edit
+
+**Plan 10 is newly owner-authorized independent ACTIONABLE provider-free historical simulation work.** It reuses terminal Plans 1–8 and is not blocked by parked real-provider Plan 9; do not misclassify its first data-intake Section as WAITING_EXTERNAL. No real money or credentials. Plan 9 remains the final signed/NVDA provider-free release and optional external-provider qualification without invented DONE. Plan 10 statuses live in MULTI_PLAN_CLOSURE_STATE.md; strict historical causality and legal data provenance are binding.
+
 ## Worker selection
 
 For Plans 1–7:

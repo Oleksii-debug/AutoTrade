@@ -19,17 +19,16 @@ import re
 from tools.historical_public_klines import (
     BASE, DATASET_LICENSE, DATASET_TERMS_URL,
     HistoricalArchiveError, INTERVAL_SECONDS, SYMBOL, _month_range,
+    _reject_symlink_ancestors,
 )
 from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
 
 
 def _checked_month(root: Path, symbol: str, interval: str, month: str):
     base = root / "spot" / symbol / interval
-    # The collector rejects symlinked ancestors; replay must not reintroduce
-    # a redirect to an unverified local dataset after collection.
-    for parent in (root, root / "spot", root / "spot" / symbol, base):
-        if parent.is_symlink():
-            raise HistoricalArchiveError("historical replay source directory is a symlink")
+    # Verify the complete lexical ancestor chain, including ancestors ABOVE
+    # data-root; a symlink above root must never redirect trusted replay.
+    _reject_symlink_ancestors(base)
     manifest_file = base / (month + ".manifest.json")
     rows_file = base / (month + ".ohlcv.csv")
     for f in (manifest_file, rows_file):

@@ -58,6 +58,36 @@ class HistoricalZeroTests(unittest.TestCase):
             self.assertEqual(times[-1].isoformat(),"2024-01-31T23:00:00+00:00")
             self.assertEqual(len(digest),64)
 
+    def test_nested_parent_symlink_blocks_archive_before_network_and_replay(self):
+        # Even when data-root itself is not a symlink, one of its higher
+        # ancestors can redirect writes and reads to a different dataset.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            physical = root / "physical"
+            physical.mkdir()
+            alias = root / "alias"
+            try:
+                alias.symlink_to(physical, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("directory symlinks unavailable on this host")
+            shadow_root = alias / "dataset"
+            archive, checksum, _ = full_month_fixture()
+            network_attempts = []
+            def fake_source(url, limit):
+                network_attempts.append(url)
+                return checksum if url.endswith(".CHECKSUM") else archive
+            with self.assertRaisesRegex(HistoricalArchiveError, "symlink ancestor"):
+                collect_month(symbol="BTCUSDT", interval="1h",
+                              month="2024-01", output=shadow_root, fetch=fake_source)
+            self.assertEqual(network_attempts, [])
+            self.assertFalse((physical / "dataset").exists())
+            self._dataset(physical / "dataset")
+            with self.assertRaisesRegex(HistoricalArchiveError, "symlink ancestor"):
+                load_verified_months(shadow_root, "BTCUSDT", "1h", "2024-01", "2024-01")
+            with self.assertRaisesRegex(HistoricalArchiveError, "parent traversal"):
+                load_verified_months(physical / ".." / "physical" / "dataset",
+                                     "BTCUSDT", "1h", "2024-01", "2024-01")
+
     def test_replay_rejects_truncated_month_even_if_manifest_hash_is_recomputed(self):
         # A coherent-looking local manifest must not turn a missing opening
         # candle into a COMPLETE dataset after a disk fault or tampering.

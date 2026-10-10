@@ -40,6 +40,24 @@ class HistoricalArchiveError(ValueError):
     """Untrusted archive, data, chronology or provenance is invalid."""
 
 
+def _reject_symlink_ancestors(path: Path) -> None:
+    """Fail closed on lexical dataset traversal and symlinks in ANY ancestor.
+
+    Check before network intake, before publication, and again before replay.
+    This protects ordinary local path selection; it does not claim to solve
+    concurrent adversarial filesystem swaps (those require descriptor pinning).
+    """
+    if ".." in path.parts:
+        raise HistoricalArchiveError("historical dataset parent traversal forbidden")
+    try:
+        absolute = path.absolute()
+        for candidate in (absolute, *absolute.parents):
+            if candidate.is_symlink():
+                raise HistoricalArchiveError("historical dataset path has symlink ancestor")
+    except (OSError, RuntimeError) as exc:
+        raise HistoricalArchiveError("historical dataset path cannot be safely inspected") from exc
+
+
 def _utc_month(value: str) -> tuple[int, int]:
     m = MONTH.fullmatch(value) if type(value) is str else None
     if m is None:
@@ -276,17 +294,20 @@ def collect_month(*, symbol: str, interval: str, month: str, output: Path, fetch
     source_base = DAILY_BASE if day is not None else BASE
     filename = f"{symbol}-{interval}-{period}.zip"
     url = f"{source_base}/{symbol}/{interval}/{filename}"
+    # Reject redirects through symlinked parent directories BEFORE any download.
+    chosen_series = output / "spot" / symbol / interval
+    if day is not None:
+        chosen_series = chosen_series / "daily"
+    _reject_symlink_ancestors(chosen_series)
     raw = fetch(url, MAX_ZIP_BYTES)
     checksum = fetch(url + ".CHECKSUM", 4096)
     result = verify_archive(raw, checksum, symbol=symbol, interval=interval, month=month, day=day)
     series = output / "spot" / symbol / interval
     if day is not None:
         series = series / "daily"
-    for ancestor in (output, output / "spot", output / "spot" / symbol,
-                     output / "spot" / symbol / interval, series):
-        if ancestor.is_symlink():
-            raise HistoricalArchiveError("dataset directory may not be a symlink")
+    _reject_symlink_ancestors(series)
     series.mkdir(parents=True, exist_ok=True)
+    _reject_symlink_ancestors(series)
     manifest = {k: v for k, v in result.items() if k != "ohlcv_rows"}
     manifest["source_checksum_url"] = url + ".CHECKSUM"
     manifest["source_checksum_sha256"] = sha256(checksum).hexdigest()

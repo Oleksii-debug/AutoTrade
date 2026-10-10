@@ -86,8 +86,13 @@ async function command(page, action) {
     await page.evaluate(() => document.activeElement.id),
     "command-result",
     action + " command feedback focus");
+  // Installed Windows recovery must verify a full durable financial cut.
+  // The worker's own fail-closed timeout is 300s; 30s of Playwright polling
+  // can expire while it is still correctly inspecting the recovered journal.
+  // Still require actual canonical SUCCEEDED (never RUNNING/UNKNOWN).
   await page.waitForFunction(count => document.querySelectorAll("#operations-body tr[data-operation-id]").length > count
-    && document.querySelector("#operations-body").lastElementChild?.children[1]?.textContent === "SUCCEEDED", before);
+    && document.querySelector("#operations-body").lastElementChild?.children[1]?.textContent === "SUCCEEDED",
+    before, {timeout: action === "RECOVER_SIMULATION" ? 120000 : 30000});
   await page.keyboard.press("Shift+Tab");
   assert.equal(
     await page.evaluate(() => document.activeElement.id),

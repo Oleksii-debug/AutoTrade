@@ -55,6 +55,23 @@ class PublicHistoryTests(unittest.TestCase):
         with self.assertRaises(HistoricalArchiveError):
             list(_month_range("2023-12", "2024-01"))
 
+    def test_rejects_current_and_future_month_without_network(self):
+        # Only completed UTC monthly periods are eligible for historical use.
+        now = datetime.now(timezone.utc)
+        current = f"{now.year:04d}-{now.month:02d}"
+        with TemporaryDirectory() as tmp:
+            for month in (current, "2099-01"):
+                with self.subTest(month=month):
+                    with self.assertRaisesRegex(HistoricalArchiveError, "completed UTC month"):
+                        collect_month(
+                            symbol="BTCUSDT", interval="1h", month=month,
+                            output=Path(tmp),
+                            fetch=lambda *_: self.fail("must reject before network access"),
+                        )
+                    with self.assertRaisesRegex(HistoricalArchiveError, "completed UTC month"):
+                        verify_archive(b"invalid", b"invalid", symbol="BTCUSDT",
+                                       interval="1h", month=month)
+
     def test_milliseconds_2024_and_microseconds_2025(self):
         for month, unit in (("2024-01", "ms"), ("2025-01", "us")):
             with self.subTest(month=month):

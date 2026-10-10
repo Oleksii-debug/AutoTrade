@@ -516,7 +516,7 @@ from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
 from pathlib import Path
 import sys
 result = run_autonomous_simulation(
-    PRICES, Path(sys.argv[1]), run_id='provider-free-product',
+    PRICES, Path(sys.argv[1]).resolve(), run_id='provider-free-product',
     now=START_TIME, stop_after_episodes=1,
     execution_profile='TWO_EQUAL_PARTIALS', target_quantity='2')
 print(result['status'], result['completed_episodes'])
@@ -530,7 +530,7 @@ from pathlib import Path
 import mvp.autotrade_mvp.simulation_session as s
 from mvp.autotrade_mvp.simulation_commands import _protocol
 from mvp.autotrade_mvp.persistence import JournalStore
-root=Path(sys.argv[1]); p=_protocol(JournalStore(root/"journal.sqlite3"))
+root=Path(sys.argv[1]).resolve(); p=_protocol(JournalStore(root/"journal.sqlite3"))
 original=s.commit_order_fill_with_reservation_consumption
 def die(*a,**kw):
     original(*a,**kw)

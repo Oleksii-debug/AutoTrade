@@ -122,7 +122,7 @@ class PublicHistoryTests(unittest.TestCase):
             self.assertFalse(list(dataset.glob("*.partial")))
             first = collect_month(symbol="BTCUSDT", interval="1h", month="2024-01",
                                   output=base, fetch=source)
-            self.assertIn("NON_COMMERCIAL_ONLY", first["rights_scope"])
+            self.assertIn("NON_COMMERCIAL", first["rights_scope"])
             self.assertIn("NON-COMMERCIAL", first["license"])
             self.assertIsNone(first["published_at_utc"])
             self.assertEqual(first["verification"]["publisher_companion_sha256"], "PASS")

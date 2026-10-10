@@ -64,9 +64,9 @@ Legacy Section 2 is split:
 - repository-controllable dependency/provenance engineering -> Plan 4 / Section 2, internally complete;
 - final external/delivered-release rights/trust/SBOM facts -> Plan 9 / Section 1, WAITING_EXTERNAL.
 
-Legacy Section 15 -> Plan 1 / Section 10, QUALIFYING on canonical PR #2318.
-Legacy Section 16 -> Plan 2 / Section 2, PARTIAL_EXISTING on PR #1631.
-Legacy Section 17 -> Plan 1 / Section 11, PARTIAL_EXISTING on PR #1628.
+Legacy Section 15 -> Plan 1 / Section 10 — DONE; canonical PR #2318 accepted, final evidence in MULTI_PLAN_CLOSURE_STATE.md.
+Legacy Section 16 -> Plan 2 / Section 2 — DONE; original PR #1631 is historic source, current closure evidence in MULTI_PLAN_CLOSURE_STATE.md.
+Legacy Section 17 -> Plan 1 / Section 11 — DONE; original PR #1628 is historic source, current closure evidence in MULTI_PLAN_CLOSURE_STATE.md.
 
 Detailed 0–47 mapping: LEGACY_48_TO_MULTIPLAN_COVERAGE.md.
 

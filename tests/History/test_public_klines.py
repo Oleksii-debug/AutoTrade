@@ -223,5 +223,61 @@ class PublicHistoryTests(unittest.TestCase):
                 collect_month(symbol="BTCUSDT", interval="1h", month="2024-01", output=path, fetch=frozen_fetch)
 
 
+    def test_network_and_partial_archive_failure_never_publish(self):
+        """404, truncated source ZIP, and checksum loss never publish evidence."""
+        archive, checksum = _bundle()
+        name = "BTCUSDT-1h-2024-01.zip"
+        truncated = archive[:24]
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            def missing_source(url, limit):
+                raise HistoricalArchiveError("public archive unavailable: HTTPError")
+            with self.assertRaisesRegex(HistoricalArchiveError, "unavailable"):
+                collect_month(symbol="BTCUSDT", interval="1h", month="2024-01",
+                              output=base, fetch=missing_source)
+            def missing_checksum(url, limit):
+                if url.endswith(".CHECKSUM"):
+                    raise HistoricalArchiveError("public archive unavailable: HTTPError")
+                return archive
+            with self.assertRaisesRegex(HistoricalArchiveError, "unavailable"):
+                collect_month(symbol="BTCUSDT", interval="1h", month="2024-01",
+                              output=base, fetch=missing_checksum)
+            def truncated_source(url, limit):
+                if url.endswith(".CHECKSUM"):
+                    return _publisher_checksum(truncated, name)
+                return truncated
+            with self.assertRaisesRegex(HistoricalArchiveError, "invalid ZIP"):
+                collect_month(symbol="BTCUSDT", interval="1h", month="2024-01",
+                              output=base, fetch=truncated_source)
+            series = base / "spot" / "BTCUSDT" / "1h"
+            self.assertFalse(list(series.glob("*.manifest.json")))
+            self.assertFalse(list(series.glob("*.ohlcv.csv")))
+            self.assertFalse(list(series.glob("*.partial")))
+
+    def test_verified_source_revision_never_overwrites_immutable_history(self):
+        """Even a new valid publisher checksum cannot silently replace a local snapshot."""
+        first_raw, first_checksum = _bundle()
+        revised_raw, revised_checksum = _bundle(gap=True)
+        self.assertNotEqual(sha256(first_raw).digest(), sha256(revised_raw).digest())
+        def first_source(url, limit):
+            return first_checksum if url.endswith(".CHECKSUM") else first_raw
+        def revised_source(url, limit):
+            return revised_checksum if url.endswith(".CHECKSUM") else revised_raw
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            original = collect_month(symbol="BTCUSDT", interval="1h",
+                                     month="2024-01", output=base, fetch=first_source)
+            series = base / "spot" / "BTCUSDT" / "1h"
+            csv_before = (series / "2024-01.ohlcv.csv").read_bytes()
+            manifest_before = (series / "2024-01.manifest.json").read_bytes()
+            with self.assertRaisesRegex(HistoricalArchiveError, "revision conflict"):
+                collect_month(symbol="BTCUSDT", interval="1h",
+                              month="2024-01", output=base, fetch=revised_source)
+            self.assertEqual((series / "2024-01.ohlcv.csv").read_bytes(), csv_before)
+            self.assertEqual((series / "2024-01.manifest.json").read_bytes(), manifest_before)
+            self.assertEqual(json.loads(manifest_before)["source_zip_sha256"],
+                             original["source_zip_sha256"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -85,6 +85,16 @@ def _checked_month(root: Path, symbol: str, interval: str, month: str):
     step = INTERVAL_SECONDS[interval]
     if any(int((b-a).total_seconds()) != step for a,b in zip(dates, dates[1:])):
         raise HistoricalArchiveError("internal timestamp gap/reorder")
+    # Recalculate UTC-calendar completeness from actual rows, not from
+    # self-reported manifest fields. A truncated first/last bar and a locally
+    # recomputed CSV hash must never silently qualify a partial month.
+    from calendar import monthrange
+    year, month_number = map(int, month.split("-"))
+    expected_first = datetime(year, month_number, 1, tzinfo=timezone.utc)
+    expected_bars = monthrange(year, month_number)[1] * 86400 // step
+    expected_last = expected_first + timedelta(seconds=step * (expected_bars - 1))
+    if len(dates) != expected_bars or dates[0] != expected_first or dates[-1] != expected_last:
+        raise HistoricalArchiveError("historical coverage does not include full UTC month")
     return dates, prices, manifest
 
 

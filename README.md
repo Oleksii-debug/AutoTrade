@@ -1,5 +1,10 @@
 # AutoTrade
 
+## Historical provider-free campaign — new Plan 10 (2026-10-10)
+
+[Canonical Plan 10 in Google Drive](https://docs.google.com/document/d/1bTDCb0yGLrOqlKClhyAD_7k7aZsP57kFRkexHz_b6d4/edit): actual 2024+ lawful public BTCUSDT/ETHUSDT market history intake, no-lookahead causal replay, $1000 USD ZERO virtual account, separate data collector/simulated broker/trader/learner and independent walk-forward evaluation. Source-only engineering can start immediately with **no broker accounts or API keys**. Until next-bar execution, historical data, model training and independent evaluation are demonstrably integrated, the existing example commands below are **synthetic development simulations, not historical trading performance proofs**. Terminal Plans 1–8 remain DONE. Plan9 retains production signing/legal/NVDA gates and optional real provider/PAPER/LIVE tracks.
+
+
 Universal autonomous multi-agent financial trading platform.
 
 ## Run the network-free simulation

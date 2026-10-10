@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import csv
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -130,11 +130,23 @@ def main(argv=None) -> int:
         # restart/recovery, but its strategy receives only prices[:episode].
         # Observation time represents the completed bar, never its open.
         first_close = dates[0] + timedelta(seconds=INTERVAL_SECONDS[args.interval])
+        # The first CLOSED candle is known at first_close. Freeze a bounded,
+        # affordable SPOT quantity from that observation alone; no future
+        # bars, result labels or hindsight portfolio figures are consulted.
+        # Existing canonical ZERO risk/OMS/accounting still own every fill.
+        first_closed_price = Decimal(prices[0])
+        research_target = (Decimal("250") / first_closed_price).quantize(
+            Decimal("0.00000001"), rounding=ROUND_DOWN
+        )
+        if research_target <= 0:
+            raise HistoricalArchiveError("first closed price exceeds bounded fractional research quantity")
         result = run_autonomous_simulation(
             prices, args.state_dir, run_id=args.run_id + "-" + digest[:16],
             now=first_close.isoformat().replace("+00:00", "Z"),
             observation_interval_seconds=INTERVAL_SECONDS[args.interval],
             stop_after_episodes=args.stop_after_episodes,
+            instrument_profile="FRACTIONAL_SPOT_RESEARCH",
+            target_quantity=format(research_target, "f"),
         )
         print(json.dumps({
             "label": "INTERNAL_CANDLE_CLOSE_SAME_PRICE_EXPERIMENT_NOT_PERFORMANCE_EVIDENCE",
@@ -144,6 +156,8 @@ def main(argv=None) -> int:
             "historical_end_utc": dates[-1].isoformat().replace("+00:00", "Z"),
             "observation_count": len(prices),
             "dataset_identity_sha256": digest,
+            "frozen_fractional_spot_target_quantity": format(research_target, "f"),
+            "target_sizing_basis": "USD 250 / first completed candle close, rounded down to 0.00000001; remaining virtual cash stays unspent",
             "important_limitations": [
                 "Existing agent is currently a frozen moving-average strategy; this run does not prove learning.",
                 "Existing engine executes at observed mark, not qualified next-bar open/spread/slippage.",

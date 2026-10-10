@@ -24,6 +24,7 @@ from zipfile import ZipFile, BadZipFile
 from io import BytesIO
 
 BASE = "https://data.binance.vision/data/spot/monthly/klines"
+DAILY_BASE = "https://data.binance.vision/data/spot/daily/klines"
 DATASET_TERMS_URL = "https://github.com/binance/binance-public-data/blob/master/TERMS_AND_CONDITIONS.md"
 DATASET_LICENSE = "CC BY-NC-SA 4.0 + Binance Vision Dataset Terms (NON-COMMERCIAL ONLY)"
 SYMBOL = re.compile(r"^[A-Z0-9]{5,20}$")
@@ -49,6 +50,20 @@ def _utc_month(value: str) -> tuple[int, int]:
     return year, month
 
 
+def _utc_day(value: str) -> datetime:
+    if type(value) is not str or len(value) != 10:
+        raise HistoricalArchiveError("day must be exact YYYY-MM-DD")
+    try:
+        day = datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise HistoricalArchiveError("invalid calendar day") from exc
+    if day.date().isoformat() != value or day.year < 2024:
+        raise HistoricalArchiveError("daily archive outside supported 2024+ calendar")
+    if day >= datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0):
+        raise HistoricalArchiveError("daily archive requires a completed historic UTC day")
+    return day
+
+
 def _month_range(start: str, end: str):
     year, month = _utc_month(start)
     last_year, last_month = _utc_month(end)
@@ -66,7 +81,7 @@ class _RejectRedirects(HTTPRedirectHandler):
 
 
 def _fetch(url: str, limit: int) -> bytes:
-    if not url.startswith(BASE + "/") or "?" in url or "#" in url:
+    if not (url.startswith(BASE + "/") or url.startswith(DAILY_BASE + "/")) or "?" in url or "#" in url:
         raise HistoricalArchiveError("unexpected archive URL")
     req = Request(url, headers={"User-Agent": "AutoTrade-public-history-provenance/1.0"})
     try:
@@ -175,13 +190,19 @@ def _validated_rows(data: bytes, *, month: str, interval: str) -> tuple[list[tup
     return normalized, missing_periods
 
 
-def verify_archive(raw: bytes, checksum: bytes, *, symbol: str, interval: str, month: str) -> dict:
+def verify_archive(raw: bytes, checksum: bytes, *, symbol: str, interval: str, month: str, day: str | None = None) -> dict:
     if type(symbol) is not str or SYMBOL.fullmatch(symbol) is None:
         raise HistoricalArchiveError("symbol must be uppercase bounded pair")
     if interval not in INTERVAL_SECONDS:
         raise HistoricalArchiveError("unsupported candle interval")
     _utc_month(month)
-    filename = f"{symbol}-{interval}-{month}.zip"
+    if day is not None:
+        _utc_day(day)
+        if day[:7] != month:
+            raise HistoricalArchiveError("daily period does not match month")
+    period = day if day is not None else month
+    source_base = DAILY_BASE if day is not None else BASE
+    filename = f"{symbol}-{interval}-{period}.zip"
     try:
         check = checksum.decode("ascii").strip()
     except UnicodeDecodeError as exc:
@@ -207,11 +228,21 @@ def verify_archive(raw: bytes, checksum: bytes, *, symbol: str, interval: str, m
     except (BadZipFile, OSError, RuntimeError) as exc:
         raise HistoricalArchiveError("invalid ZIP") from exc
     rows, gaps = _validated_rows(data, month=month, interval=interval)
+    if day is not None:
+        start = _utc_day(day)
+        finish = start + timedelta(days=1)
+        observed = [datetime.fromisoformat(row[0].replace("Z", "+00:00")) for row in rows]
+        if any(not start <= instant < finish for instant in observed):
+            raise HistoricalArchiveError("daily archive contains another UTC date")
+        gaps = 86400 // INTERVAL_SECONDS[interval] - len(observed)
+        if gaps < 0:
+            raise HistoricalArchiveError("daily archive exceeds UTC daily coverage")
     return {
         "schema": "autotrade-spot-monthly-public-klines-v1",
         "market": "BINANCE_PUBLIC_ARCHIVE_SPOT_NOT_TRADING_PROVIDER",
         "symbol": symbol, "interval": interval, "month": month,
-        "source_url": f"{BASE}/{symbol}/{interval}/{filename}",
+        "day": day, "period_granularity": "DAILY" if day is not None else "MONTHLY",
+        "source_url": f"{source_base}/{symbol}/{interval}/{filename}",
         "source_zip_sha256": digest,
         "source_csv_sha256": sha256(data).hexdigest(),
         "row_count": len(rows), "missing_candle_intervals": gaps,
@@ -221,16 +252,24 @@ def verify_archive(raw: bytes, checksum: bytes, *, symbol: str, interval: str, m
     }
 
 
-def collect_month(*, symbol: str, interval: str, month: str, output: Path, fetch=_fetch) -> dict:
+def collect_month(*, symbol: str, interval: str, month: str, output: Path, fetch=_fetch, day: str | None = None) -> dict:
     if type(symbol) is not str or SYMBOL.fullmatch(symbol) is None or interval not in INTERVAL_SECONDS:
         raise HistoricalArchiveError("invalid public archive selection")
     _utc_month(month)
-    filename = f"{symbol}-{interval}-{month}.zip"
-    url = f"{BASE}/{symbol}/{interval}/{filename}"
+    if day is not None:
+        _utc_day(day)
+        if day[:7] != month:
+            raise HistoricalArchiveError("daily period does not match month")
+    period = day if day is not None else month
+    source_base = DAILY_BASE if day is not None else BASE
+    filename = f"{symbol}-{interval}-{period}.zip"
+    url = f"{source_base}/{symbol}/{interval}/{filename}"
     raw = fetch(url, MAX_ZIP_BYTES)
     checksum = fetch(url + ".CHECKSUM", 4096)
-    result = verify_archive(raw, checksum, symbol=symbol, interval=interval, month=month)
+    result = verify_archive(raw, checksum, symbol=symbol, interval=interval, month=month, day=day)
     series = output / "spot" / symbol / interval
+    if day is not None:
+        series = series / "daily"
     for ancestor in (output, output / "spot", output / "spot" / symbol, series):
         if ancestor.is_symlink():
             raise HistoricalArchiveError("dataset directory may not be a symlink")
@@ -254,8 +293,8 @@ def collect_month(*, symbol: str, interval: str, month: str, output: Path, fetch
         "missing_interval_count": result["missing_candle_intervals"],
     }
     manifest["untrusted_source_notice"] = "Historical candles only, no live quotes, spread, ticks, order book or fill proof"
-    target = series / (month + ".manifest.json")
-    datafile = series / (month + ".ohlcv.csv")
+    target = series / (period + ".manifest.json")
+    datafile = series / (period + ".ohlcv.csv")
     lines = [["open_time_utc", "open", "high", "low", "close", "volume"], *result["ohlcv_rows"]]
     from io import StringIO as _IO
     stream = _IO()
@@ -308,6 +347,13 @@ def collect_month(*, symbol: str, interval: str, month: str, output: Path, fetch
     return manifest
 
 
+def collect_day(*, symbol: str, interval: str, day: str, output: Path, fetch=_fetch) -> dict:
+    """One completed UTC day using the existing immutable ingestion authority."""
+    _utc_day(day)
+    return collect_month(symbol=symbol, interval=interval, month=day[:7],
+                         day=day, output=output, fetch=fetch)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Fetch and verify bounded monthly public historical spot candles")
     parser.add_argument("--symbols", default="BTCUSDT,ETHUSDT")
@@ -316,6 +362,8 @@ def main(argv=None) -> int:
     parser.add_argument("--through-month", required=True,
                         help="last fully published month YYYY-MM; current incomplete month is not an accepted monthly archive")
     parser.add_argument("--output", default="historical-data")
+    parser.add_argument("--daily-through", default=None,
+                        help="Last completed UTC day YYYY-MM-DD; begins after --through-month")
     args = parser.parse_args(argv)
     try:
         symbols = args.symbols.split(",")
@@ -324,12 +372,28 @@ def main(argv=None) -> int:
         months = list(_month_range(args.from_month, args.through_month))
         if len(months) * len(symbols) > 600:
             raise HistoricalArchiveError("explicit dataset size budget exceeded")
+        daily_days = []
+        if args.daily_through is not None:
+            last_day = _utc_day(args.daily_through)
+            year, month = _utc_month(args.through_month)
+            first_daily = (datetime(year + 1, 1, 1, tzinfo=UTC)
+                           if month == 12 else datetime(year, month + 1, 1, tzinfo=UTC))
+            if last_day < first_daily or (last_day - first_daily).days > 34:
+                raise HistoricalArchiveError("daily gap must span 1 to 35 days after monthly cut")
+            daily_days = [(first_daily + timedelta(days=i)).date().isoformat()
+                          for i in range((last_day - first_daily).days + 1)]
+        if (len(months) + len(daily_days)) * len(symbols) > 600:
+            raise HistoricalArchiveError("combined archive count exceeds budget")
         for sym in symbols:
             if SYMBOL.fullmatch(sym) is None:
                 raise HistoricalArchiveError("invalid symbol")
             for month in months:
                 result = collect_month(symbol=sym, interval=args.interval, month=month, output=Path(args.output))
                 print(f"{sym} {month}: {result['row_count']} rows; gaps={result['missing_candle_intervals']}; source_sha256={result['source_zip_sha256']}")
+            for day in daily_days:
+                result = collect_day(symbol=sym, interval=args.interval, day=day,
+                                     output=Path(args.output))
+                print(f"{sym} {day}: {result['row_count']} daily rows; gaps={result['missing_candle_intervals']}; source_sha256={result['source_zip_sha256']}")
         return 0
     except (HistoricalArchiveError, OSError) as exc:
         print(f"AutoTrade historical public data: blocked — {exc}")

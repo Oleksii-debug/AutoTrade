@@ -337,6 +337,35 @@ class PublicHistoryTests(unittest.TestCase):
             self.assertFalse(list(series.glob("*.ohlcv.csv")))
             self.assertFalse(list(series.glob("*.partial")))
 
+    def test_concurrent_archive_publication_never_accepts_foreign_csv(self):
+        # Deterministic interleaving: another collector links a different CSV
+        # between our preflight identity check and publication's exists check.
+        # A mixed provenance manifest and foreign CSV must never be accepted.
+        archive, checksum = _bundle()
+        def source(url, _limit):
+            return checksum if url.endswith(".CHECKSUM") else archive
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            series = base / "spot" / "BTCUSDT" / "1h"
+            datafile = series / "2024-01.ohlcv.csv"
+            manifest = series / "2024-01.manifest.json"
+            real_exists = Path.exists
+            csv_checks = [0]
+            def concurrent_exists(path):
+                if path == datafile:
+                    csv_checks[0] += 1
+                    if csv_checks[0] == 2:
+                        # Competing publisher won the hardlink race.
+                        datafile.write_bytes(b"foreign publisher revision")
+                return real_exists(path)
+            with patch.object(Path, "exists", concurrent_exists):
+                with self.assertRaisesRegex(HistoricalArchiveError, "revision conflict"):
+                    collect_month(symbol="BTCUSDT", interval="1h",
+                                  month="2024-01", output=base, fetch=source)
+            self.assertEqual(csv_checks[0], 2)
+            self.assertEqual(datafile.read_bytes(), b"foreign publisher revision")
+            self.assertFalse(manifest.exists())
+
     def test_verified_source_revision_never_overwrites_immutable_history(self):
         """Even a new valid publisher checksum cannot silently replace a local snapshot."""
         first_raw, first_checksum = _bundle()

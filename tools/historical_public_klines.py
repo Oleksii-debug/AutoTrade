@@ -422,6 +422,10 @@ def collect_month(*, symbol: str, interval: str, month: str, output: Path, fetch
             raise HistoricalArchiveError("archive revision conflict; do not silently overwrite accepted data")
     for file, payload in ((datafile, csv_bytes), (target, manifest_bytes)):
         if file.exists():
+            # Another collector may have linked this path after the first
+            # validation pass. Never adopt its bytes without rechecking them.
+            if file.is_symlink() or not file.is_file() or file.read_bytes() != payload:
+                raise HistoricalArchiveError("archive revision conflict; concurrent source changed at publication")
             continue
         # Complete private file first; atomically publish without overwriting.
         # A crash during write cannot expose a truncated canonical archive.

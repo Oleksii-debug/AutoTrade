@@ -2241,6 +2241,8 @@ def _recover_autonomous_zero_wire_completion(
         "financial_cut",
         "protocol_digest",
         "allocation_status",
+        "lifecycle_cost_digest",
+        "lifecycle_cost_requirements_ref",
     }
     if set(active) != expected_fields:
         raise ValueError("zero-wire autonomous start payload is malformed")
@@ -2268,6 +2270,20 @@ def _recover_autonomous_zero_wire_completion(
         datetime.fromisoformat(protocol["start_time"].replace("Z", "+00:00"))
         + timedelta(seconds=episode - 1, microseconds=1)
     ).isoformat().replace("+00:00", "Z")
+    # The started ZERO-wire decision uses the same frozen lifecycle-cost proof
+    # as a financial episode. Verify it before replaying any reconciliation:
+    # the strict started-field schema must evolve with the canonical issuer.
+    decision_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    lifecycle_cost = _simulation_lifecycle_cost_split(
+        decision_scope_ref=f"simulation:decision:{key}",
+        decision_time=decision_time,
+        horizon_end=decision_time - timedelta(microseconds=1) + timedelta(seconds=60),
+    )
+    if (
+        active["lifecycle_cost_digest"] != lifecycle_cost.lifecycle_cost_digest
+        or active["lifecycle_cost_requirements_ref"] != lifecycle_cost.requirements_ref
+    ):
+        raise ValueError("zero-wire autonomous historical cost cut differs")
 
     # The Started cut is the last admissible pre-completion mutation point for
     # a zero-wire episode. A prior exact after-checkpoint is the only additional

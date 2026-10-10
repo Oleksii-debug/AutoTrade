@@ -12,6 +12,8 @@ Run at repository root with a **completed and published** monthly end date:
 
 ```console
 python -m tools.historical_public_klines --symbols BTCUSDT,ETHUSDT --interval 1h --from-month 2024-01 --through-month 2026-09 --output historical-data
+# Optional research-only daily intake after the completed monthly cut (example as of 2026-10-10):
+python -m tools.historical_public_klines --symbols BTCUSDT,ETHUSDT --interval 1h --from-month 2024-01 --through-month 2026-09 --daily-through 2026-10-08 --output historical-data
 python -m unittest discover -s tests/History -v
 ```
 

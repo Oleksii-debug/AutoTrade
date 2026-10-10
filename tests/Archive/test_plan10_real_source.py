@@ -44,6 +44,16 @@ def _last_published_month():
 
 @unittest.skipUnless(_REAL_ENABLED, "real historical download is opt-in / canonical Plan10 CI only")
 class RealHistoryArchiveSample(unittest.TestCase):
+    def test_local_source_and_adapter_negative_suites(self):
+        # Collect isolated full negative/recovery evidence even when a separate
+        # pre-existing Control suite gate fails later in the global Verify run.
+        source_tests = Path(__file__).resolve().parents[1] / "History"
+        suite = unittest.defaultTestLoader.discover(
+            start_dir=str(source_tests), pattern="test_*.py"
+        )
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        self.assertTrue(result.wasSuccessful(), "Plan10 offline source/recovery suites failed")
+
     def test_verified_historical_btc_eth_hourly_2024_onward(self):
         end = _last_published_month() if os.environ.get("GITHUB_HEAD_REF") == _CANONICAL_PR_BRANCH else "2024-01"
         months = list(_month_range("2024-01", end))

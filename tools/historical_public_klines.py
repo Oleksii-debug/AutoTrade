@@ -23,6 +23,7 @@ import time
 from tempfile import NamedTemporaryFile
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, HTTPRedirectHandler
+from urllib.parse import urlsplit
 from zipfile import ZipFile, BadZipFile
 from io import BytesIO
 
@@ -125,9 +126,40 @@ def _pace_request() -> None:
         _NEXT_REQUEST_NOT_BEFORE = max(now, _NEXT_REQUEST_NOT_BEFORE) + MIN_REQUEST_GAP_SECONDS
 
 
-def _fetch(url: str, limit: int) -> bytes:
-    if not (url.startswith(BASE + "/") or url.startswith(DAILY_BASE + "/")) or "?" in url or "#" in url:
+def _validate_public_archive_url(url: str) -> None:
+    """Reject malformed source paths *before* a network request or pace slot.
+
+    Pin not just the HTTPS hostname, but exact Binance SPOT archive naming:
+    no traversal, percent-encoded aliases, userinfo, ports, query or cross-pair
+    filenames. A publisher CHECKSUM must refer to the same canonical ZIP.
+    """
+    if type(url) is not str:
         raise HistoricalArchiveError("unexpected archive URL")
+    parsed = urlsplit(url)
+    path = parsed.path.split("/")
+    if (parsed.scheme != "https" or parsed.netloc != "data.binance.vision"
+            or parsed.query or parsed.fragment or parsed.geturl() != url
+            or len(path) != 8 or path[:3] != ["", "data", "spot"]
+            or path[3] not in ("monthly", "daily") or path[4] != "klines"):
+        raise HistoricalArchiveError("unexpected archive URL")
+    symbol, interval, filename = path[5:]
+    if SYMBOL.fullmatch(symbol) is None or interval not in INTERVAL_SECONDS:
+        raise HistoricalArchiveError("unexpected archive URL")
+    suffix = ".CHECKSUM" if filename.endswith(".CHECKSUM") else ""
+    zip_name = filename[:-len(suffix)] if suffix else filename
+    prefix = f"{symbol}-{interval}-"
+    if not (zip_name.startswith(prefix) and zip_name.endswith(".zip")):
+        raise HistoricalArchiveError("unexpected archive URL")
+    period = zip_name[len(prefix):-4]
+    expected_pattern = (r"20\\d{2}-(?:0[1-9]|1[0-2])"
+                        if path[3] == "monthly"
+                        else r"20\\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])")
+    if re.fullmatch(expected_pattern, period) is None:
+        raise HistoricalArchiveError("unexpected archive URL")
+
+
+def _fetch(url: str, limit: int) -> bytes:
+    _validate_public_archive_url(url)
     _pace_request()
     req = Request(url, headers={"User-Agent": "AutoTrade-public-history-provenance/1.0"})
     try:

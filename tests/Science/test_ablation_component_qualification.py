@@ -11,7 +11,13 @@ from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import sys
 from uuid import NAMESPACE_URL, uuid5
+
+# The science workflow invokes discovery from repo root without pip-installing
+# the sibling research package. Import the exact checked-out source under test;
+# keep every scientific assertion and negative control active.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "research"))
 
 from autotrade_research.evaluation.ablation import (
     AblationOutcome,

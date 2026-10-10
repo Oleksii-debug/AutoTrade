@@ -1,5 +1,33 @@
 # AutoTrade
 
+## Historical provider-free campaign — new Plan 10 (2026-10-10)
+
+[Canonical Plan 10 in Google Drive](https://docs.google.com/document/d/1bTDCb0yGLrOqlKClhyAD_7k7aZsP57kFRkexHz_b6d4/edit): actual 2024+ lawful public BTCUSDT/ETHUSDT market history intake, no-lookahead causal replay, $1000 USD ZERO virtual account, separate data collector/simulated broker/trader/learner and independent walk-forward evaluation. Source-only engineering can start immediately with **no broker accounts or API keys**. Until next-bar execution, historical data, model training and independent evaluation are demonstrably integrated, the existing example commands below are **synthetic development simulations, not historical trading performance proofs**. Terminal Plans 1–8 remain DONE. Plan9 retains production signing/legal/NVDA gates and optional real provider/PAPER/LIVE tracks.
+
+
+### Plan 10 Section 1: public archival ingestion (not a trading provider)
+
+Python 3.12, no broker account, exchange API key, paid API, or wallet is needed.
+Run at repository root with a **completed and published** monthly end date:
+
+```console
+python -m tools.historical_public_klines --symbols BTCUSDT,ETHUSDT --interval 1h --from-month 2024-01 --through-month 2026-09 --output historical-data
+# Optional research-only daily intake after the completed monthly cut (example as of 2026-10-10):
+python -m tools.historical_public_klines --symbols BTCUSDT,ETHUSDT --interval 1h --from-month 2024-01 --through-month 2026-09 --daily-through 2026-10-08 --output historical-data
+python -m unittest discover -s tests/History -v
+```
+
+The collector checks each official Binance Vision monthly ZIP against its publisher SHA-256 CHECKSUM. It verifies spot OHLCV, UTC hourly continuity, publisher timestamp units (milliseconds before 2025; microseconds after), rejects unsafe archive members, and publishes immutable normalized CSV plus a provenance manifest. A missing file, gap, mismatched digest, or revised archived bytes **fails closed**: it is never invented or replaced. Files under `historical-data/` contain downloaded data, not code; keep them outside committed source control. Each dataset manifest records the observed download instant; `published_at_utc: null` means the publisher's exact original publication time was not verified.
+
+**Source rights:** Binance Vision Dataset Terms version dated 2026-08-26, available at
+https://github.com/binance/binance-public-data/blob/master/TERMS_AND_CONDITIONS.md ,
+restrict the default dataset license to **CC BY-NC-SA 4.0 plus non-commercial-only terms**.
+This intake is strictly personal non-commercial research/simulation; do **not** redistribute the raw archive, use it for commercial products or connect it to compensated signal distribution or LIVE execution without appropriate separate rights.
+
+The original source URL, publisher checksum SHA-256, normalized CSV SHA-256, exchange, symbol, interval, date range, gap count, and research-only rights notice are kept in each manifest. This does **not** qualify next-bar execution, model learning, profitability, or a public signed release. The existing `tools/run_historical_zero.py` experiment is explicitly marked **SAME-CLOSE / INTERNAL / UNQUALIFIED** until Sections 2–6 are completed.
+
+
+
 Universal autonomous multi-agent financial trading platform.
 
 ## Run the network-free simulation

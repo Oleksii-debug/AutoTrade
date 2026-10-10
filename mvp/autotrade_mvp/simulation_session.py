@@ -1740,13 +1740,20 @@ def _loop_event(
 
 
 
-def _loop_instrument(effective_from):
+def _loop_instrument(effective_from, instrument_profile="GENERIC"):
     from .instruments import InstrumentRegistry, InstrumentVersion
+    # Fractional spot is a research-only numeric instrument adapter to the
+    # existing canonical simulator, NOT an actual exchange qualification.
+    if instrument_profile not in {"GENERIC", "FRACTIONAL_SPOT_RESEARCH"}:
+        raise ValueError("unsupported simulation instrument profile")
+    fractional = instrument_profile == "FRACTIONAL_SPOT_RESEARCH"
+    step = Decimal("0.00000001") if fractional else Decimal("1")
+    tick = Decimal("0.00000001") if fractional else Decimal("0.01")
     version = InstrumentVersion(instrument_id=INSTRUMENT_ID, version=1, provider_id=PROVIDER,
         venue_id="internal-simulation", provider_symbol="CANONICAL-SIM", asset_class="CASH_EQUITY",
         base_currency="CANONICAL-SIM", quote_currency="USD", settlement_currency="USD", quantity_unit="SHARE",
-        contract_multiplier=Decimal("1"), price_tick=Decimal("0.01"), quantity_step=Decimal("1"),
-        minimum_quantity=Decimal("1"),
+        contract_multiplier=Decimal("1"), price_tick=tick, quantity_step=step,
+        minimum_quantity=step,
         maximum_quantity=Decimal("10"), calendar_id="CONTINUOUS_24_7",
         timezone_id="UTC", effective_from=effective_from)
     return InstrumentRegistry(versions=(version,))
@@ -2009,6 +2016,8 @@ def run_autonomous_simulation(
     execution_profile: str = "IMMEDIATE",
     target_quantity: str = "1",
     should_pause=None,
+    observation_interval_seconds: int = 1,
+    instrument_profile: str = "GENERIC",
 ) -> dict[str, object]:
     """Run/resume a frozen price stream using the canonical SIMULATION authorities.
 
@@ -2030,11 +2039,15 @@ def run_autonomous_simulation(
         raise ValueError("price stream must contain 1 to 10000 observations")
     values = _prices(prices)
     timestamp = _now(now)
+    if type(observation_interval_seconds) is not int or not 1 <= observation_interval_seconds <= 86400:
+        raise ValueError("observation_interval_seconds must be a positive bounded exact int")
+    if type(instrument_profile) is not str or instrument_profile not in {"GENERIC", "FRACTIONAL_SPOT_RESEARCH"}:
+        raise ValueError("unsupported simulation instrument profile")
     if should_pause is not None and not callable(should_pause):
         raise TypeError("should_pause must be callable or None")
     if type(execution_profile) is not str or execution_profile not in {"IMMEDIATE", "TWO_EQUAL_PARTIALS"}:
         raise ValueError("unsupported frozen simulation execution profile")
-    instrument_registry = _loop_instrument(datetime.fromisoformat(timestamp.replace("Z", "+00:00")))
+    instrument_registry = _loop_instrument(datetime.fromisoformat(timestamp.replace("Z", "+00:00")), instrument_profile)
     instrument = instrument_registry.require_tradable(INSTRUMENT_ID, datetime.fromisoformat(timestamp.replace("Z", "+00:00")))
     if type(target_quantity) is not str:
         raise TypeError("frozen target quantity must be exact decimal text")
@@ -2062,6 +2075,8 @@ def run_autonomous_simulation(
         "financial_scope": _simulation_protocol_document(fault_after_send=False)["financial_scope"],
         "strategy_parameters": {"fast": 2, "slow": 3},
         "prices": [canonical_decimal_text(v) for v in values], "start_time": timestamp,
+        "observation_interval_seconds": observation_interval_seconds,
+        "instrument_profile": instrument_profile,
         "risk_policy": "canonical-provider-free-risk-v1",
         "risk_policy_digest": risk_policy_digest(selected_policy),
         "strategy": "moving-average-2-3-long-only-target-" + canonical_decimal_text(target),
@@ -2268,7 +2283,7 @@ def _recover_autonomous_zero_wire_completion(
     key = f"{run_id}:{episode}"
     timestamp = (
         datetime.fromisoformat(protocol["start_time"].replace("Z", "+00:00"))
-        + timedelta(seconds=episode - 1, microseconds=1)
+        + timedelta(seconds=(episode - 1) * protocol["observation_interval_seconds"], microseconds=1)
     ).isoformat().replace("+00:00", "Z")
     # The started ZERO-wire decision uses the same frozen lifecycle-cost proof
     # as a financial episode. Verify it before replaying any reconciliation:
@@ -2501,7 +2516,7 @@ def _recover_autonomous_observed_fill(
     price = parse_bounded_exact_decimal(protocol["prices"][episode - 1])
     timestamp = (
         datetime.fromisoformat(protocol["start_time"].replace("Z", "+00:00"))
-        + timedelta(seconds=episode - 1, microseconds=1)
+        + timedelta(seconds=(episode - 1) * protocol["observation_interval_seconds"], microseconds=1)
     ).isoformat().replace("+00:00", "Z")
     intent_id = _uuid("loop-intent", key)
     attempt_id = _uuid("loop-attempt", key)
@@ -2809,7 +2824,7 @@ def _run_autonomous_locked(
         protocol["runtime_authority_key_sha256"] = key_identity
     protocol_digest = autonomous_protocol_digest(protocol)
     started_at = datetime.fromisoformat(protocol["start_time"].replace("Z", "+00:00"))
-    instruments = _loop_instrument(started_at)
+    instruments = _loop_instrument(started_at, protocol["instrument_profile"])
     if instruments.require_tradable(INSTRUMENT_ID, started_at).to_contract_dict() != protocol["instrument"]:
         raise ValueError("frozen instrument identity differs")
     if not events:
@@ -3004,7 +3019,7 @@ def _run_autonomous_locked(
             break
         episode = index + 1
         key = f"{run_id}:{episode}"
-        point = started_at + timedelta(seconds=index)
+        point = started_at + timedelta(seconds=index * protocol["observation_interval_seconds"])
         instrument = instruments.require_tradable(INSTRUMENT_ID, point)
         instrument.validate_price(values[index])
         timestamp = (point + timedelta(microseconds=1)).isoformat().replace("+00:00", "Z")

@@ -18,22 +18,6 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 
 **Only the current `State` column in each Plan table is work-selection authority.** Do not treat old Git history, PR comments, Drive migration snapshots or former open/qualifying checkpoints as current status. Plan 4 Sections 1–7 are terminal DONE, Plan 6 Sections 1–6 are terminal DONE, and Plan 8 Sections 1–6 are terminal DONE; Plan 9 retains its actual WAITING/PARKED states. A DONE item may be reopened only for evidenced regression, invalid evidence, changed contract or breaking integration. Source/test/CI proof remains in the linked final rows and immutable Git history; historic nonterminal status blocks have been removed from this active registry.
 
-### Plan 10 — historical provider-free research/simulation, Jan 2024 onward
-| Section | State | Gate / required outcome |
-| ---: | --- | --- |
-| 1 | ACTIONABLE_OFFLINE / NOT DONE | Verify and ingest actual lawful 2024+ BTCUSDT/ETHUSDT historical spot OHLCV public archive, checksums, UTC ms/µs, missing data. |
-| 2 | WAITING_SECTION1 | Causal feeder: strategy sees only released past facts at virtual clock. |
-| 3 | WAITING_SECTION2 | REUSE SimulatedProvider/OMS/risk/ledger and exact next-bar execution plus realistic costs. |
-| 4 | WAITING_SECTION3 | Autonomous $1000 virtual BUY/SELL/HOLD/NO_TRADE with stop/risk. |
-| 5 | WAITING_SECTION4 | Actual walk-forward learning, train/holdout and frozen experiments; NOT dummy moving-average = training. |
-| 6 | WAITING_SECTION5 | True cost-adjusted P&L/drawdown, causal independent evaluation and benchmarks. |
-| 7 | WAITING_SECTION3 | Canonical Web/Windows/NVDA historical-session controls and accessible reporting. |
-| 8 | WAITING_SECTIONS3_7 | Internal provider-free executable test artifact; public signed release still Plan9. |
-| 9 | WAITING_SECTION1 | Incremental source archive updates, safe replay and coverage gaps. |
-| 10 | WAITING_SECTIONS1_9 | Integrated historical campaign/readback and 2024+ lawful coverage evidence. |
-
-Owner explicitly authorizes Plan10 as **ACTIONABLE without provider credentials or accounts**. This does NOT reopen terminal Plans1–8 or waive Plan9 legal/trust/signed release/physical NVDA prerequisites. Provider/PAPER/LIVE track remains optional, with no real orders or claims of profitability. Reuse existing financial authority, market-data pipeline, causal feeder, journal/OMS, simulated provider, strategy and semantic Windows/Web. No genuine data must be replaced by fabricated market history. First worker targets Plan10 Section1 now; subsequent Sections selected by their named gates. The existing static MovingAverage strategy is not evidence of actual learning. Canonical owner plan: https://docs.google.com/document/d/1bTDCb0yGLrOqlKClhyAD_7k7aZsP57kFRkexHz_b6d4/edit
-
 ## Migration status
 
 ### Plan 1 — Financial / portfolio / economics
@@ -152,6 +136,23 @@ Owner explicitly authorizes Plan10 as **ACTIONABLE without provider credentials 
 | 8 | WAITING_SECTION7 |
 | 9 | WAITING_CLAIMED_SCOPE; provider rows may be NOT_ACTIVATED/NOT_CLAIMED |
 | 10 | WAITING_SECTION9; provider-free M2-PF does not wait for Sections 2–6 |
+
+### Plan 10 — independent provider-free historical simulation (2024+), owner 2026-10-10
+
+| Section | State | Work / gate |
+| ---: | --- | --- |
+| 1 | **ACTIONABLE_OFFLINE / NOT DONE** | Ingest lawful 2024+ BTCUSDT/ETHUSDT spot history (initially 1h), source rights, authenticated publisher checksums, UTC/coverage manifest, negatives. No broker account or trading API needed. |
+| 2 | WAITING_SECTION1 / NOT DONE | Existing causal replay feeder, strict as-of observations and immutable snapshots; no lookahead. |
+| 3 | WAITING_SECTION2 / NOT DONE | Reuse canonical SimulatedProvider/OMS/risk/ledger with next-available-bar execution, slippage, spread and fees. |
+| 4 | WAITING_SECTION3 / NOT DONE | Bounded autonomous strategy BUY/SELL/HOLD with $1000 virtual capital, realistic risk and no actual orders. |
+| 5 | WAITING_SECTION4 / NOT DONE | Actual train/validation/holdout separated learning and causal memory, not an unchanged moving average. |
+| 6 | WAITING_SECTION5 / NOT DONE | Independent cost-adjusted P&L/drawdown, benchmark, leak-proof walk-forward qualification. |
+| 7 | WAITING_SECTION3 / NOT DONE | Canonical semantic Web/Windows/NVDA historical-run operator UI and accessible results. |
+| 8 | WAITING_SECTIONS3_7 / NOT DONE | INTERNAL UNSIGNED SIMULATION-ONLY executable package, exact source and acceptance; no public release claim. |
+| 9 | WAITING_SECTION1 / NOT DONE | Bounded incremental historical public-data refresh and restart/coverage proof. |
+| 10 | WAITING_SECTIONS1_9 / NOT DONE | Whole-system exact-SHA E2E acceptance, real historical campaign, negative/restart/CI evidence. |
+
+**Owner-authorized Plan10 independent work:** first actionable unfinished Section is **10.1**, which may begin immediately without ANY broker/provider credentials, Plan9 rights/production signing, physical NVDA or optional provider/PAPER/LIVE gates. Owner explicitly deferred provider onboarding and requested research historical simulation. Plans1–8 terminal DONE remain untouched. Plan9 external signed release status remains WAITING/PARKED, NOT DONE; Plan10 internal experiments must not be represented as signed commercial releases, true-paper fills, real adaptive learning or demonstrated profitability until actually verified. Existing unfinished [PR #2389](https://github.com/Oleksii-debug/AutoTrade/pull/2389) is reusable engineering work, NOT evidence of terminal DONE and must not be blindly reimplemented. Existing [PR #2388](https://github.com/Oleksii-debug/AutoTrade/pull/2388) is separate protected-workflow CI repair and must be integrated only through its current trust rules. Canonical plan: https://docs.google.com/document/d/1bTDCb0yGLrOqlKClhyAD_7k7aZsP57kFRkexHz_b6d4/edit
 
 Migration note: old parked/partial PRs may have stale bases after the control-plane switch. Their existence is preserved as work/evidence, not as a requirement to merge stale topology. When a Section becomes actionable, refresh head/base/current-main, preserve unique changes, and converge once under the new owner plan.
 

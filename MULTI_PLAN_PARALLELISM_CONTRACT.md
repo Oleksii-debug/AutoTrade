@@ -58,6 +58,10 @@ The optional provider track does not block a provider-free release whose capabil
 It does not fork generic source subsystems from Plans 1–7.
 Conflict keys: external-qualification, final-release, m2-freeze.
 
+### Plan 10 — public historical dataset + strictly causal internal simulation (owner active)
+
+Plan10 is independent of Plan9 external provider activation. Its primary source work uses immutable public-archive provenance and dataset snapshots, causal replay adapters, simulation-only strategy/evaluation tests and the canonical existing ZERO/OMS/risk/ledger/Host/Web capabilities. It may add bounded, versioned interfaces in tools/historical_*, research/** and tests/History/**, but MUST NOT fork financial authority or weaken Plan9 release/signing/provider trust. Conflict keys: historical-public-data, causal-market-replay, historical-zero-research; shared canonical simulation_session.py, CLI, UI, workflow and root control files require exact-head convergence against current main and any already open PR, especially #2389. Provider absence never blocks 10.1 source-only engineering. Plan10 DONE does not mean Plan9 is signed, legal, PAPER/LIVE, or physically NVDA-qualified.
+
 ## Shared files
 
 Root project files, broad CI workflows, shared contracts, control registries and product composition files may be touched by multiple plans.

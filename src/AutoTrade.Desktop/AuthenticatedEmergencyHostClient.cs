@@ -232,7 +232,9 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         _pendingCommandStore = pendingCommandStore
             ?? new VolatileEmergencyPendingCommandStore();
         BaseUri = ValidateBaseUri(baseUri);
-        _httpClient.BaseAddress = BaseUri;
+        // Requests always use absolute URIs bound to BaseUri. The same HttpClient
+        // has already carried the one-time pairing request, so changing
+        // BaseAddress here would throw after its first request.
         _pendingCommand = LoadPendingCommand();
     }
 

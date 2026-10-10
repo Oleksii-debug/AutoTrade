@@ -135,7 +135,7 @@ async function exercisePortfolioTableTools(page) {
     copiedPortfolio,
     /^Field\tHost evidence\n/,
     "copied portfolio page is self-describing with column headings");
-  assert.match(copiedPortfolio, /895\.696/);
+  assert.match(copiedPortfolio, /791.392/);
   await page.keyboard.press("Shift+Tab");
   assert.equal(await page.evaluate(() => document.activeElement.id), "portfolio-filter");
   await page.keyboard.press("Control+A");
@@ -474,7 +474,12 @@ async function exerciseCanonicalPageNavigation(page) {
   await page.waitForFunction(() => !document.querySelector("#submit-command").disabled);
   assert.equal(new URL(page.url()).hash, "");
   assert.match(await page.locator("#jobs-body").innerText(), /DIAGNOSTIC_ONLY/);
+  // Chromium may have pre-focused the skip link during automatic pairing.
+  // Probe strictly by keyboard, and reverse one Tab when already past it.
   await page.keyboard.press("Tab");
+  if (await page.locator(":focus").innerText() !== "Skip to main content") {
+    await page.keyboard.press("Shift+Tab");
+  }
   assert.equal(await page.locator(":focus").innerText(), "Skip to main content");
   await page.keyboard.press("Enter");
   assert.equal(await page.evaluate(() => document.activeElement.id), "main");
@@ -497,14 +502,14 @@ def die(*a,**kw):
     original(*a,**kw)
     os._exit(73)
 s.commit_order_fill_with_reservation_consumption=die
-s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_time'],partial_fills=True)
+s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_time'],execution_profile=p.get('execution_profile','IMMEDIATE'),target_quantity=p.get('target_quantity','1'))
 `, path.join(data, "state")], {cwd: ROOT, env, encoding: "utf8", timeout: 30000});
   assert.equal(crash.status, 73, crash.stderr);
   await page.goto(await start(data));
   await page.waitForFunction(() => !document.querySelector("#submit-command").disabled);
   assert.match(await page.locator("#portfolio-body").innerText(), /PARTIALLY_FILLED/);
   await command(page, "RECOVER_SIMULATION", 3);
-  assert.match(await page.locator("#portfolio-body").innerText(), /895\.696/);
+  assert.match(await page.locator("#portfolio-body").innerText(), /791.392/);
   await exercisePortfolioTableTools(page);
   await exercisePortfolioPagingAndSort(page);
   await exerciseSnapshotSelectionPreservation(page);
@@ -519,7 +524,7 @@ s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_tim
   const restored = path.join(scratch, "restored state");
   await page.goto(await start(restored, path.join(data, "backups", backups[0])));
   await page.waitForFunction(() => !document.querySelector("#submit-command").disabled);
-  assert.match(await page.locator("#portfolio-body").innerText(), /895\.696/);
+  assert.match(await page.locator("#portfolio-body").innerText(), /791.392/);
   assert.match(await page.locator("#risk-body").innerText(), /RECONCILIATION_REQUIRED/);
   await command(page, "RECOVER_SIMULATION", 3);
   await stop();

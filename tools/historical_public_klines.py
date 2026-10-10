@@ -270,7 +270,8 @@ def collect_month(*, symbol: str, interval: str, month: str, output: Path, fetch
     series = output / "spot" / symbol / interval
     if day is not None:
         series = series / "daily"
-    for ancestor in (output, output / "spot", output / "spot" / symbol, series):
+    for ancestor in (output, output / "spot", output / "spot" / symbol,
+                     output / "spot" / symbol / interval, series):
         if ancestor.is_symlink():
             raise HistoricalArchiveError("dataset directory may not be a symlink")
     series.mkdir(parents=True, exist_ok=True)

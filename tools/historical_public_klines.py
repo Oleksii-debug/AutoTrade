@@ -151,9 +151,9 @@ def _validate_public_archive_url(url: str) -> None:
     if not (zip_name.startswith(prefix) and zip_name.endswith(".zip")):
         raise HistoricalArchiveError("unexpected archive URL")
     period = zip_name[len(prefix):-4]
-    expected_pattern = (r"20\\d{2}-(?:0[1-9]|1[0-2])"
+    expected_pattern = (r"20\d{2}-(?:0[1-9]|1[0-2])"
                         if path[3] == "monthly"
-                        else r"20\\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])")
+                        else r"20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])")
     if re.fullmatch(expected_pattern, period) is None:
         raise HistoricalArchiveError("unexpected archive URL")
 

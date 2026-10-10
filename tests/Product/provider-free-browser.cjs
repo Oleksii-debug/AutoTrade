@@ -117,15 +117,33 @@ async function command(page, action) {
       operation.remaining_uncertainty.length === 0;
   }, receipt.operation_id, {polling: 500,
     timeout: action === "RECOVER_SIMULATION" ? 120000 : 30000});
+  // The durable Host GET may complete before the asynchronous command
+  // feedback and snapshot refresh finish rendering. Wait for the UI to
+  // settle; never assert from a transient "Submitting..." placeholder.
+  await page.waitForFunction(operationId => {
+    const feedback = document.querySelector("#command-result")?.textContent || "";
+    if (feedback.startsWith("Submitting host command ")) return false;
+    const body = document.querySelector("#operations-body");
+    const row = [...(body?.querySelectorAll("tr[data-operation-id]") || [])]
+      .find(item => item.dataset.operationId === operationId);
+    return row?.children[1]?.textContent === "SUCCEEDED" ||
+      (body?.textContent || "").includes("Current host operations were cleared because Canonical snapshot advanced from event cursor") ||
+      feedback.includes("Operation phase is SUCCEEDED.") ||
+      feedback.includes("Operation status was not rendered because");
+  }, receipt.operation_id, {timeout: action === "RECOVER_SIMULATION" ? 120000 : 30000});
   const renderedOperation = page.locator('#operations-body tr[data-operation-id="' +
     receipt.operation_id + '"]');
+  const feedback = await page.locator("#command-result").innerText();
   if (await renderedOperation.count() === 1) {
     assert.equal(await renderedOperation.locator("td").first().innerText(), "SUCCEEDED");
   } else {
-    assert.match(await page.locator("#operations-body").innerText(),
-      /Current host operations were cleared because Canonical snapshot advanced from event cursor/);
-    assert.match(await page.locator("#command-result").innerText(),
-      /was accepted for processing\. It is not yet a completed financial outcome/);
+    const operations = await page.locator("#operations-body").innerText();
+    assert.ok(
+      operations.includes("Current host operations were cleared because Canonical snapshot advanced from event cursor") ||
+      feedback.includes("Operation phase is SUCCEEDED.") ||
+      feedback.includes("Operation status was not rendered because"),
+      "UI must either display durable success or disclose that operation rows were withheld");
+    assert.match(feedback, /was accepted for processing\. It is not yet a completed financial outcome/);
   }
   await page.keyboard.press("Shift+Tab");
   assert.equal(

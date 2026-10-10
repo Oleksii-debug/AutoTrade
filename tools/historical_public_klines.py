@@ -274,7 +274,7 @@ def collect_month(*, symbol: str, interval: str, month: str, output: Path, fetch
             if parsed.tzinfo != UTC or parsed > datetime.now(UTC):
                 raise ValueError("invalid prior download time")
         except (ValueError, AttributeError, TypeError, KeyError) as exc:
-            raise HistoricalArchiveError("existing provenance manifest malformed") from exc
+            raise HistoricalArchiveError("archive revision conflict; existing provenance manifest malformed") from exc
         manifest["downloaded_at_utc"] = recorded
     manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
     # Keep accepted bytes immutable; after process loss between the two

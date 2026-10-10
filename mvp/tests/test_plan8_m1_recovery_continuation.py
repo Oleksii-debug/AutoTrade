@@ -5,6 +5,8 @@ A new recovery receipt is not permission to create a second order/fill/settlemen
 """
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
+import os
 import unittest
 
 from mvp.autotrade_mvp.backup import verify_backup, restore_requires_reconciliation
@@ -124,8 +126,18 @@ class Plan8M1RecoveryContinuation(unittest.TestCase):
             try:
                 verify_cut(client)
                 for _ in range(2):
-                    _, recovered = client.command("RECOVER_SIMULATION")
-                    self.assertEqual(recovered["phase"], "SUCCEEDED", recovered)
+                    # Record only the canonical worker stage/exception class on
+                    # failure. Keep UNKNOWN fail-closed and never accept it as
+                    # a successful recovered financial state.
+                    with patch.dict(os.environ, {"AUTOTRADE_TEST_DIAGNOSTIC": "1"}):
+                        _, recovered = client.command("RECOVER_SIMULATION")
+                    diagnostic = restored / "worker-stage-diagnostic.txt"
+                    self.assertEqual(
+                        recovered["phase"], "SUCCEEDED",
+                        {"operation": recovered, "worker_stage":
+                         diagnostic.read_text(encoding="utf-8")
+                         if diagnostic.is_file() else "NO_WORKER_DIAGNOSTIC"},
+                    )
                     verify_cut(client)
             finally:
                 client.close()

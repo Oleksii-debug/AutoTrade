@@ -18,6 +18,22 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 
 **Only the current `State` column in each Plan table is work-selection authority.** Do not treat old Git history, PR comments, Drive migration snapshots or former open/qualifying checkpoints as current status. Plan 4 Sections 1–7 are terminal DONE, Plan 6 Sections 1–6 are terminal DONE, and Plan 8 Sections 1–6 are terminal DONE; Plan 9 retains its actual WAITING/PARKED states. A DONE item may be reopened only for evidenced regression, invalid evidence, changed contract or breaking integration. Source/test/CI proof remains in the linked final rows and immutable Git history; historic nonterminal status blocks have been removed from this active registry.
 
+### Plan 10 — historical provider-free research/simulation, Jan 2024 onward
+| Section | State | Gate / required outcome |
+| ---: | --- | --- |
+| 1 | ACTIONABLE_OFFLINE / NOT DONE | Verify and ingest actual lawful 2024+ BTCUSDT/ETHUSDT historical spot OHLCV public archive, checksums, UTC ms/µs, missing data. |
+| 2 | WAITING_SECTION1 | Causal feeder: strategy sees only released past facts at virtual clock. |
+| 3 | WAITING_SECTION2 | REUSE SimulatedProvider/OMS/risk/ledger and exact next-bar execution plus realistic costs. |
+| 4 | WAITING_SECTION3 | Autonomous $1000 virtual BUY/SELL/HOLD/NO_TRADE with stop/risk. |
+| 5 | WAITING_SECTION4 | Actual walk-forward learning, train/holdout and frozen experiments; NOT dummy moving-average = training. |
+| 6 | WAITING_SECTION5 | True cost-adjusted P&L/drawdown, causal independent evaluation and benchmarks. |
+| 7 | WAITING_SECTION3 | Canonical Web/Windows/NVDA historical-session controls and accessible reporting. |
+| 8 | WAITING_SECTIONS3_7 | Internal provider-free executable test artifact; public signed release still Plan9. |
+| 9 | WAITING_SECTION1 | Incremental source archive updates, safe replay and coverage gaps. |
+| 10 | WAITING_SECTIONS1_9 | Integrated historical campaign/readback and 2024+ lawful coverage evidence. |
+
+Owner explicitly authorizes Plan10 as **ACTIONABLE without provider credentials or accounts**. This does NOT reopen terminal Plans1–8 or waive Plan9 legal/trust/signed release/physical NVDA prerequisites. Provider/PAPER/LIVE track remains optional, with no real orders or claims of profitability. Reuse existing financial authority, market-data pipeline, causal feeder, journal/OMS, simulated provider, strategy and semantic Windows/Web. No genuine data must be replaced by fabricated market history. First worker targets Plan10 Section1 now; subsequent Sections selected by their named gates. The existing static MovingAverage strategy is not evidence of actual learning. Canonical owner plan: https://docs.google.com/document/d/1bTDCb0yGLrOqlKClhyAD_7k7aZsP57kFRkexHz_b6d4/edit
+
 ## Migration status
 
 ### Plan 1 — Financial / portfolio / economics

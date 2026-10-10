@@ -2009,6 +2009,7 @@ def run_autonomous_simulation(
     execution_profile: str = "IMMEDIATE",
     target_quantity: str = "1",
     should_pause=None,
+    observation_interval_seconds: int = 1,
 ) -> dict[str, object]:
     """Run/resume a frozen price stream using the canonical SIMULATION authorities.
 
@@ -2030,6 +2031,8 @@ def run_autonomous_simulation(
         raise ValueError("price stream must contain 1 to 10000 observations")
     values = _prices(prices)
     timestamp = _now(now)
+    if type(observation_interval_seconds) is not int or not 1 <= observation_interval_seconds <= 86400:
+        raise ValueError("observation_interval_seconds must be a positive bounded exact int")
     if should_pause is not None and not callable(should_pause):
         raise TypeError("should_pause must be callable or None")
     if type(execution_profile) is not str or execution_profile not in {"IMMEDIATE", "TWO_EQUAL_PARTIALS"}:
@@ -2062,6 +2065,7 @@ def run_autonomous_simulation(
         "financial_scope": _simulation_protocol_document(fault_after_send=False)["financial_scope"],
         "strategy_parameters": {"fast": 2, "slow": 3},
         "prices": [canonical_decimal_text(v) for v in values], "start_time": timestamp,
+        "observation_interval_seconds": observation_interval_seconds,
         "risk_policy": "canonical-provider-free-risk-v1",
         "risk_policy_digest": risk_policy_digest(selected_policy),
         "strategy": "moving-average-2-3-long-only-target-" + canonical_decimal_text(target),
@@ -2268,7 +2272,7 @@ def _recover_autonomous_zero_wire_completion(
     key = f"{run_id}:{episode}"
     timestamp = (
         datetime.fromisoformat(protocol["start_time"].replace("Z", "+00:00"))
-        + timedelta(seconds=episode - 1, microseconds=1)
+        + timedelta(seconds=(episode - 1) * protocol["observation_interval_seconds"], microseconds=1)
     ).isoformat().replace("+00:00", "Z")
     # The started ZERO-wire decision uses the same frozen lifecycle-cost proof
     # as a financial episode. Verify it before replaying any reconciliation:
@@ -2501,7 +2505,7 @@ def _recover_autonomous_observed_fill(
     price = parse_bounded_exact_decimal(protocol["prices"][episode - 1])
     timestamp = (
         datetime.fromisoformat(protocol["start_time"].replace("Z", "+00:00"))
-        + timedelta(seconds=episode - 1, microseconds=1)
+        + timedelta(seconds=(episode - 1) * protocol["observation_interval_seconds"], microseconds=1)
     ).isoformat().replace("+00:00", "Z")
     intent_id = _uuid("loop-intent", key)
     attempt_id = _uuid("loop-attempt", key)
@@ -3004,7 +3008,7 @@ def _run_autonomous_locked(
             break
         episode = index + 1
         key = f"{run_id}:{episode}"
-        point = started_at + timedelta(seconds=index)
+        point = started_at + timedelta(seconds=index * protocol["observation_interval_seconds"])
         instrument = instruments.require_tradable(INSTRUMENT_ID, point)
         instrument.validate_price(values[index])
         timestamp = (point + timedelta(microseconds=1)).isoformat().replace("+00:00", "Z")

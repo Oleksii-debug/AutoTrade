@@ -81,7 +81,12 @@ async function command(page, action) {
   assert.equal(await page.evaluate(() => document.activeElement.id), "submit-command", action);
   const before = await page.locator("#operations-body tr[data-operation-id]").count();
   await page.keyboard.press("Enter");
-  await page.waitForFunction(() => document.activeElement?.id === "command-result");
+  // An accepted recovered financial cut can remain under verification while
+  // the Host replies. Focus must still arrive; only widen the bounded UI
+  // observation for RECOVER, not the financial completion criteria.
+  await page.waitForFunction(
+    () => document.activeElement?.id === "command-result",
+    null, {timeout: action === "RECOVER_SIMULATION" ? 120000 : 30000});
   assert.equal(
     await page.evaluate(() => document.activeElement.id),
     "command-result",

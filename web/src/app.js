@@ -2126,7 +2126,18 @@ function renderOperation(operation) {
           " was accepted for processing. It is not yet a completed financial outcome.";
         if (result.operationId !== null) {
           try {
-            const operation = await refreshOperation(result.operationId);
+            let operation = await refreshOperation(result.operationId);
+            if (
+              operation === null &&
+              commandContextMatchesCurrentSnapshot(payload, submittedHostId)
+            ) {
+              // An event-cursor gap can invalidate an in-flight operation read
+              // without changing this authenticated Host/account/session.
+              // Never restore a stale event row. Re-fetch the exact accepted
+              // operation ID from the canonical Host under the verified
+              // current scope; cross-scope results stay intentionally hidden.
+              operation = await refreshOperation(result.operationId);
+            }
             if (operation === null) {
               text(
                 "command-result",

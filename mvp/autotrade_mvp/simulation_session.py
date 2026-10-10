@@ -2535,6 +2535,25 @@ def _recover_autonomous_observed_fill(
         ):
             raise ValueError("retained fill economics differ from frozen request")
 
+    # Reconstruct the exact ex-ante lifecycle-cost identity from the frozen
+    # episode/protocol; the original admission binds both cost fields in its
+    # intent hash.  Omitting them on recovery falsely rejects a valid retained
+    # fill, while taking them on trust from the event could accept altered
+    # admission evidence. No policy, authority, or provider send is reissued.
+    decision_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    horizon_end = (
+        decision_time - timedelta(microseconds=1) + timedelta(seconds=60)
+    )
+    lifecycle_cost = _simulation_lifecycle_cost_split(
+        decision_scope_ref=f"simulation:decision:{key}",
+        decision_time=decision_time,
+        horizon_end=horizon_end,
+    )
+    if (
+        active.get("lifecycle_cost_digest") != lifecycle_cost.lifecycle_cost_digest
+        or active.get("lifecycle_cost_requirements_ref") != lifecycle_cost.requirements_ref
+    ):
+        raise ValueError("retained fill historical cost cut differs")
     intent_hash = payload_digest(
         {
             "protocol_digest": protocol_digest,
@@ -2545,6 +2564,8 @@ def _recover_autonomous_observed_fill(
             "instrument": INSTRUMENT,
             "allocation": {
                 "target": canonical_decimal_text(target),
+                "lifecycle_cost_digest": lifecycle_cost.lifecycle_cost_digest,
+                "lifecycle_cost_requirements_ref": lifecycle_cost.requirements_ref,
             },
         }
     )

@@ -522,7 +522,7 @@ result = run_autonomous_simulation(
 print(result['status'], result['completed_episodes'])
 `, path.join(crashData, "state")], {cwd: ROOT, env, encoding: "utf8", timeout: 30000});
   assert.equal(bootstrap.status, 0, bootstrap.stderr);
-  assert.match(bootstrap.stdout, /^PAUSED 1\\s*$/);
+  assert.equal(bootstrap.stdout.trim(), "PAUSED 1");
 
   const crash = spawnSync(python, ["-B", "-c", `
 import os,sys

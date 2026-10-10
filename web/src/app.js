@@ -2298,7 +2298,11 @@ function renderOperation(operation) {
         if (page) page.heading.focus({preventScroll: true});
       }
     });
-    window.addEventListener("hashchange", () => activate({focusHeading: true}));
+    // Pairing removes its secret fragment with a synthetic hashchange. Only
+    // browser-originated route changes move keyboard/screen-reader focus;
+    // synthetic housekeeping must leave the first skip link reachable.
+    window.addEventListener("hashchange", (event) =>
+      activate({focusHeading: event.isTrusted}));
     // Native fragment scrolling/focus can run after DOMContentLoaded on an
     // initial deep link. Re-apply the semantic heading focus after load, so a
     // fresh browser navigation and keyboard history use the same route contract.

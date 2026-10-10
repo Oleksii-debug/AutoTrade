@@ -17,6 +17,8 @@ import json
 import os
 from pathlib import Path
 import re
+import threading
+import time
 from tempfile import NamedTemporaryFile
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, HTTPRedirectHandler
@@ -33,6 +35,11 @@ INTERVAL_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
 MAX_ZIP_BYTES = 20 * 1024 * 1024
 MAX_CSV_BYTES = 80 * 1024 * 1024
 MAX_ROWS = 100_000
+# Per-process upper bound for public archive and companion CHECKSUM requests.
+# A lock serializes multi-threaded callers; no implicit retries or API keys.
+MIN_REQUEST_GAP_SECONDS = 0.25
+_DOWNLOAD_PACE_LOCK = threading.Lock()
+_NEXT_REQUEST_NOT_BEFORE = 0.0
 UTC = timezone.utc
 
 
@@ -106,9 +113,21 @@ class _RejectRedirects(HTTPRedirectHandler):
         raise HistoricalArchiveError("public archive redirect denied (host pinned)")
 
 
+def _pace_request() -> None:
+    """Serialize archive requests with a bounded minimum gap (monotonic clock)."""
+    global _NEXT_REQUEST_NOT_BEFORE
+    with _DOWNLOAD_PACE_LOCK:
+        now = time.monotonic()
+        delay = max(0.0, _NEXT_REQUEST_NOT_BEFORE - now)
+        if delay:
+            time.sleep(delay)
+        _NEXT_REQUEST_NOT_BEFORE = max(now, _NEXT_REQUEST_NOT_BEFORE) + MIN_REQUEST_GAP_SECONDS
+
+
 def _fetch(url: str, limit: int) -> bytes:
     if not (url.startswith(BASE + "/") or url.startswith(DAILY_BASE + "/")) or "?" in url or "#" in url:
         raise HistoricalArchiveError("unexpected archive URL")
+    _pace_request()
     req = Request(url, headers={"User-Agent": "AutoTrade-public-history-provenance/1.0"})
     try:
         with build_opener(_RejectRedirects()).open(req, timeout=25) as response:

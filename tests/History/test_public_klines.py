@@ -116,6 +116,24 @@ class PublicHistoryTests(unittest.TestCase):
             verify_archive(invalid, _publisher_checksum(invalid, "BTCUSDT-1h-2024-01.zip"),
                            symbol="BTCUSDT", interval="1h", month="2024-01")
 
+    def test_public_source_requests_have_a_bounded_pace(self):
+        # Synthetic clock only; no live network, account, or provider requests.
+        from tools import historical_public_klines as ingest
+        with patch.object(ingest, "_NEXT_REQUEST_NOT_BEFORE", 0.0), \
+             patch.object(ingest.time, "monotonic", side_effect=(100.0, 100.0, 100.5)), \
+             patch.object(ingest.time, "sleep") as sleep:
+            ingest._pace_request()
+            ingest._pace_request()
+            ingest._pace_request()
+        sleep.assert_called_once_with(ingest.MIN_REQUEST_GAP_SECONDS)
+
+    def test_public_source_url_rejection_occurs_before_rate_reservation(self):
+        from tools import historical_public_klines as ingest
+        with patch.object(ingest, "_pace_request") as pace:
+            with self.assertRaisesRegex(HistoricalArchiveError, "unexpected archive URL"):
+                ingest._fetch("https://example.invalid/evil.zip", 4096)
+            pace.assert_not_called()
+
     def test_compressed_zip_bomb_and_redirect_prevented(self):
         from tools.historical_public_klines import _RejectRedirects
         with self.assertRaisesRegex(HistoricalArchiveError, "redirect"):

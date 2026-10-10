@@ -79,11 +79,21 @@ async function command(page, action) {
   await page.waitForFunction(() => !document.querySelector("#submit-command").disabled);
   await page.keyboard.press("Tab");
   assert.equal(await page.evaluate(() => document.activeElement.id), "submit-command", action);
-  const before = await page.locator("#operations-body tr[data-operation-id]").count();
+  // Capture the actual same-origin authenticated Host response while issuing
+  // the command by keyboard. A snapshot cursor gap correctly discards
+  // incomplete event-derived UI rows; it must never be mistaken for a failed
+  // or completed financial operation.
+  const acceptedResponse = page.waitForResponse(response =>
+    response.request().method() === "POST" &&
+    new URL(response.url()).pathname === "/api/v1/commands");
   await page.keyboard.press("Enter");
-  // An accepted recovered financial cut can remain under verification while
-  // the Host replies. Focus must still arrive; only widen the bounded UI
-  // observation for RECOVER, not the financial completion criteria.
+  const response = await acceptedResponse;
+  assert.equal(response.status(), 200, action + " canonical Host acceptance");
+  const receipt = await response.json();
+  assert.equal(receipt.status, "ACCEPTED", action + " admission only, not a fill");
+  assert.match(receipt.operation_id, /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i);
+  // Focus must still reach the real result and acceptance must be described
+  // as provisional regardless of how long restored reconciliation takes.
   await page.waitForFunction(
     () => document.activeElement?.id === "command-result",
     null, {timeout: action === "RECOVER_SIMULATION" ? 120000 : 30000});
@@ -91,13 +101,32 @@ async function command(page, action) {
     await page.evaluate(() => document.activeElement.id),
     "command-result",
     action + " command feedback focus");
-  // Installed Windows recovery must verify a full durable financial cut.
-  // The worker's own fail-closed timeout is 300s; 30s of Playwright polling
-  // can expire while it is still correctly inspecting the recovered journal.
-  // Still require actual canonical SUCCEEDED (never RUNNING/UNKNOWN).
-  await page.waitForFunction(count => document.querySelectorAll("#operations-body tr[data-operation-id]").length > count
-    && document.querySelector("#operations-body").lastElementChild?.children[1]?.textContent === "SUCCEEDED",
-    before, {timeout: action === "RECOVER_SIMULATION" ? 120000 : 30000});
+  // Read the one canonical durable operation after the accepted command.
+  // The UI intentionally drops event-derived operation rows when a snapshot
+  // advances past unconsumed events. Never weaken that fail-closed UI behavior
+  // or infer completion from ACCEPTED, a timeout, or portfolio figures.
+  await page.waitForFunction(async operationId => {
+    const route = window.AutoTradeHostApi.route("getOperation", {operation_id: operationId});
+    const current = await fetch(route, {credentials: "same-origin", cache: "no-store",
+      headers: {"Accept": "application/json"}});
+    if (!current.ok) return false;
+    const operation = await current.json();
+    return operation.operation_id === operationId &&
+      operation.phase === "SUCCEEDED" &&
+      Array.isArray(operation.remaining_uncertainty) &&
+      operation.remaining_uncertainty.length === 0;
+  }, receipt.operation_id, {polling: 500,
+    timeout: action === "RECOVER_SIMULATION" ? 120000 : 30000});
+  const renderedOperation = page.locator('#operations-body tr[data-operation-id="' +
+    receipt.operation_id + '"]');
+  if (await renderedOperation.count() === 1) {
+    assert.equal(await renderedOperation.locator("td").first().innerText(), "SUCCEEDED");
+  } else {
+    assert.match(await page.locator("#operations-body").innerText(),
+      /Current host operations were cleared because Canonical snapshot advanced from event cursor/);
+    assert.match(await page.locator("#command-result").innerText(),
+      /was accepted for processing\. It is not yet a completed financial outcome/);
+  }
   await page.keyboard.press("Shift+Tab");
   assert.equal(
     await page.evaluate(() => document.activeElement.id),

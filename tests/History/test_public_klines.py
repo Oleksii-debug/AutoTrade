@@ -12,7 +12,7 @@ import os
 import json
 
 from tools.historical_public_klines import (
-    HistoricalArchiveError, _month_range, verify_archive, collect_month,
+    HistoricalArchiveError, _month_range, verify_archive, collect_month, collect_day, _fetch,
 )
 
 
@@ -22,11 +22,11 @@ def _publisher_checksum(raw: bytes, filename: str) -> bytes:
     return sha256(raw).hexdigest().encode("ascii") + b"  " + filename.encode("ascii") + bytes((10,))
 
 
-def _bundle(month="2024-01", interval="1h", gap=False, corrupt=False, unit="ms"):
+def _bundle(month="2024-01", interval="1h", gap=False, corrupt=False, unit="ms", day=None, count=3):
     # Synthetic data ONLY for parser/negative testing, never for trade performance.
-    first = datetime.fromisoformat(month + "-01T00:00:00+00:00")
+    first = datetime.fromisoformat((day or (month + "-01")) + "T00:00:00+00:00")
     rows = []
-    for i in range(3):
+    for i in range(count):
         instant = first + timedelta(hours=i + (1 if gap and i > 0 else 0))
         stamp = int(instant.timestamp()) * (1000 if unit == "ms" else 1_000_000)
         rows.append([str(stamp), "100", "102", "99", "101", "1",
@@ -34,7 +34,7 @@ def _bundle(month="2024-01", interval="1h", gap=False, corrupt=False, unit="ms")
                      "101", "3", "0.1", "10.1", "0"])
     data = StringIO()
     csv.writer(data, lineterminator="\n").writerows(rows)
-    filename = f"BTCUSDT-{interval}-{month}.zip"
+    filename = f"BTCUSDT-{interval}-{day or month}.zip"
     bio = BytesIO()
     with ZipFile(bio, "w") as z:
         z.writestr(filename[:-4] + ".csv", data.getvalue())
@@ -136,6 +136,50 @@ class PublicHistoryTests(unittest.TestCase):
             second = collect_month(symbol="BTCUSDT", interval="1h", month="2024-01",
                                    output=base, fetch=source)
             self.assertEqual(first, second)
+
+
+    def test_completed_daily_archive_and_immutable_replay(self):
+        day = "2024-01-02"
+        raw, check = _bundle(day=day, count=24)
+        receipt = verify_archive(raw, check, symbol="BTCUSDT",
+                                 interval="1h", month="2024-01", day=day)
+        self.assertEqual(receipt["period_granularity"], "DAILY")
+        self.assertEqual(receipt["row_count"], 24)
+        self.assertEqual(receipt["missing_candle_intervals"], 0)
+        self.assertTrue(receipt["usable_as_complete_causal_interval"])
+        self.assertIn("/daily/klines/", receipt["source_url"])
+        def source(url, _limit):
+            return check if url.endswith(".CHECKSUM") else raw
+        with TemporaryDirectory() as tmp:
+            first = collect_day(symbol="BTCUSDT", interval="1h", day=day,
+                                output=Path(tmp), fetch=source)
+            second = collect_day(symbol="BTCUSDT", interval="1h", day=day,
+                                 output=Path(tmp), fetch=source)
+            self.assertEqual(first, second)
+            self.assertTrue((Path(tmp) / "spot/BTCUSDT/1h/daily/2024-01-02.ohlcv.csv").is_file())
+            self.assertEqual(first["verification"]["publisher_companion_sha256"], "PASS")
+
+    def test_daily_fail_closed_on_future_invalid_other_day_and_partial_coverage(self):
+        day = "2024-01-02"
+        raw, check = _bundle(day=day, count=23)
+        report = verify_archive(raw, check, symbol="BTCUSDT",
+                                interval="1h", month="2024-01", day=day)
+        self.assertEqual(report["missing_candle_intervals"], 1)
+        self.assertFalse(report["usable_as_complete_causal_interval"])
+        with self.assertRaisesRegex(HistoricalArchiveError, "another UTC date"):
+            verify_archive(raw, check, symbol="BTCUSDT", interval="1h",
+                           month="2024-01", day="2024-01-03")
+        with self.assertRaises(HistoricalArchiveError):
+            collect_day(symbol="BTCUSDT", interval="1h", day="2099-01-01",
+                        output=Path("."), fetch=lambda u, l: raw)
+        with self.assertRaises(HistoricalArchiveError):
+            collect_day(symbol="BTCUSDT", interval="1h", day="2024-02-30",
+                        output=Path("."), fetch=lambda u, l: raw)
+        with self.assertRaisesRegex(HistoricalArchiveError, "unexpected archive URL"):
+            _fetch("https://evil.example/data/spot/daily/klines/BTCUSDT/1h/x.zip", 4096)
+        with self.assertRaisesRegex(HistoricalArchiveError, "SHA-256"):
+            verify_archive(raw, b"0" * 64 + b"  BTCUSDT-1h-2024-01-02.zip\\n",
+                           symbol="BTCUSDT", interval="1h", month="2024-01", day=day)
 
     def test_wrong_archive_symbol_and_unsafe_options(self):
         raw, check = _bundle()

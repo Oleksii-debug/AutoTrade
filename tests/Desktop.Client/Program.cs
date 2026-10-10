@@ -354,6 +354,50 @@ internal static class Program
             "origin mismatch persisted a command before authority was established");
     }
 
+    static async Task PairedHostClientReusesAlreadyStartedHttpTransportTest()
+    {
+        // The installed ZERO bootstrap pairs on this transport before the
+        // emergency client exists. A post-send BaseAddress mutation must never
+        // break startup or weaken the validated, session-bound request URI.
+        const string token = "post-pair-transport-token";
+        int requests = 0;
+        DelegateHandler handler = new((request, _, _) =>
+        {
+            requests++;
+            Check.True(request.RequestUri is not null
+                && request.RequestUri.Scheme == "http"
+                && request.RequestUri.Host == "127.0.0.1"
+                && request.RequestUri.Port == HostOrigin.Port,
+                "paired transport escaped the exact local Host origin");
+            if (requests == 1)
+            {
+                Check.True(request.Method == HttpMethod.Post
+                    && request.RequestUri.AbsolutePath == "/api/v1/session",
+                    "pairing did not precede authenticated Host requests");
+                return Task.FromResult(Json(HttpStatusCode.OK, new { paired = true }));
+            }
+            AssertAuth(request, token);
+            Check.True(request.Method == HttpMethod.Get
+                && request.RequestUri.AbsolutePath == "/api/v1/state",
+                "post-pair client used an unexpected authority endpoint");
+            return Task.FromResult(Json(HttpStatusCode.OK, Snapshot(token, "71")));
+        });
+        using HttpClient http = new(handler);
+        using (HttpRequestMessage pairing = new(
+            HttpMethod.Post, new Uri(HostOrigin, "api/v1/session")))
+        using (HttpResponseMessage paired = await http.SendAsync(pairing))
+        {
+            Check.True(paired.IsSuccessStatusCode, "pairing setup failed");
+        }
+        AuthenticatedEmergencyHostClient client = new(
+            http, HostOrigin, new MutableSessionProvider(
+                PairedSession(token)), new MemoryPendingCommandStore());
+        EmergencyHostStatus status =
+            await client.GetStatusAsync(CancellationToken.None);
+        Check.True(status.StateVersion == "71" && requests == 2,
+            "authenticated status failed after initial pairing request");
+    }
+
     static async Task CanonicalStatusAndOperationTest()
     {
         const string token = "session-token-a";
@@ -2153,6 +2197,7 @@ internal static class Program
         CanonicalOperationIdentityVectorTest();
         CredentialTargetIsOriginBoundTest();
         await PairedOriginMismatchFailsBeforeTransportTest();
+        await PairedHostClientReusesAlreadyStartedHttpTransportTest();
         await CanonicalStatusAndOperationTest();
         StaleSuccessorMayCarryOlderEvidenceTimeTest();
         StaleSuccessorRejectsDurableRegressionAndIdentityChangeTest();

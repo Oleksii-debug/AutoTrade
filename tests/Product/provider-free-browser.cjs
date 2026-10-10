@@ -62,9 +62,15 @@ async function tabTo(page, id) {
   throw new Error("Keyboard could not reach " + id);
 }
 
-async function command(page, action, index) {
+async function command(page, action) {
   stage = action;
   console.log("Keyboard command: " + action);
+  // Resolve the canonical action by stable value, not historical option
+  // order. The user interaction remains entirely keyboard-only.
+  const index = await page.locator("#host-action option").evaluateAll(
+    (options, target) => options.findIndex(option => option.value === target),
+    action);
+  assert.ok(index >= 0, "canonical Host action option is missing: " + action);
   await tabTo(page, "host-action");
   await page.keyboard.press("Home");
   for (let step = 0; step < index; step++) await page.keyboard.press("ArrowDown");
@@ -514,25 +520,25 @@ s.run_autonomous_simulation(PRICES,root,run_id='provider-free-product',now=START
   await page.goto(await start(crashData));
   await page.waitForFunction(() => !document.querySelector("#submit-command").disabled);
   assert.match(await page.locator("#portfolio-body").innerText(), /PARTIALLY_FILLED/);
-  await command(page, "RECOVER_SIMULATION", 3);
+  await command(page, "RECOVER_SIMULATION");
   assert.match(await page.locator("#portfolio-body").innerText(), /791\.392/);
   await exercisePortfolioTableTools(page);
   await exercisePortfolioPagingAndSort(page);
   await exerciseSnapshotSelectionPreservation(page);
   await exerciseScopeSpeechIsolation(page);
   assert.match(await page.locator("#strategy-body").innerText(), /deterministic-trend/);
-  await command(page, "START_SIMULATION", 2);
-  await command(page, "BACKUP_SIMULATION", 4);
+  await command(page, "START_SIMULATION");
+  await command(page, "BACKUP_SIMULATION");
   const backups = fs.readdirSync(path.join(crashData, "backups")).filter(name => /^[0-9a-f-]{36}$/.test(name));
   assert.equal(backups.length, 1);
-  await command(page, "BLOCK_NEW_EXPOSURE", 0);
+  await command(page, "BLOCK_NEW_EXPOSURE");
   await stop();
   const restored = path.join(scratch, "restored state");
   await page.goto(await start(restored, path.join(crashData, "backups", backups[0])));
   await page.waitForFunction(() => !document.querySelector("#submit-command").disabled);
   assert.match(await page.locator("#portfolio-body").innerText(), /791\.392/);
   assert.match(await page.locator("#risk-body").innerText(), /RECONCILIATION_REQUIRED/);
-  await command(page, "RECOVER_SIMULATION", 3);
+  await command(page, "RECOVER_SIMULATION");
   await stop();
   assert.deepEqual(errors, []);
   passed = true;

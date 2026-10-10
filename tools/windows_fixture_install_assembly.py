@@ -164,7 +164,7 @@ def _check_inventory(root: Path, version: str) -> dict:
             raise FixtureAssemblyError("fixture file is not regular") from error
         if before.st_size != item["size"] or digest != item["sha256"]:
             raise FixtureAssemblyError("installed fixture payload differs from verified bytes")
-    allowed = {str(Path("payload") / p) for p in seen} | {_MANIFEST}
+    allowed = {(Path("payload") / p).as_posix() for p in seen} | {_MANIFEST}
     found = {f.relative_to(product).as_posix() for f in product.rglob("*") if f.is_file() or f.is_symlink()}
     if found != allowed:
         raise FixtureAssemblyError("fixture installation has untracked or missing files")

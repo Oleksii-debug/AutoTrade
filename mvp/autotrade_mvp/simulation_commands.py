@@ -325,6 +325,29 @@ def execute_simulation_action(journal, action, payload, accepted_at):
                         )
                         category = next((code for marker, code in reasons if marker in stderr), 'KEY_OTHER')
                         detail += ':' + category
+                    # Only classify the proven installed recovery ValueError.
+                    # Never emit child stderr, journal content, paths or keys.
+                    if (
+                        types and types[-1].rsplit(".", 1)[-1] == 'ValueError'
+                        and frames and frames[-1] == '_recover_autonomous_observed_fill'
+                    ):
+                        retained_reasons = (
+                            ('retained fill episode is invalid', 'EPISODE'),
+                            ('retained fill observation identity differs', 'OBSERVATION_IDENTITY'),
+                            ('retained fill lacks a trade decision', 'DECISION'),
+                            ('retained fill order/target differs', 'ORDER_TARGET'),
+                            ('retained simulator history differs', 'PROVIDER_HISTORY'),
+                            ('retained fill economics differ from frozen request', 'FILL_ECONOMICS'),
+                            ('retained fill historical admission differs', 'HISTORICAL_ADMISSION'),
+                            ('retained fill lacks exact completed send evidence', 'SEND_EVIDENCE'),
+                            ('retained fill conflicts with canonical economic state', 'ECONOMIC_STATE'),
+                            ('retained fill conflicts with canonical economic history', 'ECONOMIC_HISTORY'),
+                            ('journal changed while validating retained fill', 'JOURNAL_RACE'),
+                            ('retained fill recovery did not reconcile financial owners', 'FINANCIAL_OWNERS'),
+                        )
+                        reason = next((code for marker, code in retained_reasons
+                                       if marker in stderr), 'OTHER')
+                        detail += ':RETAINED_' + reason
                     diagnostic('worker_exited', detail)
                 else:
                     diagnostic('worker_exited', str(completed.returncode))

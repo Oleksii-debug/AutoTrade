@@ -16,7 +16,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from tools.historical_public_klines import _month_range, collect_month
+from tools.historical_public_klines import _month_range, collect_month, collect_day
 
 
 _CANONICAL_PR_BRANCH = "owner/historical-simulation-plan10-20261010"
@@ -53,6 +53,25 @@ class RealHistoryArchiveSample(unittest.TestCase):
         )
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         self.assertTrue(result.wasSuccessful(), "Plan10 offline source/recovery suites failed")
+
+    def test_real_publisher_daily_spot_hourly_samples(self):
+        # Both historic milliseconds and newer microseconds are covered.
+        # One verifiable completed daily archive for each market and era.
+        with TemporaryDirectory(prefix="autotrade-plan10-real-daily-") as tmp:
+            for symbol, day in (("BTCUSDT", "2024-01-02"),
+                                ("ETHUSDT", "2026-10-08")):
+                item = collect_day(symbol=symbol, interval="1h", day=day, output=Path(tmp))
+                self.assertEqual(item["row_count"], 24)
+                self.assertEqual(item["missing_candle_intervals"], 0)
+                self.assertTrue(item["usable_as_complete_causal_interval"])
+                self.assertEqual(item["period_granularity"], "DAILY")
+                self.assertEqual(item["verification"]["publisher_companion_sha256"], "PASS")
+                print("PLAN10_REAL_DAILY_SOURCE " + json.dumps({
+                    "symbol": symbol, "day": day,
+                    "source_zip_sha256": item["source_zip_sha256"],
+                    "normalized_csv_sha256": item["normalized_csv_sha256"],
+                    "rows": item["row_count"], "research_only": True,
+                }, sort_keys=True), flush=True)
 
     def test_verified_historical_btc_eth_hourly_2024_onward(self):
         end = _last_published_month() if os.environ.get("GITHUB_HEAD_REF") == _CANONICAL_PR_BRANCH else "2024-01"

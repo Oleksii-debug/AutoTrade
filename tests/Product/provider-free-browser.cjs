@@ -503,11 +503,26 @@ async function exerciseCanonicalPageNavigation(page) {
   // after the first *real* atomic fill. A Host-signature is never bypassed.
   stage = "isolated financial crash preparation";
   const crashData = path.join(scratch, "isolated crash recovery state");
-  // The real Host first establishes the canonical no-trade bootstrap cut and
-  // its frozen journal/protocol. The fault must occur *after* that valid
-  // lifecycle, matching the existing real Product crash/restart acceptance.
-  await start(crashData);
-  await stop();
+  // Bootstrap with the exact Product Host's canonical one-observation
+  // simulator contract, but without starting a second Host process. Host
+  // startup has its own durable research/Host journal writes: those are not
+  // part of the simulator's signed checkpoint cut and must not be injected
+  // between this independent crash process and its first financial admission.
+  // This creates no synthetic fills, bypasses no signer, and leaves the real
+  // packaged Host/recovery/browser acceptance below unchanged.
+  const bootstrap = spawnSync(python, ["-B", "-c", `
+from mvp.autotrade_mvp.product_runtime import PRICES, START_TIME
+from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
+from pathlib import Path
+import sys
+result = run_autonomous_simulation(
+    PRICES, Path(sys.argv[1]), run_id='provider-free-product',
+    now=START_TIME, stop_after_episodes=1,
+    execution_profile='TWO_EQUAL_PARTIALS', target_quantity='2')
+print(result['status'], result['completed_episodes'])
+`, path.join(crashData, "state")], {cwd: ROOT, env, encoding: "utf8", timeout: 30000});
+  assert.equal(bootstrap.status, 0, bootstrap.stderr);
+  assert.match(bootstrap.stdout, /^PAUSED 1\\s*$/);
 
   const crash = spawnSync(python, ["-B", "-c", `
 import os,sys

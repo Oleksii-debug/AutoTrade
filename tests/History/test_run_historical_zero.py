@@ -72,6 +72,10 @@ class HistoricalZeroTests(unittest.TestCase):
             self.assertEqual(len(args[0]),744)
             self.assertEqual(kw["now"],"2024-01-01T01:00:00Z")
             self.assertEqual(kw["observation_interval_seconds"],3600)
+            # $250 research target comes from the FIRST COMPLETED close (101),
+            # never the last/future candles; canonical engine handles fills.
+            self.assertEqual(kw["instrument_profile"],"FRACTIONAL_SPOT_RESEARCH")
+            self.assertEqual(kw["target_quantity"],"2.47524752")
             self.assertTrue(kw["run_id"].startswith("trial-"))
             self.assertEqual(len(kw["run_id"]),len("trial-")+16)
 

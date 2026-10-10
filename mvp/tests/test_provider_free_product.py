@@ -328,7 +328,7 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
                 status, replay, _ = client.request('POST', '/api/v1/commands', command)
                 self.assertEqual(replay['operation_id'], operation_id)
                 self.assertEqual(len(client.state()['portfolio']['fills']), 6)
-                self.assertEqual(client.state()['portfolio']['status']['cash'], '895.696')
+                self.assertEqual(client.state()['portfolio']['status']['cash'], '791.392')
             finally: client.close()
 
     def test_historical_admission_replay_cannot_authorize_stale_current_cash(self):
@@ -346,14 +346,16 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'predates settlement financial truth'):
                 load_account_resource_availability_evidence(journal, **args)
             historical = load_account_resource_availability_evidence(journal, **args,
-                _historical_risk_event_id=risk['event_id'])
+                journal_sequence_cut=risk['journal_sequence'])
             self.assertEqual(historical['availability'], evidence['availability'])
-            with self.assertRaisesRegex(ValueError, 'cannot authorize current'):
+            with self.assertRaisesRegex(ValueError, 'current availability cannot use a historical journal cut'):
                 load_account_resource_availability_evidence(journal, **args,
-                    _historical_risk_event_id=risk['event_id'], require_latest_scope=True)
-            with self.assertRaisesRegex(ValueError, 'durable risk event'):
+                    journal_sequence_cut=risk['journal_sequence'], require_latest_scope=True)
+            checkpoint = journal.get_event(evidence['checkpoint_event_id'])
+            self.assertGreater(risk['journal_sequence'], checkpoint['journal_sequence'])
+            with self.assertRaisesRegex(ValueError, 'availability checkpoint is after the historical journal cut'):
                 load_account_resource_availability_evidence(journal, **args,
-                    _historical_risk_event_id=evidence['checkpoint_event_id'])
+                    journal_sequence_cut=checkpoint['journal_sequence'] - 1)
 
     def test_whole_application_partial_fill_crash_restart_backup_restore_interface(self):
         with TemporaryDirectory() as directory:
@@ -391,7 +393,7 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             self.assertEqual(crashed.returncode, 73, crashed.stderr.decode())
             store = JournalStore(data / 'state' / 'journal.sqlite3')
             book = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
-            self.assertEqual(str(book.position(INSTRUMENT)), '0.5')
+            self.assertEqual(str(book.position(INSTRUMENT)), '1')
             oms = DurableOrderBookProjection(store, provider_id=PROVIDER, account_id=ACCOUNT,
                 environment=ENVIRONMENT, host_id='local-simulation', owner_epoch='1')
             self.assertEqual(oms.snapshots[0].state, 'PARTIALLY_FILLED')
@@ -440,8 +442,8 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
                 state = client.state()
                 self.assertEqual(state['portfolio']['status']['session_status'], 'COMPLETED')
-                self.assertEqual(state['portfolio']['status']['cash'], '895.696')
-                self.assertEqual(state['portfolio']['status']['position'], '1')
+                self.assertEqual(state['portfolio']['status']['cash'], '791.392')
+                self.assertEqual(state['portfolio']['status']['position'], '2')
                 self.assertEqual(len(state['portfolio']['fills']), 6)
                 self.assertEqual([o['state'] for o in state['portfolio']['orders']], ['FILLED'] * 3)
                 self.assertEqual(len(store.load_events_by_aggregate_type('settlement_book')), 12)
@@ -517,13 +519,13 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             client = ProductClient(restored)
             try:
                 state = client.state()
-                self.assertEqual(state['portfolio']['status']['cash'], '895.696')
+                self.assertEqual(state['portfolio']['status']['cash'], '791.392')
                 self.assertEqual(len(state['portfolio']['fills']), 6)
                 self.assertEqual(state['risk']['real_order_submission'], 'UNAVAILABLE')
                 self.assertEqual(state['risk']['restore_trading_gate'], 'RECONCILIATION_REQUIRED')
                 _, operation = client.command('RECOVER_SIMULATION')
                 self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
-                self.assertEqual(client.state()['portfolio']['status']['cash'], '895.696')
+                self.assertEqual(client.state()['portfolio']['status']['cash'], '791.392')
             finally: client.close()
 
     def test_product_restore_layout_failure_leaves_final_destination_retryable(self):

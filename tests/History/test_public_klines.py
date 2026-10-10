@@ -128,6 +128,18 @@ class PublicHistoryTests(unittest.TestCase):
             ingest._pace_request()
         sleep.assert_called_once_with(ingest.MIN_REQUEST_GAP_SECONDS)
 
+    def test_http_fetch_rejects_unbounded_read_limits_before_network(self):
+        # read(-1) consumes the complete response: reject negative and
+        # unbounded caller budgets even if internal collectors use constants.
+        from tools.historical_public_klines import _fetch, MAX_ZIP_BYTES
+        url = "https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1h/BTCUSDT-1h-2024-01.zip"
+        with patch("tools.historical_public_klines._pace_request",
+                   side_effect=AssertionError("must reject before outbound request")):
+            for limit in (-3, -2, -1, 0, MAX_ZIP_BYTES + 1, 1.5, True, "4096"):
+                with self.subTest(limit=limit):
+                    with self.assertRaisesRegex(HistoricalArchiveError, "byte limit"):
+                        _fetch(url, limit)
+
     def test_public_source_url_rejection_occurs_before_rate_reservation(self):
         from tools import historical_public_klines as ingest
         with patch.object(ingest, "_pace_request") as pace:

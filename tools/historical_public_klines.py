@@ -160,6 +160,10 @@ def _validate_public_archive_url(url: str) -> None:
 
 def _fetch(url: str, limit: int) -> bytes:
     _validate_public_archive_url(url)
+    # Enforce the bound at the network trust boundary, not only at callers.
+    # BufferedResponse.read(n < 0) can read the entire untrusted stream.
+    if type(limit) is not int or not 1 <= limit <= MAX_ZIP_BYTES:
+        raise HistoricalArchiveError("public archive byte limit must be positive and bounded")
     _pace_request()
     req = Request(url, headers={"User-Agent": "AutoTrade-public-history-provenance/1.0"})
     try:
